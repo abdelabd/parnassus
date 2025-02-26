@@ -9,8 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import Dataset
-from tqdm import tqdm
 
+from parnassus.utils.logger import ProgressBar
 from parnassus.utils.transform import VarTransform
 
 
@@ -70,17 +70,22 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
         self.load_data()
 
     def _preprocess_data(self, mask_events: bool = True):
-        for var in tqdm(self.full_data_array.keys()):
-            value = self.full_data_array[var]
-            if mask_events:
-                value = value[self.n_particle_mask]
-            if var not in {"ht", "eventNumber", "met_x", "met_y"}:
-                value = np.concatenate(value)
-            if "eta" in var:
-                value = np.clip(value, -3, 3)
-            elif "phi" in var:
-                value = np.atan2(np.sin(value), np.cos(value))
-            self.full_data_array[var] = value
+        with ProgressBar() as progress:
+            task = progress.add_task(
+                "[green]Preprocessing data", total=len(self.full_data_array.keys())
+            )
+            for var in self.full_data_array:
+                value = self.full_data_array[var]
+                if mask_events:
+                    value = value[self.n_particle_mask]
+                if var not in {"ht", "eventNumber", "met_x", "met_y"} and value.dtype == object:
+                    value = np.concatenate(value)
+                if "eta" in var:
+                    value = np.clip(value, -3, 3)
+                elif "phi" in var:
+                    value = np.atan2(np.sin(value), np.cos(value))
+                self.full_data_array[var] = value
+                progress.update(task, advance=1)
 
     def _get_truth_data(
         self, idx: int

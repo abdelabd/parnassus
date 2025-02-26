@@ -2,9 +2,9 @@ from typing import Any, final
 
 import numpy as np
 import uproot
-from tqdm import tqdm
 from typing_extensions import override
 
+from parnassus.utils.logger import ProgressBar
 from parnassus.utils.transform import VarTransform
 
 from .base import BaseDataset, DatasetConfig
@@ -37,13 +37,18 @@ class RootDataset(BaseDataset):
         )
         self.n_particle_mask = self.n_truth_particles < self.cfg.max_particles
 
-        for var in tqdm(self.cfg.truth_variables):
-            self.full_data_array[var] = tree[f"truth_{var}"].array(
-                library="np",
-                entry_stop=self.entry_stop,
-                entry_start=self.entry_start,
+        with ProgressBar() as progress:
+            task = progress.add_task(
+                "[green]Loading data from Root file", total=len(self.cfg.truth_variables)
             )
-            self.truth_variables.append(var if var != "pt" else "ptrel")
+            for var in self.cfg.truth_variables:
+                self.full_data_array[var] = tree[f"truth_{var}"].array(
+                    library="np",
+                    entry_stop=self.entry_stop,
+                    entry_start=self.entry_start,
+                )
+                self.truth_variables.append(var if var != "pt" else "ptrel")
+                progress.update(task, advance=1)
 
         self.full_data_array["ht"] = np.zeros(self.cfg.num_events, dtype=np.float32)
         self.full_data_array["met_x"] = np.zeros(self.cfg.num_events, dtype=np.float32)

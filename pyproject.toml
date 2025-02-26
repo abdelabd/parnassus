@@ -12,6 +12,8 @@ dependencies = [
     "einops>=0.8.0",
     "hyper-connections>=0.1.11",
     "numpy>=2.2.2",
+    "particle>=0.25.2",
+    "pyhepmc>=2.14.0",
     "rich>=13.9.4",
     "torch>=2.6.0",
     "tqdm>=4.67.1",
@@ -111,6 +113,8 @@ filterwarnings = ["ignore::DeprecationWarning"]
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.27.1",
+    "ipykernel>=6.29.5",
     "ipython>=8.32.0",
     "mypy>=1.15.0",
     "pre-commit>=4.1.0",
