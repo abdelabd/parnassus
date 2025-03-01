@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import NamedTemporaryFile, mkdtemp
+from typing import final
 
 import awkward as ak
 import numpy as np
@@ -7,6 +8,8 @@ import numpy.typing as npt
 import pyhepmc
 import uproot
 from numpy.random import Generator
+from torch import Tensor, nn
+from torch.export import Dim, export, save
 
 from . import pid_to_class
 from .transform import VarTransform, VarTransformConfig
@@ -174,3 +177,80 @@ def get_mock_transforms() -> dict[str, VarTransform]:
         cfg = VarTransformConfig(name=var if var != "pt" else "ptrel", mean=0, std=1)
         var_transform_dict[cfg.name] = VarTransform(cfg)
     return var_transform_dict
+
+
+@final
+class MockModel(nn.Module):
+    def __init__(self, mode: str):
+        super().__init__()
+        self.net = nn.Identity()
+        self.mode = mode
+
+    def forward(
+        self, fs_data: Tensor, tr_data: Tensor, mask: Tensor, timestep: Tensor, global_data: Tensor
+    ) -> Tensor:
+        if self.mode == "evt":
+            return (
+                self.net(fs_data)
+                + tr_data.sum(dim=(1, 2)).view(-1, 1)
+                + timestep.view(-1, 1)
+                + global_data.sum(dim=-1).view(-1, 1)
+                + mask.sum(dim=1).view(-1, 1)
+            )
+        return (
+            self.net(fs_data)
+            + tr_data.sum(dim=(1, 2)).view(-1, 1, 1)
+            + timestep.view(-1, 1, 1)
+            + global_data.sum(dim=-1).view(-1, 1, 1)
+            + mask.sum(dim=(1, 2)).view(-1, 1, 1)
+        )
+
+
+def get_mock_input_data(mode: str = "evt") -> dict[str, Tensor]:
+    rng = np.random.default_rng(42)
+    BS, L = 2, 400
+    assert mode in {"evt", "part"}, "Mode should be either evt or part."
+    if mode == "evt":
+        return {
+            "fs_data": Tensor(rng.random((BS, 4))),
+            "tr_data": Tensor(rng.random((BS, L, 11))),
+            "mask": Tensor(rng.random((BS, L))).bool(),
+            "global_data": Tensor(rng.random((BS, 16))),
+            "timestep": Tensor(rng.random((BS,))),
+        }
+    return {
+        "fs_data": Tensor(rng.random((BS, L, 11))),
+        "tr_data": Tensor(rng.random((BS, L, 11))),
+        "mask": Tensor(rng.random((BS, L, 2))).bool(),
+        "global_data": Tensor(rng.random((BS, 20))),
+        "timestep": Tensor(rng.random((BS,))),
+    }
+
+
+def get_mock_model_file(fname: str | None = None, mode: str = "evt") -> str:
+    if fname is None:
+        fname = NamedTemporaryFile(suffix=".pt", dir=mkdtemp()).name  # noqa: SIM115
+    else:
+        Path(fname).parent.mkdir(exist_ok=True, parents=True)
+    model = MockModel(mode=mode)
+    mock_data = get_mock_input_data(mode=mode)
+    batch = Dim("batch", min=1, max=2048)
+    program = export(
+        model,
+        (
+            mock_data["fs_data"],
+            mock_data["tr_data"],
+            mock_data["mask"],
+            mock_data["timestep"],
+            mock_data["global_data"],
+        ),
+        dynamic_shapes={
+            "fs_data": {0: batch},
+            "tr_data": {0: batch},
+            "mask": {0: batch},
+            "global_data": {0: batch},
+            "timestep": {0: batch},
+        },
+    )
+    save(program, fname)
+    return fname
