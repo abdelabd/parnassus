@@ -18,6 +18,8 @@ ProgressBar = partial(
     Progress,
     TextColumn("[task.description]{task.description}"),
     BarColumn(),
+    TextColumn("{task.completed}/{task.total}"),
+    TextColumn("•"),
     TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
     TextColumn("•"),
     TimeRemainingColumn(),
