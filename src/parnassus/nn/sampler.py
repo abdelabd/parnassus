@@ -1,13 +1,12 @@
 import itertools
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import final
 
 import torch
 from torch import Size, Tensor, nn
 from torch.distributions import Normal
 from typing_extensions import override
-
-from parnassus.utils.logger import ProgressBar
 
 default_device = torch.device("cpu")
 
@@ -45,7 +44,7 @@ class Sampler(ABC):
 
     def _init_fastsim(
         self,
-        shape: list[int] | Size,
+        shape: tuple[int, ...] | Size,
         mask: Tensor | None = None,
         device: torch.device = default_device,
     ):
@@ -103,13 +102,13 @@ class Sampler(ABC):
         self,
         model: nn.Module,
         truth: Tensor,
-        pflow_shape: list[int] | Size,
+        pflow_shape: tuple[int, ...] | Size,
         mask: Tensor,
         global_data: Tensor,
-        save_seq: bool = False,
         init_fastsim: Tensor | None = None,
         verbose: bool = True,
-    ) -> Tensor | tuple[Tensor, Tensor]:
+        callback: Callable[[], None] | None = None,
+    ) -> Tensor:
         pass
 
 
@@ -120,38 +119,29 @@ class EulerSampler(Sampler):
         self,
         model: nn.Module,
         truth: Tensor,
-        pflow_shape: list[int] | Size,
+        pflow_shape: tuple[int, ...] | Size,
         mask: Tensor,
         global_data: Tensor,
-        save_seq: bool = False,
         init_fastsim: Tensor | None = None,
         verbose: bool = True,
-    ) -> Tensor | tuple[Tensor, Tensor]:
+        callback: Callable[[], None] | None = None,
+    ) -> Tensor:
         device = truth.device
         if init_fastsim is None:
             fastsim = self._init_fastsim(pflow_shape, mask, device)
         else:
             fastsim = init_fastsim
         t_steps = self.t_steps.to(device)
-        seq = [fastsim.cpu()]
-        with ProgressBar() as progress:
-            if verbose:
-                task = progress.add_task("[green]Generating fastsim data", total=self.n_steps)
-            for t_cur, t_next in itertools.pairwise(t_steps):
-                fastsim, _ = self._step(
-                    model,
-                    truth,
-                    fastsim,
-                    mask,
-                    global_data,
-                    timestep=t_cur,
-                    dt=t_next - t_cur,
-                )
-                if save_seq:
-                    seq.append(fastsim.cpu())
-                if verbose:
-                    progress.update(task, advance=1)  # pyright: ignore[reportPossiblyUnboundVariable]
-        if save_seq:
-            seq = torch.stack(seq)
-            return fastsim.cpu(), seq
+        for t_cur, t_next in itertools.pairwise(t_steps):
+            fastsim, _ = self._step(
+                model,
+                truth,
+                fastsim,
+                mask,
+                global_data,
+                timestep=t_cur,
+                dt=t_next - t_cur,
+            )
+            if verbose and callback is not None:
+                callback()
         return fastsim.cpu()

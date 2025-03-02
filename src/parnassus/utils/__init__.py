@@ -1,5 +1,7 @@
 from particle import PDGID
 
+from .transform import VarTransform, VarTransformConfig
+
 
 def pid_to_class(pid: int) -> int:
     if abs(pid) == 11:
@@ -12,3 +14,6 @@ def pid_to_class(pid: int) -> int:
             return 0
         return 3
     return 4
+
+
+__all__ = ["VarTransform", "VarTransformConfig"]

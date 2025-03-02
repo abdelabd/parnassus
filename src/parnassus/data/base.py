@@ -25,7 +25,7 @@ def do_padding(tensor: Tensor, max_len: int):
 @dataclass(kw_only=True)
 class DatasetConfig:
     # Data loading configs
-    file_path: str | Path
+    file_path: Path
     num_events: int = 1
     entry_start: int = 0
 

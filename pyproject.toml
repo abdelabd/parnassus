@@ -9,19 +9,17 @@ authors = [
 license = "MIT"
 requires-python = "<=3.11.11, >3.10"
 dependencies = [
-    "einops>=0.8.0",
-    "hyper-connections>=0.1.11",
     "numpy>=2.2.2",
     "particle>=0.25.2",
     "pyhepmc>=2.14.0",
     "rich>=13.9.4",
     "torch>=2.6.0",
-    "tqdm>=4.67.1",
     "uproot>=5.5.2",
 ]
 
 [project.scripts]
 parnassus = "parnassus:main"
+fast-eval = "parnassus.fast_eval:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -103,7 +101,7 @@ mark-parentheses = false
 [tool.mypy]
 exclude = "parnassus/models/modules"
 [[tool.mypy.overrides]]
-module = ['hyper_connections', 'awkward', 'uproot']
+module = ['awkward', 'uproot']
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -119,5 +117,4 @@ dev = [
     "mypy>=1.15.0",
     "pre-commit>=4.1.0",
     "pytest>=8.3.4",
-    "types-tqdm>=4.67.0.20241221",
 ]
