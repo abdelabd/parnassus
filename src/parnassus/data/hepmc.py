@@ -47,14 +47,18 @@ class HepMCDataset(BaseDataset):
                     num_particles = 0
                     for vtx in evt.vertices:
                         for part in vtx.particles_out:
-                            if part.status != 1:
+                            pid = pid_to_class(part.pid)
+                            if (
+                                part.status != 1
+                                or np.abs(part.momentum.eta()) >= 2.7
+                                or part.momentum.pt() <= 0.25
+                                or abs(pid) in {12, 14, 16}
+                            ):
                                 continue
                             self.full_data_array["pt"][curr_particle_idx] = part.momentum.pt()
                             self.full_data_array["eta"][curr_particle_idx] = part.momentum.eta()
                             self.full_data_array["phi"][curr_particle_idx] = part.momentum.phi()
-                            self.full_data_array["class"][curr_particle_idx] = float(
-                                pid_to_class(part.pid)
-                            )
+                            self.full_data_array["class"][curr_particle_idx] = float(pid)
                             self.full_data_array["vx"][curr_particle_idx] = vtx.position.x
                             self.full_data_array["vy"][curr_particle_idx] = vtx.position.y
                             self.full_data_array["vz"][curr_particle_idx] = vtx.position.z

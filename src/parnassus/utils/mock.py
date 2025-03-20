@@ -52,7 +52,7 @@ def mock_particles(
             ).reshape(num_events, num_particles)
             # value = rng.integers(0, 5, size=(num_events, num_particles)).astype(np.int32)
         else:
-            value = rng.random((num_events, num_particles)).astype(np.float32)
+            value = rng.random((num_events, num_particles)).astype(np.float32) + 1
         particles[var] = value
     ind = rng.choice([True, False], size=(num_events, num_particles)).astype(bool)
     data: dict[str, list[npt.NDArray[np.float32]]] = {var: [] for var in PARTICLE_VARS}
