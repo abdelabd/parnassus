@@ -3,6 +3,7 @@ import pytest
 
 from parnassus.configs.data import DatasetConfig
 from parnassus.data import HepMCDataset, RootDataset
+from parnassus.data.base import BaseDataset
 from parnassus.utils.mock import get_mock_hepmc_file, get_mock_root_file, get_mock_transforms
 
 
@@ -16,10 +17,11 @@ def root_fname():
     return get_mock_root_file()
 
 
-def test_reader_config_no_file():
+def test_reader_no_file():
     fname = "no_file_test.root"
+    var_transform_dict = get_mock_transforms()
     with pytest.raises(FileNotFoundError):
-        _ = DatasetConfig(file_path=fname)
+        _ = BaseDataset(DatasetConfig(file_path=fname), var_transform_dict=var_transform_dict)
 
 
 def test_reader_config_no_batch_size(root_fname: str):

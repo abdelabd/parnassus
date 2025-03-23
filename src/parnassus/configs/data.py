@@ -27,9 +27,6 @@ class DatasetConfig:
         if self.batch_loading and self.batch_size is None:
             raise ValueError("Asked for batch_loading, but batch_size is not provided")
 
-        if not Path(self.file_path).exists():
-            raise FileNotFoundError(f"No file exist in {self.file_path} location")
-
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> Self:
         return cls(**config)

@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,8 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
         self.n_truth_particles: npt.NDArray[np.int32]
         self.truth_cumsum: npt.NDArray[np.int64]
 
+        if not Path(self.cfg.file_path).exists():
+            raise FileNotFoundError(f"Trying to load file {self.cfg.file_path}, no file exist!")
         self.load_data()
 
     def _preprocess_data(self, mask_events: bool = True):

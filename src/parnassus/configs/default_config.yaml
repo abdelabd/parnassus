@@ -1,0 +1,30 @@
+dataset:
+  file_path: ""
+  num_events: 1000
+  entry_start: 0
+
+model:
+  name: "cms_2011_flow_v00"
+  num_steps: 50
+  batch_size: 2000
+  device: "cpu"
+
+pipelines:
+   TruthJetCluster:
+    type: "cluster"
+    collection: truth
+    dr: 0.5
+    algorithm: antikt
+    pt_min: 10
+    nconst_min: 2
+   PflowJetCluster:
+    type: "cluster"
+    collection: pflow
+    dr: 0.5
+    algorithm: antikt
+    pt_min: 10
+    nconst_min: 2
+
+output:
+  file_path: ""
+  format: default

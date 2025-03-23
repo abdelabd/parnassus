@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import logging
 from functools import partial
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
     Progress,
+    TaskID,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 is_terminal = Console().is_terminal
 ProgressBar = partial(
@@ -29,6 +34,13 @@ ProgressBar = partial(
     speed_estimate_period=30 if is_terminal else 120,
     console=Console(width=100, force_terminal=True),
 )
+
+
+def update_task(progress_bar: Progress, task: TaskID) -> Callable[[], None]:
+    def update():
+        progress_bar.update(task, advance=1)
+
+    return update
 
 
 def setup_logger(level: str = "INFO"):
