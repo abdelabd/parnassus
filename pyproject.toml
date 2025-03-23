@@ -9,6 +9,8 @@ authors = [
 license = "MIT"
 requires-python = "<=3.11.11, >3.10"
 dependencies = [
+    "energyflow>=1.4.0",
+    "fastjet>=3.4.3.1",
     "numpy>=2.2.2",
     "particle>=0.25.2",
     "pyhepmc>=2.14.0",
@@ -18,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-parnassus = "parnassus:main"
+parnassus = "parnassus.main:main"
 fast-eval = "parnassus.fast_eval:main"
 
 [build-system]
