@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from parnassus.data import DatasetConfig, HepMCDataset, RootDataset
+from parnassus.configs.data import DatasetConfig
+from parnassus.data import HepMCDataset, RootDataset
 from parnassus.utils.mock import get_mock_hepmc_file, get_mock_root_file, get_mock_transforms
 
 
