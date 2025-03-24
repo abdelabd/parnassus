@@ -1,0 +1,119 @@
+from typing import TYPE_CHECKING, Any, final
+
+import awkward as ak
+from typing_extensions import override
+from uproot import WritableTree, recreate
+
+from parnassus.data.scheme import GenEvent
+from parnassus.utils.logger import ProgressBar
+
+from .base import BaseWriter
+
+if TYPE_CHECKING:
+    from uproot.writing.writable import WritableDirectory
+
+
+BATCH_SIZE = 100
+
+PARTICLE_FLOAT_FEATS = ["pt", "eta", "phi", "vx", "vy", "vz"]
+PARTICLE_INT_FEATS = ["class_id", "pdg_id"]
+
+PARTICLE_FEATS = PARTICLE_FLOAT_FEATS + PARTICLE_INT_FEATS
+
+JET_FLOAT_FEATS = ["pt", "eta", "phi", "d2", "c2"]
+# JET_INT_FEATS = []
+
+JET_FEATS = JET_FLOAT_FEATS  # + JET_INT_FEATS
+
+
+def PARTICLE_TREE(name: str):
+    return {
+        name: "var * {"
+        + ", ".join([f'"{k}" : float32' for k in PARTICLE_FLOAT_FEATS])
+        + ", "
+        + ", ".join([f'"{k}" : int32' for k in PARTICLE_INT_FEATS])
+        + "}"
+    }
+
+
+def JET_TREE(name: str):
+    return {
+        name: "var * {"
+        + ", ".join([f'"{k}" : float32' for k in JET_FLOAT_FEATS])
+        # + ", "
+        # + ", ".join([f'"{k}" : int32' for k in JET_INT_FEATS])
+        + "}"
+    }
+
+
+def clear_dicts(data: dict[Any, Any]):
+    for value in data.values():
+        if isinstance(value, dict):
+            clear_dicts(value)
+        elif isinstance(value, list):
+            value.clear()
+
+
+def custom_counter_name(counted: str) -> str:
+    if not counted:
+        return "n"
+    return counted
+
+
+def custom_field_name(outer: str, inner: str) -> str:
+    return inner if not outer else outer + "." + inner
+
+
+@final
+class RootWriter(BaseWriter):
+    def write_to_tree(self, tree: WritableTree, data: dict[str, dict[str, Any]]):
+        extend_data = {
+            collection: ak.zip({
+                var_name: ak.Array(data[collection][var_name]) for var_name in data[collection]
+            })
+            for collection in data
+        }
+        tree.extend(extend_data)
+        clear_dicts(data)
+
+    @override
+    def write(self, events: list[GenEvent]):
+        f: WritableDirectory
+        with recreate(self.config.file_path) as f:
+            branch_types = PARTICLE_TREE("Truth") | PARTICLE_TREE("Pflow")
+            for jet_name in events[0].jets:
+                branch_types |= JET_TREE(jet_name)
+            f.mktree(
+                "Parnassus",
+                branch_types=branch_types,
+                # counter_name=custom_counter_name,
+                field_name=custom_field_name,
+            )
+
+            data: dict[str, dict[str, Any]] = {
+                collection: {var_name: [] for var_name in PARTICLE_FEATS}
+                for collection in ["Truth", "Pflow"]
+            }
+            data |= {
+                jet_name: {var_name: [] for var_name in JET_FEATS} for jet_name in events[0].jets
+            }
+            events_in_queue = 0
+            with ProgressBar() as progress:
+                task = progress.add_task("[green]Writing data to file", total=len(events))
+                for event in events:
+                    truth_particles = event.truth_particles
+                    pflow_particles = event.pflow_particles
+                    for var_name in PARTICLE_FEATS:
+                        data["Truth"][var_name].append(getattr(truth_particles, var_name))
+                        data["Pflow"][var_name].append(getattr(pflow_particles, var_name))
+                    for jet_name, jet in event.jets.items():
+                        for var_name in JET_FEATS:
+                            data[jet_name][var_name].append(getattr(jet, var_name))
+                    events_in_queue += 1
+                    if events_in_queue == BATCH_SIZE:
+                        self.write_to_tree(f["Parnassus"], data)
+                        progress.update(task, advance=BATCH_SIZE)
+                        events_in_queue = 0
+                if events_in_queue != 0:
+                    self.write_to_tree(f["Parnassus"], data)
+                    progress.update(task, advance=events_in_queue)

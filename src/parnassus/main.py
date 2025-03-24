@@ -8,6 +8,7 @@ from parnassus.configs import Config
 from parnassus.configs.pipeline import JetClusteringConfig
 from parnassus.pipelines import JetClusteringPipeline, generate
 from parnassus.utils.logger import setup_logger
+from parnassus.writers import RootWriter
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.joinpath("configs/default_config.yaml")
 
@@ -45,7 +46,7 @@ def main(args: Sequence[str] | None = None) -> None:
         if parsed_args.input_path:
             config.dataset_config.file_path = Path(parsed_args.input_path).absolute()
         if parsed_args.output_path:
-            config.output_path = Path(parsed_args.output_path).absolute()
+            config.writer_config.file_path = Path(parsed_args.output_path).absolute()
         if parsed_args.num_events:
             config.dataset_config.num_events = parsed_args.num_events
         if parsed_args.batch_size:
@@ -59,7 +60,9 @@ def main(args: Sequence[str] | None = None) -> None:
             if isinstance(pipeline_config, JetClusteringConfig):
                 pipeline = JetClusteringPipeline(pipeline_config)
                 pipeline.process(gen_events)
-        print(gen_events[0])
+        log.info("[green]Postprocessing completed.")
+        writer = RootWriter(config.writer_config)
+        writer.write(gen_events)
         end = datetime.now()
         title = " Completed! "
         log.info(f"[bold green]{title:-^100}")
