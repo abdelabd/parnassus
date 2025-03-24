@@ -44,8 +44,9 @@ def main(args: Sequence[str] | None = None) -> None:
     log.info("[green]Starting postprocessing.")
     for pipeline_config in config.pipeline_configs:
         if isinstance(pipeline_config, JetClusteringConfig):
-            pipeline = JetClusteringPipeline(pipeline_config.name, pipeline_config)
+            pipeline = JetClusteringPipeline(pipeline_config)
             pipeline.process(gen_events)
+    print(gen_events[0])
     end = datetime.now()
     title = " Completed! "
     log.info(f"[bold green]{title:-^100}")

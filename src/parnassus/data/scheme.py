@@ -102,6 +102,7 @@ class GenJetCollection:
     eta: npt.NDArray[np.float32]
     phi: npt.NDArray[np.float32]
     mass: npt.NDArray[np.float32] | None = None
+    particle_idx: list[npt.NDArray[np.int32]] | None = None
 
     jec: npt.NDArray[np.float32] | None = None
     d2: npt.NDArray[np.float32] | None = None
@@ -139,9 +140,7 @@ class GenEvent:
     truth_particles: GenParticleCollection
     pflow_particles: GenParticleCollection
 
-    truth_jets: GenJetCollection | None = None
-    pflow_jets: GenJetCollection | None = None
-
+    jets: dict[str, GenJetCollection] = field(default_factory=dict)
     # Event features
     truth_ht: np.float32 = field(init=False)
     truth_met_x: np.float32 = field(init=False)
@@ -164,7 +163,6 @@ class GenEvent:
     def __repr__(self) -> str:
         return (
             f"Event {self.event_number} with {len(self.truth_particles)} truth_particles"
-            f" and {len(self.pflow_particles)} pflow particles"
-            f" {len(self.truth_jets) if self.truth_jets else 0} truth jets"
-            f" {len(self.pflow_jets) if self.pflow_jets else 0} pflow jets"
+            f", {len(self.pflow_particles)} pflow particles"
+            f" and {len(self.jets)} jet collections: {list(self.jets.keys())}"
         )

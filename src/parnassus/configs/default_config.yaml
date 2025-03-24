@@ -10,14 +10,21 @@ model:
   device: "cpu"
 
 pipelines:
-   TruthJetCluster:
+   TruthJetsAntiKt05:
     type: "cluster"
     collection: truth
     dr: 0.5
     algorithm: antikt
     pt_min: 10
     nconst_min: 2
-   PflowJetCluster:
+   TruthJetsAntiKt08:
+    type: "cluster"
+    collection: truth
+    dr: 0.8
+    algorithm: antikt
+    pt_min: 10
+    nconst_min: 2
+   PflowJetsAntiKt05:
     type: "cluster"
     collection: pflow
     dr: 0.5
