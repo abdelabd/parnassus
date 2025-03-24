@@ -36,14 +36,12 @@ class ModelConfig:
 MODELS_DICT = {
     "cms_2011_flow_v00": ModelConfig(
         name="CMS 2011 Flow v00",
-        transform_config_path=Path(__file__)
-        .cwd()
-        .joinpath("src/parnassus/configs/var_transform_cms.yaml"),
-        event_model_path=Path(__file__)
-        .cwd()
-        .joinpath("src/parnassus/pretrained_models/exported_evt_model.pt2"),
-        particle_model_path=Path(__file__)
-        .cwd()
-        .joinpath("src/parnassus/pretrained_models/exported_part_model.pt2"),
+        transform_config_path=Path(__file__).parent.joinpath("var_transform_cms.yaml"),
+        event_model_path=Path(__file__).parent.joinpath(
+            "../pretrained_models/exported_evt_model.pt2"
+        ),
+        particle_model_path=Path(__file__).parent.joinpath(
+            "../pretrained_models/exported_part_model.pt2"
+        ),
     ),
 }
