@@ -22,4 +22,25 @@ def pid_to_class(pid: int) -> int:
     return 4
 
 
+def class_to_pid(particle_class: int) -> int:
+    if particle_class == 0:
+        return 211
+    if particle_class == 1:
+        return 11
+    if particle_class == 2:
+        return 13
+    if particle_class == 3:
+        return 111
+    return 22
+
+
+def class_to_pid_vecorized(particle_class: npt.NDArray[np.int32]) -> npt.NDArray[np.int32]:
+    pid = np.ones_like(particle_class) * 22
+    pid[particle_class == 0] = 211
+    pid[particle_class == 1] = 11
+    pid[particle_class == 2] = 13
+    pid[particle_class == 3] = 111
+    return pid
+
+
 __all__ = ["VarTransform", "VarTransformConfig"]

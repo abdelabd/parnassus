@@ -5,7 +5,7 @@ import numpy as np
 import numpy.typing as npt
 from typing_extensions import override
 
-from parnassus.utils import pid_to_class
+from parnassus.utils import class_to_pid_vecorized, pid_to_class
 
 
 @dataclass(slots=True)
@@ -53,6 +53,8 @@ class GenParticleCollection:
         if self.pdg_id is not None:
             self.class_id = np.array([pid_to_class(el) for el in self.pdg_id], dtype=np.int32)
             self.charge = np.array([np.sign(el) for el in self.pdg_id], dtype=np.int32)
+        if self.pdg_id is None and self.class_id is not None:
+            self.pdg_id = class_to_pid_vecorized(self.class_id)
         for key in self.__slots__:
             if key in {"name", "num_particles"}:
                 continue
