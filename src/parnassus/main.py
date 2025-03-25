@@ -15,15 +15,47 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent.joinpath("configs/default_config.yam
 
 def parse_args(args: Sequence[str] | None):
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="cli")
-    _ = subparsers.add_parser("init")
-    parser_run = subparsers.add_parser("run")
-    _ = parser_run.add_argument("-c", "--config", type=str)
-    _ = parser_run.add_argument("-i", "--input_path", type=str, default=None)
-    _ = parser_run.add_argument("-o", "--output_path", type=str, default=None)
-    _ = parser_run.add_argument("-n", "--num_steps", type=int, default=None)
-    _ = parser_run.add_argument("-ne", "--num_events", type=int, default=None)
-    _ = parser_run.add_argument("-bs", "--batch_size", type=int, default=None)
+    subparsers = parser.add_subparsers(
+        dest="cli",
+    )
+    _ = subparsers.add_parser(
+        "init", help="Initialize a default configuration file in the current directory"
+    )
+    parser_run = subparsers.add_parser("run", help="Execute the Parnassus pipeline")
+    _ = parser_run.add_argument(
+        "-c", "--config", type=str, help="Path to the configuration YAML file"
+    )
+    _ = parser_run.add_argument(
+        "-i",
+        "--input_path",
+        type=str,
+        default=None,
+        help="Path to input data file (overrides config)",
+    )
+    _ = parser_run.add_argument(
+        "-o", "--output_path", type=str, default=None, help="Path to output file (overrides config)"
+    )
+    _ = parser_run.add_argument(
+        "-n",
+        "--num_steps",
+        type=int,
+        default=None,
+        help="Number of steps to run (overrides config)",
+    )
+    _ = parser_run.add_argument(
+        "-ne",
+        "--num_events",
+        type=int,
+        default=None,
+        help="Number of events to process (overrides config)",
+    )
+    _ = parser_run.add_argument(
+        "-bs",
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Batch size for processing (overrides config)",
+    )
     return parser.parse_args(args)
 
 
