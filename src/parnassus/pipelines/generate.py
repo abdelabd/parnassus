@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from parnassus.configs import Config
 from parnassus.data import HepMCDataset, RootDataset
 from parnassus.data.scheme import GenEvent, GenParticleCollection
-from parnassus.nn import EulerSampler, EventModelWrapper, ParticleModelWrapper
+from parnassus.nn import EulerSampler, ModelWrapper
 from parnassus.utils import VarTransform, reshape_phi
 from parnassus.utils.logger import ProgressBar, setup_logger, update_task
 
@@ -39,8 +39,8 @@ def generate(config: Config) -> list[GenEvent]:
     log.info("[green]Data loading completed.")
     log.info("[green]Loading networks...")
     device = torch.device(config.device)
-    particle_model = ParticleModelWrapper(model_config.particle_model_path).to(device)
-    event_model = EventModelWrapper(model_config.event_model_path).to(device)
+    particle_model = ModelWrapper(model_config.particle_model_path).to(device)
+    event_model = ModelWrapper(model_config.event_model_path).to(device)
     log.info("[green]Networks loading completed.")
 
     n_events = len(dataset)

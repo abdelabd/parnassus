@@ -6,19 +6,14 @@ from torch.export import load
 
 
 @final
-class ParticleModelWrapper(nn.Module):
-    def __init__(self, file_path: str | Path):
-        super().__init__()
-        self.net: nn.Module = load(f=file_path).module()
+class ModelWrapper(nn.Module):
+    """A wrapper class for a neural network.
 
-    def forward(
-        self, fs_data: Tensor, tr_data: Tensor, mask: Tensor, timestep: Tensor, global_data: Tensor
-    ) -> Tensor:
-        return self.net(fs_data, tr_data, mask, timestep, global_data)
+    This class loads a pre-trained neural network model from a specified file path
+    and provides a forward method to pass input data through the model.
 
+    """
 
-@final
-class EventModelWrapper(nn.Module):
     def __init__(self, file_path: str | Path):
         super().__init__()
         self.net: nn.Module = load(f=file_path).module()

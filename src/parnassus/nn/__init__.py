@@ -1,4 +1,4 @@
 from .sampler import EulerSampler
-from .wrapper import EventModelWrapper, ParticleModelWrapper
+from .wrapper import ModelWrapper
 
-__all__ = ["EulerSampler", "EventModelWrapper", "ParticleModelWrapper"]
+__all__ = ["EulerSampler", "ModelWrapper"]

@@ -13,8 +13,9 @@ from rich.progress import Progress, TaskID
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from parnassus.data import DatasetConfig, HepMCDataset, RootDataset
-from parnassus.nn import EulerSampler, EventModelWrapper, ParticleModelWrapper
+from parnassus.configs.data import DatasetConfig
+from parnassus.data import HepMCDataset, RootDataset
+from parnassus.nn import EulerSampler, ModelWrapper
 from parnassus.utils import VarTransform, VarTransformConfig
 from parnassus.utils.logger import ProgressBar, setup_logger
 
@@ -72,21 +73,21 @@ def main(args: Sequence[str] | None = None) -> None:
         num_events=parsed_args.num_events,
     )
     log.info("[green]Starting loading input data...")
-    if dataset_config.file_path.suffix == ".root":
+    file_path = dataset_config.file_path
+    assert isinstance(file_path, Path)
+    if file_path.suffix == ".root":
         dataset = RootDataset(dataset_config, var_transform_dict=var_transform_dict)
-    elif dataset_config.file_path.suffix == ".hepmc":
+    elif file_path.suffix == ".hepmc":
         dataset = HepMCDataset(dataset_config, var_transform_dict=var_transform_dict)
     else:
-        raise ValueError(
-            f"Only ROOT or HepMC files are supported as input, got {dataset_config.file_path}"
-        )
+        raise ValueError(f"Only ROOT or HepMC files are supported as input, got {file_path}")
     dataloader = DataLoader(dataset, batch_size=parsed_args.batch_size, num_workers=4)
     log.info("[green]Data loading completed.")
     log.info("[green]Loading networks...")
     # device = torch.device(f"cuda:{parsed_args.gpu}")
     device = torch.device("mps")
-    particle_model = ParticleModelWrapper(PART_MODEL_PATH).to(device)
-    event_model = EventModelWrapper(EVENT_MODEL_PATH).to(device)
+    particle_model = ModelWrapper(PART_MODEL_PATH).to(device)
+    event_model = ModelWrapper(EVENT_MODEL_PATH).to(device)
     log.info("[green]Networks loading completed.")
 
     n_events = len(dataset)
