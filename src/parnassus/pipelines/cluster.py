@@ -56,10 +56,12 @@ class Jet:
             "E",
         }:
             return getattr(self.fj_jet, name)
-        return getattr(self, name)
+        if name in self.__dict__:
+            return getattr(self, name)
+        raise AttributeError(f"'Jet' object has no attribute '{name}'")
 
     def pt_order_constituents(self):
-        idx = np.argsort(self.constituents_pt)
+        idx = np.argsort(self.constituents_pt)[::-1]
         self.constituents_pt = self.constituents_pt[idx]
         self.constituents_eta = self.constituents_eta[idx]
         self.constituents_phi = self.constituents_phi[idx]
@@ -105,7 +107,7 @@ def cluster_jets(particles: GenParticleCollection, config: JetClusteringConfig) 
     cs = get_cluster_sequence(
         config.jet_definition, ak_4vecs, user_indices=list(range(len(particles)))
     )
-    jets = cs.inclusive_jets(ptmin=config.min_pt)
+    jets = cs.inclusive_jets(config.min_pt)
     jets = fj.sorted_by_pt(jets)
     jets = [Jet(j, 0.5, calc_substructure=True) for j in jets]
     return [j for j in jets if j.nconstituents >= config.nconst_min]

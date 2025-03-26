@@ -1,0 +1,133 @@
+import fastjet as fj
+import numpy as np
+import pytest
+
+from parnassus.configs.pipeline import JetClusteringConfig
+from parnassus.data.scheme import GenParticleCollection
+from parnassus.pipelines.cluster import Jet
+
+
+@pytest.fixture
+def mock_particle_collection() -> GenParticleCollection:
+    return GenParticleCollection(
+        name="test_particles",
+        pt=np.array([50.0, 30.0, 20.0]),
+        eta=np.array([0.4, 0.6, 0.5]),
+        phi=np.array([0.9, 1.1, 1.0]),
+        pdg_id=np.array([211, 211, 211]),
+    )
+
+
+def test_get_cluster_sequence(mock_particle_collection):
+    """Test get_cluster_sequence function."""
+    from parnassus.pipelines.cluster import get_cluster_sequence
+
+    jetdef = fj.JetDefinition(fj.antikt_algorithm, 0.4)
+    four_vectors = mock_particle_collection.get4vecs_awkward()
+    user_indices = list(range(len(mock_particle_collection)))
+    cs = get_cluster_sequence(jetdef, four_vectors, user_indices)
+    assert len(cs.inclusive_jets(0.0)) == 1
+    assert len(cs.inclusive_jets(0.0)[0].constituents()) == 3
+
+
+def test_cluster_jets(mock_particle_collection):
+    """Test cluster_jets function."""
+    from parnassus.pipelines.cluster import cluster_jets
+
+    config = JetClusteringConfig(
+        name="test_cluster", algorithm="antikt", dr=0.4, nconst_min=2, min_pt=0
+    )
+    jets = cluster_jets(mock_particle_collection, config)
+    assert len(jets) == 1
+    assert jets[0].nconstituents == 3
+
+
+def get_mock_constituent(pt: float, eta: float, phi: float, user_index: int) -> fj.PseudoJet:
+    px = pt * np.cos(phi)
+    py = pt * np.sin(phi)
+    pz = pt * np.sinh(eta)
+    E = pt * np.cosh(eta)
+    pseudojet = fj.PseudoJet(px, py, pz, E)
+    pseudojet.set_user_index(user_index)
+    return pseudojet
+
+
+@pytest.fixture
+def mock_fj_jet_cs():
+    # Add constituents
+    constituents = [
+        get_mock_constituent(pt=30.0, eta=0.6, phi=1.1, user_index=0),
+        get_mock_constituent(pt=50.0, eta=0.4, phi=0.9, user_index=1),
+        get_mock_constituent(pt=20.0, eta=0.5, phi=1.0, user_index=2),
+    ]
+    jetdef = fj.JetDefinition(fj.antikt_algorithm, 0.4)
+    cs = fj.ClusterSequence(constituents, jetdef)
+    return fj.sorted_by_pt(cs.inclusive_jets(0.0)), cs
+
+
+@pytest.fixture
+def mock_jet(mock_fj_jet_cs):
+    mock_fj_jet, _ = mock_fj_jet_cs
+    return Jet(mock_fj_jet[0], R=0.4, calc_substructure=True)
+
+
+def test_jet_init_basic(mock_fj_jet_cs):
+    """Test basic Jet initialization without substructure calculation."""
+    mock_fj_jet, _ = mock_fj_jet_cs
+    jet = Jet(mock_fj_jet[0], R=0.4, calc_substructure=False)
+    assert jet.R == 0.4
+    assert jet.nconstituents == 3
+    assert len(jet.constituents_pt) == 3
+    assert len(jet.constituents_eta) == 3
+    assert len(jet.constituents_phi) == 3
+    assert len(jet.constituents_m) == 3
+    assert len(jet.constituents_idx) == 3
+
+    # Check if constituents are ordered by pt
+    assert np.all(np.diff(jet.constituents_pt) <= 0)  # Should be descending
+
+    # Check initial substructure values
+    assert np.isnan(jet.substructure["c2"])
+    assert np.isnan(jet.substructure["d2"])
+
+
+def test_jet_init_with_substructure(mock_jet):
+    """Test Jet initialization with substructure calculation."""
+    # Check if substructure values were calculated
+    assert not np.isnan(mock_jet.substructure["c2"])
+    assert not np.isnan(mock_jet.substructure["d2"])
+
+
+def test_jet_getattr(mock_jet):
+    """Test __getattr__ method for accessing PseudoJet properties."""
+    np.testing.assert_approx_equal(mock_jet.pt(), 99.62034462103314)
+    np.testing.assert_approx_equal(mock_jet.eta(), 0.48344593734981606)
+    np.testing.assert_approx_equal(mock_jet.phi(), 0.9799558810407399)
+    np.testing.assert_approx_equal(mock_jet.m(), 12.328849995939832)
+
+
+def test_pt_ordering(mock_jet):
+    """Test if constituents are properly ordered by pt."""
+    # Check if constituents are ordered by decreasing pt
+    np.testing.assert_allclose(mock_jet.constituents_pt, np.array([50.0, 30.0, 20.0]))
+    # Check if other arrays maintain the same ordering
+    np.testing.assert_allclose(mock_jet.constituents_eta, np.array([0.4, 0.6, 0.5]))
+    np.testing.assert_allclose(mock_jet.constituents_idx, np.array([1, 0, 2]))
+
+
+def test_invalid_attribute(mock_jet):
+    """Test accessing invalid attribute."""
+    with pytest.raises(AttributeError):
+        _ = mock_jet.invalid_attribute
+
+
+def test_convert_to_jet_collection(mock_jet):
+    from parnassus.pipelines.cluster import convert_to_jet_collection
+
+    jet_collection = convert_to_jet_collection("Test", [mock_jet, mock_jet])
+    assert jet_collection.name == "Test"
+    assert len(jet_collection) == 2
+    np.testing.assert_allclose(jet_collection.pt, np.array([99.62034462103314, 99.62034462103314]))
+    np.testing.assert_allclose(
+        jet_collection.eta, np.array([0.48344593734981606, 0.48344593734981606])
+    )

@@ -34,7 +34,7 @@ def class_to_pid(particle_class: int) -> int:
     return 22
 
 
-def class_to_pid_vecorized(particle_class: npt.NDArray[np.int32]) -> npt.NDArray[np.int32]:
+def class_to_pid_vectorized(particle_class: npt.NDArray[np.int32]) -> npt.NDArray[np.int32]:
     pid = np.ones_like(particle_class) * 22
     pid[particle_class == 0] = 211
     pid[particle_class == 1] = 11
