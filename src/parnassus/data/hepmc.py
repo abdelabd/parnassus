@@ -4,11 +4,12 @@ import numpy as np
 import pyhepmc
 from typing_extensions import override
 
+from parnassus.configs.data import DatasetConfig
 from parnassus.utils import pid_to_class
 from parnassus.utils.logger import ProgressBar
 from parnassus.utils.transform import VarTransform
 
-from .base import BaseDataset, DatasetConfig
+from .base import BaseDataset
 
 
 @final

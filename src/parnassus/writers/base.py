@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
+from parnassus.configs.scheme import GenEvent
 from parnassus.configs.writer import WriterConfig
-from parnassus.data.scheme import GenEvent
 
 
 class BaseWriter(ABC):

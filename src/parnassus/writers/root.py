@@ -4,7 +4,7 @@ import awkward as ak
 from typing_extensions import override
 from uproot import WritableTree, recreate
 
-from parnassus.data.scheme import GenEvent
+from parnassus.configs.scheme import GenEvent
 from parnassus.utils.logger import ProgressBar
 
 from .base import BaseWriter

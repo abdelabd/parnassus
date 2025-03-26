@@ -13,7 +13,7 @@ import numpy as np
 from typing_extensions import override
 
 from parnassus.configs.pipeline import JetClusteringConfig
-from parnassus.data.scheme import GenEvent, GenJetCollection, GenParticleCollection
+from parnassus.configs.scheme import GenEvent, GenJetCollection, GenParticleCollection
 from parnassus.utils.logger import ProgressBar
 
 from .base import GenPipeline

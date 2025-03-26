@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from parnassus.data.scheme import GenEvent
+from parnassus.configs.scheme import GenEvent
 
 
 class GenPipeline(ABC):

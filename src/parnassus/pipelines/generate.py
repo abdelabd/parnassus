@@ -7,8 +7,8 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from parnassus.configs import Config
+from parnassus.configs.scheme import GenEvent, GenParticleCollection
 from parnassus.data import HepMCDataset, RootDataset
-from parnassus.data.scheme import GenEvent, GenParticleCollection
 from parnassus.nn import EulerSampler, ModelWrapper
 from parnassus.utils import VarTransform, reshape_phi
 from parnassus.utils.logger import ProgressBar, setup_logger, update_task

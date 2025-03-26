@@ -4,10 +4,11 @@ import numpy as np
 import uproot
 from typing_extensions import override
 
+from parnassus.configs.data import DatasetConfig
 from parnassus.utils.logger import ProgressBar
 from parnassus.utils.transform import VarTransform
 
-from .base import BaseDataset, DatasetConfig
+from .base import BaseDataset
 
 
 @final
