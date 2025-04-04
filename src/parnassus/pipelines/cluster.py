@@ -1,7 +1,7 @@
 import multiprocessing as mp
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from io import TextIOWrapper
 from typing import Any, final
@@ -12,8 +12,13 @@ import fastjet as fj
 import numpy as np
 from typing_extensions import override
 
+from parnassus.configs.accessors import Accessor, JetAccessor
 from parnassus.configs.pipeline import JetClusteringConfig
-from parnassus.configs.scheme import GenEvent, GenJetCollection, GenParticleCollection
+from parnassus.configs.scheme import (
+    GenEvent,
+    GenJetCollection,
+    GenParticleCollection,
+)
 from parnassus.utils.logger import ProgressBar
 
 from .base import GenPipeline
@@ -181,7 +186,19 @@ class JetClusteringPipeline(GenPipeline):
         self.config = config
 
     @override
-    def process(self, events: list[GenEvent]):
+    def get_accessors(self) -> dict[str, list[Accessor]]:
+        return {
+            self.config.name: [
+                JetAccessor("pt", self.config.name),
+                JetAccessor("eta", self.config.name),
+                JetAccessor("phi", self.config.name),
+                JetAccessor("d2", self.config.name),
+                JetAccessor("c2", self.config.name),
+            ]
+        }
+
+    @override
+    def process(self, events: Sequence[GenEvent]):
         n_events = len(events)
         batch_size = 2000
         n_batches = n_events // batch_size

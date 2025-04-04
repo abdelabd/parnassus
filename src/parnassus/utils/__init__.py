@@ -5,7 +5,7 @@ from particle import PDGID
 from .transform import VarTransform, VarTransformConfig
 
 
-def reshape_phi(phi: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+def reshape_phi(phi: npt.NDArray[np.float32 | np.int32]) -> npt.NDArray[np.float32]:
     return np.arctan2(np.sin(phi), np.cos(phi))
 
 

@@ -114,9 +114,12 @@ filterwarnings = ["ignore::DeprecationWarning"]
 [dependency-groups]
 dev = [
     "basedpyright>=1.27.1",
+    "coverage>=7.7.1",
     "ipykernel>=6.29.5",
     "ipython>=8.32.0",
     "mypy>=1.15.0",
     "pre-commit>=4.1.0",
     "pytest>=8.3.4",
+    "ruff>=0.11.2",
+    "types-pyyaml>=6.0.12.20250402",
 ]

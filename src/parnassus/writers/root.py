@@ -15,36 +15,6 @@ if TYPE_CHECKING:
 
 BATCH_SIZE = 100
 
-PARTICLE_FLOAT_FEATS = ["pt", "eta", "phi", "vx", "vy", "vz"]
-PARTICLE_INT_FEATS = ["class_id", "pdg_id"]
-
-PARTICLE_FEATS = PARTICLE_FLOAT_FEATS + PARTICLE_INT_FEATS
-
-JET_FLOAT_FEATS = ["pt", "eta", "phi", "d2", "c2"]
-# JET_INT_FEATS = []
-
-JET_FEATS = JET_FLOAT_FEATS  # + JET_INT_FEATS
-
-
-def PARTICLE_TREE(name: str):
-    return {
-        name: "var * {"
-        + ", ".join([f'"{k}" : float32' for k in PARTICLE_FLOAT_FEATS])
-        + ", "
-        + ", ".join([f'"{k}" : int32' for k in PARTICLE_INT_FEATS])
-        + "}"
-    }
-
-
-def JET_TREE(name: str):
-    return {
-        name: "var * {"
-        + ", ".join([f'"{k}" : float32' for k in JET_FLOAT_FEATS])
-        # + ", "
-        # + ", ".join([f'"{k}" : int32' for k in JET_INT_FEATS])
-        + "}"
-    }
-
 
 def clear_dicts(data: dict[Any, Any]):
     for value in data.values():
@@ -79,36 +49,29 @@ class RootWriter(BaseWriter):
     @override
     def write(self, events: list[GenEvent]):
         f: WritableDirectory
+        accessor_store = self.config.accessor_store
         with recreate(self.config.file_path) as f:
-            branch_types = PARTICLE_TREE("Truth") | PARTICLE_TREE("Pflow")
-            for jet_name in events[0].jets:
-                branch_types |= JET_TREE(jet_name)
             f.mktree(
                 "Parnassus",
-                branch_types=branch_types,
+                branch_types=self.config.accessor_store.get_branch_types(),
                 # counter_name=custom_counter_name,
                 field_name=custom_field_name,
             )
 
-            data: dict[str, dict[str, Any]] = {
-                collection: {var_name: [] for var_name in PARTICLE_FEATS}
-                for collection in ["Truth", "Pflow"]
-            }
-            data |= {
-                jet_name: {var_name: [] for var_name in JET_FEATS} for jet_name in events[0].jets
-            }
+            data = accessor_store.init_data_dict()
             events_in_queue = 0
             with ProgressBar() as progress:
                 task = progress.add_task("[green]Writing data to file", total=len(events))
                 for event in events:
-                    truth_particles = event.truth_particles
-                    pflow_particles = event.pflow_particles
-                    for var_name in PARTICLE_FEATS:
-                        data["Truth"][var_name].append(getattr(truth_particles, var_name))
-                        data["Pflow"][var_name].append(getattr(pflow_particles, var_name))
-                    for jet_name, jet in event.jets.items():
-                        for var_name in JET_FEATS:
-                            data[jet_name][var_name].append(getattr(jet, var_name))
+                    accessor_store.update_data_dict(event, data)
+                    # truth_particles = event.truth_particles
+                    # pflow_particles = event.pflow_particles
+                    # for var_name in PARTICLE_FEATS:
+                    #     data["Truth"][var_name].append(getattr(truth_particles, var_name))
+                    #     data["Pflow"][var_name].append(getattr(pflow_particles, var_name))
+                    # for jet_name, jet in event.jets.items():
+                    #     for var_name in JET_FEATS:
+                    #         data[jet_name][var_name].append(getattr(jet, var_name))
                     events_in_queue += 1
                     if events_in_queue == BATCH_SIZE:
                         self.write_to_tree(f["Parnassus"], data)

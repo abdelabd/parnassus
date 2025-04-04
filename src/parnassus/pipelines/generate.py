@@ -1,4 +1,7 @@
+from collections.abc import Mapping, Sequence
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
@@ -7,14 +10,23 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from parnassus.configs import Config
+from parnassus.configs.accessors import Accessor, ParticleAccessor
 from parnassus.configs.scheme import GenEvent, GenParticleCollection
 from parnassus.data import HepMCDataset, RootDataset
 from parnassus.nn import EulerSampler, ModelWrapper
 from parnassus.utils import VarTransform, reshape_phi
 from parnassus.utils.logger import ProgressBar, setup_logger, update_task
 
+if TYPE_CHECKING:
+    from parnassus.data.base import BaseDataset
 
-def generate(config: Config) -> list[GenEvent]:
+PARTICLE_ACCESSORS = [
+    partial(ParticleAccessor, name=name, dtype="float32")
+    for name in ["pt", "eta", "phi", "vx", "vy", "vz"]
+] + [partial(ParticleAccessor, name=name, dtype="int32") for name in ["class_id", "pdg_id"]]
+
+
+def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Accessor]]]:
     log = setup_logger()
     model_config = config.model
     dataset_config = config.dataset_config
@@ -26,7 +38,7 @@ def generate(config: Config) -> list[GenEvent]:
     assert isinstance(input_file, Path)
     if not Path(input_file).exists():
         raise FileNotFoundError(f"Trying to load file {input_file}, no file exist!")
-
+    dataset: BaseDataset
     if input_file.suffix == ".root":
         dataset = RootDataset(dataset_config, var_transform_dict=var_transform_dict)
     elif input_file.suffix == ".hepmc":
@@ -246,4 +258,8 @@ def generate(config: Config) -> list[GenEvent]:
                 )
             )
             progress.update(conv_task, advance=1)
-    return event_list
+    accessors_dict = {
+        "Truth": [accessor(collection="truth_particles") for accessor in PARTICLE_ACCESSORS],
+        "Pflow": [accessor(collection="truth_particles") for accessor in PARTICLE_ACCESSORS],
+    }
+    return event_list, accessors_dict

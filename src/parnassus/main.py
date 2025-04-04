@@ -74,6 +74,7 @@ def main(args: Sequence[str] | None = None) -> None:
         start = datetime.now()
         log.info(f"Start time: {start.strftime('%Y-%m-%d %H:%M:%S')}")
         config = Config.from_yaml(parsed_args.config)
+        accessor_store = config.writer_config.accessor_store
 
         if parsed_args.input_path:
             config.dataset_config.file_path = Path(parsed_args.input_path).absolute()
@@ -86,12 +87,14 @@ def main(args: Sequence[str] | None = None) -> None:
         if parsed_args.num_steps:
             config.num_steps = parsed_args.num_steps
 
-        gen_events = generate(config)
+        gen_events, accessors_dict = generate(config)
+        accessor_store.update_from_dict(accessors_dict)
         log.info("[green]Starting postprocessing.")
         for pipeline_config in config.pipeline_configs:
             if isinstance(pipeline_config, JetClusteringConfig):
                 pipeline = JetClusteringPipeline(pipeline_config)
                 pipeline.process(gen_events)
+                accessor_store.update_from_dict(pipeline.get_accessors())
         log.info("[green]Postprocessing completed.")
         writer = RootWriter(config.writer_config)
         writer.write(gen_events)
