@@ -96,6 +96,8 @@ def main(args: Sequence[str] | None = None) -> None:
                 pipeline.process(gen_events)
                 accessor_store.update_from_dict(pipeline.get_accessors())
         log.info("[green]Postprocessing completed.")
+        log.info("[green]Using following accessors for writer:")
+        print(accessor_store)
         writer = RootWriter(config.writer_config)
         writer.write(gen_events)
         end = datetime.now()

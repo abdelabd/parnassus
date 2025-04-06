@@ -10,9 +10,10 @@ import awkward as ak
 import energyflow as ef
 import fastjet as fj
 import numpy as np
+import numpy.typing as npt
 from typing_extensions import override
 
-from parnassus.configs.accessors import Accessor, JetAccessor
+from parnassus.configs.accessors import Accessor, JetAccessor, ParticleAccessor
 from parnassus.configs.pipeline import JetClusteringConfig
 from parnassus.configs.scheme import (
     GenEvent,
@@ -107,7 +108,9 @@ def get_cluster_sequence(
     return fj.ClusterSequence(pj_array, jet_definition)
 
 
-def cluster_jets(particles: GenParticleCollection, config: JetClusteringConfig) -> list[Jet]:
+def cluster_jets(
+    particles: GenParticleCollection, config: JetClusteringConfig
+) -> tuple[list[Jet], npt.NDArray[np.int32]]:
     ak_4vecs = particles.get4vecs_awkward()
     cs = get_cluster_sequence(
         config.jet_definition, ak_4vecs, user_indices=list(range(len(particles)))
@@ -115,7 +118,17 @@ def cluster_jets(particles: GenParticleCollection, config: JetClusteringConfig) 
     jets = cs.inclusive_jets(config.min_pt)
     jets = fj.sorted_by_pt(jets)
     jets = [Jet(j, 0.5, calc_substructure=True) for j in jets]
-    return [j for j in jets if j.nconstituents >= config.nconst_min]
+
+    used_indices: set[int] = set()
+    jet_idxs = np.zeros(len(particles), dtype=int)
+    for jet_idx, jet in enumerate(jets):
+        particle_idx = jet.constituents_idx
+        jet_idxs[particle_idx] = jet_idx
+        used_indices.update(particle_idx)
+    particle_idx = np.arange(len(particles))
+    particle_idx = particle_idx[~np.isin(particle_idx, list(used_indices))]
+    jet_idxs[particle_idx] = -1
+    return [j for j in jets if j.nconstituents >= config.nconst_min], jet_idxs
 
 
 def convert_to_jet_collection(name: str, jets: list[Jet]) -> GenJetCollection:
@@ -126,23 +139,23 @@ def convert_to_jet_collection(name: str, jets: list[Jet]) -> GenJetCollection:
         phi=np.array([jet.phi() for jet in jets]),
         d2=np.array([jet.substructure["d2"] for jet in jets]),
         c2=np.array([jet.substructure["c2"] for jet in jets]),
-        particle_idx=[jet.constituents_idx for jet in jets],
     )
 
 
 def process_events(
     event_list: list[GenEvent], config: JetClusteringConfig
-) -> list[GenJetCollection]:
+) -> tuple[list[GenJetCollection], list[npt.NDArray[np.int32]]]:
     jets: list[GenJetCollection] = []
+    idxs: list[npt.NDArray[np.int32]] = []
     for event in event_list:
+        assert config.collection in {"truth", "pflow"}, f"Can't cluster {config.collection}"
         if config.collection == "truth":
-            evt_jets = cluster_jets(event.truth_particles, config)
-        elif config.collection == "pflow":
-            evt_jets = cluster_jets(event.pflow_particles, config)
+            evt_jets, jet_idxs = cluster_jets(event.truth_particles, config)
         else:
-            evt_jets = []
+            evt_jets, jet_idxs = cluster_jets(event.pflow_particles, config)
         jets.append(convert_to_jet_collection(config.name, evt_jets))
-    return jets
+        idxs.append(jet_idxs)
+    return jets, idxs
 
 
 @contextmanager
@@ -194,7 +207,15 @@ class JetClusteringPipeline(GenPipeline):
                 JetAccessor("phi", self.config.name),
                 JetAccessor("d2", self.config.name),
                 JetAccessor("c2", self.config.name),
-            ]
+            ],
+            self.config.collection.capitalize(): [
+                ParticleAccessor(
+                    f"jet_idx/{self.config.name}",
+                    f"{self.config.collection}_particles",
+                    f"{self.config.name}_idx",
+                    dtype="int32",
+                )
+            ],
         }
 
     @override
@@ -209,11 +230,18 @@ class JetClusteringPipeline(GenPipeline):
         ]
         n_events_in_batch = (len(data[0]) for data in input_batched_data)
         jets: list[GenJetCollection] = []
+        jet_idxs: list[npt.NDArray[np.int32]] = []
         with mp.Pool(processes=self.config.num_processes) as pool, ProgressBar() as progress:
             task = progress.add_task(f"[green]Cluster {self.config.name} jets", total=n_events)
-            for jets_ in pool.imap(process_events_wrapper, input_batched_data):
+            for data_ in pool.imap(process_events_wrapper, input_batched_data):
+                jets_, jet_idxs_ = data_
                 jets.extend(jets_)
+                jet_idxs.extend(jet_idxs_)
                 progress.update(task, advance=next(n_events_in_batch))
 
         for i in range(n_events):
             events[i].jets[self.config.name] = jets[i]
+            if self.config.collection == "truth":
+                events[i].truth_particles.jet_idx[self.config.name] = jet_idxs[i]
+            if self.config.collection == "pflow":
+                events[i].pflow_particles.jet_idx[self.config.name] = jet_idxs[i]

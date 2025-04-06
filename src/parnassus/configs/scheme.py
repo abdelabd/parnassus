@@ -46,6 +46,9 @@ class GenParticleCollection:
     charge: npt.NDArray[np.int32] | None = None
     status: npt.NDArray[np.int32] | None = None
 
+    # Jet idxs
+    jet_idx: dict[str, npt.NDArray[np.int32]] = field(default_factory=dict)
+
     def __post_init__(self):
         self.num_particles = len(self.pt)
         if self.mass is None:
@@ -56,7 +59,7 @@ class GenParticleCollection:
         if self.pdg_id is None and self.class_id is not None:
             self.pdg_id = class_to_pid_vectorized(self.class_id)
         for key in self.__slots__:
-            if key in {"name", "num_particles"}:
+            if key in {"name", "num_particles", "jet_idx"}:
                 continue
             attr = self.__getattribute__(key)
             if attr is None:

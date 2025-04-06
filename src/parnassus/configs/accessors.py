@@ -17,8 +17,12 @@ class Accessor(ABC):
         self._dtype: str = dtype or "float32"
 
     @abstractmethod
-    def get(self, event: GenEvent):
+    def get(self, event: GenEvent) -> Any:
         pass
+
+    @property
+    def collection(self) -> str:
+        return self._collection
 
     @property
     def name(self) -> str:
@@ -44,13 +48,23 @@ class Accessor(ABC):
 
     @override
     def __repr__(self) -> str:
-        return f"{self._collection} '{self.name}' accessor"
+        return f"{self._collection} '{self.name}' accessor, ouput_name: {self._output_name}"
 
 
 @final
 class ParticleAccessor(Accessor):
     @override
     def get(self, event: GenEvent):
+        collection = getattr(event, self._collection)
+        if "/" in self._name:
+            assert self._name.count("/") == 1, "Nested dicts are not supported in ParticleAccessor"
+            data_dict_name, feature_name = self._name.split("/")
+            data_dict: dict[str, Any] | Any = getattr(collection, data_dict_name)
+            try:
+                return data_dict[feature_name]
+            except TypeError:
+                print(f"Trying to read {self._name} variable, but {data_dict_name} is not a dict.")
+                raise
         return getattr(getattr(event, self._collection), self._name)
 
 
@@ -65,14 +79,32 @@ class AccessorStore:
     def __init__(self):
         self.accessors_dict: dict[str, list[Accessor]] = {}
 
+    @override
+    def __repr__(self) -> str:
+        repr_string = ""
+        row = "{:<40} | {:^40} | {:>40}"
+        headers = ["Input collection", "Accessor name", "Output name"]
+        for collection, accessors in self.accessors_dict.items():
+            repr_string += f"{collection:=^126}\n"
+            repr_string += "-" * 126 + "\n"
+            repr_string += row.format(*headers) + "\n"
+            repr_string += "-" * 126 + "\n"
+            for accessor in accessors:
+                repr_string += (
+                    row.format(accessor.collection, accessor.name, accessor.output_name) + "\n"
+                )
+            repr_string += "=" * 126 + "\n\n"
+        return repr_string
+
     def update_from_dict(self, data: Mapping[str, Sequence[Accessor]]):
         for key, accessors in data.items():
             if key not in self.accessors_dict:
                 self.accessors_dict[key] = list(accessors)
-            for accessor in accessors:
-                if accessor in self.accessors_dict[key]:
-                    pass
-                self.accessors_dict[key].append(accessor)
+            else:
+                for accessor in accessors:
+                    if accessor in self.accessors_dict[key]:
+                        pass
+                    self.accessors_dict[key].append(accessor)
 
     def get_branch_types(self) -> dict[str, str]:
         return {

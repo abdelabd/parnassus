@@ -260,6 +260,6 @@ def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Acce
             progress.update(conv_task, advance=1)
     accessors_dict = {
         "Truth": [accessor(collection="truth_particles") for accessor in PARTICLE_ACCESSORS],
-        "Pflow": [accessor(collection="truth_particles") for accessor in PARTICLE_ACCESSORS],
+        "Pflow": [accessor(collection="pflow_particles") for accessor in PARTICLE_ACCESSORS],
     }
     return event_list, accessors_dict

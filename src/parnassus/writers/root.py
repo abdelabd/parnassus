@@ -53,7 +53,7 @@ class RootWriter(BaseWriter):
         with recreate(self.config.file_path) as f:
             f.mktree(
                 "Parnassus",
-                branch_types=self.config.accessor_store.get_branch_types(),
+                branch_types=accessor_store.get_branch_types(),
                 # counter_name=custom_counter_name,
                 field_name=custom_field_name,
             )
