@@ -4,7 +4,6 @@ from typing import final
 
 import awkward as ak
 import numpy as np
-import numpy.typing as npt
 import pyhepmc
 import uproot
 from numpy.random import Generator
@@ -13,6 +12,7 @@ from torch.export import Dim, export, save
 
 from . import pid_to_class
 from .transform import VarTransform, VarTransformConfig
+from .typing import FloatArray, IntArray
 
 PARTICLE_VARS = [
     "pt",
@@ -30,10 +30,10 @@ def mock_particles(
     num_events: int = 1000,
     num_particles: int = 40,
     rng: Generator | None = None,
-) -> dict[str, list[npt.NDArray[np.float32]]]:
+) -> dict[str, list[FloatArray]]:
     if rng is None:
         rng = np.random.default_rng(42)
-    particles: dict[str, npt.NDArray[np.float32 | np.int32]] = {}
+    particles: dict[str, FloatArray | IntArray] = {}
     for var in PARTICLE_VARS:
         if var == "pdgId":
             value = rng.choice(
@@ -55,7 +55,7 @@ def mock_particles(
             value = rng.random((num_events, num_particles)).astype(np.float32) + 1
         particles[var] = value
     ind = rng.choice([True, False], size=(num_events, num_particles)).astype(bool)
-    data: dict[str, list[npt.NDArray[np.float32]]] = {var: [] for var in PARTICLE_VARS}
+    data: dict[str, list[FloatArray]] = {var: [] for var in PARTICLE_VARS}
     for i in range(num_events):
         for var in PARTICLE_VARS:
             data[var].append(particles[var][i][ind[i]])
@@ -64,11 +64,11 @@ def mock_particles(
 
 
 def get_4momentum(
-    pt: npt.NDArray[np.float32] | float,
-    y: npt.NDArray[np.float32] | float,
-    phi: npt.NDArray[np.float32] | float,
-    mass: npt.NDArray[np.float32] | float,
-) -> npt.NDArray[np.float32]:
+    pt: FloatArray | float,
+    y: FloatArray | float,
+    phi: FloatArray | float,
+    mass: FloatArray | float,
+) -> FloatArray:
     mt = np.sqrt(pt**2 + mass**2)
     px = pt * np.cos(phi)
     py = pt * np.sin(phi)
@@ -78,10 +78,10 @@ def get_4momentum(
 
 
 def getParticleHepMC(
-    pt: npt.NDArray[np.float32] | float,
-    y: npt.NDArray[np.float32] | float,
-    phi: npt.NDArray[np.float32] | float,
-    pid: npt.NDArray[np.float32] | float,
+    pt: FloatArray | float,
+    y: FloatArray | float,
+    phi: FloatArray | float,
+    pid: FloatArray | float,
     status: int = 1,
 ) -> pyhepmc.GenParticle:
     p = pyhepmc.GenParticle()
@@ -92,16 +92,16 @@ def getParticleHepMC(
 
 
 def getVertexHepMC(
-    vx: npt.NDArray[np.float32] | float,
-    vy: npt.NDArray[np.float32] | float,
-    vz: npt.NDArray[np.float32] | float,
+    vx: FloatArray | float,
+    vy: FloatArray | float,
+    vz: FloatArray | float,
 ) -> pyhepmc.GenVertex:
     v = pyhepmc.GenVertex()
     v.position = pyhepmc.FourVector([vx, vy, vz, 0])
     return v
 
 
-def getEventHepMC(event_data: list[npt.NDArray[np.float32]], event_number: int) -> pyhepmc.GenEvent:
+def getEventHepMC(event_data: list[FloatArray], event_number: int) -> pyhepmc.GenEvent:
     event = pyhepmc.GenEvent()
     vtx_dict: dict[int, pyhepmc.GenVertex] = {}
     for pt, y, phi, pid, vx, vy, vz in zip(*event_data, strict=True):

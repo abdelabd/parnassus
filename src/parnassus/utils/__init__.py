@@ -5,7 +5,7 @@ from .transform import VarTransform, VarTransformConfig
 from .typing import FloatArray, IntArray
 
 
-def reshape_phi(phi: FloatArray) -> FloatArray:
+def reshape_phi(phi: FloatArray | IntArray) -> FloatArray:
     return np.arctan2(np.sin(phi), np.cos(phi))
 
 

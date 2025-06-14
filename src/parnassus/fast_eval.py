@@ -5,7 +5,6 @@ from pathlib import Path
 
 import awkward as ak
 import numpy as np
-import numpy.typing as npt
 import torch
 import uproot
 import yaml
@@ -18,9 +17,10 @@ from parnassus.data import HepMCDataset, RootDataset
 from parnassus.nn import EulerSampler, ModelWrapper
 from parnassus.utils import VarTransform, VarTransformConfig
 from parnassus.utils.logger import ProgressBar, setup_logger
+from parnassus.utils.typing import FloatArray
 
 
-def reshape_phi(phi: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+def reshape_phi(phi: FloatArray) -> FloatArray:
     return np.arctan2(np.sin(phi), np.cos(phi))
 
 
@@ -91,7 +91,7 @@ def main(args: Sequence[str] | None = None) -> None:
     log.info("[green]Networks loading completed.")
 
     n_events = len(dataset)
-    l_tr_data: dict[str, npt.NDArray[np.float32]] = {
+    l_tr_data: dict[str, FloatArray] = {
         key.replace("pflow_", "").replace("ptrel", "pt"): np.zeros(
             (
                 n_events,
@@ -101,7 +101,7 @@ def main(args: Sequence[str] | None = None) -> None:
         )
         for key in [*dataset_config.truth_variables, "ind"]
     }
-    l_fs_data: dict[str, npt.NDArray[np.float32]] = {
+    l_fs_data: dict[str, FloatArray] = {
         key.replace("pflow_", "").replace("ptrel", "pt"): np.zeros(
             (
                 n_events,
@@ -219,14 +219,12 @@ def main(args: Sequence[str] | None = None) -> None:
                 callback=update_task(progress_bar, part_sampler_task),
             ).cpu()
 
-            pflow_ht: npt.NDArray[np.float32] = (
-                var_transform_dict["ht"].inverse_transform(pf_ht_pred).numpy()
-            )
-            truth_ht: npt.NDArray[np.float32] = (
+            pflow_ht: FloatArray = var_transform_dict["ht"].inverse_transform(pf_ht_pred).numpy()
+            truth_ht: FloatArray = (
                 var_transform_dict["ht"].inverse_transform(truth_ht_scaled).numpy()
             )
-            tr_data_: npt.NDArray[np.float32]
-            fs_data_: npt.NDArray[np.float32]
+            tr_data_: FloatArray
+            fs_data_: FloatArray
             for j, var in enumerate(dataset_config.truth_variables):
                 var_name = var.replace("pt", "ptrel")
                 if var_name == "class":
