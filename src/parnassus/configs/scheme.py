@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import override
+from typing import Self, override
 
 import awkward as ak
 import numpy as np
@@ -97,6 +97,82 @@ class GenParticleCollection:
 
 
 @dataclass(slots=True)
+class GenLeptonCollection:
+    """Class storing information about a collection of generic leptons.
+
+    This class represents a collection of generic leptons
+    and provides methods to access and manipulate their properties.
+
+    Attributes
+    ----------
+        name (str): The name of the particle collection.
+        pt (np.ndarray): The transverse momentum of the particles.
+        eta (np.ndarray): The pseudorapidity of the particles.
+        phi (np.ndarray): The azimuthal angle of the particles.
+    """
+
+    # Properties
+    name: str
+    num_particles: int = field(init=False)
+    pt: FloatArray
+    eta: FloatArray
+    phi: FloatArray
+
+    iso_var: FloatArray | None = None
+    sum_pt: FloatArray | None = None
+    sum_pt_ch: FloatArray | None = None
+    sum_pt_neut: FloatArray | None = None
+
+    @staticmethod
+    def get_class_id(name: str) -> int:
+        if name == "electrons":
+            return 1
+        if name == "muons":
+            return 2
+        return -1
+
+    @classmethod
+    def from_particles(cls, particles: GenParticleCollection, name: str) -> Self:
+        assert name in {"electrons", "muons"}, (
+            "Can create lepton collection only for electrons (class 1) or muons (class 2),"
+            f" got {name}"
+        )
+        assert particles.class_id is not None, "Expect particles to have class"
+
+        class_mask = cls.get_class_id(name) == particles.class_id
+        return cls(
+            name=name,
+            pt=particles.pt[class_mask],
+            eta=particles.pt[class_mask],
+            phi=particles.pt[class_mask],
+        )
+
+    def __post_init__(self):
+        self.num_particles = len(self.pt)
+        for key in self.__slots__:
+            if key in {"name", "num_particles"}:
+                continue
+            attr = self.__getattribute__(key)
+            if attr is None:
+                continue
+            attr_len = len(attr)
+            assert attr_len == self.num_particles, (
+                f"Assumed length of each features be {self.num_particles}, got"
+                f" {attr_len} for {key} attribute"
+            )
+
+    def __len__(self):
+        return self.num_particles
+
+    @override
+    def __repr__(self) -> str:
+        return f"{self.name} collection with {len(self)} elements"
+
+    def __getitem__(self, idx: int):
+        assert idx < self.num_particles, f"Index {idx} out of range"
+
+
+@dataclass(slots=True)
 class GenJetCollection:
     """Class storing information about generic jet collection."""
 
@@ -145,6 +221,9 @@ class GenEvent:
     truth_particles: GenParticleCollection
     pflow_particles: GenParticleCollection
 
+    muons: GenLeptonCollection = field(init=False)
+    electrons: GenLeptonCollection = field(init=False)
+
     jets: dict[str, GenJetCollection] = field(default_factory=dict)
     # Event features
     truth_ht: np.float32 = field(init=False)
@@ -163,6 +242,9 @@ class GenEvent:
         self.pflow_ht = np.sum(self.pflow_particles.pt)
         self.pflow_met_x = np.sum(self.pflow_particles.pt * np.cos(self.pflow_particles.phi))
         self.pflow_met_y = np.sum(self.pflow_particles.pt * np.sin(self.pflow_particles.phi))
+
+        self.muons = GenLeptonCollection.from_particles(self.pflow_particles, name="muons")
+        self.electrons = GenLeptonCollection.from_particles(self.pflow_particles, name="electrons")
 
     @override
     def __repr__(self) -> str:

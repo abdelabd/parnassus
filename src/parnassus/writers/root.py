@@ -63,14 +63,6 @@ class RootWriter(BaseWriter):
                 task = progress.add_task("[green]Writing data to file", total=len(events))
                 for event in events:
                     accessor_store.update_data_dict(event, data)
-                    # truth_particles = event.truth_particles
-                    # pflow_particles = event.pflow_particles
-                    # for var_name in PARTICLE_FEATS:
-                    #     data["Truth"][var_name].append(getattr(truth_particles, var_name))
-                    #     data["Pflow"][var_name].append(getattr(pflow_particles, var_name))
-                    # for jet_name, jet in event.jets.items():
-                    #     for var_name in JET_FEATS:
-                    #         data[jet_name][var_name].append(getattr(jet, var_name))
                     events_in_queue += 1
                     if events_in_queue == BATCH_SIZE:
                         self.write_to_tree(f["Parnassus"], data)

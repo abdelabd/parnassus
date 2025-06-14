@@ -5,8 +5,8 @@ from datetime import datetime
 from pathlib import Path
 
 from parnassus.configs import Config
-from parnassus.configs.pipeline import JetClusteringConfig
-from parnassus.pipelines import JetClusteringPipeline, generate
+from parnassus.configs.pipeline import IsolationConfig, JetClusteringConfig
+from parnassus.pipelines import IsolationPipeline, JetClusteringPipeline, generate
 from parnassus.utils.logger import setup_logger
 from parnassus.writers import RootWriter
 
@@ -90,9 +90,14 @@ def main(args: Sequence[str] | None = None) -> None:
         gen_events, accessors_dict = generate(config)
         accessor_store.update_from_dict(accessors_dict)
         log.info("[green]Starting postprocessing.")
+        pipeline: JetClusteringPipeline | IsolationPipeline
         for pipeline_config in config.pipeline_configs:
             if isinstance(pipeline_config, JetClusteringConfig):
                 pipeline = JetClusteringPipeline(pipeline_config)
+                pipeline.process(gen_events)
+                accessor_store.update_from_dict(pipeline.get_accessors())
+            elif isinstance(pipeline_config, IsolationConfig):
+                pipeline = IsolationPipeline(pipeline_config)
                 pipeline.process(gen_events)
                 accessor_store.update_from_dict(pipeline.get_accessors())
         log.info("[green]Postprocessing completed.")

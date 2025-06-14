@@ -1,4 +1,5 @@
 from .cluster import JetClusteringPipeline
 from .generate import generate
+from .isolation import IsolationPipeline
 
-__all__ = ["JetClusteringPipeline", "generate"]
+__all__ = ["IsolationPipeline", "JetClusteringPipeline", "generate"]

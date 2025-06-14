@@ -31,6 +31,14 @@ pipelines:
     algorithm: antikt
     pt_min: 10
     nconst_min: 2
+   ElectronIsolation:
+    type: "isolation"
+    collection: "electrons"
+    dr: 0.4
+   MuonIsolation:
+    type: "isolation"
+    collection: "muons"
+    dr: 0.4
 
 output:
   file_path: ""

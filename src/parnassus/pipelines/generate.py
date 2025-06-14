@@ -25,6 +25,10 @@ PARTICLE_ACCESSORS = [
     for name in ["pt", "eta", "phi", "vx", "vy", "vz"]
 ] + [partial(ParticleAccessor, name=name, dtype="int32") for name in ["class_id", "pdg_id"]]
 
+LEPTON_ACCESSORS = [
+    partial(ParticleAccessor, name=name, dtype="float32") for name in ["pt", "eta", "phi"]
+]
+
 
 def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Accessor]]]:
     log = setup_logger()
@@ -237,7 +241,7 @@ def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Acce
                 vz=l_tr_data["vz"][i][truth_ind],
                 class_id=l_tr_data["class"][i][truth_ind].astype(np.int32),
             )
-            pflow_ind = l_pf_data["ind"][i] > 0
+            pflow_ind = (l_pf_data["ind"][i] > 0) & (l_pf_data["pt"][i] > 1)
             pflow_particles = GenParticleCollection(
                 name="pflow",
                 pt=l_pf_data["pt"][i][pflow_ind],
@@ -259,5 +263,7 @@ def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Acce
     accessors_dict = {
         "Truth": [accessor(collection="truth_particles") for accessor in PARTICLE_ACCESSORS],
         "Pflow": [accessor(collection="pflow_particles") for accessor in PARTICLE_ACCESSORS],
+        "Electrons": [accessor(collection="electrons") for accessor in LEPTON_ACCESSORS],
+        "Muons": [accessor(collection="muons") for accessor in LEPTON_ACCESSORS],
     }
     return event_list, accessors_dict

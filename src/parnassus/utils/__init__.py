@@ -43,4 +43,13 @@ def class_to_pid_vectorized(particle_class: IntArray) -> IntArray:
     return pid
 
 
+def calculate_dr(
+    src_eta: FloatArray, src_phi: FloatArray, dst_eta: FloatArray, dst_phi: FloatArray
+) -> FloatArray:
+    delta_eta = src_eta - dst_eta
+    delta_phi = (src_phi - dst_phi + np.pi) % (2 * np.pi) - np.pi
+
+    return np.sqrt(delta_eta**2 + delta_phi**2)
+
+
 __all__ = ["VarTransform", "VarTransformConfig"]

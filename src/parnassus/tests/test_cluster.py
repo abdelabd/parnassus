@@ -26,8 +26,10 @@ def test_get_cluster_sequence(mock_particle_collection: GenParticleCollection):
     four_vectors = mock_particle_collection.get4vecs_awkward()
     user_indices = list(range(len(mock_particle_collection)))
     cs = get_cluster_sequence(jetdef, four_vectors, user_indices)
-    assert len(cs.inclusive_jets(0.0)) == 1
-    assert len(cs.inclusive_jets(0.0)[0].constituents()) == 3
+    assert len(cs.inclusive_jets(0.0)) == 1, "Expected to have one jet."
+    assert len(cs.inclusive_jets(0.0)[0].constituents()) == 3, (
+        "Expected to have 3 particles in jet."
+    )
 
 
 def test_cluster_jets(mock_particle_collection: GenParticleCollection):
@@ -37,8 +39,9 @@ def test_cluster_jets(mock_particle_collection: GenParticleCollection):
     config = JetClusteringConfig(
         name="test_cluster", algorithm="antikt", dr=0.4, nconst_min=2, min_pt=0
     )
-    jets = cluster_jets(mock_particle_collection, config)
+    jets, idxs = cluster_jets(mock_particle_collection, config)
     assert len(jets) == 1
+    assert idxs.shape == (3,)
     assert jets[0].nconstituents == 3
 
 
