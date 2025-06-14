@@ -5,7 +5,6 @@ from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from io import TextIOWrapper
 from typing import Any, final, override
-from typing import Any, final, override
 
 import awkward as ak
 import energyflow as ef
