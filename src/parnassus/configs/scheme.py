@@ -114,14 +114,14 @@ class GenLeptonCollection:
     # Properties
     name: str
     num_particles: int = field(init=False)
-    pt: npt.NDArray[np.float32]
-    eta: npt.NDArray[np.float32]
-    phi: npt.NDArray[np.float32]
+    pt: FloatArray
+    eta: FloatArray
+    phi: FloatArray
 
-    iso_var: npt.NDArray[np.float32] | None = None
-    sum_pt: npt.NDArray[np.float32] | None = None
-    sum_pt_ch: npt.NDArray[np.float32] | None = None
-    sum_pt_neut: npt.NDArray[np.float32] | None = None
+    iso_var: FloatArray | None = None
+    sum_pt: FloatArray | None = None
+    sum_pt_ch: FloatArray | None = None
+    sum_pt_neut: FloatArray | None = None
 
     @staticmethod
     def get_class_id(name: str) -> int:
