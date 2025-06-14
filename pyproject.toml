@@ -7,7 +7,7 @@ authors = [
   {name = "Dmitrii Kobylianskii", email = "dmitry.kobylyansky@weizmann.ac.il"},
 ]
 license = "MIT"
-requires-python = "<=3.11.11, >3.10"
+requires-python = ">=3.12, <3.13"
 dependencies = [
     "energyflow>=1.4.0",
     "fastjet>=3.4.3.1",
@@ -99,6 +99,9 @@ convention = "numpy"
 [tool.ruff.lint.flake8-pytest-style]
 fixture-parentheses = false
 mark-parentheses = false
+
+[tool.ruff.lint.flake8-builtins]
+builtins-allowed-modules = ["typing"]
 
 [tool.mypy]
 exclude = "parnassus/models/modules"

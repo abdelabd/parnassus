@@ -4,14 +4,13 @@ import sys
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from io import TextIOWrapper
-from typing import Any, final
+from typing import Any, final, override
 
 import awkward as ak
 import energyflow as ef
 import fastjet as fj
 import numpy as np
 import numpy.typing as npt
-from typing_extensions import override
 
 from parnassus.configs.accessors import Accessor, JetAccessor, ParticleAccessor
 from parnassus.configs.pipeline import JetClusteringConfig

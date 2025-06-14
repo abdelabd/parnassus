@@ -1,11 +1,11 @@
 import numpy as np
-import numpy.typing as npt
 from particle import PDGID
 
 from .transform import VarTransform, VarTransformConfig
+from .typing import FloatArray, IntArray
 
 
-def reshape_phi(phi: npt.NDArray[np.float32 | np.int32]) -> npt.NDArray[np.float32]:
+def reshape_phi(phi: FloatArray) -> FloatArray:
     return np.arctan2(np.sin(phi), np.cos(phi))
 
 
@@ -34,13 +34,22 @@ def class_to_pid(particle_class: int) -> int:
     return 22
 
 
-def class_to_pid_vectorized(particle_class: npt.NDArray[np.int32]) -> npt.NDArray[np.int32]:
+def class_to_pid_vectorized(particle_class: IntArray) -> IntArray:
     pid = np.ones_like(particle_class) * 22
     pid[particle_class == 0] = 211
     pid[particle_class == 1] = 11
     pid[particle_class == 2] = 13
     pid[particle_class == 3] = 111
     return pid
+
+
+def calculate_dr(
+    src_eta: FloatArray, src_phi: FloatArray, dst_eta: FloatArray, dst_phi: FloatArray
+) -> FloatArray:
+    delta_eta = src_eta - dst_eta
+    delta_phi = (src_phi - dst_phi + np.pi) % (2 * np.pi) - np.pi
+
+    return np.sqrt(delta_eta**2 + delta_phi**2)
 
 
 __all__ = ["VarTransform", "VarTransformConfig"]
