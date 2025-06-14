@@ -1,8 +1,7 @@
-from typing import Any, final
+from typing import Any, final, override
 
 import numpy as np
 import uproot
-from typing_extensions import override
 
 from parnassus.configs.data import DatasetConfig
 from parnassus.utils.logger import ProgressBar

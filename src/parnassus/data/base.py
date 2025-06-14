@@ -1,9 +1,8 @@
 from abc import abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -12,6 +11,9 @@ from torch.utils.data import Dataset
 from parnassus.configs.data import DatasetConfig
 from parnassus.utils.logger import ProgressBar
 from parnassus.utils.transform import VarTransform
+
+if TYPE_CHECKING:
+    from parnassus.utils.typing import BoolArray, FloatArray, IntArray, LongArray
 
 
 def do_padding(tensor: Tensor, max_len: int):
@@ -30,14 +32,14 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
         self.var_transform_dict: dict[str, VarTransform] = var_transform_dict
 
         self.truth_variables: list[str] = []
-        self.full_data_array: dict[str, npt.NDArray[np.float32]] = {}
+        self.full_data_array: dict[str, FloatArray] = {}
 
         self.entry_start: int
         self.entry_stop: int
 
-        self.n_particle_mask: npt.NDArray[np.bool]
-        self.n_truth_particles: npt.NDArray[np.int32]
-        self.truth_cumsum: npt.NDArray[np.int64]
+        self.n_particle_mask: BoolArray
+        self.n_truth_particles: IntArray
+        self.truth_cumsum: LongArray
 
         if not Path(self.cfg.file_path).exists():
             raise FileNotFoundError(f"Trying to load file {self.cfg.file_path}, no file exist!")

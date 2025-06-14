@@ -1,7 +1,6 @@
-from typing import TYPE_CHECKING, Any, final
+from typing import TYPE_CHECKING, Any, final, override
 
 import awkward as ak
-from typing_extensions import override
 from uproot import WritableTree, recreate
 
 from parnassus.configs.scheme import GenEvent

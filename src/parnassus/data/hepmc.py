@@ -1,8 +1,7 @@
-from typing import final
+from typing import final, override
 
 import numpy as np
 import pyhepmc
-from typing_extensions import override
 
 from parnassus.configs.data import DatasetConfig
 from parnassus.utils import pid_to_class

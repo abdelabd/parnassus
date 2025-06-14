@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any, final
-
-from typing_extensions import override
+from typing import Any, final, override
 
 from .scheme import GenEvent
 

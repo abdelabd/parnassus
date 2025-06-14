@@ -4,14 +4,12 @@ import sys
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from io import TextIOWrapper
-from typing import Any, final
+from typing import Any, final, override
 
 import awkward as ak
 import energyflow as ef
 import fastjet as fj
 import numpy as np
-import numpy.typing as npt
-from typing_extensions import override
 
 from parnassus.configs.accessors import Accessor, JetAccessor, ParticleAccessor
 from parnassus.configs.pipeline import JetClusteringConfig
@@ -21,6 +19,7 @@ from parnassus.configs.scheme import (
     GenParticleCollection,
 )
 from parnassus.utils.logger import ProgressBar
+from parnassus.utils.typing import IntArray
 
 from .base import GenPipeline
 
@@ -110,7 +109,7 @@ def get_cluster_sequence(
 
 def cluster_jets(
     particles: GenParticleCollection, config: JetClusteringConfig
-) -> tuple[list[Jet], npt.NDArray[np.int32]]:
+) -> tuple[list[Jet], IntArray]:
     ak_4vecs = particles.get4vecs_awkward()
     cs = get_cluster_sequence(
         config.jet_definition, ak_4vecs, user_indices=list(range(len(particles)))
@@ -144,9 +143,9 @@ def convert_to_jet_collection(name: str, jets: list[Jet]) -> GenJetCollection:
 
 def process_events(
     event_list: list[GenEvent], config: JetClusteringConfig
-) -> tuple[list[GenJetCollection], list[npt.NDArray[np.int32]]]:
+) -> tuple[list[GenJetCollection], list[IntArray]]:
     jets: list[GenJetCollection] = []
-    idxs: list[npt.NDArray[np.int32]] = []
+    idxs: list[IntArray] = []
     for event in event_list:
         assert config.collection in {"truth", "pflow"}, f"Can't cluster {config.collection}"
         if config.collection == "truth":
@@ -230,7 +229,7 @@ class JetClusteringPipeline(GenPipeline):
         ]
         n_events_in_batch = (len(data[0]) for data in input_batched_data)
         jets: list[GenJetCollection] = []
-        jet_idxs: list[npt.NDArray[np.int32]] = []
+        jet_idxs: list[IntArray] = []
         with mp.Pool(processes=self.config.num_processes) as pool, ProgressBar() as progress:
             task = progress.add_task(f"[green]Cluster {self.config.name} jets", total=n_events)
             for data_ in pool.imap(process_events_wrapper, input_batched_data):

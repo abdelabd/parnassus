@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
+from typing import override
 
 import awkward as ak
 import numpy as np
-import numpy.typing as npt
-from typing_extensions import override
 
 from parnassus.utils import class_to_pid_vectorized, pid_to_class
+from parnassus.utils.typing import FloatArray, IntArray
 
 
 @dataclass(slots=True)
@@ -31,23 +31,23 @@ class GenParticleCollection:
     # Properties
     name: str
     num_particles: int = field(init=False)
-    pt: npt.NDArray[np.float32]
-    eta: npt.NDArray[np.float32]
-    phi: npt.NDArray[np.float32]
-    mass: npt.NDArray[np.float32] | None = None
-    pdg_id: npt.NDArray[np.int32] | None = None
-    particle_jet_idx: npt.NDArray[np.int32] | None = None
-    vx: npt.NDArray[np.float32] | None = None
-    vy: npt.NDArray[np.float32] | None = None
-    vz: npt.NDArray[np.float32] | None = None
+    pt: FloatArray
+    eta: FloatArray
+    phi: FloatArray
+    mass: FloatArray | None = None
+    pdg_id: IntArray | None = None
+    particle_jet_idx: IntArray | None = None
+    vx: FloatArray | None = None
+    vy: FloatArray | None = None
+    vz: FloatArray | None = None
 
     # Additional properties
-    class_id: npt.NDArray[np.int32] | None = None
-    charge: npt.NDArray[np.int32] | None = None
-    status: npt.NDArray[np.int32] | None = None
+    class_id: IntArray | None = None
+    charge: IntArray | None = None
+    status: IntArray | None = None
 
     # Jet idxs
-    jet_idx: dict[str, npt.NDArray[np.int32]] = field(default_factory=dict)
+    jet_idx: dict[str, IntArray] = field(default_factory=dict)
 
     def __post_init__(self):
         self.num_particles = len(self.pt)
@@ -77,7 +77,7 @@ class GenParticleCollection:
     def __repr__(self) -> str:
         return f"{self.name}"
 
-    def get4vecs(self) -> npt.NDArray[np.float32]:
+    def get4vecs(self) -> FloatArray:
         assert self.mass is not None
         return np.stack([self.pt, self.eta, self.phi, self.mass], axis=-1)
 
@@ -103,15 +103,15 @@ class GenJetCollection:
     # Jet properties
     name: str
     num_jets: int = field(init=False)
-    pt: npt.NDArray[np.float32]
-    eta: npt.NDArray[np.float32]
-    phi: npt.NDArray[np.float32]
-    mass: npt.NDArray[np.float32] | None = None
-    particle_idx: list[npt.NDArray[np.int32]] | None = None
+    pt: FloatArray
+    eta: FloatArray
+    phi: FloatArray
+    mass: FloatArray | None = None
+    particle_idx: list[IntArray] | None = None
 
-    jec: npt.NDArray[np.float32] | None = None
-    d2: npt.NDArray[np.float32] | None = None
-    c2: npt.NDArray[np.float32] | None = None
+    jec: FloatArray | None = None
+    d2: FloatArray | None = None
+    c2: FloatArray | None = None
 
     def __post_init__(self):
         self.num_jets = len(self.pt)
