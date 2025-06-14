@@ -1,12 +1,11 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import final
+from typing import final, override
 
 import torch
 from torch import Size, Tensor, nn
 from torch.distributions import Normal
-from typing_extensions import override
 
 default_device = torch.device("cpu")
 
