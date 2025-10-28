@@ -2,6 +2,7 @@ import argparse
 import itertools
 import math
 from pathlib import Path
+import pytest
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,7 +23,7 @@ MZ = 91.1876
 GAMMA_Z = 2.4952
 
 
-def draw(event_dict, key, bins=60, range_=None, xlabel=None, fig_dir="figures/HZZ4l"):
+def draw(event_dict, key, bins=60, range_=None, xlabel=None, fig_dir="src/parnassus/tests/figures/HZZ4l"):
     x = event_dict.get(key, [])
     print(f"{key}: {len(x)} entries")
     if len(x) == 0:
@@ -175,7 +176,6 @@ def build_jet_inputs(final_particles, exclude_p4, R=0.4, ptmin=30.0, etamax=4.5)
 
 
 def inspect_hepmc(fpath_hepmc, args):
-    args = parse_args()
 
     plot_vars = [
         "m_4l",
@@ -199,11 +199,11 @@ def inspect_hepmc(fpath_hepmc, args):
         "l4_eta",
         "min_DR_ll",
     ]
-    EVT_DICT = {k: np.full((args.max_events,), np.nan) for k in plot_vars}
+    EVT_DICT = {k: np.full((args["max_events"],), np.nan) for k in plot_vars}
 
     cut_vars = ["fail_nlep>=4", "fail_njets>=2", "fail_pairing", "fail_mZ2_window"]
-    COUNTS = {k: np.zeros((args.max_events,)) for k in cut_vars}
-    N_EVENTS = np.zeros((args.max_events,))
+    COUNTS = {k: np.zeros((args["max_events"],)) for k in cut_vars}
+    N_EVENTS = np.zeros((args["max_events"],))
 
     def process_event(event_idx, event):
         N_EVENTS[event_idx] = 1
@@ -216,9 +216,9 @@ def inspect_hepmc(fpath_hepmc, args):
                 continue
             px, py, pz, E = p.momentum.px, p.momentum.py, p.momentum.pz, p.momentum.e
             p4 = as_p4(px, py, pz, E)
-            if pt(px, py) < args.lep_pt:
+            if pt(px, py) < args["lep_pt"]:
                 continue
-            if abs(p4[4]) > args.lep_eta:
+            if abs(p4[4]) > args["lep_eta"]:
                 continue
             leptons.append((p.pid, p4))
 
@@ -240,7 +240,7 @@ def inspect_hepmc(fpath_hepmc, args):
             return
         _, _, mZ1, mZ2 = pair
         # Off-shell threshold (optional, classic 12 GeV)
-        if mZ2 < args.min_mll2:
+        if mZ2 < args["min_mll2"]:
             COUNTS["fail_mZ2_window"][event_idx] = 1
             return
 
@@ -250,7 +250,7 @@ def inspect_hepmc(fpath_hepmc, args):
 
         # --- jets via anti-kt on visible final state, excluding the leptons ---
         jets = build_jet_inputs(
-            final_parts, exclude_p4=lep_p4s, R=args.R, ptmin=args.jet_pt, etamax=args.jet_eta
+            final_parts, exclude_p4=lep_p4s, R=args["R"], ptmin=args["jet_pt"], etamax=args["jet_eta"]
         )
         if len(jets) < 2:
             COUNTS["fail_njets>=2"][event_idx] = 1
@@ -295,14 +295,14 @@ def inspect_hepmc(fpath_hepmc, args):
 
     # Reader handles plain or gz
     with pyhepmc.open(fpath_hepmc, "r") as f:
-        if args.debug:
+        if args["debug"]:
             subset = itertools.islice(enumerate(f), 0, 1000)
-            Parallel(n_jobs=args.n_jobs, prefer="threads")(
+            Parallel(n_jobs=args["n_jobs"], prefer="threads")(
                 itertools.starmap(delayed(process_event), tqdm(subset, total=1000))
             )
         else:
-            Parallel(n_jobs=args.n_jobs, prefer="threads")(
-                itertools.starmap(delayed(process_event), tqdm(enumerate(f), total=args.max_events))
+            Parallel(n_jobs=args["n_jobs"], prefer="threads")(
+                itertools.starmap(delayed(process_event), tqdm(enumerate(f), total=args["max_events"]))
             )
 
     # Aggregate results
@@ -320,7 +320,7 @@ def inspect_hepmc(fpath_hepmc, args):
         n_skipped += v
     print(f"\n\nEvents selected: {N_EVENTS - n_skipped}\n\n")
 
-    fig_dir = "figures/HZZ4l"
+    fig_dir = "src/parnassus/tests/figures/HZZ4l"
     Path(fig_dir).mkdir(exist_ok=True, parents=True)
 
     # ---------- Plots ----------
@@ -362,18 +362,14 @@ def parse_args():
     return ap.parse_args()
 
 
-def main():
-    args = parse_args()
+def test_pythia():
+    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 1_000, "n_jobs": 200, "debug": False}
     generator = HepMC3Generator(
-        cmnd_file="HZZ4l.cmnd", output_dir="data_out/HZZ4l", log_dir="logs/HZZ4l"
+        cmnd_file="src/parnassus/tests/HZZ4l.cmnd", output_dir="src/parnassus/tests/data_out/HZZ4l", log_dir="src/parnassus/tests/logs/HZZ4l"
     )
-    fpath_merged = generator.generate(n_events=args.max_events, max_workers=args.n_jobs)
+    fpath_merged = generator.generate(n_events=args["max_events"], max_workers=args["n_jobs"], debug=args["debug"])
     print(f"Wrote to file {fpath_merged}")
 
     print("Inspecting hepmc file and generating histograms")
-    args = parse_args()
     inspect_hepmc(fpath_merged, args)
 
-
-if __name__ == "__main__":
-    main()
