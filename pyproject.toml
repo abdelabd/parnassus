@@ -16,7 +16,7 @@ dependencies = [
     "pyhepmc>=2.14.0",
     "rich>=13.9.4",
     "torch>=2.6.0",
-    "uproot>=5.5.2",
+    "uproot>=5.5.2, <5.6.7",
     "pyyaml",
     "joblib",
     "pythia8mc"
