@@ -296,10 +296,9 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
     # Reader handles plain or gz
     with pyhepmc.open(fpath_hepmc, "r") as f:
         if args["debug"]:
-            subset = itertools.islice(enumerate(f), 0, 1000)
-            Parallel(n_jobs=args["n_jobs"], prefer="threads")(
-                itertools.starmap(delayed(process_event), tqdm(subset, total=1000))
-            )
+            for i, evt in enumerate(f):
+                if i<1000//args["n_jobs"]:
+                    process_event(i, evt)
         else:
             Parallel(n_jobs=args["n_jobs"], prefer="threads")(
                 itertools.starmap(delayed(process_event), tqdm(enumerate(f), total=args["max_events"]))
@@ -363,7 +362,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def test_pythia():
-    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 1_000, "n_jobs": 200, "debug": False}
+    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 1_000, "n_jobs": 200, "debug": True}
     generator = HepMC3Generator(
         cmnd_file="src/parnassus/tests/HZZ4l.cmnd", output_dir="src/parnassus/tests/data_out/HZZ4l", log_dir="src/parnassus/tests/logs/HZZ4l"
     )
