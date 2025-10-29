@@ -1,5 +1,6 @@
 import argparse
 import itertools
+from tqdm import tqdm
 import math
 from pathlib import Path
 import pytest
@@ -11,9 +12,10 @@ import numpy as np
 import pyhepmc
 from joblib import Parallel, delayed
 
-# FastJet (via pyjet)
-from pyjet import DTYPE_PTEPM, cluster
-from tqdm import tqdm
+# FastJet (for clustering)
+import fastjet as fj
+from parnassus.pipelines.cluster import get_cluster_sequence
+import awkward as ak 
 
 # DUT
 from parnassus.pythia import HepMC3Generator
@@ -148,22 +150,23 @@ def build_jet_inputs(final_particles: list[pyhepmc.GenParticle], exclude_p4: lis
         if any(deltaR(p4, lp4) < R for lp4 in exclude_p4):
             continue
         # Feed all remaining to clustering; pT/eta cuts applied after clustering
-        pt_i = pt(p4[0], p4[1])
-        eta_i = p4[4]
-        phi_i = p4[5]
-        m_i = inv_mass([(p4[0], p4[1], p4[2], p4[3])])  # should be 0 or very small
-        cand.append((pt_i, eta_i, phi_i, m_i))
+        cand.append((p.momentum.px, p.momentum.py, p.momentum.pz, p.momentum.e))
 
     if not cand:
         return []
 
-    a = np.array(cand, dtype=DTYPE_PTEPM)  # fields: px, py, pz, E
-    sequence = cluster(a, R=R, p=-1)  # anti-kt (p=-1)
+    a = np.array(cand)
+    jetdef = fj.JetDefinition(fj.antikt_algorithm, R)
+    four_vectors = ak.Array(
+        {"px": a[..., 0], "py": a[..., 1], "pz": a[..., 2], "E": a[..., 3]},
+        with_name="Momentum4D",
+    )
+    sequence = get_cluster_sequence(jetdef, four_vectors)
     jets = sequence.inclusive_jets()  # list of PseudoJets
 
     out = []
     for j in jets:
-        px, py, pz, E = j.px, j.py, j.pz, j.e
+        px, py, pz, E = j.px(), j.py(), j.pz(), j.e()
         p4 = as_p4(px, py, pz, E)
         if pt(px, py) < ptmin:
             continue
@@ -362,7 +365,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def test_pythia():
-    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 1_000, "n_jobs": 200, "debug": True}
+    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 10_000, "n_jobs": 200, "debug": False}
     generator = HepMC3Generator(
         cmnd_file="src/parnassus/tests/HZZ4l.cmnd", output_dir="src/parnassus/tests/data_out/HZZ4l", log_dir="src/parnassus/tests/logs/HZZ4l"
     )
