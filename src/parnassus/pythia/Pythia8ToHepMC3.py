@@ -2,6 +2,9 @@ import hashlib
 import pythia8mc
 import pyhepmc
 
+from parnassus.utils.logger import setup_logger
+
+LOG = setup_logger()
 
 class HashableGenVertex:
     def __init__(self, pyhepmc_vertex: pyhepmc.GenVertex):
@@ -88,7 +91,7 @@ class Pythia8ToHepMC3:
 
         # Error if no event passed
         if not pythia.next():
-            print(f"Skipping event {evt_num}; no Pythia event generated")
+            LOG.info(f"Pythia8ToHepMC3: Skipping event {evt_num}; no Pythia event generated")
             return None
 
         hepmc_event = pyhepmc.GenEvent()
@@ -117,8 +120,8 @@ class Pythia8ToHepMC3:
         # TODO: Below causes error; too few vertices when reading from hepmc file
         for i in range(pythia.event.size()):
             if not hepevt_particles[i].in_event:
-                print(
-                    f"Found detached particle; status = {hepevt_particles[i].status}, pid = {hepevt_particles[i].pid}"
+                LOG.info(
+                    f"Pythia8ToHepMC3: Found detached particle; status = {hepevt_particles[i].status}, pid = {hepevt_particles[i].pid}"
                 )
                 # prod_vtx = pyhepmc.GenVertex()
                 # prod_vtx.add_particle_out(hepevt_particles[i])
@@ -136,8 +139,8 @@ class Pythia8ToHepMC3:
                             f"Error: Found final-state gluon with no end vertex! event {evt_num}, particle {i}"
                         )
                     if self.m_free_parton_warnings:
-                        print(
-                            f"Warning: Found final-state gluon with no end vertex! event {evt_num}, particle {i}"
+                        LOG.info(
+                            f"Pythia8ToHepMC3: Warning: Found final-state gluon with no end vertex! event {evt_num}, particle {i}"
                         )
 
                 if abs(hepevt_particles[i].pid) <= 6 and self._check_if_free_particle(
@@ -148,8 +151,8 @@ class Pythia8ToHepMC3:
                             f"Error: Found final-state quark with no end vertex! event {evt_num}, particle {i}"
                         )
                     if self.m_free_parton_warnings:
-                        print(
-                            f"Warning: Found final-state quark with no end vertex! event {evt_num}, particle {i}"
+                        LOG.info(
+                            f"Pythia8ToHepMC3:Warning: Found final-state quark with no end vertex! event {evt_num}, particle {i}"
                         )
 
         # 6. Store PDF, weight, cross section and other event information. #################

@@ -6,6 +6,9 @@ import tempfile
 
 from joblib import Parallel, delayed
 
+from parnassus.utils.logger import setup_logger
+
+LOG = setup_logger()
 
 class HepMC3Generator:
     def __init__(self, cmnd_file: str, output_dir: str, log_dir: str | None = None):
@@ -32,7 +35,7 @@ class HepMC3Generator:
         self._write_single_job()
         tic_gen = time.time()
         if debug:
-            print("DEBUG MODE: Generating 5 events using single core...")
+            LOG.info("HepMC3Generator: DEBUG MODE: Generating 5 events using single core...")
             self._gen_hepmc_single_job(
                 cmnd_file=self.cmnd_file,
                 n_events=5,
@@ -44,7 +47,7 @@ class HepMC3Generator:
             fpath_merged = Path(self.output_dir) / "events_DEBUG.hepmc"
 
         else:
-            print(f"Generating {n_events} events using {max_workers} cores...")
+            LOG.info(f"HepMC3Generator: Generating {n_events} events using {max_workers} cores...")
             Parallel(n_jobs=max_workers, backend="multiprocessing", verbose=100)(
                 delayed(self._gen_hepmc_single_job)(
                     cmnd_file=self.cmnd_file,
@@ -58,28 +61,28 @@ class HepMC3Generator:
 
         toc_gen = time.time()
         dur_gen = toc_gen - tic_gen
-        print(f"\nGenerated {n_events} events in {dur_gen // 60}m {dur_gen % 60:.1f}s")
+        LOG.info(f"HepMC3Generator: \nGenerated {n_events} events in {dur_gen // 60}m {dur_gen % 60:.1f}s")
 
         # Merge output files
         if not debug:
-            print("\nMerging files...")
+            LOG.info("HepMC3Generator: \nMerging files...")
             tic_merge = time.time()
             fpath_merged = Path(self.output_dir) / "events.hepmc"
             self._merge_hepmc_files(fpaths_output, fpath_merged, max_workers=max_workers)
             toc_merge = time.time()
             dur_merge = toc_merge - tic_merge
-            print(f"Merged {max_workers} files in {dur_merge // 60}m {dur_merge % 60:.1f}s")
+            LOG.info(f"HepMC3Generator: Merged {max_workers} files in {dur_merge // 60}m {dur_merge % 60:.1f}s")
 
         toc = time.time()
         dur = toc - tic
-        print(f"Total duration: {dur // 60} min {dur % 60:.1f} sec")
+        LOG.info(f"HepMC3Generator: Total duration: {dur // 60} min {dur % 60:.1f} sec")
 
         return fpath_merged
 
     def _write_single_job(self):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as f:
             self.fpath_script = f.name
-            print(f"self.fpath_script = {self.fpath_script}")
+            LOG.info(f"HepMC3Generator: self.fpath_script = {self.fpath_script}")
             f.write(SINGLE_JOB_SCRIPT.encode())
 
     def _gen_hepmc_single_job(
@@ -103,7 +106,7 @@ class HepMC3Generator:
             result = subprocess.run(cmd, stdout=log_file, stderr=subprocess.STDOUT, check=False)
 
         if result.returncode != 0:
-            print(f"Error running job #{seed}")
+            LOG.info(f"HepMC3Generator: Error running job #{seed}")
 
     def _merge_hepmc_files(self, input_files: list, output_file: str, max_workers: int = 8):
         """Reads events from multiple input HepMC files and writes them to a single output file.
@@ -116,7 +119,7 @@ class HepMC3Generator:
 
         # Merge files in pairs in parallel until only 1 file remains
         while len(all_files) > 1:
-            print(f"len(files) = {len(all_files)}")
+            LOG.info(f"HepMC3Generator: len(files) = {len(all_files)}")
             if len(all_files) % 2 != 0:
                 all_files = [self._append_hepmc_file(all_files[0], all_files[1])] + all_files[2:]
             assert len(all_files) % 2 == 0
@@ -128,7 +131,7 @@ class HepMC3Generator:
 
         # Rename the final file to the desired output file name
         shutil.move(all_files[0], output_file)
-        print(f"len(files) = {len(all_files)}")
+        LOG.info(f"HepMC3Generator: len(files) = {len(all_files)}")
 
     def _append_hepmc_file(self, fpath1: str, fpath2: str) -> str:
         # Read files to memory
@@ -210,7 +213,7 @@ def main() -> int:
     pythia.readFile(args.cmnd)
 
     if not pythia.init():
-        print("Pythia initialization failed!")
+        LOG.info("HepMC3Generator: Pythia initialization failed!")
         return 1
 
     # HepMC3 writer
@@ -230,7 +233,7 @@ def main() -> int:
         idx_event += 1
 
         if n_written % 10000 == 0:
-            print(f"Generated {n_written} events...")
+            LOG.info(f"HepMC3Generator: Generated {n_written} events...")
 
     pythia.stat()
     writer.close()
