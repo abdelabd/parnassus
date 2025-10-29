@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # HepMC3 Python bindings
+import pythia8mc
 import pyhepmc
 from joblib import Parallel, delayed
 
@@ -18,7 +19,8 @@ from parnassus.pipelines.cluster import get_cluster_sequence
 import awkward as ak 
 
 # DUT
-from parnassus.pythia import HepMC3Generator
+from parnassus.pythia import Pythia8ToHepMC3, HepMC3Generator
+
 
 # Helper functions #############################
 MZ = 91.1876
@@ -364,8 +366,17 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def test_pythia():
-    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 10_000, "n_jobs": 200, "debug": False}
+def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
+    # Tests HepMC3Generator.__init__()
+        # ._is_hadronization_on()
+    # Tests HepMC3Generator.generate()
+        # ._write_single_job()
+        # ._gen_hepmc_single_job()
+        # ._merge_hepmc_files()
+            # ._append_hepmc_file()
+    # So that is all the methods of HepMC3Generator covered
+
+    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 1_000, "n_jobs": 200, "debug": False}
     generator = HepMC3Generator(
         cmnd_file="src/parnassus/tests/HZZ4l.cmnd", output_dir="src/parnassus/tests/data_out/HZZ4l", log_dir="src/parnassus/tests/logs/HZZ4l"
     )
@@ -375,3 +386,47 @@ def test_pythia():
     print("Inspecting hepmc file and generating histograms")
     inspect_hepmc(fpath_merged, args)
 
+def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
+    # Tests Pythia8ToHepMC3.__init__()
+    # Tests Pythia8ToHepMC3.fill_next_event(), with m_detect_cycles=True
+        # ._get_particles()
+        # ._get_vertices()
+        # ._add_tree()
+            # ._detect_cycles()
+                # ._visit_children()
+            # ._topological_sort_vertices()
+        # ._check_if_free_particle()
+        # ._store_event_info()
+    # This leaves Pythia8ToHepMC3._add_color(), which is currently broken due to HepMC3 Python bindings limitations
+
+    pythia = pythia8mc.Pythia()
+
+    pythia.readString("Random:setSeed = on")
+    pythia.readString(f"Random:seed = 42")
+
+    # Read settings from .cmnd file
+    pythia.readFile("src/parnassus/tests/HZZ4l.cmnd")
+
+    if not pythia.init():
+        print("test_pythia::test_detect_cycles: Pythia initialization failed!")
+        return 1
+    
+    converter = Pythia8ToHepMC3(m_hadronization_on=True, m_detect_cycles=True) # This enables detect_cycles and visit_children
+    writer = pyhepmc.io.WriterAscii(f"src/parnassus/tests/data_out/HZZ4l/test_cycles.hepmc")
+
+    n_written = 0
+    idx_event = 0
+    while n_written < 20: # detecting cycles takes a while, 20 is sufficient
+        if not pythia.next():
+            continue  # event failed, try again
+
+        hepmcEvent = converter.fill_next_event(pythia, idx_event+1)
+        writer.write_event(hepmcEvent)
+        n_written += 1
+        idx_event += 1
+
+        if n_written % 5 == 0:
+            print(f"HepMC3Generator: Generated {n_written} events...")
+
+    pythia.stat()
+    writer.close()
