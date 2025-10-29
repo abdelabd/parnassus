@@ -19,7 +19,7 @@ class HepMC3Generator:
 
         self.hadronization_on = self._is_hadronization_on()
 
-    def generate(self, n_events, max_workers, debug=False):
+    def generate(self, n_events: int, max_workers: int, debug: bool = False) -> Path:
         tic = time.time()
 
         n_events_per_job = n_events // max_workers
@@ -127,7 +127,7 @@ class HepMC3Generator:
         shutil.move(all_files[0], output_file)
         print(f"len(files) = {len(all_files)}")
 
-    def _append_hepmc_file(self, fpath1: str, fpath2: str):
+    def _append_hepmc_file(self, fpath1: str, fpath2: str) -> str:
         # Read files to memory
         with open(fpath1, "rb") as f:
             file1 = f.readlines()
@@ -163,7 +163,7 @@ class HepMC3Generator:
 
         return fpath1
 
-    def _is_hadronization_on(self):
+    def _is_hadronization_on(self) -> bool:
         with open(self.cmnd_file) as f:
             lines = f.readlines()
         for line in lines:
@@ -185,7 +185,7 @@ import pyhepmc
 from parnassus.pythia.Pythia8ToHepMC3 import Pythia8ToHepMC3
 import argparse
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate events with Pythia8 on a single core and save to HepMC3 format.")
     parser.add_argument("cmnd", help=".cmnd file with Pythia8 settings")
     parser.add_argument("--n-events", type=int, default=1000, help="Number of events to generate (default: 1000)")
@@ -194,7 +194,7 @@ def parse_args():
     parser.add_argument("--hadronization-on", action="store_true", help="Flag to indicate if hadronization is on (default: True)")
     return parser.parse_args()
 
-def main():
+def main() -> int:
     args = parse_args()
 
     pythia = pythia8mc.Pythia()

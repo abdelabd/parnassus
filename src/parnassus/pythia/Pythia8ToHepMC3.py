@@ -1,5 +1,5 @@
 import hashlib
-
+import pythia8mc
 import pyhepmc
 
 
@@ -24,7 +24,7 @@ class HashableGenVertex:
         """
         self.vertex = pyhepmc_vertex
 
-    def _particle_to_str(self, particle):
+    def _particle_to_str(self, particle: pyhepmc.GenParticle) -> str:
         string_out = ""
         for momentum_attribute in ["x", "y", "z", "px", "py", "pz", "t"]:
             string_out += f"{getattr(particle.momentum, momentum_attribute):.5e}_"
@@ -34,7 +34,7 @@ class HashableGenVertex:
         string_out += f"{particle.status}"
         return string_out
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         particles = []
         if hasattr(self.vertex, "particles_in"):
             particles += list(self.vertex.particles_in)
@@ -49,7 +49,7 @@ class HashableGenVertex:
 
         return hash_
 
-    def __eq__(self, other_object):
+    def __eq__(self, other_object: object) -> bool:
         if not isinstance(other_object, HashableGenVertex):
             return False
 
@@ -59,17 +59,17 @@ class HashableGenVertex:
 class Pythia8ToHepMC3:
     def __init__(
         self,
-        m_hadronization_on=True,
-        m_internal_event_number=0,
-        m_print_inconsistency=True,
-        m_free_parton_warnings=True,
-        m_crash_on_problem=False,
-        m_convert_gluon_to_0=False,
-        m_store_pdf=True,
-        m_store_proc=True,
-        m_store_xsec=True,
-        m_store_weights=True,
-        m_detect_cycles=False,
+        m_hadronization_on: bool = True,
+        m_internal_event_number: int = 0,
+        m_print_inconsistency: bool = True,
+        m_free_parton_warnings: bool = True,
+        m_crash_on_problem: bool = False,
+        m_convert_gluon_to_0: bool = False,
+        m_store_pdf: bool = True,
+        m_store_proc: bool = True,
+        m_store_xsec: bool = True,
+        m_store_weights: bool = True,
+        m_detect_cycles: bool = False,
     ):
         self.m_hadronization_on = m_hadronization_on
         self.m_internal_event_number = m_internal_event_number
@@ -83,7 +83,7 @@ class Pythia8ToHepMC3:
         self.m_store_weights = m_store_weights
         self.m_detect_cycles = m_detect_cycles
 
-    def fill_next_event(self, pythia, evt_num):
+    def fill_next_event(self, pythia: pythia8mc.Pythia, evt_num: int) -> pyhepmc.GenEvent:
         # 1. Initalize HepMC event #################
 
         # Error if no event passed
@@ -157,7 +157,7 @@ class Pythia8ToHepMC3:
 
         return hepmc_event
 
-    def get_particles(self, pythia_event):
+    def get_particles(self, pythia_event: pythia8mc.Event) -> list[pyhepmc.GenParticle]:
         hepevt_particles = [None for particle_idx in range(pythia_event.size())]
         for particle_idx in range(pythia_event.size()):
             pythia_particle = pythia_event[particle_idx]
@@ -175,7 +175,7 @@ class Pythia8ToHepMC3:
             hepevt_particles[particle_idx] = hepmc_particle
         return hepevt_particles
 
-    def get_vertices(self, pythia_event, hepevt_particles):
+    def get_vertices(self, pythia_event: pythia8mc.Event, hepevt_particles: list[pyhepmc.GenParticle]) -> tuple[list[pyhepmc.GenVertex], list[pyhepmc.GenParticle]]:
         vertex_cache = []
         beam_particles = []
         for particle_idx in range(pythia_event.size()):
@@ -236,7 +236,7 @@ class Pythia8ToHepMC3:
 
         return vertex_cache, beam_particles
 
-    def visit_children(self, vertex_visit_map, current_vertex):
+    def visit_children(self, vertex_visit_map: dict[HashableGenVertex, int], current_vertex: HashableGenVertex) -> bool:
         # Traverse all outgoing particles from this vertex
         for p_out in current_vertex.vertex.particles_out:
             if getattr(p_out, "end_vertex", None):
@@ -260,7 +260,7 @@ class Pythia8ToHepMC3:
         # If we make it here, then no cycles found
         return False
 
-    def detect_cycles(self, pythia_evt, hepmc_evt, beam_particles):
+    def detect_cycles(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
         # Check if cycles attribute already exists
         existing_hc = getattr(pythia_evt, "cycles", None)
         has_cycles = False
@@ -310,7 +310,7 @@ class Pythia8ToHepMC3:
         if has_cycles:
             hepmc_evt.attributes["cycles"] = 1
 
-    def topological_sort_vertices(self, beam_particles):
+    def topological_sort_vertices(self, beam_particles: list[pyhepmc.GenParticle]) -> list[pyhepmc.GenVertex]:
         all_vertices_sorted = []
         vertices_processed = []  # Track which vertices we've already
 
@@ -374,7 +374,7 @@ class Pythia8ToHepMC3:
 
         return all_vertices_sorted
 
-    def add_tree(self, pythia_evt, hepmc_evt, beam_particles):
+    def add_tree(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
         if self.m_detect_cycles:
             self.detect_cycles(pythia_evt, hepmc_evt, beam_particles)
 
@@ -384,7 +384,7 @@ class Pythia8ToHepMC3:
 
         # TODO: Validate root-vertex handling; requires custom HepMC3 bindings (otherwise no attribute pyhepmc.GenEvent.m_root_vertex)
 
-    def add_color(self, pythia_event, hepmc_particles):
+    def add_color(self, pythia_event: pythia8mc.Event, hepmc_particles: list[pyhepmc.GenParticle]):
         """To check in-place-ness:
         import pyhepmc
         p1 = pyhepmc.GenParticle()
@@ -409,7 +409,7 @@ class Pythia8ToHepMC3:
                 hepmc_particles[i].attributes["flow1"] = flow1
                 hepmc_particles[i].attributes["flow2"] = flow2
 
-    def store_event_info(self, pythia, hepmc_event):
+    def store_event_info(self, pythia: pythia8mc.Pythia, hepmc_event: pyhepmc.GenEvent):
         pyinfo = pythia.infoPython()
 
         # PDF information
@@ -453,7 +453,7 @@ class Pythia8ToHepMC3:
             for i in range(pyinfo.nWeights()):
                 hepmc_event.weights.append(pyinfo.weight(i))
 
-    def _check_if_free_particle(self, hepevt_particle):
+    def _check_if_free_particle(self, hepevt_particle: pyhepmc.GenParticle) -> bool:
         end_vertex = getattr(hepevt_particle, "end_vertex", None)
         if end_vertex is None:
             return True

@@ -23,7 +23,7 @@ MZ = 91.1876
 GAMMA_Z = 2.4952
 
 
-def draw(event_dict, key, bins=60, range_=None, xlabel=None, fig_dir="src/parnassus/tests/figures/HZZ4l"):
+def draw(event_dict: dict, key: str, bins: int = 60, range_: tuple = None, xlabel: str | None = None, fig_dir: str = "src/parnassus/tests/figures/HZZ4l"):
     x = event_dict.get(key, [])
     print(f"{key}: {len(x)} entries")
     if len(x) == 0:
@@ -40,22 +40,22 @@ def draw(event_dict, key, bins=60, range_=None, xlabel=None, fig_dir="src/parnas
 
 
 # ---------- Kinematics ----------
-def pt(px, py):
+def pt(px: float, py: float) -> float:
     return math.hypot(px, py)
 
 
-def eta(px, py, pz):
+def eta(px: float, py: float, pz: float) -> float:
     p = math.sqrt(px * px + py * py + pz * pz)
     if p == abs(pz):
         return float("inf") if pz >= 0 else -float("inf")
     return 0.5 * math.log((p + pz) / (p - pz))
 
 
-def phi(px, py):
+def phi(px: float, py: float) -> float:
     return math.atan2(py, px)
 
 
-def inv_mass(p4s):
+def inv_mass(p4s: list[tuple[float, float, float, float]]) -> float:
     E = sum(p[3] for p in p4s)
     px = sum(p[0] for p in p4s)
     py = sum(p[1] for p in p4s)
@@ -64,13 +64,13 @@ def inv_mass(p4s):
     return math.sqrt(max(m2, 0.0))
 
 
-def deltaR(a, b):
+def deltaR(a: tuple[float, float, float, float, float], b: tuple[float, float, float, float, float]) -> float:
     # a,b are (px,py,pz,E,eta,phi)
     dphi = (a[5] - b[5] + math.pi) % (2 * math.pi) - math.pi
     return math.hypot(a[4] - b[4], dphi)
 
 
-def as_p4(px, py, pz, E):
+def as_p4(px: float, py: float, pz: float, E: float) -> tuple[float, float, float, float, float, float]:
     return (px, py, pz, E, eta(px, py, pz), phi(px, py))
 
 
@@ -78,21 +78,21 @@ def as_p4(px, py, pz, E):
 NEUTRINOS = {12, 14, 16, -12, -14, -16}
 
 
-def is_final(particle):
+def is_final(particle: pyhepmc.GenParticle) -> bool:
     # HepMC3 "status==1" is final state for Pythia
     return particle.status == 1
 
 
-def is_lep(particle):
+def is_lep(particle: pyhepmc.GenParticle) -> bool:
     return is_final(particle) and abs(particle.pid) in {11, 13}
 
 
-def is_neutrino(particle):
+def is_neutrino(particle: pyhepmc.GenParticle) -> bool:
     return is_final(particle) and particle.pid in NEUTRINOS
 
 
 # ---------- Pairing (global chi^2 with BW scale) ----------
-def best_ossf_pairs_min_chi2(leps_p4, leps_id):
+def best_ossf_pairs_min_chi2(leps_p4: list[tuple[float, float, float, float, float, float]], leps_id: list[int]) -> tuple[tuple[int, int], tuple[int, int], float, float] | None:
     """leps_p4: list of 4-vectors (px,py,pz,E,eta,phi) for 4 leptons (selected & sorted)
     leps_id: matching PDG IDs (11,-11,13,-13)
     Returns: ((i,j),(k,l), m1, m2) with the pair closer to mZ listed first.
@@ -100,7 +100,7 @@ def best_ossf_pairs_min_chi2(leps_p4, leps_id):
     idx = [0, 1, 2, 3]
     best = None
 
-    def mll(a, b):
+    def mll(a: tuple[float, float, float, float, float, float], b: tuple[float, float, float, float, float, float]) -> float:
         return inv_mass([
             (leps_p4[a][0], leps_p4[a][1], leps_p4[a][2], leps_p4[a][3]),
             (leps_p4[b][0], leps_p4[b][1], leps_p4[b][2], leps_p4[b][3]),
@@ -131,7 +131,7 @@ def best_ossf_pairs_min_chi2(leps_p4, leps_id):
 
 
 # ---------- Jet clustering ----------
-def build_jet_inputs(final_particles, exclude_p4, R=0.4, ptmin=30.0, etamax=4.5):
+def build_jet_inputs(final_particles: list[pyhepmc.GenParticle], exclude_p4: list[tuple[float, float, float, float, float, float]], R: float = 0.4, ptmin: float = 30.0, etamax: float = 4.5) -> list[tuple[float, float, float, float, float, float]]:
     """final_particles: iterable of HepMC particles (status==1)
     exclude_p4: list of lepton p4 to be excluded from clustering (ΔR>0.4)
     Returns list of jets, each as (px,py,pz,E,eta,phi)
@@ -175,7 +175,7 @@ def build_jet_inputs(final_particles, exclude_p4, R=0.4, ptmin=30.0, etamax=4.5)
     return out
 
 
-def inspect_hepmc(fpath_hepmc, args):
+def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
 
     plot_vars = [
         "m_4l",
@@ -205,7 +205,7 @@ def inspect_hepmc(fpath_hepmc, args):
     COUNTS = {k: np.zeros((args["max_events"],)) for k in cut_vars}
     N_EVENTS = np.zeros((args["max_events"],))
 
-    def process_event(event_idx, event):
+    def process_event(event_idx: int, event: pyhepmc.GenEvent) -> None:
         N_EVENTS[event_idx] = 1
         final_parts = [p for p in event.particles if is_final(p)]
 
@@ -346,7 +346,7 @@ def inspect_hepmc(fpath_hepmc, args):
 
 
 # Testing function #################################
-def parse_args():
+def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Inspect HepMC H->ZZ->4l VBF-like events")
     ap.add_argument("--R", type=float, default=0.4, help="anti-kt jet radius")
     ap.add_argument("--jet-pt", type=float, default=30.0, help="jet pT min [GeV]")
