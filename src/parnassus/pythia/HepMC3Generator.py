@@ -2,6 +2,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+import tempfile
 
 from joblib import Parallel, delayed
 
@@ -76,15 +77,17 @@ class HepMC3Generator:
         return fpath_merged
 
     def _write_single_job(self):
-        with open("single_job.py", "w") as f:
-            f.write(SINGLE_JOB_SCRIPT)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as f:
+            self.fpath_script = f.name
+            print(f"self.fpath_script = {self.fpath_script}")
+            f.write(SINGLE_JOB_SCRIPT.encode())
 
     def _gen_hepmc_single_job(
         self, cmnd_file: str, n_events: int, seed: int, fpath_output: str, fpath_log: str
     ):
         cmd = [
             "python",
-            "single_job.py",
+            self.fpath_script,
             cmnd_file,
             "--n-events",
             str(n_events),

@@ -176,5 +176,3 @@ cython_debug/
 *.root
 src/parnassus/tests/data_out
 src/parnassus/tests/figures
-src/parnassus/tests/single_job.py
-single_job.py
