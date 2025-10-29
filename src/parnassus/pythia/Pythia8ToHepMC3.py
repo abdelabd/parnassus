@@ -99,19 +99,19 @@ class Pythia8ToHepMC3:
         hepmc_event.set_units(pyhepmc.Units.GEV, pyhepmc.Units.MM)
 
         # 2. Fill particle information #################
-        hepevt_particles = self.get_particles(pythia.event)
+        hepevt_particles = self._get_particles(pythia.event)
 
         # 3. Fill vertex information and find beam particles #################
-        vertex_cache, beam_particles = self.get_vertices(pythia.event, hepevt_particles)
+        vertex_cache, beam_particles = self._get_vertices(pythia.event, hepevt_particles)
 
         # Reserve memory for the event
         hepmc_event.reserve(len(hepevt_particles), len(vertex_cache))
 
         # Add particles and vertices in topological order
-        self.add_tree(pythia.event, hepmc_event, beam_particles)
+        self._add_tree(pythia.event, hepmc_event, beam_particles)
 
         # Add color attributes to particles AFTER adding them to event
-        # self.add_color(pythia.event, hepevt_particles)  # TODO: Causes segmentation fault; requires custom HepMC3 bindings (otherwise thread-locking not accessible)
+        # self._add_color(pythia.event, hepevt_particles)  # TODO: Causes segmentation fault; requires custom HepMC3 bindings (otherwise thread-locking not accessible)
 
         # 4. Check for particles which come from nowhere, #################
         # i.e. are without mothers or daughters. These need to be attached
@@ -156,11 +156,11 @@ class Pythia8ToHepMC3:
                         )
 
         # 6. Store PDF, weight, cross section and other event information. #################
-        self.store_event_info(pythia, hepmc_event)
+        self._store_event_info(pythia, hepmc_event)
 
         return hepmc_event
 
-    def get_particles(self, pythia_event: pythia8mc.Event) -> list[pyhepmc.GenParticle]:
+    def _get_particles(self, pythia_event: pythia8mc.Event) -> list[pyhepmc.GenParticle]:
         hepevt_particles = [None for particle_idx in range(pythia_event.size())]
         for particle_idx in range(pythia_event.size()):
             pythia_particle = pythia_event[particle_idx]
@@ -178,7 +178,7 @@ class Pythia8ToHepMC3:
             hepevt_particles[particle_idx] = hepmc_particle
         return hepevt_particles
 
-    def get_vertices(self, pythia_event: pythia8mc.Event, hepevt_particles: list[pyhepmc.GenParticle]) -> tuple[list[pyhepmc.GenVertex], list[pyhepmc.GenParticle]]:
+    def _get_vertices(self, pythia_event: pythia8mc.Event, hepevt_particles: list[pyhepmc.GenParticle]) -> tuple[list[pyhepmc.GenVertex], list[pyhepmc.GenParticle]]:
         vertex_cache = []
         beam_particles = []
         for particle_idx in range(pythia_event.size()):
@@ -239,31 +239,17 @@ class Pythia8ToHepMC3:
 
         return vertex_cache, beam_particles
 
-    def visit_children(self, vertex_visit_map: dict[HashableGenVertex, int], current_vertex: HashableGenVertex) -> bool:
-        # Traverse all outgoing particles from this vertex
-        for p_out in current_vertex.vertex.particles_out:
-            if getattr(p_out, "end_vertex", None):
-                end_vertex = HashableGenVertex(p_out.end_vertex)
+    def _add_tree(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
+        if self.m_detect_cycles:
+            self._detect_cycles(pythia_evt, hepmc_evt, beam_particles)
 
-                # CYCLE DETECTION: If we've already visited this vertex, then we've found a cycle
-                if end_vertex in vertex_visit_map:
-                    if vertex_visit_map[end_vertex] != 0:
-                        return True
+        all_vertices_sorted = self._topological_sort_vertices(beam_particles)
+        for v in all_vertices_sorted:
+            hepmc_evt.add_vertex(v)
 
-                # Mark this vertex as visited
-                if end_vertex not in vertex_visit_map:
-                    vertex_visit_map[end_vertex] = 0
-                else:
-                    vertex_visit_map[end_vertex] = vertex_visit_map[end_vertex] + 1
+        # TODO: Validate root-vertex handling; requires custom HepMC3 bindings (otherwise no attribute pyhepmc.GenEvent.m_root_vertex)
 
-                # Recursively check children of this end_vertex
-                if self.visit_children(vertex_visit_map, end_vertex):
-                    return True
-
-        # If we make it here, then no cycles found
-        return False
-
-    def detect_cycles(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
+    def _detect_cycles(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
         # Check if cycles attribute already exists
         existing_hc = getattr(pythia_evt, "cycles", None)
         has_cycles = False
@@ -307,13 +293,38 @@ class Pythia8ToHepMC3:
             for start_vtx in starting_vertices:
                 temp_vertex_visit_map = {k: v for k, v in vertex_visit_map.items()}
                 start_vtx_hashable = HashableGenVertex(start_vtx)
-                found_cycles = self.visit_children(temp_vertex_visit_map, start_vtx_hashable)
+                found_cycles = self._visit_children(temp_vertex_visit_map, start_vtx_hashable)
                 has_cycles = has_cycles or found_cycles
 
         if has_cycles:
             hepmc_evt.attributes["cycles"] = 1
+            LOG.info(f"Pythia8ToHepMC3: Detected cycles in event {hepmc_evt.event_number}")
 
-    def topological_sort_vertices(self, beam_particles: list[pyhepmc.GenParticle]) -> list[pyhepmc.GenVertex]:
+    def _visit_children(self, vertex_visit_map: dict[HashableGenVertex, int], current_vertex: HashableGenVertex) -> bool:
+        # Traverse all outgoing particles from this vertex
+        for p_out in current_vertex.vertex.particles_out:
+            if getattr(p_out, "end_vertex", None):
+                end_vertex = HashableGenVertex(p_out.end_vertex)
+
+                # CYCLE DETECTION: If we've already visited this vertex, then we've found a cycle
+                if end_vertex in vertex_visit_map:
+                    if vertex_visit_map[end_vertex] != 0:
+                        return True
+
+                # Mark this vertex as visited
+                if end_vertex not in vertex_visit_map:
+                    vertex_visit_map[end_vertex] = 0
+                else:
+                    vertex_visit_map[end_vertex] = vertex_visit_map[end_vertex] + 1
+
+                # Recursively check children of this end_vertex
+                if self._visit_children(vertex_visit_map, end_vertex):
+                    return True
+
+        # If we make it here, then no cycles found
+        return False
+    
+    def _topological_sort_vertices(self, beam_particles: list[pyhepmc.GenParticle]) -> list[pyhepmc.GenVertex]:
         all_vertices_sorted = []
         vertices_processed = []  # Track which vertices we've already
 
@@ -377,17 +388,20 @@ class Pythia8ToHepMC3:
 
         return all_vertices_sorted
 
-    def add_tree(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
-        if self.m_detect_cycles:
-            self.detect_cycles(pythia_evt, hepmc_evt, beam_particles)
+    def _check_if_free_particle(self, hepevt_particle: pyhepmc.GenParticle) -> bool:
+        end_vertex = getattr(hepevt_particle, "end_vertex", None)
+        if end_vertex is None:
+            return True
 
-        all_vertices_sorted = self.topological_sort_vertices(beam_particles)
-        for v in all_vertices_sorted:
-            hepmc_evt.add_vertex(v)
+        particles_out = getattr(end_vertex, "particles_out", None)
+        if particles_out is None:
+            return True
+        if len(particles_out) == 0:
+            return True
 
-        # TODO: Validate root-vertex handling; requires custom HepMC3 bindings (otherwise no attribute pyhepmc.GenEvent.m_root_vertex)
+        return False
 
-    def add_color(self, pythia_event: pythia8mc.Event, hepmc_particles: list[pyhepmc.GenParticle]):
+    def _add_color(self, pythia_event: pythia8mc.Event, hepmc_particles: list[pyhepmc.GenParticle]):
         """To check in-place-ness:
         import pyhepmc
         p1 = pyhepmc.GenParticle()
@@ -412,7 +426,7 @@ class Pythia8ToHepMC3:
                 hepmc_particles[i].attributes["flow1"] = flow1
                 hepmc_particles[i].attributes["flow2"] = flow2
 
-    def store_event_info(self, pythia: pythia8mc.Pythia, hepmc_event: pyhepmc.GenEvent):
+    def _store_event_info(self, pythia: pythia8mc.Pythia, hepmc_event: pyhepmc.GenEvent):
         pyinfo = pythia.infoPython()
 
         # PDF information
@@ -456,15 +470,3 @@ class Pythia8ToHepMC3:
             for i in range(pyinfo.nWeights()):
                 hepmc_event.weights.append(pyinfo.weight(i))
 
-    def _check_if_free_particle(self, hepevt_particle: pyhepmc.GenParticle) -> bool:
-        end_vertex = getattr(hepevt_particle, "end_vertex", None)
-        if end_vertex is None:
-            return True
-
-        particles_out = getattr(end_vertex, "particles_out", None)
-        if particles_out is None:
-            return True
-        if len(particles_out) == 0:
-            return True
-
-        return False
