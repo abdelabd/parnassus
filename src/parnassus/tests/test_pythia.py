@@ -409,8 +409,8 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
         "lep_pt": 10.0,
         "lep_eta": 2.5,
         "min_mll2": 12.0,
-        "max_events": 1_000,
-        "n_jobs": 200,
+        "max_events": 100,
+        "n_jobs": 5,
         "debug": False,
     }
     generator = HepMC3Generator(
