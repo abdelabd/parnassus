@@ -1,33 +1,39 @@
 import argparse
 import itertools
-from tqdm import tqdm
 import math
 from pathlib import Path
-import pytest
 
-import matplotlib.pyplot as plt
-import numpy as np
-
-# HepMC3 Python bindings
-import pythia8mc
-import pyhepmc
-from joblib import Parallel, delayed
+import awkward as ak
 
 # FastJet (for clustering)
 import fastjet as fj
+import matplotlib.pyplot as plt
+import numpy as np
+import pyhepmc
+
+# HepMC3 Python bindings
+import pythia8mc
+from joblib import Parallel, delayed
+from tqdm import tqdm
+
 from parnassus.pipelines.cluster import get_cluster_sequence
-import awkward as ak 
 
 # DUT
-from parnassus.pythia import Pythia8ToHepMC3, HepMC3Generator
-
+from parnassus.pythia import HepMC3Generator, Pythia8ToHepMC3
 
 # Helper functions #############################
 MZ = 91.1876
 GAMMA_Z = 2.4952
 
 
-def draw(event_dict: dict, key: str, bins: int = 60, range_: tuple = None, xlabel: str | None = None, fig_dir: str = "src/parnassus/tests/figures/HZZ4l"):
+def draw(
+    event_dict: dict,
+    key: str,
+    bins: int = 60,
+    range_: tuple | None = None,
+    xlabel: str | None = None,
+    fig_dir: str = "src/parnassus/tests/figures/HZZ4l",
+):
     x = event_dict.get(key, [])
     print(f"{key}: {len(x)} entries")
     if len(x) == 0:
@@ -68,13 +74,17 @@ def inv_mass(p4s: list[tuple[float, float, float, float]]) -> float:
     return math.sqrt(max(m2, 0.0))
 
 
-def deltaR(a: tuple[float, float, float, float, float], b: tuple[float, float, float, float, float]) -> float:
+def deltaR(
+    a: tuple[float, float, float, float, float], b: tuple[float, float, float, float, float]
+) -> float:
     # a,b are (px,py,pz,E,eta,phi)
     dphi = (a[5] - b[5] + math.pi) % (2 * math.pi) - math.pi
     return math.hypot(a[4] - b[4], dphi)
 
 
-def as_p4(px: float, py: float, pz: float, E: float) -> tuple[float, float, float, float, float, float]:
+def as_p4(
+    px: float, py: float, pz: float, E: float
+) -> tuple[float, float, float, float, float, float]:
     return (px, py, pz, E, eta(px, py, pz), phi(px, py))
 
 
@@ -96,7 +106,9 @@ def is_neutrino(particle: pyhepmc.GenParticle) -> bool:
 
 
 # ---------- Pairing (global chi^2 with BW scale) ----------
-def best_ossf_pairs_min_chi2(leps_p4: list[tuple[float, float, float, float, float, float]], leps_id: list[int]) -> tuple[tuple[int, int], tuple[int, int], float, float] | None:
+def best_ossf_pairs_min_chi2(
+    leps_p4: list[tuple[float, float, float, float, float, float]], leps_id: list[int]
+) -> tuple[tuple[int, int], tuple[int, int], float, float] | None:
     """leps_p4: list of 4-vectors (px,py,pz,E,eta,phi) for 4 leptons (selected & sorted)
     leps_id: matching PDG IDs (11,-11,13,-13)
     Returns: ((i,j),(k,l), m1, m2) with the pair closer to mZ listed first.
@@ -104,7 +116,10 @@ def best_ossf_pairs_min_chi2(leps_p4: list[tuple[float, float, float, float, flo
     idx = [0, 1, 2, 3]
     best = None
 
-    def mll(a: tuple[float, float, float, float, float, float], b: tuple[float, float, float, float, float, float]) -> float:
+    def mll(
+        a: tuple[float, float, float, float, float, float],
+        b: tuple[float, float, float, float, float, float],
+    ) -> float:
         return inv_mass([
             (leps_p4[a][0], leps_p4[a][1], leps_p4[a][2], leps_p4[a][3]),
             (leps_p4[b][0], leps_p4[b][1], leps_p4[b][2], leps_p4[b][3]),
@@ -135,7 +150,13 @@ def best_ossf_pairs_min_chi2(leps_p4: list[tuple[float, float, float, float, flo
 
 
 # ---------- Jet clustering ----------
-def build_jet_inputs(final_particles: list[pyhepmc.GenParticle], exclude_p4: list[tuple[float, float, float, float, float, float]], R: float = 0.4, ptmin: float = 30.0, etamax: float = 4.5) -> list[tuple[float, float, float, float, float, float]]:
+def build_jet_inputs(
+    final_particles: list[pyhepmc.GenParticle],
+    exclude_p4: list[tuple[float, float, float, float, float, float]],
+    R: float = 0.4,
+    ptmin: float = 30.0,
+    etamax: float = 4.5,
+) -> list[tuple[float, float, float, float, float, float]]:
     """final_particles: iterable of HepMC particles (status==1)
     exclude_p4: list of lepton p4 to be excluded from clustering (ΔR>0.4)
     Returns list of jets, each as (px,py,pz,E,eta,phi)
@@ -181,7 +202,6 @@ def build_jet_inputs(final_particles: list[pyhepmc.GenParticle], exclude_p4: lis
 
 
 def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
-
     plot_vars = [
         "m_4l",
         "mZ1",
@@ -255,7 +275,11 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
 
         # --- jets via anti-kt on visible final state, excluding the leptons ---
         jets = build_jet_inputs(
-            final_parts, exclude_p4=lep_p4s, R=args["R"], ptmin=args["jet_pt"], etamax=args["jet_eta"]
+            final_parts,
+            exclude_p4=lep_p4s,
+            R=args["R"],
+            ptmin=args["jet_pt"],
+            etamax=args["jet_eta"],
         )
         if len(jets) < 2:
             COUNTS["fail_njets>=2"][event_idx] = 1
@@ -302,11 +326,13 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
     with pyhepmc.open(fpath_hepmc, "r") as f:
         if args["debug"]:
             for i, evt in enumerate(f):
-                if i<1000//args["n_jobs"]:
+                if i < 1000 // args["n_jobs"]:
                     process_event(i, evt)
         else:
             Parallel(n_jobs=args["n_jobs"], prefer="threads")(
-                itertools.starmap(delayed(process_event), tqdm(enumerate(f), total=args["max_events"]))
+                itertools.starmap(
+                    delayed(process_event), tqdm(enumerate(f), total=args["max_events"])
+                )
             )
 
     # Aggregate results
@@ -376,15 +402,30 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
             # ._append_hepmc_file()
     # So that is all the methods of HepMC3Generator covered
 
-    args = {"R": 0.4, "jet_pt": 30.0, "jet_eta": 4.5, "lep_pt": 10.0, "lep_eta": 2.5, "min_mll2": 12.0, "max_events": 1_000, "n_jobs": 200, "debug": False}
+    args = {
+        "R": 0.4,
+        "jet_pt": 30.0,
+        "jet_eta": 4.5,
+        "lep_pt": 10.0,
+        "lep_eta": 2.5,
+        "min_mll2": 12.0,
+        "max_events": 1_000,
+        "n_jobs": 200,
+        "debug": False,
+    }
     generator = HepMC3Generator(
-        cmnd_file="src/parnassus/tests/HZZ4l.cmnd", output_dir="src/parnassus/tests/data_out/HZZ4l", log_dir="src/parnassus/tests/logs/HZZ4l"
+        cmnd_file="src/parnassus/tests/HZZ4l.cmnd",
+        output_dir="src/parnassus/tests/data_out/HZZ4l",
+        log_dir="src/parnassus/tests/logs/HZZ4l",
     )
-    fpath_merged = generator.generate(n_events=args["max_events"], max_workers=args["n_jobs"], debug=args["debug"])
+    fpath_merged = generator.generate(
+        n_events=args["max_events"], max_workers=args["n_jobs"], debug=args["debug"]
+    )
     print(f"Wrote to file {fpath_merged}")
 
     print("Inspecting hepmc file and generating histograms")
     inspect_hepmc(fpath_merged, args)
+
 
 def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
     # Tests Pythia8ToHepMC3.__init__()
@@ -402,25 +443,27 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
     pythia = pythia8mc.Pythia()
 
     pythia.readString("Random:setSeed = on")
-    pythia.readString(f"Random:seed = 42")
+    pythia.readString("Random:seed = 42")
 
     # Read settings from .cmnd file
     pythia.readFile("src/parnassus/tests/HZZ4l.cmnd")
 
     if not pythia.init():
         print("test_pythia::test_detect_cycles: Pythia initialization failed!")
-        return 1
-    
-    converter = Pythia8ToHepMC3(m_hadronization_on=True, m_detect_cycles=True) # This enables detect_cycles and visit_children
-    writer = pyhepmc.io.WriterAscii(f"src/parnassus/tests/data_out/HZZ4l/test_cycles.hepmc")
+        return
+
+    converter = Pythia8ToHepMC3(
+        m_hadronization_on=True, m_detect_cycles=True
+    )  # This enables detect_cycles and visit_children
+    writer = pyhepmc.io.WriterAscii("src/parnassus/tests/data_out/HZZ4l/test_cycles.hepmc")
 
     n_written = 0
     idx_event = 0
-    while n_written < 20: # detecting cycles takes a while, 20 is sufficient
+    while n_written < 20:  # detecting cycles takes a while, 20 is sufficient
         if not pythia.next():
             continue  # event failed, try again
 
-        hepmcEvent = converter.fill_next_event(pythia, idx_event+1)
+        hepmcEvent = converter.fill_next_event(pythia, idx_event + 1)
         writer.write_event(hepmcEvent)
         n_written += 1
         idx_event += 1

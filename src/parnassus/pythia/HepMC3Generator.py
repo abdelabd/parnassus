@@ -1,14 +1,15 @@
-from pathlib import Path
 import shutil
 import subprocess
-import time
 import tempfile
+import time
+from pathlib import Path
 
 from joblib import Parallel, delayed
 
 from parnassus.utils.logger import setup_logger
 
 LOG = setup_logger()
+
 
 class HepMC3Generator:
     def __init__(self, cmnd_file: str, output_dir: str, log_dir: str | None = None):
@@ -61,7 +62,9 @@ class HepMC3Generator:
 
         toc_gen = time.time()
         dur_gen = toc_gen - tic_gen
-        LOG.info(f"HepMC3Generator: \nGenerated {n_events} events in {dur_gen // 60}m {dur_gen % 60:.1f}s")
+        LOG.info(
+            f"HepMC3Generator: \nGenerated {n_events} events in {dur_gen // 60}m {dur_gen % 60:.1f}s"
+        )
 
         # Merge output files
         if not debug:
@@ -71,7 +74,9 @@ class HepMC3Generator:
             self._merge_hepmc_files(fpaths_output, fpath_merged, max_workers=max_workers)
             toc_merge = time.time()
             dur_merge = toc_merge - tic_merge
-            LOG.info(f"HepMC3Generator: Merged {max_workers} files in {dur_merge // 60}m {dur_merge % 60:.1f}s")
+            LOG.info(
+                f"HepMC3Generator: Merged {max_workers} files in {dur_merge // 60}m {dur_merge % 60:.1f}s"
+            )
 
         toc = time.time()
         dur = toc - tic

@@ -1,10 +1,12 @@
 import hashlib
-import pythia8mc
+
 import pyhepmc
+import pythia8mc
 
 from parnassus.utils.logger import setup_logger
 
 LOG = setup_logger()
+
 
 class HashableGenVertex:
     def __init__(self, pyhepmc_vertex: pyhepmc.GenVertex):
@@ -178,7 +180,9 @@ class Pythia8ToHepMC3:
             hepevt_particles[particle_idx] = hepmc_particle
         return hepevt_particles
 
-    def _get_vertices(self, pythia_event: pythia8mc.Event, hepevt_particles: list[pyhepmc.GenParticle]) -> tuple[list[pyhepmc.GenVertex], list[pyhepmc.GenParticle]]:
+    def _get_vertices(
+        self, pythia_event: pythia8mc.Event, hepevt_particles: list[pyhepmc.GenParticle]
+    ) -> tuple[list[pyhepmc.GenVertex], list[pyhepmc.GenParticle]]:
         vertex_cache = []
         beam_particles = []
         for particle_idx in range(pythia_event.size()):
@@ -239,7 +243,12 @@ class Pythia8ToHepMC3:
 
         return vertex_cache, beam_particles
 
-    def _add_tree(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
+    def _add_tree(
+        self,
+        pythia_evt: pythia8mc.Event,
+        hepmc_evt: pyhepmc.GenEvent,
+        beam_particles: list[pyhepmc.GenParticle],
+    ):
         if self.m_detect_cycles:
             self._detect_cycles(pythia_evt, hepmc_evt, beam_particles)
 
@@ -249,7 +258,12 @@ class Pythia8ToHepMC3:
 
         # TODO: Validate root-vertex handling; requires custom HepMC3 bindings (otherwise no attribute pyhepmc.GenEvent.m_root_vertex)
 
-    def _detect_cycles(self, pythia_evt: pythia8mc.Event, hepmc_evt: pyhepmc.GenEvent, beam_particles: list[pyhepmc.GenParticle]):
+    def _detect_cycles(
+        self,
+        pythia_evt: pythia8mc.Event,
+        hepmc_evt: pyhepmc.GenEvent,
+        beam_particles: list[pyhepmc.GenParticle],
+    ):
         # Check if cycles attribute already exists
         existing_hc = getattr(pythia_evt, "cycles", None)
         has_cycles = False
@@ -300,7 +314,9 @@ class Pythia8ToHepMC3:
             hepmc_evt.attributes["cycles"] = 1
             LOG.info(f"Pythia8ToHepMC3: Detected cycles in event {hepmc_evt.event_number}")
 
-    def _visit_children(self, vertex_visit_map: dict[HashableGenVertex, int], current_vertex: HashableGenVertex) -> bool:
+    def _visit_children(
+        self, vertex_visit_map: dict[HashableGenVertex, int], current_vertex: HashableGenVertex
+    ) -> bool:
         # Traverse all outgoing particles from this vertex
         for p_out in current_vertex.vertex.particles_out:
             if getattr(p_out, "end_vertex", None):
@@ -323,8 +339,10 @@ class Pythia8ToHepMC3:
 
         # If we make it here, then no cycles found
         return False
-    
-    def _topological_sort_vertices(self, beam_particles: list[pyhepmc.GenParticle]) -> list[pyhepmc.GenVertex]:
+
+    def _topological_sort_vertices(
+        self, beam_particles: list[pyhepmc.GenParticle]
+    ) -> list[pyhepmc.GenVertex]:
         all_vertices_sorted = []
         vertices_processed = []  # Track which vertices we've already
 
@@ -469,4 +487,3 @@ class Pythia8ToHepMC3:
             hepmc_event.weights.clear()
             for i in range(pyinfo.nWeights()):
                 hepmc_event.weights.append(pyinfo.weight(i))
-
