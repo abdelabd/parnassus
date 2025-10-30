@@ -111,7 +111,7 @@ class HepMC3Generator:
             result = subprocess.run(cmd, stdout=log_file, stderr=subprocess.STDOUT, check=False)
 
         if result.returncode != 0:
-            LOG.info(f"HepMC3Generator: Error running job #{seed}")
+            LOG.error(f"HepMC3Generator: Job #{seed} failed")
 
     def _merge_hepmc_files(self, input_files: list, output_file: str, max_workers: int = 8):
         """Reads events from multiple input HepMC files and writes them to a single output file.

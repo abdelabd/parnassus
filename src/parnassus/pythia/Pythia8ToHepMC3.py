@@ -93,7 +93,7 @@ class Pythia8ToHepMC3:
 
         # Error if no event passed
         if not pythia.next():
-            LOG.info(f"Pythia8ToHepMC3: Skipping event {evt_num}; no Pythia event generated")
+            LOG.warning(f"Pythia8ToHepMC3: Skipping event {evt_num}; no Pythia event generated")
             return None
 
         hepmc_event = pyhepmc.GenEvent()
@@ -122,7 +122,7 @@ class Pythia8ToHepMC3:
         # TODO: Below causes error; too few vertices when reading from hepmc file
         for i in range(pythia.event.size()):
             if not hepevt_particles[i].in_event:
-                LOG.info(
+                LOG.warning(
                     f"Pythia8ToHepMC3: Found detached particle; status = {hepevt_particles[i].status}, pid = {hepevt_particles[i].pid}"
                 )
                 # prod_vtx = pyhepmc.GenVertex()
@@ -141,8 +141,8 @@ class Pythia8ToHepMC3:
                             f"Error: Found final-state gluon with no end vertex! event {evt_num}, particle {i}"
                         )
                     if self.m_free_parton_warnings:
-                        LOG.info(
-                            f"Pythia8ToHepMC3: Warning: Found final-state gluon with no end vertex! event {evt_num}, particle {i}"
+                        LOG.warning(
+                            f"Pythia8ToHepMC3: Found final-state gluon with no end vertex! event {evt_num}, particle {i}"
                         )
 
                 if abs(hepevt_particles[i].pid) <= 6 and self._check_if_free_particle(
@@ -153,8 +153,8 @@ class Pythia8ToHepMC3:
                             f"Error: Found final-state quark with no end vertex! event {evt_num}, particle {i}"
                         )
                     if self.m_free_parton_warnings:
-                        LOG.info(
-                            f"Pythia8ToHepMC3:Warning: Found final-state quark with no end vertex! event {evt_num}, particle {i}"
+                        LOG.warning(
+                            f"Pythia8ToHepMC3: Found final-state quark with no end vertex! event {evt_num}, particle {i}"
                         )
 
         # 6. Store PDF, weight, cross section and other event information. #################
@@ -312,7 +312,7 @@ class Pythia8ToHepMC3:
 
         if has_cycles:
             hepmc_evt.attributes["cycles"] = 1
-            LOG.info(f"Pythia8ToHepMC3: Detected cycles in event {hepmc_evt.event_number}")
+            LOG.warning(f"Pythia8ToHepMC3: Detected cycles in event {hepmc_evt.event_number}")
 
     def _visit_children(
         self, vertex_visit_map: dict[HashableGenVertex, int], current_vertex: HashableGenVertex
