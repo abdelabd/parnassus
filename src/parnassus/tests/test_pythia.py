@@ -429,12 +429,10 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
 
 def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
     # Tests Pythia8ToHepMC3.__init__()
-    # Tests Pythia8ToHepMC3.fill_next_event(), with m_detect_cycles=True
+    # Tests Pythia8ToHepMC3.fill_next_event()
         # ._get_particles()
         # ._get_vertices()
         # ._add_tree()
-            # ._detect_cycles()
-                # ._visit_children()
             # ._topological_sort_vertices()
         # ._check_if_free_particle()
         # ._store_event_info()
@@ -449,17 +447,17 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
     pythia.readFile("src/parnassus/tests/HZZ4l.cmnd")
 
     if not pythia.init():
-        print("test_pythia::test_detect_cycles: Pythia initialization failed!")
+        print("test_pythia::test_pythia8_to_hepmc3: Pythia initialization failed!")
         return
 
     converter = Pythia8ToHepMC3(
-        m_hadronization_on=True, m_detect_cycles=True
+        m_hadronization_on=True
     )  # This enables detect_cycles and visit_children
     writer = pyhepmc.io.WriterAscii("src/parnassus/tests/data_out/HZZ4l/test_cycles.hepmc")
 
     n_written = 0
     idx_event = 0
-    while n_written < 20:  # detecting cycles takes a while, 20 is sufficient
+    while n_written < 20: 
         if not pythia.next():
             continue  # event failed, try again
 

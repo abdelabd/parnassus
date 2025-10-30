@@ -74,7 +74,6 @@ class Pythia8ToHepMC3:
         m_store_proc: bool = True,
         m_store_xsec: bool = True,
         m_store_weights: bool = True,
-        m_detect_cycles: bool = False,
     ):
         self.m_hadronization_on = m_hadronization_on
         self.m_internal_event_number = m_internal_event_number
@@ -86,7 +85,6 @@ class Pythia8ToHepMC3:
         self.m_store_proc = m_store_proc
         self.m_store_xsec = m_store_xsec
         self.m_store_weights = m_store_weights
-        self.m_detect_cycles = m_detect_cycles
 
     def fill_next_event(self, pythia: pythia8mc.Pythia, evt_num: int) -> pyhepmc.GenEvent:
         # 1. Initalize HepMC event #################
@@ -249,96 +247,12 @@ class Pythia8ToHepMC3:
         hepmc_evt: pyhepmc.GenEvent,
         beam_particles: list[pyhepmc.GenParticle],
     ):
-        if self.m_detect_cycles:
-            self._detect_cycles(pythia_evt, hepmc_evt, beam_particles)
-
+        
         all_vertices_sorted = self._topological_sort_vertices(beam_particles)
         for v in all_vertices_sorted:
             hepmc_evt.add_vertex(v)
 
         # TODO: Validate root-vertex handling; requires custom HepMC3 bindings (otherwise no attribute pyhepmc.GenEvent.m_root_vertex)
-
-    def _detect_cycles(
-        self,
-        pythia_evt: pythia8mc.Event,
-        hepmc_evt: pyhepmc.GenEvent,
-        beam_particles: list[pyhepmc.GenParticle],
-    ):
-        # Check if cycles attribute already exists
-        existing_hc = getattr(pythia_evt, "cycles", None)
-        has_cycles = False
-        vertex_visit_map = {}
-        starting_vertices = []
-
-        # If cycles attribute exists and is non-zero, we already know there are cycles
-        if existing_hc:
-            if existing_hc != 0:
-                has_cycles = True
-
-        # If no cycles attribute exists, we need to detect them ourselves
-        if not existing_hc:
-            # First pass: collect all vertices and identify starting point
-            for p_in in beam_particles:
-                prod_vtx = getattr(p_in, "production_vertex", None)
-
-                # Add production vertex to our tracking map
-                if prod_vtx:
-                    prod_vtx_hashable = HashableGenVertex(prod_vtx)
-                    vertex_visit_map[prod_vtx_hashable] = 0
-
-                # If particle has no production vertex OR production vertex
-                # has no incoming particles, then its end vertex is a potential starting point for cycle detection
-                if not prod_vtx:
-                    end_vtx = getattr(p_in, "end_vertex", None)
-                    if end_vtx:
-                        starting_vertices.append(end_vtx)
-                        end_vtx_hashable = HashableGenVertex(end_vtx)
-                        vertex_visit_map[end_vtx_hashable] = 0
-
-                prod_vtx_particles_in = getattr(prod_vtx, "particles_in", None)
-                if not (prod_vtx_particles_in) or len(prod_vtx_particles_in) == 0:
-                    end_vtx = getattr(p_in, "end_vertex", None)
-                    if end_vtx:
-                        starting_vertices.append(end_vtx)
-                        end_vtx_hashable = HashableGenVertex(end_vtx)
-                        vertex_visit_map[end_vtx_hashable] = 0
-
-            # Second pass: check for cycles starting from each starting vertex
-            for start_vtx in starting_vertices:
-                temp_vertex_visit_map = {k: v for k, v in vertex_visit_map.items()}
-                start_vtx_hashable = HashableGenVertex(start_vtx)
-                found_cycles = self._visit_children(temp_vertex_visit_map, start_vtx_hashable)
-                has_cycles = has_cycles or found_cycles
-
-        if has_cycles:
-            hepmc_evt.attributes["cycles"] = 1
-            LOG.warning(f"Pythia8ToHepMC3: Detected cycles in event {hepmc_evt.event_number}")
-
-    def _visit_children(
-        self, vertex_visit_map: dict[HashableGenVertex, int], current_vertex: HashableGenVertex
-    ) -> bool:
-        # Traverse all outgoing particles from this vertex
-        for p_out in current_vertex.vertex.particles_out:
-            if getattr(p_out, "end_vertex", None):
-                end_vertex = HashableGenVertex(p_out.end_vertex)
-
-                # CYCLE DETECTION: If we've already visited this vertex, then we've found a cycle
-                if end_vertex in vertex_visit_map:
-                    if vertex_visit_map[end_vertex] != 0:
-                        return True
-
-                # Mark this vertex as visited
-                if end_vertex not in vertex_visit_map:
-                    vertex_visit_map[end_vertex] = 0
-                else:
-                    vertex_visit_map[end_vertex] = vertex_visit_map[end_vertex] + 1
-
-                # Recursively check children of this end_vertex
-                if self._visit_children(vertex_visit_map, end_vertex):
-                    return True
-
-        # If we make it here, then no cycles found
-        return False
 
     def _topological_sort_vertices(
         self, beam_particles: list[pyhepmc.GenParticle]
