@@ -28,59 +28,66 @@ GAMMA_Z = 2.4952
 # How many samples to generate to compare with benchmark
 N_JOBS = 10
 N_EVENTS_PARALLEL = int(1e3) # must be in {1e4, 1e3, 1e2} by default
-N_EVENTS_SINGLE = int(1e3)  # must be in {1e4, 1e3, 1e2} by default
+N_EVENTS_SINGLE = int(1e2)  # must be in {1e4, 1e3, 1e2} by default
 
 # For test thresholds
 MAX_KS_MAP = {int(1e4): 5e-2, int(1e3): 1.5e-1, int(1e2): 3e-1}
 MIN_KS_P_MAP = {int(1e4): 5e-2, int(1e3): 5e-2, int(1e2): 1e-2}
 
-PLOT_HISTS = False # Set to True to produce histograms during tests
+PLOT_HISTS = True # Set to True to produce histograms during tests
 
 def draw(
-    event_dict: dict,
+    event_dict_py: dict,
+    event_dict_c: dict,
     key: str,
+    fig_dir: str,
     bins: int = 60,
     range_: tuple | None = None,
     xlabel: str | None = None,
-    fig_dir: str = "src/parnassus/tests/figures/HZZ4l",
 ):
-    x = event_dict.get(key, [])
-    print(f"{key}: {len(x)} entries")
-    if len(x) == 0:
-        print(f"[warn] no data for {key}")
+    x_py = event_dict_py.get(key, [])
+    x_c = event_dict_c.get(key, [])
+    print(f"{key}: {len(x_py)} Parnassus.Pythia entries, {len(x_c)} C++ entries")
+    if len(x_py) == 0:
+        print(f"[warn] no Parnassus.Pythia data for {key}")
+        return
+    if len(x_c) == 0:
+        print(f"[warn] no C++ data for {key}")
         return
     plt.figure()
-    plt.hist(x, bins=bins, range=range_, histtype="step")
+    plt.hist(x_c, bins=bins, range=range_, histtype="step", color="blue", label="C++ Pythia8", density=True)
+    plt.hist(x_py, bins=bins, range=range_, histtype="step", color="orange", label="Parnassus.Pythia", density=True)
     plt.xlabel(xlabel or key)
     plt.ylabel("Events")
     plt.title(key)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(Path(fig_dir) / f"{key}.png")
     plt.close()
 
-def full_draw(evt_dict: dict, fig_dir: str) -> None: # Draws all histograms from evt_dict into fig_dir.
+def full_draw(event_dict_py: dict, event_dict_c: dict, fig_dir: str) -> None: # Draws all histograms from event_dict_py into fig_dir.
     Path(fig_dir).mkdir(exist_ok=True, parents=True)
 
     # ---------- Plots ----------
     # Core Higgs/ZZ
-    draw(evt_dict, "m_4l", bins=60, range_=(50, 200), xlabel="m(4ℓ) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "mZ1", bins=60, range_=(40, 120), xlabel="m(Z1) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "mZ2", bins=60, range_=(12, 120), xlabel="m(Z2) [GeV]", fig_dir=fig_dir)
+    draw(event_dict_py, event_dict_c, "m_4l", fig_dir, bins=60, range_=(50, 200), xlabel="m(4ℓ) [GeV]")
+    draw(event_dict_py, event_dict_c, "mZ1", fig_dir, bins=60, range_=(40, 120), xlabel="m(Z1) [GeV]")
+    draw(event_dict_py, event_dict_c, "mZ2", fig_dir, bins=60, range_=(12, 120), xlabel="m(Z2) [GeV]")
 
     # Jets / VBF
-    draw(evt_dict, "j1_pt", bins=60, range_=(0, 300), xlabel="pT(j1) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "j2_pt", bins=60, range_=(0, 200), xlabel="pT(j2) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "mjj", bins=60, range_=(0, 3000), xlabel="m(jj) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "detajj", bins=60, range_=(0, 10), xlabel="Δη(jj)", fig_dir=fig_dir)
-    draw(evt_dict, "phijj", bins=60, range_=(-math.pi, math.pi), xlabel="Δφ(jj)", fig_dir=fig_dir)
-    draw(evt_dict, "zeppenfeld_eta_star", bins=60, range_=(-5, 5), xlabel="η*(H)", fig_dir=fig_dir)
+    draw(event_dict_py, event_dict_c, "j1_pt", fig_dir, bins=60, range_=(0, 300), xlabel="pT(j1) [GeV]")
+    draw(event_dict_py, event_dict_c, "j2_pt", fig_dir, bins=60, range_=(0, 200), xlabel="pT(j2) [GeV]")
+    draw(event_dict_py, event_dict_c, "mjj", fig_dir, bins=60, range_=(0, 3000), xlabel="m(jj) [GeV]")
+    draw(event_dict_py, event_dict_c, "detajj", fig_dir, bins=60, range_=(0, 10), xlabel="Δη(jj)")
+    draw(event_dict_py, event_dict_c, "phijj", fig_dir, bins=60, range_=(-math.pi, math.pi), xlabel="Δφ(jj)")
+    draw(event_dict_py, event_dict_c, "zeppenfeld_eta_star", fig_dir, bins=60, range_=(-5, 5), xlabel="η*(H)")
 
     # Leptons
-    draw(evt_dict, "l1_pt", bins=60, range_=(0, 150), xlabel="pT(ℓ1) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "l2_pt", bins=60, range_=(0, 100), xlabel="pT(ℓ2) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "l3_pt", bins=60, range_=(0, 60), xlabel="pT(ℓ3) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "l4_pt", bins=60, range_=(0, 40), xlabel="pT(ℓ4) [GeV]", fig_dir=fig_dir)
-    draw(evt_dict, "min_DR_ll", bins=60, range_=(0, 5), xlabel="min ΔR(ℓ,ℓ)", fig_dir=fig_dir)
+    draw(event_dict_py, event_dict_c, "l1_pt", fig_dir, bins=60, range_=(0, 150), xlabel="pT(ℓ1) [GeV]")
+    draw(event_dict_py, event_dict_c, "l2_pt", fig_dir, bins=60, range_=(0, 100), xlabel="pT(ℓ2) [GeV]")
+    draw(event_dict_py, event_dict_c, "l3_pt", fig_dir, bins=60, range_=(0, 60), xlabel="pT(ℓ3) [GeV]")
+    draw(event_dict_py, event_dict_c, "l4_pt", fig_dir, bins=60, range_=(0, 40), xlabel="pT(ℓ4) [GeV]")
+    draw(event_dict_py, event_dict_c, "min_DR_ll", fig_dir, bins=60, range_=(0, 5), xlabel="min ΔR(ℓ,ℓ)")
 
 # ---------- Kinematics ----------
 def pt(px: float, py: float) -> float:
@@ -396,7 +403,7 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end: top-level confi
             # ._append_hepmc_file()
     # So that is all the methods of HepMC3Generator covered
 
-    fpath_benchmark = f"src/parnassus/tests/benchmark_data/HZZ4l/events_{N_EVENTS_PARALLEL}.hepmc"
+    fpath_benchmark = f"src/parnassus/tests/benchmark_data/HZZ4l/{N_EVENTS_PARALLEL}/events.hepmc"
     assert Path(fpath_benchmark).exists(), f"""Benchmark file {fpath_benchmark} does not exist. N_EVENTS_PARALLEL must be a number for which benchmark data exists. 
                                                     \nCheck src/parnassus/tests/benchmark_data/HZZ4l. You can generate your own benchmark data via tests/HZZ4l.cc OR download it from the Google Drive link: https://drive.google.com/drive/folders/1W-V_rU6lRmtuaOclj3gYB1qJSn4J11qM?usp=sharing"""
     args = {
@@ -412,8 +419,8 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end: top-level confi
     }
     generator = HepMC3Generator(
         cmnd_file="src/parnassus/tests/HZZ4l.cmnd",
-        output_dir="src/parnassus/tests/data_out/HZZ4l_generator",
-        log_dir="src/parnassus/tests/logs/HZZ4l_generator",
+        output_dir=f"src/parnassus/tests/data_out/HZZ4l/{N_EVENTS_PARALLEL}/HepMC3Generator",
+        log_dir=f"src/parnassus/tests/logs/HZZ4l/{N_EVENTS_PARALLEL}/HepMC3Generator",
     )
     fpath_merged = generator.generate(
         n_events=args["max_events"], max_workers=args["n_jobs"], debug=args["debug"]
@@ -422,12 +429,9 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end: top-level confi
 
     print("Inspecting hepmc file and generating histograms")
     evt_dict_out, counts_out, n_events_out = inspect_hepmc_HZZ4l(fpath_merged, args)
-    if PLOT_HISTS:
-        full_draw(evt_dict_out, fig_dir=f"src/parnassus/tests/figures/HZZ4l/hepmc3_generator_{N_EVENTS_PARALLEL}.png")
-
     evt_dict_bench, counts_bench, n_events_bench = inspect_hepmc_HZZ4l(fpath_benchmark, args)
     if PLOT_HISTS:
-        full_draw(evt_dict_bench, fig_dir=f"src/parnassus/tests/figures/HZZ4l/benchmark_{N_EVENTS_PARALLEL}")
+        full_draw(evt_dict_out, evt_dict_bench, fig_dir=f"src/parnassus/tests/figures/HZZ4l/{N_EVENTS_PARALLEL}/HepMC3Generator")
 
     # Check number of events generated
     print(f"HepMC3Generator: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
@@ -465,7 +469,7 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end: val
         # ._store_event_info()
     # This leaves Pythia8ToHepMC3._add_color(), which is currently broken due to HepMC3 Python bindings limitations
 
-    fpath_benchmark = f"src/parnassus/tests/benchmark_data/HZZ4l/events_{N_EVENTS_SINGLE}.hepmc"
+    fpath_benchmark = f"src/parnassus/tests/benchmark_data/HZZ4l/{N_EVENTS_SINGLE}/events.hepmc"
     assert Path(fpath_benchmark).exists(), f"""Benchmark file {fpath_benchmark} does not exist. N_EVENTS_PARALLEL must be a number for which benchmark data exists. 
                                                     \nCheck src/parnassus/tests/benchmark_data/HZZ4l. You can generate your own benchmark data via tests/HZZ4l.cc, or download it from the Google Drive link: https://drive.google.com/drive/folders/1W-V_rU6lRmtuaOclj3gYB1qJSn4J11qM?usp=sharing"""
     
@@ -486,11 +490,11 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end: val
     converter = Pythia8ToHepMC3(
         m_hadronization_on=True
     )  # This enables detect_cycles and visit_children
-    Path("src/parnassus/tests/data_out/HZZ4l_single").mkdir(
+    Path(f"src/parnassus/tests/data_out/HZZ4l/{N_EVENTS_SINGLE}/Pythia8ToHepMC3").mkdir(
         exist_ok=True, parents=True
     )
-    fpath_out = f"src/parnassus/tests/data_out/HZZ4l_single/events_{N_EVENTS_SINGLE}.hepmc"
-    
+    fpath_out = f"src/parnassus/tests/data_out/HZZ4l/{N_EVENTS_SINGLE}/Pythia8ToHepMC3/events.hepmc"
+
     writer = pyhepmc.io.WriterAscii(fpath_out)
     n_written = 0
     idx_event = 0
@@ -525,7 +529,7 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end: val
 
     evt_dict_bench, counts_bench, n_events_bench = inspect_hepmc_HZZ4l(fpath_benchmark, args)
     if PLOT_HISTS:
-        full_draw(evt_dict_out, fig_dir=f"src/parnassus/tests/figures/HZZ4l/pythia8_to_hepmc3_{N_EVENTS_SINGLE}")
+        full_draw(evt_dict_out, evt_dict_bench, fig_dir=f"src/parnassus/tests/figures/HZZ4l/{N_EVENTS_SINGLE}/Pythia8ToHepMC3")
 
     # Check number of events generated
     print(f"Pythia8ToHepMC3: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
