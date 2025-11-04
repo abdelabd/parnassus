@@ -1,18 +1,16 @@
 import itertools
-import math
 from pathlib import Path
 
-import awkward as ak
-
-# FastJet (for clustering)
-import fastjet as fj
-import matplotlib.pyplot as plt
+import math
 import numpy as np
-import pyhepmc
 from scipy import stats
+import awkward as ak
+import matplotlib.pyplot as plt
 
-# HepMC3 Python bindings
+import fastjet as fj
+import pyhepmc
 import pythia8mc
+
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
@@ -26,13 +24,14 @@ MZ = 91.1876
 GAMMA_Z = 2.4952
 
 # How many samples to generate to compare with benchmark
-N_JOBS = 10
+N_JOBS = 100
 N_EVENTS_PARALLEL = int(1e3) # must be in {1e4, 1e3, 1e2} by default
 N_EVENTS_SINGLE = int(1e2)  # must be in {1e4, 1e3, 1e2} by default
 
 # For test thresholds
 MAX_KS_MAP = {int(1e4): 5e-2, int(1e3): 1.5e-1, int(1e2): 3e-1}
 MIN_KS_P_MAP = {int(1e4): 5e-2, int(1e3): 5e-2, int(1e2): 1e-2}
+MAX_RED_CHI2_MAP = {int(1e4): 1e-2, int(1e3): 1e-1, int(1e2): 4e-1}
 
 PLOT_HISTS = True # Set to True to produce histograms during tests
 
@@ -392,6 +391,18 @@ def inspect_hepmc_HZZ4l(fpath_hepmc: str, args: dict) -> None: # Inspects HepMC3
 
     return evt_dict, counts, n_events
 
+def get_reduced_chi2(f_obs, f_exp) -> float:
+    chi2 = 0
+    dof = 0
+    for bin_obs, bin_exp in zip(f_obs, f_exp):
+        if bin_exp == 0:
+            continue
+        chi2 += (bin_obs - bin_exp) ** 2 / bin_exp
+        dof += 1
+
+    chi2_red = chi2 / dof 
+    return chi2_red, dof
+
 # Testing function #################################
 def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end: top-level configuration, parallelization, and merging of hepmc files.
     # Tests HepMC3Generator.__init__()
@@ -434,27 +445,56 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end: top-level confi
         full_draw(evt_dict_out, evt_dict_bench, fig_dir=f"src/parnassus/tests/figures/HZZ4l/{N_EVENTS_PARALLEL}/HepMC3Generator")
 
     # Check number of events generated
-    print(f"HepMC3Generator: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
+    print(f"\nHepMC3Generator: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
     assert(n_events_out == n_events_bench), "Mismatch in total event count > 1e-5 relative"
 
-    # Compare histograms with bin-independent KS test
-    # Kolmogorov-Smirnov statistic = maximum absolute distance between CDFs
-    # small KS means similar distributions
-    # Large p-value means high probability that samples are drawn from same distribution (i.e. the null hypothesis is not rejected)
-    # So we want small KS and large p-value
-    print("HepMC3Generator: Comparing histograms...")
+    # Compare histograms
+    bins_dict = {
+        "m_4l": {"bins": 60, "range_": (50, 200)},
+        "mZ1": {"bins": 60, "range_": (40, 120)},
+        "mZ2": {"bins": 60, "range_": (12, 120)},
+        "j1_pt": {"bins": 60, "range_": (0, 300)},
+        "j2_pt": {"bins": 60, "range_": (0, 200)},
+        "j1_eta": {"bins": 60, "range_": (-5, 5)},
+        "j2_eta": {"bins": 60, "range_": (-5, 5)},
+        "mjj": {"bins": 60, "range_": (0, 3000)},
+        "detajj": {"bins": 60, "range_": (0, 10)},
+        "phijj": {"bins": 60, "range_": (-math.pi, math.pi)},
+        "zeppenfeld_eta_star": {"bins": 60, "range_": (-5, 5)},
+        "l1_pt": {"bins": 60, "range_": (0, 150)},
+        "l2_pt": {"bins": 60, "range_": (0, 100)},
+        "l3_pt": {"bins": 60, "range_": (0, 60)},
+        "l4_pt": {"bins": 60, "range_": (0, 40)},
+        "l1_eta": {"bins": 60, "range_": (-5, 5)},
+        "l2_eta": {"bins": 60, "range_": (-5, 5)},
+        "l3_eta": {"bins": 60, "range_": (-5, 5)},
+        "l4_eta": {"bins": 60, "range_": (-5, 5)},
+        "min_DR_ll": {"bins": 60, "range_": (0, 5)},
+    }
+    print("\nHepMC3Generator: Comparing histograms...")
     for (k_out, v_out), (k_bench, v_bench) in zip(evt_dict_out.items(), evt_dict_bench.items()):
+        # Bin-independent KS test
+        # Kolmogorov-Smirnov statistic = maximum absolute distance between CDFs
+        # small KS means similar distributions
+        # Large p-value means high probability that samples are drawn from same distribution (i.e. the null hypothesis is not rejected)
+        # So we want small KS and large p-value
         ks_diff = stats.ks_2samp(v_out, v_bench)
         print(f"\n{k_out}: KS statistic = {ks_diff.statistic}, p-value = {ks_diff.pvalue}")
         assert(ks_diff.statistic < MAX_KS_MAP[N_EVENTS_PARALLEL]), f"KS statistic too large for {k_out}"
         assert(ks_diff.pvalue > MIN_KS_P_MAP[N_EVENTS_PARALLEL]), f"KS p-value too small for {k_out}"
 
-    # Testing that KS is indeed a useful metric by comparing two different variables
+        # Bin-dependent reduced Chi^2 test
+        bins_out = np.histogram(v_out, bins = bins_dict[k_out]["bins"], range=bins_dict[k_out]["range_"], density=True)[0]
+        bins_bench = np.histogram(v_bench, bins = bins_dict[k_out]["bins"], range=bins_dict[k_out]["range_"], density=True)[0]
+        reduced_chi2, dof = get_reduced_chi2(bins_out, bins_bench)
+        assert(reduced_chi2 < MAX_RED_CHI2_MAP[N_EVENTS_PARALLEL]), f"Reduced Chi^2 too large for {k_out}"
+        print(f"{k_out}: Reduced-Chi2 = {reduced_chi2}, dof = {dof}")
+
+    # Sanity check on KS: should be bad for very different distributions
     ks_test = stats.ks_2samp(evt_dict_out["m_4l"], evt_dict_bench["mZ1"])
     print(f"\nCross-variable KS test (m_4l vs mZ1): KS statistic = {ks_test.statistic}, p-value = {ks_test.pvalue}")
     assert(ks_test.statistic > 0.5), "Cross-variable KS statistic too small (should be very different distributions)"
     assert(ks_test.pvalue < 1e-5), "Cross-variable KS p-value too large (should be very different distributions)"
-
 
 
 
@@ -532,25 +572,53 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end: val
         full_draw(evt_dict_out, evt_dict_bench, fig_dir=f"src/parnassus/tests/figures/HZZ4l/{N_EVENTS_SINGLE}/Pythia8ToHepMC3")
 
     # Check number of events generated
-    print(f"Pythia8ToHepMC3: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
+    print(f"\nPythia8ToHepMC3: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
     assert(n_events_out == n_events_bench), "Mismatch in total event count"
 
-    # Compare histograms with bin-independent KS test
-    # Kolmogorov-Smirnov statistic = maximum absolute distance between CDFs
-    # small KS means similar distributions
-    # Large p-value means high probability that samples are drawn from same distribution (i.e. the null hypothesis is not rejected)
-    # So we want small KS and large p-value
-    print("Pythia8ToHepMC3: Comparing histograms...")
+    # Compare histograms
+    bins_dict = {
+        "m_4l": {"bins": 60, "range_": (50, 200)},
+        "mZ1": {"bins": 60, "range_": (40, 120)},
+        "mZ2": {"bins": 60, "range_": (12, 120)},
+        "j1_pt": {"bins": 60, "range_": (0, 300)},
+        "j2_pt": {"bins": 60, "range_": (0, 200)},
+        "j1_eta": {"bins": 60, "range_": (-5, 5)},
+        "j2_eta": {"bins": 60, "range_": (-5, 5)},
+        "mjj": {"bins": 60, "range_": (0, 3000)},
+        "detajj": {"bins": 60, "range_": (0, 10)},
+        "phijj": {"bins": 60, "range_": (-math.pi, math.pi)},
+        "zeppenfeld_eta_star": {"bins": 60, "range_": (-5, 5)},
+        "l1_pt": {"bins": 60, "range_": (0, 150)},
+        "l2_pt": {"bins": 60, "range_": (0, 100)},
+        "l3_pt": {"bins": 60, "range_": (0, 60)},
+        "l4_pt": {"bins": 60, "range_": (0, 40)},
+        "l1_eta": {"bins": 60, "range_": (-5, 5)},
+        "l2_eta": {"bins": 60, "range_": (-5, 5)},
+        "l3_eta": {"bins": 60, "range_": (-5, 5)},
+        "l4_eta": {"bins": 60, "range_": (-5, 5)},
+        "min_DR_ll": {"bins": 60, "range_": (0, 5)},
+    }
+    print("\nPythia8ToHepMC3: Comparing histograms...")
     for (k_out, v_out), (k_bench, v_bench) in zip(evt_dict_out.items(), evt_dict_bench.items()):
+        # Bin-independent KS test
+        # Kolmogorov-Smirnov statistic = maximum absolute distance between CDFs
+        # small KS means similar distributions
+        # Large p-value means high probability that samples are drawn from same distribution (i.e. the null hypothesis is not rejected)
+        # So we want small KS and large p-value
         ks_diff = stats.ks_2samp(v_out, v_bench)
         print(f"\n{k_out}: KS statistic = {ks_diff.statistic}, p-value = {ks_diff.pvalue}")
         assert(ks_diff.statistic < MAX_KS_MAP[N_EVENTS_SINGLE]), f"KS statistic too large for {k_out}"
         assert(ks_diff.pvalue > MIN_KS_P_MAP[N_EVENTS_SINGLE]), f"KS p-value too small for {k_out}"
 
-    # Testing that KS is indeed a useful metric by comparing two different variables
+        # Bin-dependent reduced Chi^2 test
+        bins_out = np.histogram(v_out, bins = bins_dict[k_out]["bins"], range=bins_dict[k_out]["range_"], density=True)[0]
+        bins_bench = np.histogram(v_bench, bins = bins_dict[k_out]["bins"], range=bins_dict[k_out]["range_"], density=True)[0]
+        reduced_chi2, dof = get_reduced_chi2(bins_out, bins_bench)
+        assert(reduced_chi2 < MAX_RED_CHI2_MAP[N_EVENTS_SINGLE]), f"Reduced Chi^2 too large for {k_out}"
+        print(f"{k_out}: Reduced-Chi2 = {reduced_chi2}, dof = {dof}")
+
+    # Sanity check on KS: should be bad for very different distributions
     ks_test = stats.ks_2samp(evt_dict_out["m_4l"], evt_dict_bench["mZ1"])
     print(f"\nCross-variable KS test (m_4l vs mZ1): KS statistic = {ks_test.statistic}, p-value = {ks_test.pvalue}")
     assert(ks_test.statistic > 0.5), "Cross-variable KS statistic too small (should be very different distributions)"
     assert(ks_test.pvalue < 1e-5), "Cross-variable KS p-value too large (should be very different distributions)"
-
-    
