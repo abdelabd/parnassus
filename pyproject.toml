@@ -130,4 +130,6 @@ dev = [
     "types-pyyaml>=6.0.12.20250402",
     "matplotlib",
     "tqdm",
+    "scipy",
+    "gdown",
 ]

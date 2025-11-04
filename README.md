@@ -38,6 +38,10 @@ To run the tests you can use the `pytest` or `coverage` command, for example
 pytest .
 ```
 
+To download the testbench data for the pythia pytest:
+```gdown --folder https://drive.google.com/drive/folders/1W-V_rU6lRmtuaOclj3gYB1qJSn4J11qM?usp=sharing -O src/parnassus/tests/benchmark_data/
+```
+
 ## Running the Package
 To init working directory, run the following command:
 

@@ -1,4 +1,3 @@
-import argparse
 import itertools
 import math
 from pathlib import Path
@@ -10,6 +9,7 @@ import fastjet as fj
 import matplotlib.pyplot as plt
 import numpy as np
 import pyhepmc
+from scipy import stats
 
 # HepMC3 Python bindings
 import pythia8mc
@@ -25,6 +25,16 @@ from parnassus.pythia import HepMC3Generator, Pythia8ToHepMC3
 MZ = 91.1876
 GAMMA_Z = 2.4952
 
+# How many samples to generate to compare with benchmark
+N_JOBS = 10
+N_EVENTS_PARALLEL = int(1e3) # must be in {1e4, 1e3, 1e2} by default
+N_EVENTS_SINGLE = int(1e3)  # must be in {1e4, 1e3, 1e2} by default
+
+# For test thresholds
+MAX_KS_MAP = {int(1e4): 5e-2, int(1e3): 1.5e-1, int(1e2): 3e-1}
+MIN_KS_P_MAP = {int(1e4): 5e-2, int(1e3): 5e-2, int(1e2): 1e-2}
+
+PLOT_HISTS = False # Set to True to produce histograms during tests
 
 def draw(
     event_dict: dict,
@@ -48,6 +58,29 @@ def draw(
     plt.savefig(Path(fig_dir) / f"{key}.png")
     plt.close()
 
+def full_draw(evt_dict: dict, fig_dir: str) -> None: # Draws all histograms from evt_dict into fig_dir.
+    Path(fig_dir).mkdir(exist_ok=True, parents=True)
+
+    # ---------- Plots ----------
+    # Core Higgs/ZZ
+    draw(evt_dict, "m_4l", bins=60, range_=(50, 200), xlabel="m(4ℓ) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "mZ1", bins=60, range_=(40, 120), xlabel="m(Z1) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "mZ2", bins=60, range_=(12, 120), xlabel="m(Z2) [GeV]", fig_dir=fig_dir)
+
+    # Jets / VBF
+    draw(evt_dict, "j1_pt", bins=60, range_=(0, 300), xlabel="pT(j1) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "j2_pt", bins=60, range_=(0, 200), xlabel="pT(j2) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "mjj", bins=60, range_=(0, 3000), xlabel="m(jj) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "detajj", bins=60, range_=(0, 10), xlabel="Δη(jj)", fig_dir=fig_dir)
+    draw(evt_dict, "phijj", bins=60, range_=(-math.pi, math.pi), xlabel="Δφ(jj)", fig_dir=fig_dir)
+    draw(evt_dict, "zeppenfeld_eta_star", bins=60, range_=(-5, 5), xlabel="η*(H)", fig_dir=fig_dir)
+
+    # Leptons
+    draw(evt_dict, "l1_pt", bins=60, range_=(0, 150), xlabel="pT(ℓ1) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "l2_pt", bins=60, range_=(0, 100), xlabel="pT(ℓ2) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "l3_pt", bins=60, range_=(0, 60), xlabel="pT(ℓ3) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "l4_pt", bins=60, range_=(0, 40), xlabel="pT(ℓ4) [GeV]", fig_dir=fig_dir)
+    draw(evt_dict, "min_DR_ll", bins=60, range_=(0, 5), xlabel="min ΔR(ℓ,ℓ)", fig_dir=fig_dir)
 
 # ---------- Kinematics ----------
 def pt(px: float, py: float) -> float:
@@ -201,7 +234,7 @@ def build_jet_inputs(
     return out
 
 
-def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
+def inspect_hepmc_HZZ4l(fpath_hepmc: str, args: dict) -> None: # Inspects HepMC3 file with H->ZZ->4l VBF-like events; produces histograms and summary statistics.
     plot_vars = [
         "m_4l",
         "mZ1",
@@ -224,14 +257,14 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
         "l4_eta",
         "min_DR_ll",
     ]
-    EVT_DICT = {k: np.full((args["max_events"],), np.nan) for k in plot_vars}
+    evt_dict = {k: np.full((args["max_events"],), np.nan) for k in plot_vars}
 
     cut_vars = ["fail_nlep>=4", "fail_njets>=2", "fail_pairing", "fail_mZ2_window"]
-    COUNTS = {k: np.zeros((args["max_events"],)) for k in cut_vars}
-    N_EVENTS = np.zeros((args["max_events"],))
+    counts = {k: np.zeros((args["max_events"],)) for k in cut_vars}
+    n_events = np.zeros((args["max_events"],))
 
     def process_event(event_idx: int, event: pyhepmc.GenEvent) -> None:
-        N_EVENTS[event_idx] = 1
+        n_events[event_idx] = 1
         final_parts = [p for p in event.particles if is_final(p)]
 
         # --- leptons (e, mu), baseline selection ---
@@ -248,7 +281,7 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
             leptons.append((p.pid, p4))
 
         if len(leptons) < 4:
-            COUNTS["fail_nlep>=4"][event_idx] = 1
+            counts["fail_nlep>=4"][event_idx] = 1
             return
 
         # sort leptons by pT
@@ -261,12 +294,12 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
         # Pairing
         pair = best_ossf_pairs_min_chi2(lep_p4s, lep_ids)
         if pair is None:
-            COUNTS["fail_pairing"][event_idx] = 1
+            counts["fail_pairing"][event_idx] = 1
             return
         _, _, mZ1, mZ2 = pair
         # Off-shell threshold (optional, classic 12 GeV)
         if mZ2 < args["min_mll2"]:
-            COUNTS["fail_mZ2_window"][event_idx] = 1
+            counts["fail_mZ2_window"][event_idx] = 1
             return
 
         # Higgs 4l
@@ -282,15 +315,15 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
             etamax=args["jet_eta"],
         )
         if len(jets) < 2:
-            COUNTS["fail_njets>=2"][event_idx] = 1
+            counts["fail_njets>=2"][event_idx] = 1
             # still fill purely leptonic histos
-            EVT_DICT["m_4l"][event_idx] = m_4l
-            EVT_DICT["mZ1"][event_idx] = mZ1
-            EVT_DICT["mZ2"][event_idx] = mZ2
+            evt_dict["m_4l"][event_idx] = m_4l
+            evt_dict["mZ1"][event_idx] = mZ1
+            evt_dict["mZ2"][event_idx] = mZ2
             for idx, p4 in enumerate(lep_p4s):
-                EVT_DICT[f"l{idx + 1}_pt"][event_idx] = pt(p4[0], p4[1])
-                EVT_DICT[f"l{idx + 1}_eta"][event_idx] = p4[4]
-            EVT_DICT["min_DR_ll"][event_idx] = min(
+                evt_dict[f"l{idx + 1}_pt"][event_idx] = pt(p4[0], p4[1])
+                evt_dict[f"l{idx + 1}_eta"][event_idx] = p4[4]
+            evt_dict["min_DR_ll"][event_idx] = min(
                 deltaR(lep_p4s[a], lep_p4s[b]) for a in range(4) for b in range(a + 1, 4)
             )
             return
@@ -304,21 +337,21 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
         zepp = etaH - 0.5 * (j1[4] + j2[4])
 
         # Fill histos
-        EVT_DICT["m_4l"][event_idx] = m_4l
-        EVT_DICT["mZ1"][event_idx] = mZ1
-        EVT_DICT["mZ2"][event_idx] = mZ2
-        EVT_DICT["j1_pt"][event_idx] = pt(j1[0], j1[1])
-        EVT_DICT["j2_pt"][event_idx] = pt(j2[0], j2[1])
-        EVT_DICT["j1_eta"][event_idx] = j1[4]
-        EVT_DICT["j2_eta"][event_idx] = j2[4]
-        EVT_DICT["mjj"][event_idx] = mjj
-        EVT_DICT["detajj"][event_idx] = detajj
-        EVT_DICT["phijj"][event_idx] = dphijj
-        EVT_DICT["zeppenfeld_eta_star"][event_idx] = zepp
+        evt_dict["m_4l"][event_idx] = m_4l
+        evt_dict["mZ1"][event_idx] = mZ1
+        evt_dict["mZ2"][event_idx] = mZ2
+        evt_dict["j1_pt"][event_idx] = pt(j1[0], j1[1])
+        evt_dict["j2_pt"][event_idx] = pt(j2[0], j2[1])
+        evt_dict["j1_eta"][event_idx] = j1[4]
+        evt_dict["j2_eta"][event_idx] = j2[4]
+        evt_dict["mjj"][event_idx] = mjj
+        evt_dict["detajj"][event_idx] = detajj
+        evt_dict["phijj"][event_idx] = dphijj
+        evt_dict["zeppenfeld_eta_star"][event_idx] = zepp
         for idx, p4 in enumerate(lep_p4s):
-            EVT_DICT[f"l{idx + 1}_pt"][event_idx] = pt(p4[0], p4[1])
-            EVT_DICT[f"l{idx + 1}_eta"][event_idx] = p4[4]
-        EVT_DICT["min_DR_ll"][event_idx] = min(
+            evt_dict[f"l{idx + 1}_pt"][event_idx] = pt(p4[0], p4[1])
+            evt_dict[f"l{idx + 1}_eta"][event_idx] = p4[4]
+        evt_dict["min_DR_ll"][event_idx] = min(
             deltaR(lep_p4s[a], lep_p4s[b]) for a in range(4) for b in range(a + 1, 4)
         )
 
@@ -336,63 +369,24 @@ def inspect_hepmc(fpath_hepmc: str, args: dict) -> None:
             )
 
     # Aggregate results
-    for k in EVT_DICT:
-        EVT_DICT[k] = EVT_DICT[k][~np.isnan(EVT_DICT[k])]  # trim to filled
-    for k, v in COUNTS.items():
-        COUNTS[k] = int(np.sum(v))
-    N_EVENTS = int(np.sum(N_EVENTS))
+    for k in evt_dict:
+        evt_dict[k] = evt_dict[k][~np.isnan(evt_dict[k])]  # trim to filled
+    for k, v in counts.items():
+        counts[k] = int(np.sum(v))
+    n_events = int(np.sum(n_events))
 
     # ---------- Summary ----------
-    print(f"Events total: {N_EVENTS}")
+    print(f"Events total: {n_events}")
     n_skipped = 0
-    for k, v in COUNTS.items():
+    for k, v in counts.items():
         print(f"{k}: {v}")
         n_skipped += v
-    print(f"\n\nEvents selected: {N_EVENTS - n_skipped}\n\n")
+    print(f"\n\nEvents selected: {n_events - n_skipped}\n\n")
 
-    fig_dir = "src/parnassus/tests/figures/HZZ4l"
-    Path(fig_dir).mkdir(exist_ok=True, parents=True)
-
-    # ---------- Plots ----------
-    # Core Higgs/ZZ
-    draw(EVT_DICT, "m_4l", bins=60, range_=(50, 200), xlabel="m(4ℓ) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "mZ1", bins=60, range_=(40, 120), xlabel="m(Z1) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "mZ2", bins=60, range_=(12, 120), xlabel="m(Z2) [GeV]", fig_dir=fig_dir)
-
-    # Jets / VBF
-    draw(EVT_DICT, "j1_pt", bins=60, range_=(0, 300), xlabel="pT(j1) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "j2_pt", bins=60, range_=(0, 200), xlabel="pT(j2) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "mjj", bins=60, range_=(0, 3000), xlabel="m(jj) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "detajj", bins=60, range_=(0, 10), xlabel="Δη(jj)", fig_dir=fig_dir)
-    draw(EVT_DICT, "phijj", bins=60, range_=(-math.pi, math.pi), xlabel="Δφ(jj)", fig_dir=fig_dir)
-    draw(EVT_DICT, "zeppenfeld_eta_star", bins=60, range_=(-5, 5), xlabel="η*(H)", fig_dir=fig_dir)
-
-    # Leptons
-    draw(EVT_DICT, "l1_pt", bins=60, range_=(0, 150), xlabel="pT(ℓ1) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "l2_pt", bins=60, range_=(0, 100), xlabel="pT(ℓ2) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "l3_pt", bins=60, range_=(0, 60), xlabel="pT(ℓ3) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "l4_pt", bins=60, range_=(0, 40), xlabel="pT(ℓ4) [GeV]", fig_dir=fig_dir)
-    draw(EVT_DICT, "min_DR_ll", bins=60, range_=(0, 5), xlabel="min ΔR(ℓ,ℓ)", fig_dir=fig_dir)
-
+    return evt_dict, counts, n_events
 
 # Testing function #################################
-def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="Inspect HepMC H->ZZ->4l VBF-like events")
-    ap.add_argument("--R", type=float, default=0.4, help="anti-kt jet radius")
-    ap.add_argument("--jet-pt", type=float, default=30.0, help="jet pT min [GeV]")
-    ap.add_argument("--jet-eta", type=float, default=4.5, help="|eta| max for jets")
-    ap.add_argument("--lep-pt", type=float, default=10.0, help="lepton pT min [GeV]")
-    ap.add_argument("--lep-eta", type=float, default=2.5, help="|eta| max for leptons")
-    ap.add_argument(
-        "--min-mll2", type=float, default=12.0, help="min mass for off-shell Z window [GeV]"
-    )
-    ap.add_argument("--max-events", type=int, default=100_000, help="max events to process")
-    ap.add_argument("--n-jobs", type=int, default=32, help="number of parallel jobs")
-    ap.add_argument("--debug", action="store_true", help="debug mode (only 1000 events)")
-    return ap.parse_args()
-
-
-def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
+def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end: top-level configuration, parallelization, and merging of hepmc files.
     # Tests HepMC3Generator.__init__()
         # ._is_hadronization_on()
     # Tests HepMC3Generator.generate()
@@ -402,6 +396,9 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
             # ._append_hepmc_file()
     # So that is all the methods of HepMC3Generator covered
 
+    fpath_benchmark = f"src/parnassus/tests/benchmark_data/HZZ4l/events_{N_EVENTS_PARALLEL}.hepmc"
+    assert Path(fpath_benchmark).exists(), f"""Benchmark file {fpath_benchmark} does not exist. N_EVENTS_PARALLEL must be a number for which benchmark data exists. 
+                                                    \nCheck src/parnassus/tests/benchmark_data/HZZ4l. You can generate your own benchmark data via tests/HZZ4l.cc OR download it from the Google Drive link: https://drive.google.com/drive/folders/1W-V_rU6lRmtuaOclj3gYB1qJSn4J11qM?usp=sharing"""
     args = {
         "R": 0.4,
         "jet_pt": 30.0,
@@ -409,14 +406,14 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
         "lep_pt": 10.0,
         "lep_eta": 2.5,
         "min_mll2": 12.0,
-        "max_events": 100,
-        "n_jobs": 5,
+        "max_events": N_EVENTS_PARALLEL,
+        "n_jobs": N_JOBS,
         "debug": False,
     }
     generator = HepMC3Generator(
         cmnd_file="src/parnassus/tests/HZZ4l.cmnd",
-        output_dir="src/parnassus/tests/data_out/HZZ4l",
-        log_dir="src/parnassus/tests/logs/HZZ4l",
+        output_dir="src/parnassus/tests/data_out/HZZ4l_generator",
+        log_dir="src/parnassus/tests/logs/HZZ4l_generator",
     )
     fpath_merged = generator.generate(
         n_events=args["max_events"], max_workers=args["n_jobs"], debug=args["debug"]
@@ -424,10 +421,40 @@ def test_hepmc3_generator(): # Tests HepMC3Generator end-to-end
     print(f"Wrote to file {fpath_merged}")
 
     print("Inspecting hepmc file and generating histograms")
-    inspect_hepmc(fpath_merged, args)
+    evt_dict_out, counts_out, n_events_out = inspect_hepmc_HZZ4l(fpath_merged, args)
+    if PLOT_HISTS:
+        full_draw(evt_dict_out, fig_dir=f"src/parnassus/tests/figures/HZZ4l/hepmc3_generator_{N_EVENTS_PARALLEL}.png")
+
+    evt_dict_bench, counts_bench, n_events_bench = inspect_hepmc_HZZ4l(fpath_benchmark, args)
+    if PLOT_HISTS:
+        full_draw(evt_dict_bench, fig_dir=f"src/parnassus/tests/figures/HZZ4l/benchmark_{N_EVENTS_PARALLEL}")
+
+    # Check number of events generated
+    print(f"HepMC3Generator: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
+    assert(n_events_out == n_events_bench), "Mismatch in total event count > 1e-5 relative"
+
+    # Compare histograms with bin-independent KS test
+    # Kolmogorov-Smirnov statistic = maximum absolute distance between CDFs
+    # small KS means similar distributions
+    # Large p-value means high probability that samples are drawn from same distribution (i.e. the null hypothesis is not rejected)
+    # So we want small KS and large p-value
+    print("HepMC3Generator: Comparing histograms...")
+    for (k_out, v_out), (k_bench, v_bench) in zip(evt_dict_out.items(), evt_dict_bench.items()):
+        ks_diff = stats.ks_2samp(v_out, v_bench)
+        print(f"\n{k_out}: KS statistic = {ks_diff.statistic}, p-value = {ks_diff.pvalue}")
+        assert(ks_diff.statistic < MAX_KS_MAP[N_EVENTS_PARALLEL]), f"KS statistic too large for {k_out}"
+        assert(ks_diff.pvalue > MIN_KS_P_MAP[N_EVENTS_PARALLEL]), f"KS p-value too small for {k_out}"
+
+    # Testing that KS is indeed a useful metric by comparing two different variables
+    ks_test = stats.ks_2samp(evt_dict_out["m_4l"], evt_dict_bench["mZ1"])
+    print(f"\nCross-variable KS test (m_4l vs mZ1): KS statistic = {ks_test.statistic}, p-value = {ks_test.pvalue}")
+    assert(ks_test.statistic > 0.5), "Cross-variable KS statistic too small (should be very different distributions)"
+    assert(ks_test.pvalue < 1e-5), "Cross-variable KS p-value too large (should be very different distributions)"
 
 
-def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
+
+
+def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end: validates data output against benchmark hepmc files generated with C++ Pythia8 package; see HZZ4l.cc and HZZ4l.cmnd
     # Tests Pythia8ToHepMC3.__init__()
     # Tests Pythia8ToHepMC3.fill_next_event()
         # ._get_particles()
@@ -438,12 +465,18 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
         # ._store_event_info()
     # This leaves Pythia8ToHepMC3._add_color(), which is currently broken due to HepMC3 Python bindings limitations
 
+    fpath_benchmark = f"src/parnassus/tests/benchmark_data/HZZ4l/events_{N_EVENTS_SINGLE}.hepmc"
+    assert Path(fpath_benchmark).exists(), f"""Benchmark file {fpath_benchmark} does not exist. N_EVENTS_PARALLEL must be a number for which benchmark data exists. 
+                                                    \nCheck src/parnassus/tests/benchmark_data/HZZ4l. You can generate your own benchmark data via tests/HZZ4l.cc, or download it from the Google Drive link: https://drive.google.com/drive/folders/1W-V_rU6lRmtuaOclj3gYB1qJSn4J11qM?usp=sharing"""
+    
+    ############# Generate events with our interface #############
     pythia = pythia8mc.Pythia()
 
+    # Random seed
     pythia.readString("Random:setSeed = on")
     pythia.readString("Random:seed = 42")
 
-    # Read settings from .cmnd file
+    # Command file for rest of config
     pythia.readFile("src/parnassus/tests/HZZ4l.cmnd")
 
     if not pythia.init():
@@ -453,11 +486,15 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
     converter = Pythia8ToHepMC3(
         m_hadronization_on=True
     )  # This enables detect_cycles and visit_children
-    writer = pyhepmc.io.WriterAscii("src/parnassus/tests/data_out/HZZ4l/test_cycles.hepmc")
-
+    Path("src/parnassus/tests/data_out/HZZ4l_single").mkdir(
+        exist_ok=True, parents=True
+    )
+    fpath_out = f"src/parnassus/tests/data_out/HZZ4l_single/events_{N_EVENTS_SINGLE}.hepmc"
+    
+    writer = pyhepmc.io.WriterAscii(fpath_out)
     n_written = 0
     idx_event = 0
-    while n_written < 20: 
+    while n_written < N_EVENTS_SINGLE:
         if not pythia.next():
             continue  # event failed, try again
 
@@ -466,8 +503,50 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end
         n_written += 1
         idx_event += 1
 
-        if n_written % 5 == 0:
-            print(f"HepMC3Generator: Generated {n_written} events...")
+        if n_written % 100 == 0:
+            print(f"Pythia8ToHepMC3: Generated {n_written} events...")
 
     pythia.stat()
     writer.close()
+
+    ############# Compare against C++ benchmark #############
+    args = {
+        "R": 0.4,
+        "jet_pt": 30.0,
+        "jet_eta": 4.5,
+        "lep_pt": 10.0,
+        "lep_eta": 2.5,
+        "min_mll2": 12.0,
+        "max_events": N_EVENTS_SINGLE,
+        "n_jobs": N_JOBS,
+        "debug": False,
+    }
+    evt_dict_out, counts_out, n_events_out = inspect_hepmc_HZZ4l(fpath_out, args)
+
+    evt_dict_bench, counts_bench, n_events_bench = inspect_hepmc_HZZ4l(fpath_benchmark, args)
+    if PLOT_HISTS:
+        full_draw(evt_dict_out, fig_dir=f"src/parnassus/tests/figures/HZZ4l/pythia8_to_hepmc3_{N_EVENTS_SINGLE}")
+
+    # Check number of events generated
+    print(f"Pythia8ToHepMC3: n_events_out: {n_events_out}, n_events_bench: {n_events_bench}")
+    assert(n_events_out == n_events_bench), "Mismatch in total event count"
+
+    # Compare histograms with bin-independent KS test
+    # Kolmogorov-Smirnov statistic = maximum absolute distance between CDFs
+    # small KS means similar distributions
+    # Large p-value means high probability that samples are drawn from same distribution (i.e. the null hypothesis is not rejected)
+    # So we want small KS and large p-value
+    print("Pythia8ToHepMC3: Comparing histograms...")
+    for (k_out, v_out), (k_bench, v_bench) in zip(evt_dict_out.items(), evt_dict_bench.items()):
+        ks_diff = stats.ks_2samp(v_out, v_bench)
+        print(f"\n{k_out}: KS statistic = {ks_diff.statistic}, p-value = {ks_diff.pvalue}")
+        assert(ks_diff.statistic < MAX_KS_MAP[N_EVENTS_SINGLE]), f"KS statistic too large for {k_out}"
+        assert(ks_diff.pvalue > MIN_KS_P_MAP[N_EVENTS_SINGLE]), f"KS p-value too small for {k_out}"
+
+    # Testing that KS is indeed a useful metric by comparing two different variables
+    ks_test = stats.ks_2samp(evt_dict_out["m_4l"], evt_dict_bench["mZ1"])
+    print(f"\nCross-variable KS test (m_4l vs mZ1): KS statistic = {ks_test.statistic}, p-value = {ks_test.pvalue}")
+    assert(ks_test.statistic > 0.5), "Cross-variable KS statistic too small (should be very different distributions)"
+    assert(ks_test.pvalue < 1e-5), "Cross-variable KS p-value too large (should be very different distributions)"
+
+    
