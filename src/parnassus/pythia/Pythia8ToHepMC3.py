@@ -89,11 +89,6 @@ class Pythia8ToHepMC3:
     def fill_next_event(self, pythia: pythia8mc.Pythia, evt_num: int) -> pyhepmc.GenEvent:
         # 1. Initalize HepMC event #################
 
-        # Error if no event passed
-        if not pythia.next():
-            LOG.warning(f"Pythia8ToHepMC3: Skipping event {evt_num}; no Pythia event generated")
-            return None
-
         hepmc_event = pyhepmc.GenEvent()
         hepmc_event.event_number = evt_num
         hepmc_event.set_units(pyhepmc.Units.GEV, pyhepmc.Units.MM)
@@ -117,12 +112,12 @@ class Pythia8ToHepMC3:
         # i.e. are without mothers or daughters. These need to be attached
         # to a vertex, or else they will never become part of the event.
 
-        # TODO: Below causes error; too few vertices when reading from hepmc file
         for i in range(pythia.event.size()):
             if not hepevt_particles[i].in_event:
                 LOG.warning(
                     f"Pythia8ToHepMC3: Found detached particle; status = {hepevt_particles[i].status}, pid = {hepevt_particles[i].pid}"
                 )
+                # TODO: Below causes error; too few vertices when reading from hepmc file
                 # prod_vtx = pyhepmc.GenVertex()
                 # prod_vtx.add_particle_out(hepevt_particles[i])
                 # hepmc_event.add_vertex(prod_vtx)
@@ -247,7 +242,7 @@ class Pythia8ToHepMC3:
         hepmc_evt: pyhepmc.GenEvent,
         beam_particles: list[pyhepmc.GenParticle],
     ):
-        
+
         all_vertices_sorted = self._topological_sort_vertices(beam_particles)
         for v in all_vertices_sorted:
             hepmc_evt.add_vertex(v)
