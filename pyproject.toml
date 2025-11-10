@@ -19,7 +19,7 @@ dependencies = [
     "uproot>=5.5.2, <5.6.7",
     "pyyaml",
     "joblib",
-    "pythia8mc"
+    "pythia8mc==8.316.0"
 ]
 
 [project.scripts]

@@ -391,7 +391,7 @@ class Pythia8ToHepMC3:
             xsec.set_cross_section(pyinfo.sigmaGen() * 1e9, pyinfo.sigmaErr() * 1e9)
             hepmc_event.cross_section = xsec
 
-        # Event weights
+        # Event weights # TODO: This doesn't save to file!
         if self.m_store_weights:
             hepmc_event.weights.clear()
             for i in range(pyinfo.nWeights()):

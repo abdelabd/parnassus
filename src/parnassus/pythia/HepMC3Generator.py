@@ -28,6 +28,9 @@ class HepMC3Generator:
         tic = time.time()
 
         n_events_per_job = n_events // max_workers
+        n_remainder = n_events % max_workers
+        # Create list of event counts: first n_remainder workers get +1 event
+        n_events_list = [n_events_per_job + (1 if i < n_remainder else 0) for i in range(max_workers)]
         seeds = list(range(1, max_workers + 1))
         fpaths_output = [Path(self.output_dir) / f"events_part_{i}.hepmc" for i in seeds]
         fpaths_log = [Path(self.log_dir) / f"job_{i}.log" for i in seeds]
@@ -52,7 +55,7 @@ class HepMC3Generator:
             Parallel(n_jobs=max_workers, backend="multiprocessing", verbose=100)(
                 delayed(self._gen_hepmc_single_job)(
                     cmnd_file=self.cmnd_file,
-                    n_events=n_events_per_job,
+                    n_events=n_events_list[i],
                     seed=seeds[i],
                     fpath_output=fpaths_output[i],
                     fpath_log=fpaths_log[i],
