@@ -6,7 +6,7 @@ from typing import Any, Self
 import yaml
 
 from .data import DatasetConfig
-from .model import MODELS_DICT, ModelConfig
+from .model import MODELS_DICT, GenerativeModelConfig
 from .pipeline import GenPipelineConfig, get_pipeline_config
 from .writer import WriterConfig
 
@@ -25,7 +25,7 @@ class Config:
     dataset_config: DatasetConfig
 
     # Generation properties
-    model: ModelConfig = field(init=False)
+    model: GenerativeModelConfig = field(init=False)
     model_name: str = DEFAULT_MODEL
     num_steps: int = 40
     batch_size: int = 2000
@@ -38,12 +38,19 @@ class Config:
 
         self.model = MODELS_DICT[self.model_name]
 
+        self.dataset_config.truth_vars_to_load = self.model.truth_vars_to_load
+        self.dataset_config.ctxt_vars = self.model.event_model_config.variables_config.ctxt_vars
+        self.dataset_config.ctxt_global_vars = (
+            self.model.event_model_config.variables_config.ctxt_global_vars
+        )
+
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> Self:
         output_config_dict = config_dict["output"]
         pipeline_config_dict = config_dict["pipelines"]
         dataset_config_dict = config_dict["dataset"]
         model_config_dict = config_dict["model"]
+
         return cls(
             pipeline_configs=list(starmap(get_pipeline_config, pipeline_config_dict.items())),
             dataset_config=DatasetConfig.from_dict(dataset_config_dict),

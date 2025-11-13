@@ -11,9 +11,10 @@ from torch.utils.data import Dataset
 from parnassus.configs.data import DatasetConfig
 from parnassus.utils.logger import ProgressBar
 from parnassus.utils.transform import VarTransform
+from parnassus.utils.typing import FloatArray, VarNameTuple
 
 if TYPE_CHECKING:
-    from parnassus.utils.typing import BoolArray, FloatArray, IntArray, LongArray
+    from parnassus.utils.typing import BoolArray, IntArray, LongArray
 
 
 def do_padding(tensor: Tensor, max_len: int):
@@ -31,19 +32,52 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
 
         self.var_transform_dict: dict[str, VarTransform] = var_transform_dict
 
-        self.truth_variables: list[str] = []
-        self.full_data_array: dict[str, FloatArray] = {}
+        self.truth_vars_to_load: VarNameTuple = cfg.truth_vars_to_load
+        self.ctxt_vars: list[str] = [var.replace("truth_", "") for var in cfg.ctxt_vars]
+        self.ctxt_global_vars: list[str] = [
+            var.replace("truth_", "") for var in cfg.ctxt_global_vars
+        ]
 
-        self.entry_start: int
-        self.entry_stop: int
+        self.full_data_array: dict[str, FloatArray] = {}
 
         self.n_particle_mask: BoolArray
         self.n_truth_particles: IntArray
         self.truth_cumsum: LongArray
+        self.eventNumber: LongArray
 
         if not Path(self.cfg.file_path).exists():
             raise FileNotFoundError(f"Trying to load file {self.cfg.file_path}, no file exist!")
         self.load_data()
+        self._validate_required_attributes()
+        self._preprocess_data()
+
+        self.n_events = len(self.n_truth_particles)
+        self.scaled_ctxt_global_data: Tensor = self._prepare_ctxt_global_data()
+
+    def _validate_required_attributes(self) -> None:
+        """Validate that all required attributes are set by load_data().
+
+        Raises
+        ------
+        AttributeError
+            If any required attribute is not set or is None.
+        """
+        required_attrs = {
+            "n_truth_particles": "IntArray",
+            "truth_cumsum": "LongArray",
+            "eventNumber": "IntArray",
+        }
+
+        for attr_name, expected_type in required_attrs.items():
+            if not hasattr(self, attr_name):
+                raise AttributeError(
+                    f"'{attr_name}' not set in load_data(). Expected type: {expected_type}"
+                )
+            attr_value = getattr(self, attr_name)
+            if attr_value is None:
+                raise AttributeError(
+                    f"'{attr_name}' is None after load_data(). Expected type: {expected_type}"
+                )
 
     def _preprocess_data(self, mask_events: bool = True):
         with ProgressBar() as progress:
@@ -63,80 +97,104 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
                 self.full_data_array[var] = value
                 progress.update(task, advance=1)
 
-    def _get_truth_data(
-        self, idx: int
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, torch.Tensor]]:
-        """Returns the truth particle data for the given index.
+    def _calculate_means(self) -> FloatArray:
+        n_vars = len([el for el in self.ctxt_vars if "class" not in el])
+        means = np.zeros((self.n_events, n_vars), dtype=np.float32)
+        with ProgressBar() as progress:
+            task = progress.add_task("[green]Calculating means", total=len(self.ctxt_vars))
+            for i, var in enumerate(self.ctxt_vars):
+                if "class" not in var:
+                    means[:, i] = (
+                        np.add.reduceat(
+                            self.full_data_array[var],
+                            self.truth_cumsum[:-1],
+                        )
+                        / self.n_truth_particles
+                    )
+                progress.update(task, advance=1)
+        return means
+
+    def _prepare_ctxt_global_data(self) -> Tensor:
+        scaled_ctxt_global_data_list: list[Tensor] = []
+        means = self._calculate_means()
+        for var in self.ctxt_global_vars:
+            if var == "means":
+                scaled_ctxt_global_data_list.append(torch.tensor(means, dtype=torch.float32))
+            elif var.startswith("ntruth"):
+                var_transform = self.var_transform_dict["npart"]
+                scaled_ctxt_global_data_list.append(
+                    var_transform.transform(
+                        torch.tensor(
+                            self.n_truth_particles,
+                            dtype=torch.float32,
+                        ).view(-1, 1)
+                    )
+                )
+            else:
+                var_transform = self.var_transform_dict[var]
+                scaled_ctxt_global_data_list.append(
+                    var_transform.transform(
+                        torch.tensor(
+                            self.full_data_array[var],
+                            dtype=torch.float32,
+                        ).view(-1, 1)
+                    )
+                )
+        return torch.cat(scaled_ctxt_global_data_list, dim=-1)
+
+    def _get_data(self, idx: int) -> tuple[Tensor, Tensor, Tensor]:
+        """Returns the context data for the given index.
 
         Args:
             idx (int): index of the event
 
         Returns
         -------
-            truth_data (dict): dictionary containing the truth data
-            truth_mask (torch.Tensor): mask for the truth data
-            global_data (torch.Tensor): tensor containing the global data
-                                        (shift and scale from the truth data)
+        ctxt_data (torch.Tensor): context data for the event
+        ctxt_global_data (torch.Tensor): global context data for the event
+        mask (torch.Tensor): mask for the event
         """
         n_truth_particles = self.n_truth_particles[idx]
         truth_start, truth_end = self.truth_cumsum[idx], self.truth_cumsum[idx + 1]
 
-        truth_vars = {
-            key: torch.tensor(self.full_data_array[key][truth_start:truth_end])
-            for key in self.truth_variables
-        }
+        truth_idx = np.argsort(self.full_data_array["ptrel"][truth_start:truth_end], axis=0)
 
-        truth_data: dict[str, torch.Tensor] = {}
-        global_data: dict[str, torch.Tensor] = {}
-
-        truth_idx = torch.argsort(truth_vars["ptrel"], descending=True)
-
-        for var_name in self.truth_variables:
-            var_data = truth_vars[var_name][truth_idx]
-            if var_name == "class":
-                truth_data[var_name] = F.one_hot(var_data.long(), 5).float()
-                continue
-            var_transform = self.var_transform_dict[var_name]
-            shift, scale = var_transform.calculate(var_data)
-            global_data[var_name + "_shift"] = shift
-            global_data[var_name + "_scale"] = scale
-            truth_data[var_name] = (
-                var_transform.transform(truth_vars[var_name][truth_idx]).float().unsqueeze(-1)
+        ctxt_data_list = []
+        for var in self.ctxt_vars:
+            x = torch.tensor(self.full_data_array[var][truth_start:truth_end][truth_idx]).view(
+                -1, 1
             )
+            if var == "phi":
+                ctxt_data_list.extend([
+                    torch.sin(x).float(),
+                    torch.cos(x).float(),
+                ])
+            elif var == "class":
+                ctxt_data_list.append(F.one_hot(x.long().squeeze(-1), num_classes=5).float())
+            else:
+                var_transform = self.var_transform_dict[var]
+                ctxt_data_list.append(var_transform.transform(x).float())
 
-        truth_mask = torch.zeros(self.cfg.max_particles)
-        truth_mask[:n_truth_particles] = 1
+        ctxt_data = torch.cat(ctxt_data_list, dim=-1)
+        ctxt_data = do_padding(ctxt_data, self.cfg.max_particles)
+        ctxt_global_data = self.scaled_ctxt_global_data[idx]
+        mask = torch.zeros((self.cfg.max_particles,), dtype=torch.bool)
+        mask[:n_truth_particles] = 1
 
-        return truth_data, truth_mask, global_data
+        return ctxt_data, ctxt_global_data, mask
 
     def __len__(self):
         return len(self.n_truth_particles)
 
-    def __getitem__(self, idx: Any) -> dict[str, torch.Tensor]:  # pyright: ignore[reportImplicitOverride]
-        n_truth_particles = self.n_truth_particles[idx]
-        truth_data_dict, truth_mask, event_data_dict = self._get_truth_data(idx)
-        truth_data = torch.cat([truth_data_dict[key] for key in self.truth_variables], -1)
-        truth_data = do_padding(truth_data, max_len=self.cfg.max_particles)
-
-        event_data = torch.cat([
-            torch.stack(list(event_data_dict.values()), -1).to(torch.float32),
-            self.var_transform_dict["met_x"].transform(
-                torch.tensor(self.full_data_array["met_x"][idx], dtype=torch.float32).unsqueeze(-1)
-            ),
-            self.var_transform_dict["met_y"].transform(
-                torch.tensor(self.full_data_array["met_y"][idx], dtype=torch.float32).unsqueeze(-1)
-            ),
-            self.var_transform_dict["npart"]
-            .transform(torch.tensor(n_truth_particles, dtype=torch.float32).unsqueeze(-1))
-            .float(),
-            self.var_transform_dict["ht"]
-            .transform(
-                torch.tensor(self.full_data_array["ht"][idx], dtype=torch.float32).unsqueeze(-1)
-            )
-            .float(),
-        ])
-
-        return {"truth_data": truth_data, "truth_mask": truth_mask, "event_data": event_data}
+    def __getitem__(self, idx: Any) -> dict[str, Tensor]:  # pyright: ignore[reportImplicitOverride]
+        ctxt_data, ctxt_global_data, mask = self._get_data(idx)
+        event_number = torch.tensor(self.eventNumber[idx], dtype=torch.long).unsqueeze(-1)
+        return {
+            "ctxt_data": ctxt_data,
+            "ctxt_global_data": ctxt_global_data,
+            "mask": mask,
+            "event_number": event_number,
+        }
 
     @abstractmethod
     def load_data(self):

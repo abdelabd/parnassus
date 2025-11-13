@@ -1,0 +1,138 @@
+ptrel:
+  min: 0.000
+  max: 0.796
+  mean: 0.006
+  std: 0.015
+
+ht:
+  min: 34.629
+  max: 3301.761
+  mean: 780.979
+  std: 394.733
+
+eta:
+  min: -2.700
+  max: 2.700
+  mean: -0.000
+  std: 1.290
+
+phi:
+  min: -3.142
+  max: 3.142
+  mean: 0.002
+  std: 1.814
+
+vx:
+  min: -198.488
+  max: 292.861
+  mean: 0.206
+  std: 0.691
+
+vy:
+  min: -179.167
+  max: 168.160
+  mean: 0.331
+  std: 0.702
+
+vz:
+  min: -253.811
+  max: 808.448
+  mean: 0.340
+  std: 5.730
+
+npart:
+  min: 0
+  max: 400
+  mean: 165
+  std: 57.85
+
+met_x:
+  min: -1e3
+  max: 1e3
+  mean: -0.21
+  std: 37.258
+
+met_y:
+  min: -1e3
+  max: 1e3
+  mean: 0.075
+  std: 36.852
+
+class_0:
+  min: 4.000
+  max: 287.000
+  mean: 94.068
+  std: 32.106
+
+class_1:
+  min: 0.000
+  max: 11.000
+  mean: 0.759
+  std: 1.005
+
+class_2:
+  min: 0.000
+  max: 7.000
+  mean: 0.457
+  std: 0.724
+
+class_3:
+  min: 0.000
+  max: 79.000
+  mean: 20.911
+  std: 8.168
+
+class_4:
+  min: 0.000
+  max: 188.000
+  mean: 49.124
+  std: 25.896
+
+pv_x:
+  min: 0
+  max: 1
+  mean: 0.24399
+  std: 0.002
+
+pv_y:
+  min: 0
+  max: 1
+  mean: 0.392893
+  std: 0.002
+
+pv_z:
+  min: 0
+  max: 1
+  mean: 0.41011
+  std: 5.7921853
+
+d0:
+  mean: 0
+  std: 1
+  min: -54.882
+  max: 58.463
+  fn: atan
+  fn_scale: 0.05
+
+d0Error:
+  mean: 0
+  std: 1
+  min: 0.000
+  max: 33.009
+  fn: log1p
+
+z0:
+  mean: 0
+  std: 1
+  min: -304.082
+  max: 292.045
+  fn: atan
+  fn_scale: 0.02
+
+z0Error:
+  mean: 0
+  std: 1
+  min: 0.001
+  max: 49.526
+  fn: log
+  fn_shift: 0.001

@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
+from parnassus.utils.typing import VarNameTuple
+
 
 @dataclass(kw_only=True)
 class DatasetConfig:
@@ -14,11 +16,11 @@ class DatasetConfig:
     batch_size: int | None = None
 
     # Data preprocessing configs
-    truth_variables: list[str] = field(
-        default_factory=lambda: ["pt", "eta", "phi", "vx", "vy", "vz", "class"]
-    )
     max_particles: int = 400
-    zero_neutral_vtx: bool = True
+
+    truth_vars_to_load: VarNameTuple = field(init=False)
+    ctxt_vars: VarNameTuple = field(init=False)
+    ctxt_global_vars: VarNameTuple = field(init=False)
 
     def __post_init__(self):
         if isinstance(self.file_path, str):
