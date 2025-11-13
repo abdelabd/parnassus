@@ -160,7 +160,8 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
         n_truth_particles = self.n_truth_particles[idx]
         truth_start, truth_end = self.truth_cumsum[idx], self.truth_cumsum[idx + 1]
 
-        truth_idx = np.argsort(self.full_data_array["ptrel"][truth_start:truth_end], axis=0)
+        # Sort truth particles by descending ptrel
+        truth_idx = np.argsort(self.full_data_array["ptrel"][truth_start:truth_end], axis=0)[::-1]
 
         ctxt_data_list = []
         for var in self.ctxt_vars:
