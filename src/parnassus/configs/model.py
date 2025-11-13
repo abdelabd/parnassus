@@ -70,6 +70,19 @@ class GenerativeModelConfig:
         default=None, init=False, repr=False, compare=False
     )
 
+    def __post_init__(self):
+        """Post-initialization checks.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the transform config file does not exist at the specified path.
+        """
+        if not self.transform_config_path.exists():
+            raise FileNotFoundError(
+                f"Transform config file not found: {self.transform_config_path}"
+            )
+
     @property
     def transform_registry(self) -> TransformRegistry:
         """Lazy-loaded registry of variable transformations.
