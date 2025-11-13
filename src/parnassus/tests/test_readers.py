@@ -4,7 +4,12 @@ import pytest
 from parnassus.configs.data import DatasetConfig
 from parnassus.data import HepMCDataset, RootDataset
 from parnassus.data.base import BaseDataset
-from parnassus.utils.mock import get_mock_hepmc_file, get_mock_root_file, get_mock_transforms
+from parnassus.utils.mock import (
+    get_mock_hepmc_file,
+    get_mock_root_file,
+    get_mock_transforms,
+    get_mock_variable_requirements,
+)
 
 
 @pytest.fixture
@@ -20,57 +25,86 @@ def root_fname():
 def test_reader_no_file():
     fname = "no_file_test.root"
     var_transform_dict = get_mock_transforms()
+    var_reqs = get_mock_variable_requirements()
     with pytest.raises(FileNotFoundError):
-        _ = BaseDataset(DatasetConfig(file_path=fname), var_transform_dict=var_transform_dict)
+        _ = BaseDataset(
+            DatasetConfig(file_path=fname, variable_requirements=var_reqs, max_particles=400),
+            var_transform_dict=var_transform_dict,
+        )
 
 
 def test_reader_config_no_batch_size(root_fname: str):
+    var_reqs = get_mock_variable_requirements()
     with pytest.raises(ValueError, match="Asked for batch_loading, but batch_size is not provided"):
-        _ = DatasetConfig(file_path=root_fname, batch_loading=True)
+        _ = DatasetConfig(
+            file_path=root_fname,
+            variable_requirements=var_reqs,
+            max_particles=400,
+            batch_loading=True,
+        )
 
 
 def test_root_reader_load_data(root_fname: str):
     var_transform_dict = get_mock_transforms()
-    cfg = DatasetConfig(file_path=root_fname, num_events=500)
+    var_reqs = get_mock_variable_requirements()
+    cfg = DatasetConfig(
+        file_path=root_fname, variable_requirements=var_reqs, max_particles=400, num_events=500
+    )
     _ = RootDataset(cfg, var_transform_dict=var_transform_dict)
 
 
 def test_root_reader_get_data(root_fname: str):
     var_transform_dict = get_mock_transforms()
-    cfg = DatasetConfig(file_path=root_fname, num_events=500)
+    var_reqs = get_mock_variable_requirements()
+    cfg = DatasetConfig(
+        file_path=root_fname, variable_requirements=var_reqs, max_particles=400, num_events=500
+    )
     reader = RootDataset(cfg, var_transform_dict=var_transform_dict)
     output = reader[0]
 
-    assert "truth_data" in output
-    assert "truth_mask" in output
-    assert "event_data" in output
+    assert "ctxt_data" in output
+    assert "ctxt_global_data" in output
+    assert "mask" in output
+    assert "event_number" in output
 
 
 def test_hepmc_reader_load_data(hepmc_fname: str):
     var_transform_dict = get_mock_transforms()
-    cfg = DatasetConfig(file_path=hepmc_fname, num_events=500)
+    var_reqs = get_mock_variable_requirements()
+    cfg = DatasetConfig(
+        file_path=hepmc_fname, variable_requirements=var_reqs, max_particles=400, num_events=500
+    )
     _ = HepMCDataset(cfg, var_transform_dict=var_transform_dict)
 
 
 def test_hepmc_reader_get_data(hepmc_fname: str):
     var_transform_dict = get_mock_transforms()
-    cfg = DatasetConfig(file_path=hepmc_fname, num_events=500)
+    var_reqs = get_mock_variable_requirements()
+    cfg = DatasetConfig(
+        file_path=hepmc_fname, variable_requirements=var_reqs, max_particles=400, num_events=500
+    )
     reader = HepMCDataset(cfg, var_transform_dict=var_transform_dict)
     output = reader[0]
 
-    assert "truth_data" in output
-    assert "truth_mask" in output
-    assert "event_data" in output
+    assert "ctxt_data" in output
+    assert "ctxt_global_data" in output
+    assert "mask" in output
+    assert "event_number" in output
 
 
 def test_hepmc_root_readers_equivalence(root_fname: str, hepmc_fname: str):
     rng = np.random.default_rng(42)
     var_transform_dict = get_mock_transforms()
+    var_reqs = get_mock_variable_requirements()
 
-    hepmc_cfg = DatasetConfig(file_path=hepmc_fname, num_events=500)
+    hepmc_cfg = DatasetConfig(
+        file_path=hepmc_fname, variable_requirements=var_reqs, max_particles=400, num_events=500
+    )
     hepmc_reader = HepMCDataset(hepmc_cfg, var_transform_dict=var_transform_dict)
 
-    root_cfg = DatasetConfig(file_path=root_fname, num_events=500)
+    root_cfg = DatasetConfig(
+        file_path=root_fname, variable_requirements=var_reqs, max_particles=400, num_events=500
+    )
     root_reader = RootDataset(root_cfg, var_transform_dict=var_transform_dict)
 
     for key in ["ht", "met_x", "met_y"]:

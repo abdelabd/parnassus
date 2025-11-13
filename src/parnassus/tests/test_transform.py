@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from parnassus.utils.transform import VarTransformConfig
+from parnassus.utils.transform import TRANSFORM_FUNCTIONS, TRANSFORM_TYPES, VarTransformConfig
 
 
 def get_default_params() -> dict[str, str | bool | float | None]:
@@ -24,7 +24,7 @@ def test_var_transform_confg_fn():
         ValueError,
         match=re.escape(
             f"Expected transform_fn for var {params['name']} "
-            f"be in [None, 'log', 'log1p'], got {params['transform_fn']}"
+            f"be in {TRANSFORM_FUNCTIONS}, got {params['transform_fn']}"
         ),
     ):
         _ = VarTransformConfig(**params)  # pyright: ignore[reportArgumentType]
@@ -37,7 +37,7 @@ def test_var_transform_wrong_type():
         ValueError,
         match=re.escape(
             f"Expected transform_type for var {params['name']} "
-            f"be in ['std', 'minmax'], got {params['transform_type']}"
+            f"be in {TRANSFORM_TYPES}, got {params['transform_type']}"
         ),
     ):
         _ = VarTransformConfig(**params)  # pyright: ignore[reportArgumentType]
@@ -59,12 +59,12 @@ def test_var_transform_std_type():
 
 def test_var_transform_minmax_type():
     params = get_default_params()
-    params["transform_type"] = "minmax"
+    params["transform_type"] = "min_max"
     params["min"] = None
     with pytest.raises(
         ValueError,
         match=re.escape(
-            f"For var {params['name']} and 'minmax' transform_type min and max values "
+            f"For var {params['name']} and 'min_max' transform_type min and max values "
             f"should be provided, got min={params['min']}, max={params['max']}"
         ),
     ):

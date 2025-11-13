@@ -17,15 +17,44 @@ class GenParticleCollection:
 
     Attributes
     ----------
-        name (str): The name of the particle collection.
-        pt (np.ndarray): The transverse momentum of the particles.
-        eta (np.ndarray): The pseudorapidity of the particles.
-        phi (np.ndarray): The azimuthal angle of the particles.
-        mass (np.ndarray): The mass of the particles.
-        pdg_id (np.ndarray): The PDG ID of the particles.
-        class_id (np.ndarray): The class ID of the particles.
-        n (int): The number of particles in the collection.
-        charge (np.ndarray): The charge of the particles.
+    name : str
+        Name identifier for the particle collection.
+    num_particles : int
+        Total number of particles in the collection (automatically computed).
+    pt : FloatArray
+        Transverse momentum of particles.
+    eta : FloatArray
+        Pseudorapidity of particles.
+    phi : FloatArray
+        Azimuthal angle of particles.
+    mass : FloatArray | None, optional
+        Mass of particles. Defaults to zeros if not provided.
+    pdg_id : IntArray | None, optional
+        PDG (Particle Data Group) identification codes.
+    particle_jet_idx : IntArray | None, optional
+        Index mapping particles to jets.
+    vx : FloatArray | None, optional
+        Vertex x-coordinate.
+    vy : FloatArray | None, optional
+        Vertex y-coordinate.
+    vz : FloatArray | None, optional
+        Vertex z-coordinate.
+    d0 : FloatArray | None, optional
+        Transverse impact parameter.
+    z0 : FloatArray | None, optional
+        Longitudinal impact parameter.
+    d0_error : FloatArray | None, optional
+        Uncertainty in transverse impact parameter.
+    z0_error : FloatArray | None, optional
+        Uncertainty in longitudinal impact parameter.
+    class_id : IntArray | None, optional
+        Particle class identifier (derived from pdg_id if available).
+    charge : IntArray | None, optional
+        Electric charge of particles (derived from pdg_id if available).
+    status : IntArray | None, optional
+        Status code of particles.
+    jet_idx : dict[str, IntArray]
+        Dictionary mapping jet algorithm names to particle-jet associations.
     """
 
     # Properties
@@ -40,6 +69,12 @@ class GenParticleCollection:
     vx: FloatArray | None = None
     vy: FloatArray | None = None
     vz: FloatArray | None = None
+
+    # Impact parameters
+    d0: FloatArray | None = None
+    z0: FloatArray | None = None
+    d0_error: FloatArray | None = None
+    z0_error: FloatArray | None = None
 
     # Additional properties
     class_id: IntArray | None = None
@@ -105,10 +140,24 @@ class GenLeptonCollection:
 
     Attributes
     ----------
-        name (str): The name of the particle collection.
-        pt (np.ndarray): The transverse momentum of the particles.
-        eta (np.ndarray): The pseudorapidity of the particles.
-        phi (np.ndarray): The azimuthal angle of the particles.
+    name : str
+        Name identifier for the lepton collection.
+    num_particles : int
+        Total number of leptons in the collection (automatically computed).
+    pt : FloatArray
+        Transverse momentum of leptons.
+    eta : FloatArray
+        Pseudorapidity of leptons.
+    phi : FloatArray
+        Azimuthal angle of leptons.
+    iso_var : FloatArray | None, optional
+        Isolation variable of leptons.
+    sum_pt : FloatArray | None, optional
+        Sum of transverse momentum around the lepton.
+    sum_pt_ch : FloatArray | None, optional
+        Sum of charged transverse momentum around the lepton.
+    sum_pt_neut : FloatArray | None, optional
+        Sum of neutral transverse momentum around the lepton.
     """
 
     # Properties
