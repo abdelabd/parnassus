@@ -280,7 +280,9 @@ def get_mock_model_file(fname: str | None = None, mode: str = "evt") -> str:
     else:
         Path(fname).parent.mkdir(exist_ok=True, parents=True)
     model = MockModel(mode=mode)
-    fs_feats = 4 if mode == "evt" else 12
+    # For particle mode: fs_vars calculation is:
+    # base_vars (4: pt, eta, phi, class) + phi expansion (+1) + class expansion (+4) = 9
+    fs_feats = 4 if mode == "evt" else 9
     mock_data = get_mock_input_data(mode=mode, num_fs_feats=fs_feats)
     batch = Dim("batch", min=1, max=2048)
     program = export(
