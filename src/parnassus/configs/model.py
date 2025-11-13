@@ -4,7 +4,7 @@ from typing import Literal, Self
 
 import yaml
 
-from parnassus.utils import VarTransformConfig
+from parnassus.utils import TransformRegistry, VarTransformConfig
 from parnassus.utils.typing import VarNameTuple
 
 
@@ -33,30 +33,77 @@ class ModelConfig:
 
 @dataclass(slots=True)
 class GenerativeModelConfig:
-    name: str
+    """Configuration for the complete generative model pipeline.
 
+    This class manages configurations for event, particle, and optional impact models,
+    along with variable transformations and output specifications.
+
+    Parameters
+    ----------
+    name : str
+        Name identifier for this model configuration.
+    max_particles : int
+        Maximum number of particles per event (fixed at training time).
+    transform_config_path : Path
+        Path to YAML file containing variable transformation configurations.
+    truth_vars_to_load : VarNameTuple
+        Tuple of truth-level variable names to load from input data.
+    event_model_config : ModelConfig
+        Configuration for the event-level generative model.
+    particle_model_config : ModelConfig
+        Configuration for the particle-level generative model.
+    impact_model_config : ModelConfig | None, optional
+        Configuration for the impact parameter model. Defaults to None.
+    """
+
+    name: str
     max_particles: int
     transform_config_path: Path
-    var_transform_dict: dict[str, VarTransformConfig] = field(init=False)
-
     truth_vars_to_load: VarNameTuple
 
     event_model_config: ModelConfig
     particle_model_config: ModelConfig
     impact_model_config: ModelConfig | None = None
 
-    tr_output_vars: list[str] = field(init=False)
-    pf_output_vars: list[str] = field(init=False)
+    # Private field for lazy-loaded transform registry
+    _transform_registry: TransformRegistry | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
-    def __post_init__(self):
-        with open(self.transform_config_path) as f:
-            transform_config = yaml.safe_load(f)
-            self.var_transform_dict = {
-                key: VarTransformConfig(name=key, **value)
-                for key, value in transform_config.items()
-            }
+    @property
+    def transform_registry(self) -> TransformRegistry:
+        """Lazy-loaded registry of variable transformations.
 
-        self.pf_output_vars = [
+        Returns
+        -------
+        TransformRegistry
+            Registry containing all variable transformation configurations.
+        """
+        if self._transform_registry is None:
+            self._transform_registry = TransformRegistry.from_yaml(self.transform_config_path)
+        return self._transform_registry
+
+    @property
+    def var_transform_dict(self) -> dict[str, VarTransformConfig]:
+        """Dictionary of variable transformation configurations.
+
+        Returns
+        -------
+        dict[str, VarTransformConfig]
+            Mapping of variable names to their transformation configurations.
+        """
+        return self.transform_registry.transforms
+
+    @property
+    def pflow_output_vars(self) -> list[str]:
+        """Particle flow output variable names (with 'pflow_' prefix removed).
+
+        Returns
+        -------
+        list[str]
+            List of particle flow output variable names.
+        """
+        return [
             var.replace("pflow_", "")
             for var in (
                 *self.particle_model_config.variables_config.fs_vars,
@@ -67,7 +114,17 @@ class GenerativeModelConfig:
                 ),
             )
         ]
-        self.tr_output_vars = [
+
+    @property
+    def truth_output_vars(self) -> list[str]:
+        """Truth-level output variable names (with 'truth_' prefix removed).
+
+        Returns
+        -------
+        list[str]
+            List of truth-level output variable names.
+        """
+        return [
             var.replace("truth_", "")
             for var in self.event_model_config.variables_config.truth_vars_to_load
         ]

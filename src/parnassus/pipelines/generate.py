@@ -13,7 +13,7 @@ from parnassus.configs.model import GenerativeModelConfig
 from parnassus.configs.scheme import GenEvent, GenParticleCollection
 from parnassus.data import HepMCDataset, RootDataset
 from parnassus.nn import ModelWrapper
-from parnassus.utils import Unscaler, VarTransform
+from parnassus.utils import Unscaler
 from parnassus.utils.logger import ProgressBar, setup_logger, update_task
 from parnassus.utils.typing import TensorDict
 
@@ -59,9 +59,8 @@ class GenerativeModel:
             self.impact_model = None
         self.log.info("[green]Networks loading completed.")
 
-        self.var_transform_dict = {
-            key: VarTransform(value) for key, value in config.var_transform_dict.items()
-        }
+        # Use the transform registry to get VarTransform instances
+        self.var_transform_dict = config.transform_registry.to_var_transform_dict()
 
         self.fs_npart_pos = config.event_model_config.variables_config.fs_vars.index("npflow")
         self.fs_ht_pos = config.event_model_config.variables_config.fs_vars.index("pflow_ht")
@@ -184,9 +183,8 @@ def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Acce
     log = setup_logger()
     model_config = config.model
     dataset_config = config.dataset_config
-    var_transform_dict = {
-        key: VarTransform(value) for key, value in model_config.var_transform_dict.items()
-    }
+    # Use the transform registry to get VarTransform instances
+    var_transform_dict = model_config.transform_registry.to_var_transform_dict()
     log.info("[green]Starting loading input data...")
     input_file = dataset_config.file_path
     assert isinstance(input_file, Path)
@@ -215,7 +213,7 @@ def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Acce
             ),
             dtype=np.float32,
         )
-        for key in [*generative_model.config.tr_output_vars, "ind"]
+        for key in [*generative_model.config.truth_output_vars, "ind"]
     }
     l_pf_data: dict[str, FloatArray] = {
         key.replace("ptrel", "pt"): np.zeros(
@@ -225,7 +223,7 @@ def generate(config: Config) -> tuple[list[GenEvent], Mapping[str, Sequence[Acce
             ),
             dtype=np.float32,
         )
-        for key in [*generative_model.config.pf_output_vars, "ind"]
+        for key in [*generative_model.config.pflow_output_vars, "ind"]
     }
     l_eventNumber = np.zeros(n_events, dtype=np.int32)
     n = 0

@@ -32,11 +32,10 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
 
         self.var_transform_dict: dict[str, VarTransform] = var_transform_dict
 
+        # Use properties from VariableRequirements for cleaner variable access
         self.truth_vars_to_load: VarNameTuple = cfg.truth_vars_to_load
-        self.ctxt_vars: list[str] = [var.replace("truth_", "") for var in cfg.ctxt_vars]
-        self.ctxt_global_vars: list[str] = [
-            var.replace("truth_", "") for var in cfg.ctxt_global_vars
-        ]
+        self.ctxt_vars: list[str] = cfg.variable_requirements.ctxt_vars_stripped
+        self.ctxt_global_vars: list[str] = cfg.variable_requirements.ctxt_global_vars_stripped
 
         self.full_data_array: dict[str, FloatArray] = {}
 
@@ -86,7 +85,11 @@ class BaseDataset(Dataset[dict[str, Tensor]]):
             )
             for var in self.full_data_array:
                 value = self.full_data_array[var]
-                if mask_events:
+                if (
+                    mask_events
+                    and hasattr(self, "n_particle_mask")
+                    and self.n_particle_mask is not None
+                ):
                     value = value[self.n_particle_mask]
                 if var not in {"ht", "eventNumber", "met_x", "met_y"} and value.dtype == object:
                     value = np.concatenate(value)

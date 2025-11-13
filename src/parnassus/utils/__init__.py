@@ -1,7 +1,7 @@
 import numpy as np
 from particle import PDGID
 
-from .transform import Unscaler, VarTransform, VarTransformConfig
+from .transform import TransformRegistry, Unscaler, VarTransform, VarTransformConfig
 from .typing import FloatArray, IntArray
 
 
@@ -52,4 +52,10 @@ def calculate_dr(
     return np.sqrt(delta_eta**2 + delta_phi**2)
 
 
-__all__ = ["Unscaler", "VarTransform", "VarTransformConfig", "reshape_phi"]
+__all__ = [
+    "TransformRegistry",
+    "Unscaler",
+    "VarTransform",
+    "VarTransformConfig",
+    "reshape_phi",
+]

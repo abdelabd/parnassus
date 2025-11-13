@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import final
 
 import torch
+import yaml
 from torch import Tensor
 
 from parnassus.utils.typing import FloatArray, VarNameTuple
@@ -233,3 +235,62 @@ class Unscaler:
                 var_name_ = "pt"
             pf_data_dict[var_name_] = fs_.numpy()
         return tr_data_dict, pf_data_dict
+
+
+@final
+@dataclass(frozen=True)
+class TransformRegistry:
+    """Manages variable transformations loaded from configuration.
+
+    This class provides a centralized registry for variable transformations,
+    decoupling transform loading from model configuration.
+    """
+
+    transforms: dict[str, VarTransformConfig]
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "TransformRegistry":
+        """Load transforms from a YAML configuration file.
+
+        Parameters
+        ----------
+        path : Path
+            Path to the YAML file containing transform configurations.
+
+        Returns
+        -------
+        TransformRegistry
+            A new registry with loaded transformations.
+        """
+        with open(path) as f:
+            config = yaml.safe_load(f)
+            return cls(
+                transforms={
+                    key: VarTransformConfig(name=key, **value) for key, value in config.items()
+                }
+            )
+
+    def get_transform(self, var_name: str) -> VarTransformConfig:
+        """Get the transform configuration for a variable.
+
+        Parameters
+        ----------
+        var_name : str
+            Name of the variable to get transform for.
+
+        Returns
+        -------
+        VarTransformConfig
+            The transform configuration for the variable.
+        """
+        return self.transforms[var_name]
+
+    def to_var_transform_dict(self) -> dict[str, VarTransform]:
+        """Convert registry to dictionary of VarTransform instances.
+
+        Returns
+        -------
+        dict[str, VarTransform]
+            Dictionary mapping variable names to VarTransform instances.
+        """
+        return {key: VarTransform(value) for key, value in self.transforms.items()}

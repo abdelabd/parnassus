@@ -35,15 +35,14 @@ class RootDataset(BaseDataset):
             entry_start=self.entry_start,
         )
         self.n_particle_mask = self.n_truth_particles < self.cfg.max_particles
-
         arrays = tree.arrays(
-            (*self.truth_vars_to_load, "eventNumber"),
+            [f"truth_{var}" for var in self.truth_vars_to_load] + ["eventNumber"],
             library="np",
             entry_stop=self.entry_stop,
             entry_start=self.entry_start,
         )
         for var in self.truth_vars_to_load:
-            self.full_data_array[var] = arrays[var]
+            self.full_data_array[var] = arrays[f"truth_{var}"]
         self.eventNumber = arrays["eventNumber"]
 
         self.full_data_array["ht"] = np.zeros(self.cfg.num_events, dtype=np.float32)

@@ -19,7 +19,6 @@ class HepMCDataset(BaseDataset):
     @override
     def load_data(self):
         self.n_truth_particles = np.zeros(self.cfg.num_events, dtype=np.int32)
-
         for var in (*self.cfg.truth_vars_to_load, "ptrel"):
             self.full_data_array[var] = np.zeros(
                 self.cfg.num_events * self.cfg.max_particles, dtype=np.float32
