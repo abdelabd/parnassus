@@ -1,28 +1,60 @@
-import itertools
 from pathlib import Path
 import tempfile
 from typing import Optional, Tuple
+import sys
+import os
+from contextlib import contextmanager
 
 import math
-import numpy as np
-from scipy import stats
-import awkward as ak
-import matplotlib.pyplot as plt
 
-import fastjet as fj
 import pyhepmc
 import pythia8mc
-
-from joblib import Parallel, delayed
-from tqdm import tqdm
-
-from parnassus.pipelines.cluster import get_cluster_sequence
 
 # DUT
 from parnassus.pythia import HepMC3Generator, Pythia8ToHepMC3
 
 N_EVENTS = 5
 N_JOBS = 2
+
+@contextmanager
+def suppress_stdout_stderr():
+    """Context manager to suppress stdout and stderr at the file descriptor level.
+    This is necessary to suppress output from backend C++ libraries like Pythia8."""
+    # Save original file descriptors
+    stdout_fd = sys.stdout.fileno()
+    stderr_fd = sys.stderr.fileno()
+    
+    # Save copies of original file descriptors
+    saved_stdout_fd = os.dup(stdout_fd)
+    saved_stderr_fd = os.dup(stderr_fd)
+    
+    # Open devnull
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    
+    try:
+        # Flush Python's buffered output
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # Redirect stdout and stderr to devnull
+        os.dup2(devnull_fd, stdout_fd)
+        os.dup2(devnull_fd, stderr_fd)
+        
+        yield
+        
+    finally:
+        # Flush again before restoring
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # Restore original file descriptors
+        os.dup2(saved_stdout_fd, stdout_fd)
+        os.dup2(saved_stderr_fd, stderr_fd)
+        
+        # Close temporary file descriptors
+        os.close(devnull_fd)
+        os.close(saved_stdout_fd)
+        os.close(saved_stderr_fd)
 
 ##################################### Helpers for validation ########################################
 
@@ -395,40 +427,42 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end: val
     assert(Path(fpath_benchmark).exists())
     
     ############# Generate events with our interface #############
-    pythia = pythia8mc.Pythia()
+    with suppress_stdout_stderr():
+        pythia = pythia8mc.Pythia()
 
-    # Random seed
-    pythia.readString("Random:setSeed = on")
-    pythia.readString("Random:seed = 42")
+        # Random seed
+        pythia.readString("Random:setSeed = on")
+        pythia.readString("Random:seed = 42")
 
-    # Command file for rest of config
-    pythia.readFile("src/parnassus/tests/HZZ4l.cmnd")
+        # Command file for rest of config
+        pythia.readFile("src/parnassus/tests/HZZ4l.cmnd")
 
-    if not pythia.init():
-        print("test_pythia::test_pythia8_to_hepmc3: Pythia initialization failed!")
-        return
+        if not pythia.init():
+            print("test_pythia::test_pythia8_to_hepmc3: Pythia initialization failed!")
+            return
 
-    converter = Pythia8ToHepMC3()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".hepmc") as f:
-        fpath_out = f.name
+        converter = Pythia8ToHepMC3()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".hepmc") as f:
+            fpath_out = f.name
 
-    writer = pyhepmc.io.WriterAscii(fpath_out)
-    n_written = 0
-    idx_event = 0
-    while n_written < N_EVENTS:
-        if not pythia.next():
-            continue  # event failed, try again
+        writer = pyhepmc.io.WriterAscii(fpath_out)
+        n_written = 0
+        idx_event = 0
+        while n_written < N_EVENTS:
+            if not pythia.next():
+                continue  # event failed, try again
 
-        hepmcEvent = converter.fill_next_event(pythia, idx_event)
-        writer.write_event(hepmcEvent)
-        n_written += 1
-        idx_event += 1
+            hepmcEvent = converter.fill_next_event(pythia, idx_event)
+            writer.write_event(hepmcEvent)
+            n_written += 1
+            idx_event += 1
 
-        if n_written % 100 == 0:
-            print(f"Pythia8ToHepMC3: Generated {n_written} events...")
+            # Note: progress messages will also be suppressed inside this context
 
-    pythia.stat()
-    writer.close()
+        pythia.stat()
+        writer.close()
+    
+    print(f"Pythia8ToHepMC3: Generated {N_EVENTS} events")
 
     ############# Compare against C++ benchmark #############
     match, message, num_events = compare_hepmc_files(
