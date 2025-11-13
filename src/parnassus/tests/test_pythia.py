@@ -423,13 +423,23 @@ def test_pythia8_to_hepmc3(): # Tests standalone Pythia8ToHepMC3 end-to-end: val
         # ._store_event_info()
     # This leaves Pythia8ToHepMC3._add_color(), which is currently broken due to HepMC3 Python bindings limitations
 
-    fpath_benchmark = f"src/parnassus/tests/expected_results/HZZ4l_{N_EVENTS}.hepmc"
-    assert(Path(fpath_benchmark).exists())
+    
     
     ############# Generate events with our interface #############
     with suppress_stdout_stderr():
         pythia = pythia8mc.Pythia()
 
+        # Check version number to select benchmark file
+        pythia_version = pythia.settings.parm("Pythia:versionNumber")
+        if pythia_version==8.316:
+            fpath_benchmark = f"src/parnassus/tests/expected_results/HZZ4l_{N_EVENTS}_8316.hepmc"
+        elif pythia_version==8.315:
+            fpath_benchmark = f"src/parnassus/tests/expected_results/HZZ4l_{N_EVENTS}_8315.hepmc"
+        else:
+            raise NotImplementedError(f"No benchmark file for pythia8mc=={pythia_version}; must be in {8.315, 8.316}")
+
+        assert(Path(fpath_benchmark).exists())
+        
         # Random seed
         pythia.readString("Random:setSeed = on")
         pythia.readString("Random:seed = 42")

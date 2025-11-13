@@ -174,6 +174,3 @@ cython_debug/
 
 # Data files
 *.root
-src/parnassus/tests/data_out
-src/parnassus/tests/figures
-src/parnassus/tests/benchmark_data/HZZ4l/*/events.hepmc
