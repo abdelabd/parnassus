@@ -35,12 +35,6 @@ LEPTON_ACCESSORS = [
     partial(ParticleAccessor, name=name, dtype="float32") for name in ["pt", "eta", "phi"]
 ]
 
-REMAP_DICT = {
-    "d0Error": "d0_error",
-    "z0Error": "z0_error",
-}
-
-
 @final
 class GenerativeModel:
     def __init__(self, config: GenerativeModelConfig, log):
