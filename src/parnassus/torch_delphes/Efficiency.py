@@ -40,20 +40,16 @@ class DelphesEfficiency(nn.Module):
     
     def __init__(self, 
                  efficiency_formula='charged_hadron_cms',
-                 use_precomputed_kinematics=True,
                  deterministic=False,
                  device='cpu'):
         """
         Args:
             efficiency_formula: Name of predefined formula or custom callable
-            use_precomputed_kinematics: If True (default), use pre-computed PT/Eta/Phi from Delphes
-                                       If False, compute from momentum components (slower, less accurate)
             deterministic: If True, apply efficiency deterministically (threshold)
                          If False (default), apply stochastically (random sampling)
             device: torch device ('cpu' or 'cuda')
         """
         super().__init__()
-        self.use_precomputed_kinematics = use_precomputed_kinematics
         self.deterministic = deterministic
         self.device = device
         
@@ -243,29 +239,12 @@ class DelphesEfficiency(nn.Module):
         # Move to device
         particles = particles.to(self.device)
         
-        # Extract attributes (optimized: use pre-computed values)
-        if self.use_precomputed_kinematics:
-            # Use pre-computed PT, Eta, Phi from Delphes (faster, more accurate)
-            pt = particles[..., 7]   # Column 7: PT (pre-computed)
-            eta = particles[..., 8]  # Column 8: Eta (pre-computed)
-            phi = particles[..., 9]  # Column 9: Phi (pre-computed)
-        else:
-            # Compute from momentum components (only if needed for some reason)
-            px = particles[..., 4]
-            py = particles[..., 5]
-            pz = particles[..., 6]
-            
-            # Compute PT
-            pt = torch.sqrt(px**2 + py**2)
-            
-            # Compute Eta (expensive calculation)
-            theta = torch.atan2(pt, pz)
-            eta = -torch.log(torch.tan(theta / 2.0 + 1e-10))
-            
-            # Compute Phi
-            phi = torch.atan2(py, px)
+        # Extract pre-computed kinematics from Delphes (columns 7-9)
+        pt = particles[..., 7]   # Column 7: PT (transverse momentum)
+        eta = particles[..., 8]  # Column 8: Eta (pseudorapidity)
+        phi = particles[..., 9]  # Column 9: Phi (azimuthal angle)
         
-        # Compute efficiency for each particle using pre-computed kinematics
+        # Compute efficiency for each particle
         efficiency = self.efficiency_func(pt, eta)
         
         # Apply efficiency

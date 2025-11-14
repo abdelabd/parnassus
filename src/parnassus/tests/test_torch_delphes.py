@@ -125,7 +125,6 @@ def delphes_to_pytorch_format(event_data):
         torch.Tensor of shape (N, 15) with columns:
         [PID, Status, Charge, E, Px, Py, Pz, PT, Eta, Phi, T, X, Y, Z]
         
-    Note: Includes pre-computed PT from Delphes to avoid redundant computation
     """
     n_particles = len(event_data['E'])
     
