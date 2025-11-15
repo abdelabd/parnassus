@@ -48,8 +48,7 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes.Efficiency import Efficiency
-from parnassus.torch_delphes.MomentumSmearing import MomentumSmearing
+from parnassus.torch_delphes import Efficiency, MomentumSmearing
 
 DEVICE = "cpu"
 # DEVICE = "cuda"
