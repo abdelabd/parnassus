@@ -10,6 +10,8 @@ from numpy.random import Generator
 from torch import Tensor, nn
 from torch.export import Dim, export, save
 
+from parnassus.configs.variables import VariableRequirements
+
 from . import pid_to_class
 from .transform import VarTransform, VarTransformConfig
 from .typing import FloatArray, IntArray
@@ -172,11 +174,55 @@ def get_mock_hepmc_file(
 
 
 def get_mock_transforms() -> dict[str, VarTransform]:
+    """Create mock variable transformations for testing.
+
+    Returns
+    -------
+    dict[str, VarTransform]
+        Dictionary mapping variable names to VarTransform instances.
+    """
     var_transform_dict: dict[str, VarTransform] = {}
     for var in [*PARTICLE_VARS, "met_x", "met_y", "ht", "npart"]:
         cfg = VarTransformConfig(name=var if var != "pt" else "ptrel", mean=0, std=1)
         var_transform_dict[cfg.name] = VarTransform(cfg)
     return var_transform_dict
+
+
+def get_mock_variable_requirements() -> VariableRequirements:
+    """Create mock VariableRequirements for testing.
+
+    Returns
+    -------
+    VariableRequirements
+        Mock variable requirements with typical particle physics variables.
+    """
+    return VariableRequirements(
+        truth_vars_to_load=(
+            "pt",
+            "eta",
+            "phi",
+            "vx",
+            "vy",
+            "vz",
+            "class",
+        ),
+        ctxt_vars=(
+            "truth_ptrel",
+            "truth_eta",
+            "truth_phi",
+            "truth_vx",
+            "truth_vy",
+            "truth_vz",
+            "truth_class",
+        ),
+        ctxt_global_vars=(
+            "means",
+            "truth_ht",
+            "truth_met_x",
+            "truth_met_y",
+            "ntruth",
+        ),
+    )
 
 
 @final
@@ -187,43 +233,44 @@ class MockModel(nn.Module):
         self.mode = mode
 
     def forward(
-        self, fs_data: Tensor, tr_data: Tensor, mask: Tensor, timestep: Tensor, global_data: Tensor
+        self,
+        fs_data: Tensor,
+        timestep: Tensor,
+        mask: Tensor,
+        ctxt_data: Tensor,
+        ctxt_global_data: Tensor,
     ) -> Tensor:
         if self.mode == "evt":
             return (
                 self.net(fs_data)
-                + tr_data.sum(dim=(1, 2)).view(-1, 1)
+                + ctxt_data.sum(dim=(1, 2)).view(-1, 1)
                 + timestep.view(-1, 1)
-                + global_data.sum(dim=-1).view(-1, 1)
+                + ctxt_global_data.sum(dim=-1).view(-1, 1)
                 + mask.sum(dim=1).view(-1, 1)
             )
         return (
             self.net(fs_data)
-            + tr_data.sum(dim=(1, 2)).view(-1, 1, 1)
+            + ctxt_data.sum(dim=(1, 2)).view(-1, 1, 1)
             + timestep.view(-1, 1, 1)
-            + global_data.sum(dim=-1).view(-1, 1, 1)
+            + ctxt_global_data.sum(dim=-1).view(-1, 1, 1)
             + mask.sum(dim=(1, 2)).view(-1, 1, 1)
         )
 
 
-def get_mock_input_data(mode: str = "evt") -> dict[str, Tensor]:
+def get_mock_input_data(
+    mode: str, num_fs_feats: int, num_ctxt_feats: int = 12, num_global_feats: int = 8
+) -> dict[str, Tensor]:
     rng = np.random.default_rng(42)
     BS, L = 2, 400
     assert mode in {"evt", "part"}, "Mode should be either evt or part."
-    if mode == "evt":
-        return {
-            "fs_data": Tensor(rng.random((BS, 4))),
-            "tr_data": Tensor(rng.random((BS, L, 11))),
-            "mask": Tensor(rng.random((BS, L))).bool(),
-            "global_data": Tensor(rng.random((BS, 16))),
-            "timestep": Tensor(rng.random((BS,))),
-        }
+    mask = rng.random((BS, L)) > 0.5 if mode == "evt" else rng.random((BS, L, 2)) > 0.5
+    fs_data = rng.random((BS, num_fs_feats)) if mode == "evt" else rng.random((BS, L, num_fs_feats))
     return {
-        "fs_data": Tensor(rng.random((BS, L, 11))),
-        "tr_data": Tensor(rng.random((BS, L, 11))),
-        "mask": Tensor(rng.random((BS, L, 2))).bool(),
-        "global_data": Tensor(rng.random((BS, 20))),
-        "timestep": Tensor(rng.random((BS,))),
+        "fs_data": Tensor(fs_data),
+        "ctxt_data": Tensor(rng.random((BS, L, num_ctxt_feats))),
+        "mask": Tensor(mask).bool(),
+        "ctxt_global_data": Tensor(rng.random((BS, num_global_feats))),
+        "timestep": Tensor(rng.random((BS, 1))),
     }
 
 
@@ -233,23 +280,26 @@ def get_mock_model_file(fname: str | None = None, mode: str = "evt") -> str:
     else:
         Path(fname).parent.mkdir(exist_ok=True, parents=True)
     model = MockModel(mode=mode)
-    mock_data = get_mock_input_data(mode=mode)
+    # For particle mode: fs_vars calculation is:
+    # base_vars (4: pt, eta, phi, class) + phi expansion (+1) + class expansion (+4) = 9
+    fs_feats = 4 if mode == "evt" else 9
+    mock_data = get_mock_input_data(mode=mode, num_fs_feats=fs_feats)
     batch = Dim("batch", min=1, max=2048)
     program = export(
         model,
         (
             mock_data["fs_data"],
-            mock_data["tr_data"],
-            mock_data["mask"],
             mock_data["timestep"],
-            mock_data["global_data"],
+            mock_data["mask"],
+            mock_data["ctxt_data"],
+            mock_data["ctxt_global_data"],
         ),
         dynamic_shapes={
             "fs_data": {0: batch},
-            "tr_data": {0: batch},
-            "mask": {0: batch},
-            "global_data": {0: batch},
             "timestep": {0: batch},
+            "mask": {0: batch},
+            "ctxt_data": {0: batch},
+            "ctxt_global_data": {0: batch},
         },
     )
     save(program, fname)

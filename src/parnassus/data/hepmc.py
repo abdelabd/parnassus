@@ -19,15 +19,12 @@ class HepMCDataset(BaseDataset):
     @override
     def load_data(self):
         self.n_truth_particles = np.zeros(self.cfg.num_events, dtype=np.int32)
-
-        for var in ["ptrel", *self.cfg.truth_variables]:
+        for var in (*self.cfg.truth_vars_to_load, "ptrel"):
             self.full_data_array[var] = np.zeros(
                 self.cfg.num_events * self.cfg.max_particles, dtype=np.float32
             )
-            if var != "pt":
-                self.truth_variables.append(var)
 
-        self.full_data_array["eventNumber"] = np.zeros(self.cfg.num_events, dtype=np.float32)
+        self.eventNumber = np.zeros(self.cfg.num_events, dtype=np.int64)
         self.full_data_array["ht"] = np.zeros(self.cfg.num_events, dtype=np.float32)
         self.full_data_array["met_x"] = np.zeros(self.cfg.num_events, dtype=np.float32)
         self.full_data_array["met_y"] = np.zeros(self.cfg.num_events, dtype=np.float32)
@@ -89,15 +86,16 @@ class HepMCDataset(BaseDataset):
                         )
                     ).sum()
                     self.n_truth_particles[curr_event_idx] = num_particles
-                    self.full_data_array["eventNumber"][curr_event_idx] = float(evt.event_number)
+                    self.eventNumber[curr_event_idx] = int(evt.event_number)
                     curr_event_idx += 1
                     progress.update(task, advance=1)
                 if self.cfg.num_events > curr_event_idx:
                     print("Requested more events than in file")
         _ = self.full_data_array.pop("pt")
-        for key in self.truth_variables:
+        for key in self.ctxt_vars:
             self.full_data_array[key] = self.full_data_array[key][:curr_particle_idx]
         for key in ["ht", "met_x", "met_y"]:
             self.full_data_array[key] = self.full_data_array[key][:curr_event_idx]
+        self.eventNumber = self.eventNumber[:curr_event_idx]
         self.n_truth_particles = self.n_truth_particles[:curr_event_idx]
         self.truth_cumsum = np.cumsum([0, *list(self.n_truth_particles)])

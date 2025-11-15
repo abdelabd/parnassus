@@ -4,7 +4,6 @@ import numpy as np
 import uproot
 
 from parnassus.configs.data import DatasetConfig
-from parnassus.utils.logger import ProgressBar
 from parnassus.utils.transform import VarTransform
 
 from .base import BaseDataset
@@ -36,19 +35,15 @@ class RootDataset(BaseDataset):
             entry_start=self.entry_start,
         )
         self.n_particle_mask = self.n_truth_particles < self.cfg.max_particles
-
-        with ProgressBar() as progress:
-            task = progress.add_task(
-                "[green]Loading data from Root file", total=len(self.cfg.truth_variables)
-            )
-            for var in self.cfg.truth_variables:
-                self.full_data_array[var] = tree[f"truth_{var}"].array(
-                    library="np",
-                    entry_stop=self.entry_stop,
-                    entry_start=self.entry_start,
-                )
-                self.truth_variables.append(var if var != "pt" else "ptrel")
-                progress.update(task, advance=1)
+        arrays = tree.arrays(
+            [f"truth_{var}" for var in self.truth_vars_to_load] + ["eventNumber"],
+            library="np",
+            entry_stop=self.entry_stop,
+            entry_start=self.entry_start,
+        )
+        for var in self.truth_vars_to_load:
+            self.full_data_array[var] = arrays[f"truth_{var}"]
+        self.eventNumber = arrays["eventNumber"]
 
         self.full_data_array["ht"] = np.zeros(self.cfg.num_events, dtype=np.float32)
         self.full_data_array["met_x"] = np.zeros(self.cfg.num_events, dtype=np.float32)
@@ -75,8 +70,4 @@ class RootDataset(BaseDataset):
             tree = f["evt_tree"]
             self._update_num_events(tree)
             self._load_truth(tree)
-            self.full_data_array["eventNumber"] = tree["eventNumber"].array(  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-                library="np", entry_start=self.entry_start, entry_stop=self.entry_stop
-            )
             self.truth_cumsum = np.cumsum([0, *list(self.n_truth_particles)])
-            self._preprocess_data()
