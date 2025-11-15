@@ -23,9 +23,9 @@ class DelphesEfficiency(nn.Module):
         - column 2: Charge
         - column 3: E (Energy)
         - columns 4-6: Px, Py, Pz (3-momentum)
-        - column 7: PT (transverse momentum, pre-computed by Delphes)
-        - column 8: Eta (pseudorapidity, pre-computed by Delphes)
-        - column 9: Phi (azimuthal angle, pre-computed by Delphes)
+        - column 7: PT (transverse momentum)
+        - column 8: Eta (pseudorapidity)
+        - column 9: Phi (azimuthal angle)
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position)
     
@@ -160,48 +160,6 @@ class DelphesEfficiency(nn.Module):
         
         return eff
     
-    @staticmethod
-    def compute_kinematics(momentum_4vec):
-        """
-        Compute pt, eta, phi from momentum 4-vector.
-        
-        Args:
-            momentum_4vec: tensor of shape (..., 4) with (E, px, py, pz)
-            
-        Returns:
-            pt: transverse momentum
-            eta: pseudorapidity
-            phi: azimuthal angle
-        """
-        E = momentum_4vec[..., 0]
-        px = momentum_4vec[..., 1]
-        py = momentum_4vec[..., 2]
-        pz = momentum_4vec[..., 3]
-        
-        pt = torch.sqrt(px**2 + py**2)
-        phi = torch.atan2(py, px)
-        
-        # Compute eta: eta = -ln(tan(theta/2)) where theta = atan2(pt, pz)
-        # Handle special cases to avoid division by zero
-        p = torch.sqrt(px**2 + py**2 + pz**2)
-        eta = torch.zeros_like(pt)
-        
-        # Forward region (pz > 0)
-        mask_fwd = pz > 1e-10
-        theta_fwd = torch.atan2(pt[mask_fwd], pz[mask_fwd])
-        eta[mask_fwd] = -torch.log(torch.tan(theta_fwd / 2.0))
-        
-        # Backward region (pz < 0)
-        mask_bwd = pz < -1e-10
-        theta_bwd = torch.atan2(pt[mask_bwd], pz[mask_bwd])
-        eta[mask_bwd] = -torch.log(torch.tan(theta_bwd / 2.0))
-        
-        # Central region (pz ~ 0): use approximation or set to large value
-        mask_central = torch.abs(pz) <= 1e-10
-        eta[mask_central] = torch.sign(pz[mask_central]) * 10.0  # Large eta
-        
-        return pt, eta, phi
-    
     def forward(self, particles, return_mask=False):
         """
         Apply efficiency filter to particles.
@@ -314,33 +272,39 @@ if __name__ == "__main__":
     # Set random seed for reproducibility
     torch.manual_seed(42)
     
-    # Create some example particles
-    # Format: (t, x, y, z, E, px, py, pz, PDG, status)
+    # Create some example particles in the (N, 15) format expected by the module
     n_particles = 10
     
     # Generate random particles
-    particles = torch.zeros((n_particles, 10))
+    particles = torch.zeros((n_particles, 15))
     
-    # Position (not used for efficiency, but required)
-    particles[:, 0:4] = torch.randn(n_particles, 4)
-    
-    # Momentum: generate reasonable values
+    # Generate random kinematics
     pt_values = torch.rand(n_particles) * 50 + 0.1  # 0.1 to 50 GeV
-    phi_values = torch.rand(n_particles) * 2 * np.pi - np.pi
     eta_values = torch.rand(n_particles) * 6 - 3  # -3 to 3
+    phi_values = torch.rand(n_particles) * 2 * np.pi - np.pi
     
-    # Convert to px, py, pz
-    particles[:, 5] = pt_values * torch.cos(phi_values)  # px
-    particles[:, 6] = pt_values * torch.sin(phi_values)  # py
-    particles[:, 7] = pt_values * torch.sinh(eta_values)  # pz
-    particles[:, 4] = torch.sqrt(particles[:, 5]**2 + particles[:, 6]**2 + 
-                                 particles[:, 7]**2)  # E (massless)
-    
-    # PDG ID (charged pions)
-    particles[:, 8] = 211
-    
-    # Status (stable)
-    particles[:, 9] = 1
+    # Column 0: PID (charged pions)
+    particles[:, 0] = 211
+    # Column 1: Status (stable)
+    particles[:, 1] = 1
+    # Column 2: Charge
+    particles[:, 2] = 1
+    # Column 3: E (approximate from pt for massless particles)
+    particles[:, 3] = pt_values * torch.cosh(eta_values)
+    # Columns 4-6: Px, Py, Pz
+    particles[:, 4] = pt_values * torch.cos(phi_values)  # Px
+    particles[:, 5] = pt_values * torch.sin(phi_values)  # Py
+    particles[:, 6] = pt_values * torch.sinh(eta_values)  # Pz
+    # Column 7: PT (pre-computed)
+    particles[:, 7] = pt_values
+    # Column 8: Eta (pre-computed)
+    particles[:, 8] = eta_values
+    # Column 9: Phi (pre-computed)
+    particles[:, 9] = phi_values
+    # Column 10: T (time)
+    particles[:, 10] = torch.randn(n_particles)
+    # Columns 11-13: X, Y, Z (position)
+    particles[:, 11:14] = torch.randn(n_particles, 3)
     
     print("Input particles:")
     print(f"Shape: {particles.shape}")
@@ -368,8 +332,9 @@ if __name__ == "__main__":
         print(f"Rejection rate: {(1 - mask.float().mean().item())*100:.1f}%")
         print(f"\nOutput shape: {filtered_particles.shape}")
         
-        # Show which particles passed
-        pt, eta, _ = eff_module.compute_kinematics(particles[:, 4:8])
+        # Show which particles passed (use pre-computed PT and Eta from columns 7 and 8)
+        pt = particles[:, 7]
+        eta = particles[:, 8]
         print(f"\nPer-particle results:")
         print(f"{'Index':<6} {'pt (GeV)':<10} {'eta':<10} {'Passed':<8}")
         print("-" * 40)
