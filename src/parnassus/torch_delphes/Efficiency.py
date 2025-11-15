@@ -10,7 +10,7 @@ import torch.nn as nn
 import numpy as np
 
 
-class DelphesEfficiency(nn.Module):
+class Efficiency(nn.Module):
     """
     PyTorch implementation of Delphes Efficiency module.
     

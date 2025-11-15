@@ -1,24 +1,27 @@
 """
-Apply PyTorch Delphes Efficiency modules to ROOT file and save outputs.
+Apply PyTorch Delphes Efficiency and MomentumSmearing modules to ROOT file and save outputs.
 
-This script emulates three delphes cards:
+This script emulates four delphes cards:
 1. delphes_card_CMS_2_0.tcl: Applies ChargedHadronTrackingEfficiency only
 2. delphes_card_CMS_2_1.tcl: Applies ChargedHadronTrackingEfficiency + ElectronTrackingEfficiency
 3. delphes_card_CMS_2_2.tcl: Applies ChargedHadronTrackingEfficiency + ElectronTrackingEfficiency + MuonTrackingEfficiency
+4. delphes_card_CMS_3_0.tcl: Applies all efficiency modules + ChargedHadronMomentumSmearing
 
 Process:
 1. Reads particles from HZZ4l_1.root (output after ParticlePropagator)
 2. Applies tracking efficiency modules using PyTorch
-3. Writes three output ROOT files with different structures
+3. Applies momentum smearing to charged hadrons
+4. Writes four output ROOT files with different structures
 
 Usage:
-    python test_torch_delphes.py [input.root] [output_v2_0.root] [output_v2_1.root] [output_v2_2.root]
+    python test_torch_delphes.py [input.root] [output_v2_0.root] [output_v2_1.root] [output_v2_2.root] [output_v3_0.root]
     
 Default:
     Input:  delphes_data/HZZ4l/HZZ4l_1.root
     Output: delphes_data/HZZ4l/HZZ4l_2_0_torch.root (ChargedHadron only)
     Output: delphes_data/HZZ4l/HZZ4l_2_1_torch.root (ChargedHadron + Electron)
     Output: delphes_data/HZZ4l/HZZ4l_2_2_torch.root (ChargedHadron + Electron + Muon)
+    Output: delphes_data/HZZ4l/HZZ4l_3_0_torch.root (ChargedHadron + Electron + Muon + Smearing)
 """
 
 import sys
@@ -41,10 +44,11 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes.Efficiency import DelphesEfficiency
+from parnassus.torch_delphes.Efficiency import Efficiency
+from parnassus.torch_delphes.MomentumSmearing import MomentumSmearing
 
-# DEVICE = "cpu"
-DEVICE = "cuda"
+DEVICE = "cpu"
+# DEVICE = "cuda"
 
 
 def read_branch_data(tree, branch_name, max_events=None):
@@ -96,7 +100,7 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
         List of filtered awkward arrays (one per event)
     """
     # Initialize efficiency module
-    eff_module = DelphesEfficiency(
+    eff_module = Efficiency(
         efficiency_formula=efficiency_formula,
         deterministic=False,
         device=DEVICE
@@ -171,6 +175,100 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
     return filtered_events
 
 
+def apply_momentum_smearing(filtered_particles, smearing_formula='charged_hadron_cms', module_name='MomentumSmearing'):
+    """
+    Apply momentum smearing to filtered particles.
+    
+    Args:
+        filtered_particles: List of filtered particle events (from apply_tracking_efficiency)
+        smearing_formula: which resolution formula to use
+        module_name: name for logging purposes
+        
+    Returns:
+        List of smeared awkward arrays (one per event)
+    """
+    # Initialize smearing module
+    smearing_module = MomentumSmearing(
+        resolution_formula=smearing_formula,
+        deterministic=False,
+        device=DEVICE
+    )
+    
+    n_events = len(filtered_particles)
+    smeared_events = []
+    
+    for i in tqdm(range(n_events)):
+        event = filtered_particles[i]
+        
+        if not event or len(event.get('PT', [])) == 0:
+            # Empty event - create empty output
+            smeared_events.append({})
+            continue
+        
+        # Build tensor (N, 15) from filtered event data
+        n_particles = len(event['PT'])
+        particles = np.zeros((n_particles, 15))
+        
+        # Column 0: PID
+        particles[:, 0] = event['PID']
+        # Column 1: Status (not available for Track, set to 1)
+        particles[:, 1] = 1
+        # Column 2: Charge
+        particles[:, 2] = event['Charge']
+        # Column 3: E (compute from P if available, else approximate)
+        if 'P' in event:
+            particles[:, 3] = event['P']  # Approximate E ≈ P for high energy
+        else:
+            particles[:, 3] = event['PT']  # Fallback
+        # Columns 4-6: Px, Py, Pz (compute from PT, Eta, Phi)
+        PT = event['PT']
+        Eta = event.get('Eta', np.zeros_like(PT))
+        EtaOuter = event.get('EtaOuter', Eta)  # Use EtaOuter if available
+        Phi = event['Phi']
+        particles[:, 4] = PT * np.cos(Phi)  # Px
+        particles[:, 5] = PT * np.sin(Phi)  # Py
+        particles[:, 6] = PT * np.sinh(Eta)  # Pz
+        # Column 7: PT
+        particles[:, 7] = PT
+        # Column 8: Eta (use EtaOuter for position-based smearing)
+        particles[:, 8] = EtaOuter
+        # Column 9: Phi
+        particles[:, 9] = Phi
+        # Column 10: T
+        particles[:, 10] = event.get('T', np.zeros_like(PT))
+        # Columns 11-13: X, Y, Z
+        particles[:, 11] = event.get('X', np.zeros_like(PT))
+        particles[:, 12] = event.get('Y', np.zeros_like(PT))
+        particles[:, 13] = event.get('Z', np.zeros_like(PT))
+        # Column 14: Mass (assume pion mass for charged hadrons)
+        particles[:, 14] = 0.140  # GeV
+        
+        # Convert to torch tensor
+        particles_tensor = torch.from_numpy(particles).float()
+        
+        # Apply smearing
+        smeared_tensor = smearing_module(particles_tensor)
+        smeared_np = smeared_tensor.cpu().numpy()
+        
+        # Extract smeared data back into event dictionary
+        smeared_event = {}
+        smeared_event['PID'] = smeared_np[:, 0].astype(int)
+        smeared_event['Charge'] = smeared_np[:, 2].astype(int)
+        smeared_event['P'] = np.sqrt(smeared_np[:, 4]**2 + smeared_np[:, 5]**2 + smeared_np[:, 6]**2)
+        smeared_event['PT'] = smeared_np[:, 7]
+        smeared_event['Eta'] = event['Eta']  # Preserve original momentum eta
+        smeared_event['EtaOuter'] = event['EtaOuter']  # Preserve position eta
+        smeared_event['Phi'] = smeared_np[:, 9]
+        smeared_event['T'] = event.get('T', np.zeros(len(smeared_event['PT'])))
+        smeared_event['X'] = event.get('X', np.zeros(len(smeared_event['PT'])))
+        smeared_event['Y'] = event.get('Y', np.zeros(len(smeared_event['PT'])))
+        smeared_event['Z'] = event.get('Z', np.zeros(len(smeared_event['PT'])))
+        
+        smeared_events.append(smeared_event)
+    
+    return smeared_events
+
+
 def load_base_branches(input_tree, max_events=None):
     """
     Load base branches from input ROOT file into a dictionary.
@@ -189,21 +287,24 @@ def load_base_branches(input_tree, max_events=None):
     return output_data
 
 
-def add_tracking_efficiency(tree_data, filtered_particles, efficiency_branch_name):
+def add_particle_branch(tree_data, particles, branch_name):
     """
-    Add tracking efficiency branch to tree data dictionary.
+    Add a particle branch to tree data dictionary.
+    
+    This is a generic function used to add any particle branch (efficiency outputs,
+    smearing outputs, etc.) to the ROOT tree data structure.
     
     Args:
         tree_data: Dictionary of awkward arrays representing tree branches
-        filtered_particles: List of filtered particle events from apply_tracking_efficiency
-        efficiency_branch_name: Name for the efficiency branch (e.g., "ChargedHadronEfficiency")
+        particles: List of event particles (from apply_tracking_efficiency or apply_momentum_smearing)
+        branch_name: Name for the branch (e.g., "ChargedHadronEfficiency", "ChargedHadronSmeared")
     
     Returns:
-        Updated tree_data dictionary with new efficiency branch added
+        Updated tree_data dictionary with new branch added
     """
     # Get attribute names from first non-empty event
     attr_names = None
-    for event in filtered_particles:
+    for event in particles:
         if event:
             attr_names = list(event.keys())
             break
@@ -211,13 +312,13 @@ def add_tracking_efficiency(tree_data, filtered_particles, efficiency_branch_nam
     # Add each attribute as a branch
     for attr_name in attr_names:
         data_list = []
-        for event in filtered_particles:
+        for event in particles:
             if event and attr_name in event:
                 data_list.append(event[attr_name])
             else:
                 data_list.append(np.array([]))
         
-        tree_data[f"{efficiency_branch_name}.{attr_name}"] = ak.Array(data_list)
+        tree_data[f"{branch_name}.{attr_name}"] = ak.Array(data_list)
     
     return tree_data
 
@@ -261,10 +362,10 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     # Kinematic variables to compare
     kinematic_vars = ['Charge', 'E', 'P', 'Px', 'Py', 'Pz', 'PT', 'Eta', 'Phi']
     
-    # Branches to validate
-    efficiency_branches = ['ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency']
+    # Branches to validate (efficiency modules + momentum smearing)
+    branches = ['ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency', 'ChargedHadronSmeared']
     
-    for branch_name in efficiency_branches:
+    for branch_name in branches:
         print(f"\nValidating {branch_name}...")
         
         # Create branch-specific directory
@@ -339,7 +440,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     print(f"\n✓ Validation complete! Plots saved to {output_dir}")
 
 
-def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_events=None):
+def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, output_file_v3_0, max_events=None):
     """Main processing function."""
     
     ############################## Open input ROOT file #####################################
@@ -367,7 +468,7 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
         module_name='ChargedHadronTrackingEfficiency'
     )
 
-    tree_data = add_tracking_efficiency(tree_data, filtered_charged_hadrons, "ChargedHadronEfficiency")
+    tree_data = add_particle_branch(tree_data, filtered_charged_hadrons, "ChargedHadronEfficiency")
     write_output_root(output_file_v2_0, tree_data)
 
     
@@ -386,7 +487,7 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
         module_name='ElectronTrackingEfficiency'
     )
 
-    tree_data = add_tracking_efficiency(tree_data, filtered_electrons, "ElectronEfficiency")
+    tree_data = add_particle_branch(tree_data, filtered_electrons, "ElectronEfficiency")
     write_output_root(output_file_v2_1, tree_data)
 
     ############################## MuonTrackingEfficiency #####################################
@@ -404,19 +505,32 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
         module_name='MuonTrackingEfficiency'
     )
 
-    tree_data = add_tracking_efficiency(tree_data, filtered_muons, "MuonEfficiency")
+    tree_data = add_particle_branch(tree_data, filtered_muons, "MuonEfficiency")
     write_output_root(output_file_v2_2, tree_data)
+
+    ############################## ChargedHadronMomentumSmearing #####################################
+    print("\nChargedHadronMomentumSmearing...")
+    smeared_charged_hadrons = apply_momentum_smearing(
+        filtered_charged_hadrons,
+        smearing_formula='charged_hadron_cms',
+        module_name='ChargedHadronMomentumSmearing'
+    )
+    
+    tree_data = add_particle_branch(tree_data, smeared_charged_hadrons, "ChargedHadronSmeared")
+    write_output_root(output_file_v3_0, tree_data)
 
     ############################## Summary #####################################
 
     total_output_ch = sum(len(event.get('PT', [])) for event in filtered_charged_hadrons)
     total_output_el = sum(len(event.get('PT', [])) for event in filtered_electrons)
     total_output_mu = sum(len(event.get('PT', [])) for event in filtered_muons)
+    total_smeared_ch = sum(len(event.get('PT', [])) for event in smeared_charged_hadrons)
     
     print(f"\nStatistics:")
     print(f"  ChargedHadrons: {total_input_ch} → {total_output_ch} ({total_output_ch/total_input_ch*100:.2f}%)")
     print(f"  Electrons:      {total_input_el} → {total_output_el} ({total_output_el/total_input_el*100:.2f}%)")
     print(f"  Muons:          {total_input_mu} → {total_output_mu} ({total_output_mu/total_input_mu*100:.2f}%)")
+    print(f"  ChargedHadronsSmeared: {total_output_ch} → {total_smeared_ch} (100.00%)")
     
     
     print(f"\n{'='*70}")
@@ -425,16 +539,18 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
     print(f"n_events: {n_events}")
     print(f"\nOutput files created:")
     print("TrackingEfficiency:")
-    print(f"  ChargedHadron: {output_file_v2_0}")
-    print(f"  ChargedHadron + Electron: {output_file_v2_1}")
-    print(f"  ChargedHadron + Electron + Muon: {output_file_v2_2}")
+    print(f"  v2.0 (ChargedHadron): {output_file_v2_0}")
+    print(f"  v2.1 (ChargedHadron + Electron): {output_file_v2_1}")
+    print(f"  v2.2 (ChargedHadron + Electron + Muon): {output_file_v2_2}")
+    print("TrackingEfficiency + MomentumSmearing:")
+    print(f"  v3.0 (ChargedHadron + Electron + Muon + Smearing): {output_file_v3_0}")
     print()
     
     ############################## Validation #####################################
 
     # Validate against C++ Delphes benchmark
     script_dir = Path(__file__).parent
-    benchmark_file = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_2_2.root"
+    benchmark_file = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_3_0.root"
     validation_dir = script_dir / "torch_delphes_validation"
     print(f"\n{'='*70}")
     print("Validation: Comparing PyTorch Delphes vs C++ Delphes")
@@ -443,10 +559,10 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
     print(f"Validation directory: {validation_dir}")
 
     if benchmark_file.exists():
-        validate_against_benchmark(output_file_v2_2, benchmark_file, validation_dir)
+        validate_against_benchmark(output_file_v3_0, benchmark_file, validation_dir)
     else:
         print(f"\n⚠ Benchmark file not found: {benchmark_file}")
-        print("  Skipping validation. To enable validation, provide HZZ4l_2_2.root")
+        print("  Skipping validation. To enable validation, provide HZZ4l_3_0.root")
 
 
 if __name__ == "__main__":
@@ -458,6 +574,7 @@ if __name__ == "__main__":
     default_output_v2_0 = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_2_0_torch.root"
     default_output_v2_1 = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_2_1_torch.root"
     default_output_v2_2 = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_2_2_torch.root"
+    default_output_v3_0 = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_3_0_torch.root"
     
     # Parse command line arguments
     if len(sys.argv) == 1:
@@ -466,24 +583,27 @@ if __name__ == "__main__":
         output_file_v2_0 = str(default_output_v2_0)
         output_file_v2_1 = str(default_output_v2_1)
         output_file_v2_2 = str(default_output_v2_2)
+        output_file_v3_0 = str(default_output_v3_0)
         max_events = None
-    elif len(sys.argv) >= 5:
+    elif len(sys.argv) >= 6:
         # Input and outputs specified
         input_file = sys.argv[1]
         output_file_v2_0 = sys.argv[2]
         output_file_v2_1 = sys.argv[3]
         output_file_v2_2 = sys.argv[4]
-        max_events = int(sys.argv[5]) if len(sys.argv) > 5 else None
+        output_file_v3_0 = sys.argv[5]
+        max_events = int(sys.argv[6]) if len(sys.argv) > 6 else None
     else:
-        print("Usage: python test_torch_delphes.py [input.root] [output_v2_0.root] [output_v2_1.root] [output_v2_2.root] [max_events]")
+        print("Usage: python test_torch_delphes.py [input.root] [output_v2_0.root] [output_v2_1.root] [output_v2_2.root] [output_v3_0.root] [max_events]")
         print("\nRun with no arguments to use defaults:")
         print(f"  Input:       {default_input}")
         print(f"  Output v2.0: {default_output_v2_0}")
         print(f"  Output v2.1: {default_output_v2_1}")
         print(f"  Output v2.2: {default_output_v2_2}")
+        print(f"  Output v3.0: {default_output_v3_0}")
         sys.exit(1)
     
-    main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_events)
+    main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, output_file_v3_0, max_events)
 
     toc = time.time()
     dur = toc - tic
