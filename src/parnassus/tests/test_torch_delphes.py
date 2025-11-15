@@ -25,11 +25,16 @@ import sys
 import numpy as np
 import torch
 from pathlib import Path
-
+from tqdm import tqdm
 
 import uproot
 import awkward as ak
 
+# Seeds for reproducibility
+import random
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
 
 from parnassus.torch_delphes.Efficiency import DelphesEfficiency
 
@@ -91,9 +96,7 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
     n_events = len(track_arrays[f"{branch_prefix}.PT"])
     filtered_events = []
     
-    print(f"Applying {module_name} to {n_events} events...")
-    
-    for i in range(n_events):
+    for i in tqdm(range(n_events)):
         # Extract data for this event
         n_particles = len(track_arrays[f"{branch_prefix}.PT"][i])
         
@@ -152,293 +155,145 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
             filtered_event[attr_name] = original_data[mask_np]
         
         filtered_events.append(filtered_event)
-        
-        if (i + 1) % 100 == 0:
-            print(f"  Processed {i + 1}/{n_events} events")
     
     return filtered_events
 
 
-def write_output_root_v2_0(output_file, input_tree, filtered_charged_hadrons, max_events=None):
+def load_base_branches(input_tree, max_events=None):
     """
-    Write output ROOT file matching delphes_card_CMS_2_0.tcl structure.
-    Includes ChargedHadronEfficiency only.
+    Load base branches from input ROOT file into a dictionary.
+    Returns awkward array dictionary with all base particle branches.
     """
-    print(f"\nWriting output file (v2.0): {output_file}")
-    
     branch_names = ['ParticleBeforeProp', 'ParticleAfterProp', 'ChargedHadron', 'Electron', 'Muon']
     output_data = {}
     
-    # Read all existing branches from input
     for branch_name in branch_names:
-        print(f"  Reading {branch_name}...")
         branch_data = read_branch_data(input_tree, branch_name, max_events)
         
         for key in branch_data.fields:
             output_key = f"{branch_name}.{key.split('.')[-1]}"
             output_data[output_key] = branch_data[key]
     
-    # Add filtered charged hadron efficiency branch
-    print(f"  Adding ChargedHadronEfficiency branch...")
+    return output_data
+
+
+def add_tracking_efficiency(tree_data, filtered_particles, efficiency_branch_name):
+    """
+    Add tracking efficiency branch to tree data dictionary.
+    
+    Args:
+        tree_data: Dictionary of awkward arrays representing tree branches
+        filtered_particles: List of filtered particle events from apply_tracking_efficiency
+        efficiency_branch_name: Name for the efficiency branch (e.g., "ChargedHadronEfficiency")
+    
+    Returns:
+        Updated tree_data dictionary with new efficiency branch added
+    """
+    # Get attribute names from first non-empty event
     attr_names = None
-    for event in filtered_charged_hadrons:
+    for event in filtered_particles:
         if event:
             attr_names = list(event.keys())
             break
     
+    # Add each attribute as a branch
     for attr_name in attr_names:
         data_list = []
-        for event in filtered_charged_hadrons:
+        for event in filtered_particles:
             if event and attr_name in event:
                 data_list.append(event[attr_name])
             else:
                 data_list.append(np.array([]))
         
-        output_data[f"ChargedHadronEfficiency.{attr_name}"] = ak.Array(data_list)
+        tree_data[f"{efficiency_branch_name}.{attr_name}"] = ak.Array(data_list)
     
-    # Write to ROOT file
-    print(f"  Writing {len(output_data)} branches to file...")
+    return tree_data
+
+
+def write_output_root(output_file, tree_data):
+    """
+    Write tree data dictionary to ROOT file.
+    
+    Args:
+        output_file: Path to output ROOT file
+        tree_data: Dictionary of awkward arrays representing all tree branches
+    """
+    print(f"  Writing {len(tree_data)} branches to file...")
     with uproot.recreate(output_file) as f:
-        f["Delphes"] = output_data
-    
-    print(f"✓ Output v2.0 written successfully!")
-
-
-def write_output_root_v2_1(output_file, input_tree, filtered_charged_hadrons, filtered_electrons, max_events=None):
-    """
-    Write output ROOT file matching delphes_card_CMS_2_1.tcl structure.
-    Includes both ChargedHadronEfficiency and ElectronEfficiency.
-    """
-    print(f"\nWriting output file (v2.1): {output_file}")
-    
-    branch_names = ['ParticleBeforeProp', 'ParticleAfterProp', 'ChargedHadron', 'Electron', 'Muon']
-    output_data = {}
-    
-    # Read all existing branches from input
-    for branch_name in branch_names:
-        print(f"  Reading {branch_name}...")
-        branch_data = read_branch_data(input_tree, branch_name, max_events)
-        
-        for key in branch_data.fields:
-            output_key = f"{branch_name}.{key.split('.')[-1]}"
-            output_data[output_key] = branch_data[key]
-    
-    # Add filtered charged hadron efficiency branch
-    print(f"  Adding ChargedHadronEfficiency branch...")
-    attr_names_ch = None
-    for event in filtered_charged_hadrons:
-        if event:
-            attr_names_ch = list(event.keys())
-            break
-    
-    for attr_name in attr_names_ch:
-        data_list = []
-        for event in filtered_charged_hadrons:
-            if event and attr_name in event:
-                data_list.append(event[attr_name])
-            else:
-                data_list.append(np.array([]))
-        
-        output_data[f"ChargedHadronEfficiency.{attr_name}"] = ak.Array(data_list)
-    
-    # Add filtered electron efficiency branch
-    print(f"  Adding ElectronEfficiency branch...")
-    attr_names_el = None
-    for event in filtered_electrons:
-        if event:
-            attr_names_el = list(event.keys())
-            break
-    
-    for attr_name in attr_names_el:
-        data_list = []
-        for event in filtered_electrons:
-            if event and attr_name in event:
-                data_list.append(event[attr_name])
-            else:
-                data_list.append(np.array([]))
-        
-        output_data[f"ElectronEfficiency.{attr_name}"] = ak.Array(data_list)
-    
-    # Write to ROOT file
-    print(f"  Writing {len(output_data)} branches to file...")
-    with uproot.recreate(output_file) as f:
-        f["Delphes"] = output_data
-    
-    print(f"✓ Output v2.1 written successfully!")
-
-
-def write_output_root_v2_2(input_tree, filtered_charged_hadrons, filtered_electrons, filtered_muons, output_file, max_events=None):
-    """
-    Write output ROOT file matching delphes_card_CMS_2_2.tcl structure.
-    Includes: All base branches + ChargedHadronEfficiency + ElectronEfficiency + MuonEfficiency
-    """
-    print(f"\nWriting output file (v2.2): {output_file}")
-    
-    branch_names = ['ParticleBeforeProp', 'ParticleAfterProp', 'ChargedHadron', 'Electron', 'Muon']
-    output_data = {}
-    
-    # Read all existing branches from input
-    for branch_name in branch_names:
-        print(f"  Reading {branch_name}...")
-        branch_data = read_branch_data(input_tree, branch_name, max_events)
-        
-        for key in branch_data.fields:
-            output_key = f"{branch_name}.{key.split('.')[-1]}"
-            output_data[output_key] = branch_data[key]
-    
-    # Add filtered charged hadron efficiency branch
-    print(f"  Adding ChargedHadronEfficiency branch...")
-    attr_names_ch = None
-    for event in filtered_charged_hadrons:
-        if event:
-            attr_names_ch = list(event.keys())
-            break
-    
-    for attr_name in attr_names_ch:
-        data_list = []
-        for event in filtered_charged_hadrons:
-            if event and attr_name in event:
-                data_list.append(event[attr_name])
-            else:
-                data_list.append(np.array([]))
-        
-        output_data[f"ChargedHadronEfficiency.{attr_name}"] = ak.Array(data_list)
-    
-    # Add filtered electron efficiency branch
-    print(f"  Adding ElectronEfficiency branch...")
-    attr_names_el = None
-    for event in filtered_electrons:
-        if event:
-            attr_names_el = list(event.keys())
-            break
-    
-    for attr_name in attr_names_el:
-        data_list = []
-        for event in filtered_electrons:
-            if event and attr_name in event:
-                data_list.append(event[attr_name])
-            else:
-                data_list.append(np.array([]))
-        
-        output_data[f"ElectronEfficiency.{attr_name}"] = ak.Array(data_list)
-    
-    # Add filtered muon efficiency branch
-    print(f"  Adding MuonEfficiency branch...")
-    attr_names_mu = None
-    for event in filtered_muons:
-        if event:
-            attr_names_mu = list(event.keys())
-            break
-    
-    for attr_name in attr_names_mu:
-        data_list = []
-        for event in filtered_muons:
-            if event and attr_name in event:
-                data_list.append(event[attr_name])
-            else:
-                data_list.append(np.array([]))
-        
-        output_data[f"MuonEfficiency.{attr_name}"] = ak.Array(data_list)
-    
-    # Write to ROOT file
-    print(f"  Writing {len(output_data)} branches to file...")
-    with uproot.recreate(output_file) as f:
-        f["Delphes"] = output_data
-    
-    print(f"✓ Output v2.2 written successfully!")
+        f["Delphes"] = tree_data
+    print(f"✓ Output written successfully!")
 
 
 def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_events=None):
     """Main processing function."""
     
-    print("="*70)
-    print("PyTorch Delphes Tracking Efficiency Modules")
-    print("="*70)
+    ############################## Open input ROOT file #####################################
+    print("\n")
     print(f"Input:  {input_file}")
-    print(f"Output v2.0: {output_file_v2_0} (ChargedHadron only)")
-    print(f"Output v2.1: {output_file_v2_1} (ChargedHadron + Electron)")
-    print(f"Output v2.2: {output_file_v2_2} (ChargedHadron + Electron + Muon)")
-    print(f"Max events: {max_events if max_events else 'All'}")
-    print()
-    
-    # Open input ROOT file
     input_root = uproot.open(input_file)
     tree = input_root["Delphes"]
-    
+    tree_data = dict(load_base_branches(tree, max_events))
     n_events = tree.num_entries if max_events is None else min(max_events, tree.num_entries)
     print(f"Total events in file: {tree.num_entries}")
     print(f"Processing: {n_events} events\n")
     
-    # Read charged hadrons (output from ParticlePropagator)
-    print("Reading ChargedHadron branch...")
+    ############################## ChargedHadronTrackingEfficiency #####################################
+    print("\nChargedHadronTrackingEfficiency...")
     charged_hadrons = read_branch_data(tree, "ChargedHadron", max_events)
     
-    # Determine actual branch prefix
     sample_key = list(charged_hadrons.fields)[0]
     ch_prefix = sample_key.rsplit('.', 1)[0]
-    
-    print(f"Found {len(charged_hadrons.fields)} attributes for charged hadrons")
-    
-    # Count input particles
     total_input_ch = sum(len(charged_hadrons[f"{ch_prefix}.PT"][i]) 
                          for i in range(n_events))
-    print(f"Total input charged hadrons: {total_input_ch}\n")
-    
-    # Read electrons (output from ParticlePropagator)
-    print("Reading Electron branch...")
-    electrons = read_branch_data(tree, "Electron", max_events)
-    
-    # Determine actual branch prefix
-    sample_key_el = list(electrons.fields)[0]
-    el_prefix = sample_key_el.rsplit('.', 1)[0]
-    
-    print(f"Found {len(electrons.fields)} attributes for electrons")
-    
-    # Count input particles
-    total_input_el = sum(len(electrons[f"{el_prefix}.PT"][i]) 
-                         for i in range(n_events))
-    print(f"Total input electrons: {total_input_el}\n")
-    
-    # Read muons (output from ParticlePropagator)
-    print("Reading Muon branch...")
-    muons = read_branch_data(tree, "Muon", max_events)
-    
-    # Determine actual branch prefix
-    sample_key_mu = list(muons.fields)[0]
-    mu_prefix = sample_key_mu.rsplit('.', 1)[0]
-    
-    print(f"Found {len(muons.fields)} attributes for muons")
-    
-    # Count input particles
-    total_input_mu = sum(len(muons[f"{mu_prefix}.PT"][i]) 
-                         for i in range(n_events))
-    print(f"Total input muons: {total_input_mu}\n")
-    
-    # Apply ChargedHadronTrackingEfficiency
     filtered_charged_hadrons = apply_tracking_efficiency(
         charged_hadrons, 
         ch_prefix,
         efficiency_formula='charged_hadron_cms',
         module_name='ChargedHadronTrackingEfficiency'
     )
+
+    tree_data = add_tracking_efficiency(tree_data, filtered_charged_hadrons, "ChargedHadronEfficiency")
+    write_output_root(output_file_v2_0, tree_data)
+
     
-    # Apply ElectronTrackingEfficiency
+    ############################## ElectronTrackingEfficiency #####################################
+    print("\nElectronTrackingEfficiency...")
+    electrons = read_branch_data(tree, "Electron", max_events)
+    
+    sample_key_el = list(electrons.fields)[0]
+    el_prefix = sample_key_el.rsplit('.', 1)[0]
+    total_input_el = sum(len(electrons[f"{el_prefix}.PT"][i]) 
+                         for i in range(n_events))
     filtered_electrons = apply_tracking_efficiency(
         electrons,
         el_prefix,
         efficiency_formula='electron_cms',
         module_name='ElectronTrackingEfficiency'
     )
+
+    tree_data = add_tracking_efficiency(tree_data, filtered_electrons, "ElectronEfficiency")
+    write_output_root(output_file_v2_1, tree_data)
+
+    ############################## MuonTrackingEfficiency #####################################
+    print("\nMuonTrackingEfficiency...")
+    muons = read_branch_data(tree, "Muon", max_events)
     
-    # Apply MuonTrackingEfficiency
+    sample_key_mu = list(muons.fields)[0]
+    mu_prefix = sample_key_mu.rsplit('.', 1)[0]
+    total_input_mu = sum(len(muons[f"{mu_prefix}.PT"][i]) 
+                         for i in range(n_events))
     filtered_muons = apply_tracking_efficiency(
         muons,
         mu_prefix,
         efficiency_formula='muon_cms',
         module_name='MuonTrackingEfficiency'
     )
-    
-    # Compute statistics
+
+    tree_data = add_tracking_efficiency(tree_data, filtered_muons, "MuonEfficiency")
+    write_output_root(output_file_v2_2, tree_data)
+
+    ############################## Summary #####################################
+
     total_output_ch = sum(len(event.get('PT', [])) for event in filtered_charged_hadrons)
     total_output_el = sum(len(event.get('PT', [])) for event in filtered_electrons)
     total_output_mu = sum(len(event.get('PT', [])) for event in filtered_muons)
@@ -448,25 +303,17 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
     print(f"  Electrons:      {total_input_el} → {total_output_el} ({total_output_el/total_input_el*100:.2f}%)")
     print(f"  Muons:          {total_input_mu} → {total_output_mu} ({total_output_mu/total_input_mu*100:.2f}%)")
     
-    # Write output ROOT files
-    write_output_root_v2_0(output_file_v2_0, tree, filtered_charged_hadrons, max_events)
-    write_output_root_v2_1(output_file_v2_1, tree, filtered_charged_hadrons, filtered_electrons, max_events)
-    write_output_root_v2_2(tree, filtered_charged_hadrons, filtered_electrons, filtered_muons, output_file_v2_2, max_events)
     
     print(f"\n{'='*70}")
     print("Processing Complete!")
     print(f"{'='*70}")
+    print(f"n_events: {n_events}")
     print(f"\nOutput files created:")
-    print(f"  v2.0: {output_file_v2_0}")
-    print(f"    - Emulates delphes_card_CMS_2_0.tcl")
-    print(f"    - ChargedHadronEfficiency only")
-    print(f"\n  v2.1: {output_file_v2_1}")
-    print(f"    - Emulates delphes_card_CMS_2_1.tcl")
-    print(f"    - ChargedHadronEfficiency + ElectronEfficiency")
-    print(f"\n  v2.2: {output_file_v2_2}")
-    print(f"    - Emulates delphes_card_CMS_2_2.tcl")
-    print(f"    - ChargedHadronEfficiency + ElectronEfficiency + MuonEfficiency")
-
+    print("TrackingEfficiency:")
+    print(f"  ChargedHadron: {output_file_v2_0}")
+    print(f"  ChargedHadron + Electron: {output_file_v2_1}")
+    print(f"  ChargedHadron + Electron + Muon: {output_file_v2_2}")
+    print()
 
 if __name__ == "__main__":
     # Set default paths relative to this file
