@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 
 import uproot
 import awkward as ak
+import time
 
 # Set PyTorch to use maximum precision (double precision / float64)
 torch.set_default_dtype(torch.float64)
@@ -41,6 +42,9 @@ np.random.seed(42)
 torch.manual_seed(42)
 
 from parnassus.torch_delphes.Efficiency import DelphesEfficiency
+
+# DEVICE = "cpu"
+DEVICE = "cuda"
 
 
 def read_branch_data(tree, branch_name, max_events=None):
@@ -95,7 +99,7 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
     eff_module = DelphesEfficiency(
         efficiency_formula=efficiency_formula,
         deterministic=False,
-        device="cpu"
+        device=DEVICE
     )
     
     n_events = len(track_arrays[f"{branch_prefix}.PT"])
@@ -446,6 +450,8 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
 
 
 if __name__ == "__main__":
+    tic = time.time()
+
     # Set default paths relative to this file
     script_dir = Path(__file__).parent
     default_input = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_1.root"
@@ -478,4 +484,8 @@ if __name__ == "__main__":
         sys.exit(1)
     
     main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_events)
+
+    toc = time.time()
+    dur = toc - tic
+    print(f"Total duration on {DEVICE}: {dur//60} minutes, {dur%60:.2f} seconds")
 
