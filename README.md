@@ -11,7 +11,7 @@ To install the `Parnassus` package, ensure you have Python 3.10 or 3.11 installe
 
 ```bash
 # Clone the repository
-git clone https://github.com/dkobylianskii/parnassus/
+git clone https://github.com/parnassus-hep/parnassus.git
 cd parnassus
 
 # Install package
@@ -36,6 +36,10 @@ To run the tests you can use the `pytest` or `coverage` command, for example
 
 ```bash
 pytest .
+```
+
+To download the testbench data for the pythia pytest:
+```gdown --folder https://drive.google.com/drive/folders/1W-V_rU6lRmtuaOclj3gYB1qJSn4J11qM?usp=sharing -O src/parnassus/tests/benchmark_data/
 ```
 
 ## Running the Package
