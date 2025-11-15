@@ -317,7 +317,7 @@ if __name__ == "__main__":
         print('='*60)
         
         # Create efficiency module
-        eff_module = DelphesEfficiency(
+        eff_module = Efficiency(
             efficiency_formula=formula_name,
             deterministic=False,  # Stochastic mode
             device='cpu'
