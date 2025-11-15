@@ -66,7 +66,8 @@ def read_branch_data(tree, branch_name, max_events=None):
     else:
         # Track attributes (ChargedHadron, Electron, Muon)
         # Tracks don't have Status, E, Px, Py, Pz but have P instead
-        physics_attrs = ['PID', 'Charge', 'P', 'PT', 'Eta', 'Phi', 'T', 'X', 'Y', 'Z']
+        # Include EtaOuter for position-based eta (used for efficiency calculation in C++ Delphes)
+        physics_attrs = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
     
     # Build list of branch keys for physics attributes
     branch_keys = [f"{branch_name}/{branch_name}.{attr}" for attr in physics_attrs]
@@ -94,7 +95,7 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
     eff_module = DelphesEfficiency(
         efficiency_formula=efficiency_formula,
         deterministic=False,
-        device='cpu'
+        device="cpu"
     )
     
     n_events = len(track_arrays[f"{branch_prefix}.PT"])
@@ -112,6 +113,8 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
         # Build tensor (N, 15)
         # Track objects don't have Status, E, Px, Py, Pz - we'll set these to dummy values
         # The efficiency module only uses PT (column 7) and Eta (column 8)
+        # NOTE: C++ Delphes uses Position.Eta() by default, which for Track objects
+        # corresponds to EtaOuter (position eta at detector surface), not momentum Eta
         particles = np.zeros((n_particles, 15))
         
         # Column 0: PID
@@ -126,14 +129,15 @@ def apply_tracking_efficiency(track_arrays, branch_prefix, efficiency_formula='c
         # Columns 4-6: Px, Py, Pz (not available, compute from P, PT, Eta, Phi)
         PT = np.array(track_arrays[f"{branch_prefix}.PT"][i])
         Eta = np.array(track_arrays[f"{branch_prefix}.Eta"][i])
+        EtaOuter = np.array(track_arrays[f"{branch_prefix}.EtaOuter"][i])  # Position eta
         Phi = np.array(track_arrays[f"{branch_prefix}.Phi"][i])
         particles[:, 4] = PT * np.cos(Phi)  # Px
         particles[:, 5] = PT * np.sin(Phi)  # Py
         particles[:, 6] = PT * np.sinh(Eta)  # Pz
         # Column 7: PT (already have this)
         particles[:, 7] = PT
-        # Column 8: Eta (already have this)
-        particles[:, 8] = Eta
+        # Column 8: Eta - USE ETAOUTER to match C++ Delphes behavior!
+        particles[:, 8] = EtaOuter  # Position eta (what C++ Delphes uses by default)
         # Column 9: Phi (already have this)
         particles[:, 9] = Phi
         # Column 10: T
