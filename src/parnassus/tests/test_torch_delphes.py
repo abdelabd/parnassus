@@ -26,9 +26,13 @@ import numpy as np
 import torch
 from pathlib import Path
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 import uproot
 import awkward as ak
+
+# Set PyTorch to use maximum precision (double precision / float64)
+torch.set_default_dtype(torch.float64)
 
 # Seeds for reproducibility
 import random
@@ -224,6 +228,109 @@ def write_output_root(output_file, tree_data):
     print(f"✓ Output written successfully!")
 
 
+def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
+    """
+    Validate PyTorch Delphes implementation against C++ Delphes benchmark.
+    
+    Args:
+        torch_output_file: Path to PyTorch output ROOT file (e.g., HZZ4l_2_2_torch.root)
+        benchmark_file: Path to benchmark ROOT file from C++ Delphes
+        output_dir: Directory to save validation plots
+    """
+
+    # Create output directory
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load PyTorch output from disk
+    torch_root = uproot.open(torch_output_file)
+    torch_tree = torch_root["Delphes"]
+    
+    # Load benchmark data
+    benchmark_root = uproot.open(benchmark_file)
+    benchmark_tree = benchmark_root["Delphes"]
+    
+    # Kinematic variables to compare
+    kinematic_vars = ['Charge', 'E', 'P', 'Px', 'Py', 'Pz', 'PT', 'Eta', 'Phi']
+    
+    # Branches to validate
+    efficiency_branches = ['ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency']
+    
+    for branch_name in efficiency_branches:
+        print(f"\nValidating {branch_name}...")
+        
+        # Create branch-specific directory
+        branch_dir = output_dir / branch_name
+        branch_dir.mkdir(exist_ok=True)
+        
+        # Check if branch exists in PyTorch output
+        torch_branch_keys = [k for k in torch_tree.keys() if k.startswith(f"{branch_name}.")]
+        if not torch_branch_keys:
+            print(f"  ⚠ {branch_name} not found in PyTorch output, skipping...")
+            continue
+        
+        for var in kinematic_vars:
+            # Check if variable exists in both datasets
+            torch_key = f"{branch_name}.{var}"
+            benchmark_key = f"{branch_name}/{branch_name}.{var}"
+            
+            if torch_key not in torch_tree.keys():
+                print(f"  ⚠ {var} not found in PyTorch {branch_name}, skipping...")
+                continue
+            
+            if benchmark_key not in benchmark_tree.keys():
+                print(f"  ⚠ {var} not found in C++ {branch_name}, skipping...")
+                continue
+            
+            try:
+                # Load data from both sources (both from disk)
+                torch_data = torch_tree[torch_key].array()
+                torch_data = ak.flatten(torch_data)
+                
+                benchmark_data = benchmark_tree[benchmark_key].array()
+                benchmark_data = ak.flatten(benchmark_data)
+                
+                # Convert to numpy for plotting
+                torch_np = np.asarray(torch_data)
+                benchmark_np = np.asarray(benchmark_data)
+                
+                # Create histogram
+                fig, ax = plt.subplots(figsize=(10, 6))
+                
+                # Determine bin range
+                all_data = np.concatenate([torch_np, benchmark_np])
+                if len(all_data) > 0:
+                    bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 50)
+                else:
+                    bins = 50
+                
+                # Plot histograms
+                ax.hist(benchmark_np, bins=bins, histtype='step', color='orange', 
+                       linewidth=2, label='C++ Delphes', density=True)
+                ax.hist(torch_np, bins=bins, histtype='step', color='blue', 
+                       linewidth=2, label='Parnassus.TorchDelphes', density=True)
+                
+                ax.set_xlabel(var, fontsize=12)
+                ax.set_ylabel('Normalized Counts', fontsize=12)
+                ax.set_title(f'{branch_name}: {var}', fontsize=14, fontweight='bold')
+                ax.legend(fontsize=11)
+                ax.grid(True, alpha=0.3)
+                
+                # Save plot
+                plot_file = branch_dir / f"{var}.png"
+                plt.tight_layout()
+                plt.savefig(plot_file, dpi=150)
+                plt.close()
+                
+                print(f"  ✓ {var}: saved to {plot_file.name}")
+                
+            except Exception as e:
+                print(f"  ✗ {var}: Error - {e}")
+                continue
+    
+    print(f"\n✓ Validation complete! Plots saved to {output_dir}")
+
+
 def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_events=None):
     """Main processing function."""
     
@@ -314,6 +421,25 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, max_e
     print(f"  ChargedHadron + Electron: {output_file_v2_1}")
     print(f"  ChargedHadron + Electron + Muon: {output_file_v2_2}")
     print()
+    
+    ############################## Validation #####################################
+
+    # Validate against C++ Delphes benchmark
+    script_dir = Path(__file__).parent
+    benchmark_file = script_dir / "delphes_data" / "HZZ4l" / "HZZ4l_2_2.root"
+    validation_dir = script_dir / "torch_delphes_validation"
+    print(f"\n{'='*70}")
+    print("Validation: Comparing PyTorch Delphes vs C++ Delphes")
+    print(f"{'='*70}")
+    print(f"Benchmark file: {benchmark_file}")
+    print(f"Validation directory: {validation_dir}")
+
+    if benchmark_file.exists():
+        validate_against_benchmark(output_file_v2_2, benchmark_file, validation_dir)
+    else:
+        print(f"\n⚠ Benchmark file not found: {benchmark_file}")
+        print("  Skipping validation. To enable validation, provide HZZ4l_2_2.root")
+
 
 if __name__ == "__main__":
     # Set default paths relative to this file
