@@ -247,7 +247,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
                        linewidth=2, label='Parnassus.TorchDelphes', density=True)
                 
                 ax.set_xlabel(var, fontsize=12)
-                ax.set_ylabel('Normalized Counts', fontsize=12)
+                ax.set_ylabel('Counts', fontsize=12)
                 ax.set_title(f'{branch_name}: {var}', fontsize=14, fontweight='bold')
                 ax.legend(fontsize=11)
                 ax.grid(True, alpha=0.3)
