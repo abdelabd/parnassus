@@ -71,19 +71,16 @@ def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_t
     # Initialize efficiency modules
     ch_eff_module = Efficiency(
         efficiency_formula='charged_hadron_cms',
-        deterministic=False,
         device=DEVICE
     )
     
     el_eff_module = Efficiency(
         efficiency_formula='electron_cms',
-        deterministic=False,
         device=DEVICE
     )
     
     mu_eff_module = Efficiency(
         efficiency_formula='muon_cms',
-        deterministic=False,
         device=DEVICE
     )
     
@@ -127,19 +124,16 @@ def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered):
     # Initialize smearing modules
     ch_smear_module = MomentumSmearing(
         resolution_formula='charged_hadron_cms',
-        deterministic=False,
         device=DEVICE
     )
     
     el_smear_module = MomentumSmearing(
         resolution_formula='electron_cms',
-        deterministic=False,
         device=DEVICE
     )
     
     mu_smear_module = MomentumSmearing(
         resolution_formula='muon_cms',
-        deterministic=False,
         device=DEVICE
     )
     
