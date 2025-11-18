@@ -420,9 +420,9 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
                 
                 # Plot histograms
                 ax.hist(benchmark_np, bins=bins, histtype='step', color='orange', 
-                       linewidth=2, label='C++ Delphes', density=True)
+                       linewidth=2, label='C++ Delphes', density=False)
                 ax.hist(torch_np, bins=bins, histtype='step', color='blue', 
-                       linewidth=2, label='Parnassus.TorchDelphes', density=True)
+                       linewidth=2, label='Parnassus.TorchDelphes', density=False)
                 
                 ax.set_xlabel(var, fontsize=12)
                 ax.set_ylabel('Normalized Counts', fontsize=12)
