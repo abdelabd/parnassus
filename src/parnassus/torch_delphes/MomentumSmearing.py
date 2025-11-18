@@ -41,7 +41,6 @@ class MomentumSmearing(nn.Module):
     
     def __init__(self, 
                  resolution_formula='charged_hadron_cms',
-                 deterministic=False,
                  device='cpu'):
         """
         Args:
@@ -50,7 +49,6 @@ class MomentumSmearing(nn.Module):
             device: torch device ('cpu' or 'cuda')
         """
         super().__init__()
-        self.deterministic = deterministic
         self.device = device
         
         # Load resolution formula
@@ -272,12 +270,7 @@ class MomentumSmearing(nn.Module):
         resolution = torch.clamp(resolution, max=1.0)
         
         # Apply smearing
-        if self.deterministic:
-            # No smearing for deterministic mode
-            smeared_pt = pt
-        else:
-            # Apply log-normal smearing
-            smeared_pt = self.log_normal_sample(pt, resolution)
+        smeared_pt = self.log_normal_sample(pt, resolution)
         
         # Update PT in the tensor (column 7)
         smeared[:, 7] = smeared_pt
@@ -352,7 +345,7 @@ if __name__ == "__main__":
     print(f"PT:  {test_particles[:, 7]}")
     print(f"Eta: {test_particles[:, 8]}")
     
-    # Apply smearing (deterministic for testing)
+    # Apply smearing
     smeared_particles, resolutions = smearing(test_particles, return_resolution=True)
     
     print("\nResolutions:")

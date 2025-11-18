@@ -40,17 +40,13 @@ class Efficiency(nn.Module):
     
     def __init__(self, 
                  efficiency_formula='charged_hadron_cms',
-                 deterministic=False,
                  device='cpu'):
         """
         Args:
             efficiency_formula: Name of predefined formula or custom callable
-            deterministic: If True, apply efficiency deterministically (threshold)
-                         If False (default), apply stochastically (random sampling)
             device: torch device ('cpu' or 'cuda')
         """
         super().__init__()
-        self.deterministic = deterministic
         self.device = device
         
         # Load efficiency formula
@@ -160,7 +156,7 @@ class Efficiency(nn.Module):
         
         return eff
     
-    def forward(self, particles, return_mask=False):
+    def forward(self, particles):
         """
         Apply efficiency filter to particles.
         
@@ -176,25 +172,12 @@ class Efficiency(nn.Module):
                 column 9: Phi (azimuthal angle, pre-computed)
                 column 10: T (time)
                 columns 11-13: X, Y, Z (position)
-            return_mask: if True, return (filtered_particles, mask)
-                        if False, return only filtered_particles
-        
+
         Returns:
             filtered_particles: tensor with only particles that passed efficiency
                                (rows that failed are removed)
             mask (optional): boolean mask indicating which particles passed
         """
-        # Ensure 2D input (single event)
-        assert len(particles.shape) == 2, f"Expected 2D tensor (N, 15), got shape {particles.shape}"
-        n_particles, features = particles.shape
-        assert features == 15, f"Expected 15 features, got {features}"
-        
-        # Handle empty input
-        if n_particles == 0:
-            if return_mask:
-                return particles, torch.zeros(0, dtype=torch.bool, device=particles.device)
-            else:
-                return particles
         
         # Move to device
         particles = particles.to(self.device)
@@ -207,20 +190,12 @@ class Efficiency(nn.Module):
         efficiency = self.efficiency_func(pt, eta)
         
         # Apply efficiency stochastically
-        if self.deterministic:
-            # Deterministic mode: use threshold at 0.5
-            mask = efficiency > 0.5
-        else:
-            # Stochastic mode: sample from uniform distribution
-            mask = torch.rand_like(efficiency) < efficiency
+        mask = torch.rand_like(efficiency) < efficiency
         
         # Filter particles - remove rows that didn't pass
         filtered_particles = particles[mask]
         
-        if return_mask:
-            return filtered_particles, mask
-        else:
-            return filtered_particles
+        return filtered_particles
     
     def get_efficiency_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
                           n_pts=100, n_etas=100):
@@ -301,12 +276,11 @@ if __name__ == "__main__":
         # Create efficiency module
         eff_module = Efficiency(
             efficiency_formula=formula_name,
-            deterministic=False,  # Stochastic mode
             device='cpu'
         )
         
         # Apply efficiency
-        filtered_particles, mask = eff_module(particles, return_mask=True)
+        filtered_particles, mask = eff_module(particles)
         
         print(f"\nResults:")
         print(f"Input particles: {n_particles}")
