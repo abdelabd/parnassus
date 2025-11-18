@@ -23,11 +23,15 @@ class MomentumSmearing(nn.Module):
         - column 3: E (Energy)
         - columns 4-6: Px, Py, Pz (3-momentum)
         - column 7: PT (transverse momentum)
-        - column 8: Eta (pseudorapidity)
+        - column 8: Eta (pseudorapidity for resolution formula - typically position-based)
         - column 9: Phi (azimuthal angle)
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position)
         - column 14: Mass
+    
+    NOTE: The Eta in column 8 is used for evaluating the resolution formula.
+    However, when reconstructing the 4-vector after smearing, we recompute
+    Eta from the momentum components (Px, Py, Pz) to match C++ Delphes behavior.
     
     The resolution formula from CMS card (for charged hadrons):
         (abs(eta) <= 0.5) * (pt > 0.1) * sqrt(0.06^2 + pt^2*1.3e-3^2) +
@@ -241,13 +245,26 @@ class MomentumSmearing(nn.Module):
         # Clone particles to avoid modifying input
         smeared = particles.clone()
         
-        # Extract pre-computed kinematics from Delphes (columns 7-9)
+        # Extract pre-computed kinematics from Delphes
         pt = particles[..., 7]   # Column 7: PT (transverse momentum)
-        eta = particles[..., 8]  # Column 8: Eta (pseudorapidity)
+        eta = particles[..., 8]  # Column 8: Eta (for resolution formula - typically position-based)
         phi = particles[..., 9]  # Column 9: Phi (azimuthal angle)
         mass = particles[..., 14] if features > 14 else torch.zeros_like(pt)  # Column 14: Mass
         
-        # Compute resolution for each particle
+        # Extract momentum components to compute momentum-based eta for reconstruction
+        px = particles[..., 4]  # Px
+        py = particles[..., 5]  # Py
+        pz = particles[..., 6]  # Pz
+        
+        # Compute momentum-based eta and phi from the momentum vector
+        # This matches C++ Delphes which uses candidateMomentum.Eta() and candidateMomentum.Phi()
+        # for reconstructing the 4-vector after smearing
+        momentum_pt = torch.sqrt(px**2 + py**2)
+        momentum_eta = torch.asinh(pz / (momentum_pt + 1e-10))  # atanh(pz/p) = asinh(pz/pt)
+        momentum_phi = torch.atan2(py, px)
+        
+        # Compute resolution for each particle using the eta from column 8
+        # (which may be position-based depending on configuration)
         resolution = self.resolution_func(pt, eta)
         
         # Clamp resolution to maximum of 1.0 (100% of PT)
@@ -264,11 +281,12 @@ class MomentumSmearing(nn.Module):
         # Update PT in the tensor (column 7)
         smeared[..., 7] = smeared_pt
         
-        # Recompute Px, Py, Pz with smeared PT but same eta, phi, mass
-        # Using: PT, Eta, Phi, M -> Px, Py, Pz, E
-        smeared[..., 4] = smeared_pt * torch.cos(phi)  # Px
-        smeared[..., 5] = smeared_pt * torch.sin(phi)  # Py
-        smeared[..., 6] = smeared_pt * torch.sinh(eta)  # Pz
+        # Recompute Px, Py, Pz with smeared PT but using MOMENTUM-based eta and phi
+        # This matches C++ Delphes behavior: it uses candidateMomentum.Eta() and Phi()
+        # for reconstruction, not the position-based values used for resolution
+        smeared[..., 4] = smeared_pt * torch.cos(momentum_phi)  # Px
+        smeared[..., 5] = smeared_pt * torch.sin(momentum_phi)  # Py
+        smeared[..., 6] = smeared_pt * torch.sinh(momentum_eta)  # Pz
         
         # Recompute energy: E = sqrt(P^2 + M^2)
         p_squared = smeared[..., 4]**2 + smeared[..., 5]**2 + smeared[..., 6]**2
