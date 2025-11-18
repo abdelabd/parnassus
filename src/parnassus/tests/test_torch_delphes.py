@@ -50,9 +50,8 @@ torch.manual_seed(42)
 
 from parnassus.torch_delphes import Efficiency, MomentumSmearing
 
-DEVICE = "cpu"
-# DEVICE = "cuda"
-
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {DEVICE}")
 
 def read_branch_data(tree, branch_name, max_events=None):
     """
