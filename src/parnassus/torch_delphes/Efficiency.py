@@ -180,65 +180,47 @@ class Efficiency(nn.Module):
                         if False, return only filtered_particles
         
         Returns:
-            filtered_particles: particles that pass efficiency cut
-            mask (optional): boolean mask of particles that passed
+            filtered_particles: tensor with only particles that passed efficiency
+                               (rows that failed are removed)
+            mask (optional): boolean mask indicating which particles passed
         """
-        # Handle both batched and unbatched inputs
-        input_shape = particles.shape
-        if len(input_shape) == 2:
-            particles = particles.unsqueeze(0)  # Add batch dimension
-            squeeze_output = True
-        else:
-            squeeze_output = False
-        
-        batch_size, n_particles, features = particles.shape
+        # Ensure 2D input (single event)
+        assert len(particles.shape) == 2, f"Expected 2D tensor (N, 15), got shape {particles.shape}"
+        n_particles, features = particles.shape
         assert features == 15, f"Expected 15 features, got {features}"
+        
+        # Handle empty input
+        if n_particles == 0:
+            if return_mask:
+                return particles, torch.zeros(0, dtype=torch.bool, device=particles.device)
+            else:
+                return particles
         
         # Move to device
         particles = particles.to(self.device)
         
-        # Extract pre-computed kinematics from Delphes (columns 7-9)
-        pt = particles[..., 7]   # Column 7: PT (transverse momentum)
-        eta = particles[..., 8]  # Column 8: Eta (pseudorapidity)
-        phi = particles[..., 9]  # Column 9: Phi (azimuthal angle)
+        # Extract pre-computed kinematics from Delphes (columns 7-8)
+        pt = particles[:, 7]   # Column 7: PT (transverse momentum)
+        eta = particles[:, 8]  # Column 8: Eta (pseudorapidity)
         
         # Compute efficiency for each particle
         efficiency = self.efficiency_func(pt, eta)
         
-        # Apply efficiency
+        # Apply efficiency stochastically
         if self.deterministic:
-            # Deterministic: keep if efficiency > 0.5
+            # Deterministic mode: use threshold at 0.5
             mask = efficiency > 0.5
         else:
-            # Stochastic: random sampling
-            random_vals = torch.rand_like(efficiency)
-            mask = random_vals <= efficiency
+            # Stochastic mode: sample from uniform distribution
+            mask = torch.rand_like(efficiency) < efficiency
         
-        # Apply mask to filter particles
-        if squeeze_output:
-            particles = particles.squeeze(0)
-            mask = mask.squeeze(0)
-            
-            if return_mask:
-                return particles[mask], mask
-            else:
-                return particles[mask]
+        # Filter particles - remove rows that didn't pass
+        filtered_particles = particles[mask]
+        
+        if return_mask:
+            return filtered_particles, mask
         else:
-            # For batched input, need to handle variable-length outputs
-            # Return as list of tensors or use padding
-            filtered_particles_list = []
-            masks_list = []
-            
-            for i in range(batch_size):
-                batch_mask = mask[i]
-                filtered = particles[i][batch_mask]
-                filtered_particles_list.append(filtered)
-                masks_list.append(batch_mask)
-            
-            if return_mask:
-                return filtered_particles_list, masks_list
-            else:
-                return filtered_particles_list
+            return filtered_particles
     
     def get_efficiency_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
                           n_pts=100, n_etas=100):
@@ -347,7 +329,7 @@ if __name__ == "__main__":
     print("Generating efficiency map for charged hadrons")
     print('='*60)
     
-    eff_module = DelphesEfficiency(efficiency_formula='charged_hadron_cms')
+    eff_module = Efficiency(efficiency_formula='charged_hadron_cms')
     pt_grid, eta_grid, eff_map = eff_module.get_efficiency_map()
     
     print(f"\nEfficiency map shape: {eff_map.shape}")
