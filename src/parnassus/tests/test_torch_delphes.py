@@ -223,17 +223,18 @@ def apply_momentum_smearing(filtered_particles, smearing_formula='charged_hadron
             particles[:, 3] = event['P']  # Approximate E ≈ P for high energy
         else:
             particles[:, 3] = event['PT']  # Fallback
-        # Columns 4-6: Px, Py, Pz (compute from PT, Eta, Phi)
+        # Columns 4-6: Px, Py, Pz (compute from PT, Eta, Phi using momentum-based values)
         PT = event['PT']
-        Eta = event.get('Eta', np.zeros_like(PT))
-        EtaOuter = event.get('EtaOuter', Eta)  # Use EtaOuter if available
+        Eta = event.get('Eta', np.zeros_like(PT))  # Momentum-based Eta
+        EtaOuter = event.get('EtaOuter', Eta)  # Position-based Eta
         Phi = event['Phi']
         particles[:, 4] = PT * np.cos(Phi)  # Px
         particles[:, 5] = PT * np.sin(Phi)  # Py
-        particles[:, 6] = PT * np.sinh(Eta)  # Pz
+        particles[:, 6] = PT * np.sinh(Eta)  # Pz (use momentum Eta)
         # Column 7: PT
         particles[:, 7] = PT
-        # Column 8: Eta (use EtaOuter for position-based smearing)
+        # Column 8: Eta (use EtaOuter for position-based resolution formula evaluation)
+        # Note: MomentumSmearing will recompute momentum Eta from Px,Py,Pz for 4-vector reconstruction
         particles[:, 8] = EtaOuter
         # Column 9: Phi
         particles[:, 9] = Phi
