@@ -410,34 +410,23 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
             particles = np.zeros((n_particles, N_FEATURES))
             
             for i, p in enumerate(stable_particles):
-                # Get particle properties
+                # Extract raw particle properties - NO COMPUTATIONS
+                # Let modules compute PT, Eta, Phi as needed
                 pid = p.pid
                 status = p.status
                 momentum = p.momentum
                 
-                # Calculate charge from PDG ID
+                # Lookup charge and mass from PDG ID (simple lookups are okay)
                 charge = get_charge_from_pdg(pid)
+                mass = get_mass_from_pdg(pid)
                 
-                # Energy and momentum
+                # Extract raw momentum components
                 e = momentum.e
                 px = momentum.px
                 py = momentum.py
                 pz = momentum.pz
                 
-                # Transverse momentum
-                pt = np.sqrt(px**2 + py**2)
-                
-                # Pseudorapidity (momentum-based)
-                p_mag = np.sqrt(px**2 + py**2 + pz**2)
-                if p_mag > 0:
-                    eta = 0.5 * np.log((p_mag + pz) / (p_mag - pz + 1e-10))
-                else:
-                    eta = 0.0
-                
-                # Azimuthal angle
-                phi = np.arctan2(py, px)
-                
-                # Production vertex
+                # Extract production vertex
                 if p.production_vertex:
                     vertex = p.production_vertex.position
                     x = vertex.x  # mm in HepMC
@@ -447,10 +436,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 else:
                     x = y = z = t = 0.0
                 
-                # Mass
-                mass = get_mass_from_pdg(pid)
-                
-                # Fill tensor row
+                # Fill tensor row with RAW data only
                 particles[i, PID] = pid
                 particles[i, STATUS] = status
                 particles[i, CHARGE] = charge
@@ -458,9 +444,9 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 particles[i, PX] = px
                 particles[i, PY] = py
                 particles[i, PZ] = pz
-                particles[i, PT] = pt
-                particles[i, ETA] = eta
-                particles[i, PHI] = phi
+                # PT (col 7) = 0 - will be computed by ParticlePropagator
+                # ETA (col 8) = 0 - will be computed by ParticlePropagator  
+                # PHI (col 9) = 0 - will be computed by ParticlePropagator
                 particles[i, T] = t
                 particles[i, X] = x / 10.0  # Convert mm to cm
                 particles[i, Y] = y / 10.0
