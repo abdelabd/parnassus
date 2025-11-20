@@ -108,13 +108,25 @@ class ParticlePropagator(nn.Module):
         # Check minimum PT
         valid_pt = pt**2 >= 1.0e-9
         
-        # Only propagate particles inside volume with valid PT
+        # Base valid mask: inside volume with valid PT
         valid_mask = inside_volume & valid_pt
         
-        # Create output tensor (clone valid particles)
+        # ==================== HANDLE "ALREADY OUTSIDE TRACKER" CASE ====================
+        # C++ Delphes: if(r > fRadius || |z| > fHalfLength) → pass through without propagation
+        # These are particles born between tracker radius and radius_max (or half_length and half_length_max)
+        inside_tracker = (r <= self.radius) & (torch.abs(z) <= self.half_length)
+        needs_propagation = inside_tracker & valid_mask
+        already_outside_tracker = (~inside_tracker) & valid_mask
+        
+        # Clone all valid particles for output
         output = particles[valid_mask].clone()
         
-        # Extract valid particle data
+        # Create masks relative to output array (valid particles only)
+        # Map from full particle array to output array
+        needs_prop_in_output = needs_propagation[valid_mask]
+        already_outside_in_output = already_outside_tracker[valid_mask]
+        
+        # Extract particle data for propagation (only for particles that need it)
         x_v = x[valid_mask]
         y_v = y[valid_mask]
         z_v = z[valid_mask]
@@ -125,12 +137,11 @@ class ParticlePropagator(nn.Module):
         e_v = e[valid_mask]
         q_v = q[valid_mask]
         
-
-        # Separate neutral and charged particles
+        # Separate neutral and charged particles (among those needing propagation)
         # If no magnetic field, treat all as neutral
         no_bfield = 1 if torch.abs(self.bz) < 1.0e-9 else 0
-        neutral_mask = no_bfield*(torch.ones_like(q_v, dtype=torch.bool)) + (1-no_bfield)*(torch.abs(q_v) < 1.0e-9)
-        charged_mask = ~neutral_mask
+        neutral_mask = (no_bfield*(torch.ones_like(q_v, dtype=torch.bool)) + (1-no_bfield)*(torch.abs(q_v) < 1.0e-9)) & needs_prop_in_output
+        charged_mask = (~(torch.abs(q_v) < 1.0e-9)) & needs_prop_in_output
         
         # ==================== NEUTRAL PARTICLE PROPAGATION ====================
         output = self._propagate_neutral(
@@ -144,11 +155,11 @@ class ParticlePropagator(nn.Module):
             x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v, q_v
         )
         
-        # ==================== SEPARATE BY PARTICLE TYPE ====================
-        # Use updated positions to check which particles made it
+        # Filter out particles that didn't reach detector (r_t == 0)
+        # In _propagate_charged, invalid particles have position set to zero
+        # But DON'T filter particles that were already outside (they should keep their positions)
         final_r = torch.sqrt(output[:, 11]**2 + output[:, 12]**2) * 1.0e-3
-        reached_detector = final_r > 0.0
-        
+        reached_detector = (final_r > 1.0e-6) | already_outside_in_output
         output = output[reached_detector]
         
         # Separate by type using PID and charge
