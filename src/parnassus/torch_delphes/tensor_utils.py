@@ -9,7 +9,10 @@ This module provides:
 import torch
 import numpy as np
 import awkward as ak
+import uproot
+import pyhepmc
 from typing import Dict, List, Tuple
+from tqdm import tqdm
 
 
 # ==================== TENSOR COLUMN INDICES ====================
@@ -241,7 +244,6 @@ def write_root_file(output_file: str, branches_dict: Dict[str, Dict[str, ak.Arra
                       e.g., {"ChargedHadronEfficiency": {...}, "ElectronEfficiency": {...}}
         tree_name: Name of the tree in ROOT file (default: "Delphes")
     """
-    import uproot
     
     # Combine all branch dictionaries
     combined_dict = {}
@@ -267,7 +269,6 @@ def load_all_particle_types(tree, max_events: int = None) -> Tuple[List[torch.Te
         Tuple of (charged_hadron_tensors, electron_tensors, muon_tensors)
         Each is a list of tensors, one per event
     """
-    import uproot
     
     # Define branches and their attribute keys
     branches = {
@@ -292,3 +293,303 @@ def load_all_particle_types(tree, max_events: int = None) -> Tuple[List[torch.Te
     return (particle_tensors['ChargedHadron'], 
             particle_tensors['Electron'], 
             particle_tensors['Muon'])
+
+
+def root_genparticle_to_tensor(particle_arrays: ak.Array, branch_prefix: str = "Particle",
+                                max_events: int = None) -> List[torch.Tensor]:
+    """
+    Convert ROOT GenParticle branch to list of PyTorch tensors (one per event).
+    
+    GenParticle objects (from Delphes/stableParticles before PropParticlegator) have:
+    - PID, Status, Charge, E, Px, Py, Pz, PT, Eta, Phi, T, X, Y, Z, Mass (15 attributes)
+    
+    Args:
+        particle_arrays: awkward array with particle data from uproot
+        branch_prefix: branch name (default: "Particle")
+        max_events: maximum number of events to process
+        
+    Returns:
+        List of tensors, one per event, each of shape (n_particles, 15)
+    """
+    # Determine number of events
+    n_events = len(particle_arrays[f"{branch_prefix}/{branch_prefix}.PT"])
+    if max_events is not None:
+        n_events = min(n_events, max_events)
+    
+    event_tensors = []
+    
+    for i in range(n_events):
+        n_particles = len(particle_arrays[f"{branch_prefix}/{branch_prefix}.PT"][i])
+        
+        if n_particles == 0:
+            event_tensors.append(torch.zeros((0, N_FEATURES), dtype=torch.float64))
+            continue
+        
+        # Create tensor for this event
+        particles = np.zeros((n_particles, N_FEATURES))
+        
+        # Extract data from ROOT (GenParticle has all 15 attributes)
+        particles[:, PID] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.PID"][i])
+        particles[:, STATUS] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Status"][i])
+        particles[:, CHARGE] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Charge"][i])
+        particles[:, E] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.E"][i])
+        particles[:, PX] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Px"][i])
+        particles[:, PY] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Py"][i])
+        particles[:, PZ] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Pz"][i])
+        particles[:, PT] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.PT"][i])
+        particles[:, ETA] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Eta"][i])
+        particles[:, PHI] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Phi"][i])
+        particles[:, T] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.T"][i])
+        particles[:, X] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.X"][i])
+        particles[:, Y] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Y"][i])
+        particles[:, Z] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Z"][i])
+        particles[:, MASS] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Mass"][i])
+        
+        # Convert to torch tensor
+        event_tensors.append(torch.from_numpy(particles))
+    
+    return event_tensors
+
+
+def load_genparticles(tree, max_events: int = None) -> List[torch.Tensor]:
+    """
+    Load GenParticle (Delphes/stableParticles) from ROOT tree.
+    
+    Args:
+        tree: uproot TTree object
+        max_events: Maximum number of events to load
+        
+    Returns:
+        List of tensors, one per event, each of shape (n_particles, 15)
+    """
+    branch_name = "Particle"
+    attrs = ['PID', 'Status', 'Charge', 'E', 'Px', 'Py', 'Pz', 'PT', 'Eta', 'Phi', 'T', 'X', 'Y', 'Z', 'Mass']
+    
+    # Build list of keys
+    branch_keys = [f"{branch_name}/{branch_name}.{attr}" for attr in attrs]
+    
+    # Read from ROOT
+    arrays = tree.arrays(branch_keys, entry_stop=max_events, library="ak")
+    
+    # Convert to tensors
+    return root_genparticle_to_tensor(arrays, branch_name, max_events)
+
+
+def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tensor]:
+
+    """
+    Convert HepMC file to list of PyTorch tensors (one per event).
+    
+    Reads stable particles from HepMC events and converts to tensor format.
+    
+    Args:
+        hepmc_file: Path to HepMC file (.hepmc, .hepmc3, or .hepmc.gz)
+        max_events: Maximum number of events to process
+        
+    Returns:
+        List of tensors, one per event, each of shape (n_particles, 15)
+    """
+    import pyhepmc
+    
+    event_tensors = []
+    
+    with pyhepmc.open(hepmc_file) as f:
+        for event_idx, event in tqdm(enumerate(f), total=max_events):
+            if max_events is not None and event_idx >= max_events:
+                break
+            
+            # Get all stable particles (status == 1)
+            stable_particles = [p for p in event.particles if p.status == 1]
+            
+            n_particles = len(stable_particles)
+            if n_particles == 0:
+                event_tensors.append(torch.zeros((0, N_FEATURES), dtype=torch.float64))
+                continue
+            
+            # Create tensor for this event
+            particles = np.zeros((n_particles, N_FEATURES))
+            
+            for i, p in enumerate(stable_particles):
+                # Get particle properties
+                pid = p.pid
+                status = p.status
+                momentum = p.momentum
+                
+                # Calculate charge from PDG ID
+                charge = get_charge_from_pdg(pid)
+                
+                # Energy and momentum
+                e = momentum.e
+                px = momentum.px
+                py = momentum.py
+                pz = momentum.pz
+                
+                # Transverse momentum
+                pt = np.sqrt(px**2 + py**2)
+                
+                # Pseudorapidity (momentum-based)
+                p_mag = np.sqrt(px**2 + py**2 + pz**2)
+                if p_mag > 0:
+                    eta = 0.5 * np.log((p_mag + pz) / (p_mag - pz + 1e-10))
+                else:
+                    eta = 0.0
+                
+                # Azimuthal angle
+                phi = np.arctan2(py, px)
+                
+                # Production vertex
+                if p.production_vertex:
+                    vertex = p.production_vertex.position
+                    x = vertex.x  # mm in HepMC
+                    y = vertex.y
+                    z = vertex.z
+                    t = vertex.t
+                else:
+                    x = y = z = t = 0.0
+                
+                # Mass
+                mass = get_mass_from_pdg(pid)
+                
+                # Fill tensor row
+                particles[i, PID] = pid
+                particles[i, STATUS] = status
+                particles[i, CHARGE] = charge
+                particles[i, E] = e
+                particles[i, PX] = px
+                particles[i, PY] = py
+                particles[i, PZ] = pz
+                particles[i, PT] = pt
+                particles[i, ETA] = eta
+                particles[i, PHI] = phi
+                particles[i, T] = t
+                particles[i, X] = x / 10.0  # Convert mm to cm
+                particles[i, Y] = y / 10.0
+                particles[i, Z] = z / 10.0
+                particles[i, MASS] = mass
+            
+            # Convert to torch tensor
+            event_tensors.append(torch.from_numpy(particles))
+    
+    return event_tensors
+
+# ==================== PDG ID UTILITIES ====================
+
+def get_charge_from_pdg(pdg_id: int) -> float:
+    """
+    Get electric charge from PDG ID.
+    
+    Args:
+        pdg_id: Particle Data Group ID code
+        
+    Returns:
+        Electric charge in units of elementary charge
+    """
+    # Leptons
+    if abs(pdg_id) == 11:  # electron
+        return -1.0 if pdg_id > 0 else 1.0
+    elif abs(pdg_id) == 13:  # muon
+        return -1.0 if pdg_id > 0 else 1.0
+    elif abs(pdg_id) == 15:  # tau
+        return -1.0 if pdg_id > 0 else 1.0
+    
+    # Neutrinos (neutral)
+    elif abs(pdg_id) in [12, 14, 16]:
+        return 0.0
+    
+    # Photon
+    elif pdg_id == 22:
+        return 0.0
+    
+    # Pions
+    elif abs(pdg_id) == 211:  # charged pion
+        return 1.0 if pdg_id > 0 else -1.0
+    elif pdg_id == 111:  # neutral pion
+        return 0.0
+    
+    # Kaons
+    elif abs(pdg_id) == 321:  # charged kaon
+        return 1.0 if pdg_id > 0 else -1.0
+    elif pdg_id == 130 or pdg_id == 310 or pdg_id == 311:  # neutral kaons
+        return 0.0
+    
+    # Proton/neutron
+    elif pdg_id == 2212:  # proton
+        return 1.0
+    elif pdg_id == -2212:  # antiproton
+        return -1.0
+    elif pdg_id == 2112 or pdg_id == -2112:  # neutron/antineutron
+        return 0.0
+    
+    # Quarks (should not appear as stable particles, but just in case)
+    elif abs(pdg_id) in [1, 3, 5]:  # d, s, b quarks
+        return -1.0/3.0 if pdg_id > 0 else 1.0/3.0
+    elif abs(pdg_id) in [2, 4, 6]:  # u, c, t quarks
+        return 2.0/3.0 if pdg_id > 0 else -2.0/3.0
+    
+    # For unknown particles, try to infer from PDG numbering scheme
+    # This is a simplified approximation
+    else:
+        # Mesons (100-999): last digit gives charge
+        if 100 <= abs(pdg_id) < 1000:
+            last_digit = abs(pdg_id) % 10
+            if last_digit == 0:  # neutral
+                return 0.0
+            elif pdg_id > 0:
+                return 1.0 if last_digit in [1, 3, 5] else -1.0
+            else:
+                return -1.0 if last_digit in [1, 3, 5] else 1.0
+        
+        # Baryons (1000-9999)
+        elif 1000 <= abs(pdg_id) < 10000:
+            # Extract quark content (simplified)
+            return 1.0 if pdg_id > 0 else -1.0
+        
+        # Default to neutral for unknown particles
+        return 0.0
+
+
+def get_mass_from_pdg(pdg_id: int) -> float:
+    """
+    Get particle mass from PDG ID.
+    
+    Args:
+        pdg_id: Particle Data Group ID code
+        
+    Returns:
+        Mass in GeV
+    """
+    mass_table = {
+        # Leptons
+        11: ELECTRON_MASS,
+        13: MUON_MASS,
+        15: 1.77686,  # tau
+        12: 0.0,  # electron neutrino
+        14: 0.0,  # muon neutrino
+        16: 0.0,  # tau neutrino
+        
+        # Photon
+        22: 0.0,
+        
+        # Pions
+        111: 0.13498,  # pi0
+        211: PION_MASS,  # pi+/-
+        
+        # Kaons
+        130: 0.49761,  # KL
+        310: 0.49761,  # KS
+        311: 0.49761,  # K0
+        321: KAON_MASS,  # K+/-
+        
+        # Proton/neutron
+        2212: PROTON_MASS,
+        2112: 0.93957,  # neutron
+    }
+    
+    abs_pdg = abs(pdg_id)
+    if abs_pdg in mass_table:
+        return mass_table[abs_pdg]
+    
+    # Default mass for unknown particles (use pion mass as reasonable default)
+    return PION_MASS
+
+
