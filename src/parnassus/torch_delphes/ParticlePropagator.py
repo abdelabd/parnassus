@@ -179,14 +179,13 @@ class ParticlePropagator(nn.Module):
         # ==================== COMPUTE ETA FOR "ALREADY OUTSIDE" PARTICLES ====================
         # Particles that were already outside tracker don't go through propagation
         # but still need position-based Eta computed at their current position
-        if already_outside_in_output.any():
-            x_out = output[already_outside_in_output, 11] * 1.0e-2  # cm to m
-            y_out = output[already_outside_in_output, 12] * 1.0e-2
-            z_out = output[already_outside_in_output, 13] * 1.0e-2
-            r_xy_out = torch.sqrt(x_out**2 + y_out**2)
-            eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
-            output[already_outside_in_output, 8] = eta_out
-        
+        x_out = output[already_outside_in_output, 11] * 1.0e-2  # cm to m
+        y_out = output[already_outside_in_output, 12] * 1.0e-2
+        z_out = output[already_outside_in_output, 13] * 1.0e-2
+        r_xy_out = torch.sqrt(x_out**2 + y_out**2)
+        eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
+        output[already_outside_in_output, 8] = eta_out
+    
         # Filter out particles that didn't reach detector (r_t == 0)
         # In _propagate_charged, invalid particles have position set to zero
         # But DON'T filter particles that were already outside (they should keep their positions)

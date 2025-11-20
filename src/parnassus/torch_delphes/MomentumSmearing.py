@@ -202,7 +202,7 @@ class MomentumSmearing(nn.Module):
         
         return result
     
-    def forward(self, particles, return_resolution=False):
+    def forward(self, particles):
         """
         Apply momentum smearing to particles.
         
@@ -226,18 +226,7 @@ class MomentumSmearing(nn.Module):
             smeared_particles: particles with smeared PT
             resolution_values (optional): resolution values used for each particle
         """
-        # Ensure 2D input (single event)
-        assert len(particles.shape) == 2, f"Expected 2D tensor (N, 15), got shape {particles.shape}"
-        n_particles, features = particles.shape
-        assert features == 15, f"Expected 15 features, got {features}"
-        
-        # Handle empty input
-        if n_particles == 0:
-            if return_resolution:
-                return particles, torch.zeros(0, dtype=torch.float64, device=particles.device)
-            else:
-                return particles
-        
+
         # Move to device
         particles = particles.to(self.device)
         
@@ -285,11 +274,8 @@ class MomentumSmearing(nn.Module):
         # Recompute energy: E = sqrt(P^2 + M^2)
         p_squared = smeared[:, 4]**2 + smeared[:, 5]**2 + smeared[:, 6]**2
         smeared[:, 3] = torch.sqrt(p_squared + mass**2)  # E
-        
-        if return_resolution:
-            return smeared, resolution
-        else:
-            return smeared
+
+        return smeared
     
     def get_resolution_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
                           n_pts=100, n_etas=100):
