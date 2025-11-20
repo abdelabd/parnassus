@@ -60,7 +60,7 @@ class ParticlePropagator(nn.Module):
         self.radius = radius
         self.radius2 = radius * radius
         self.half_length = half_length
-        self.bz = bz
+        self.bz = torch.tensor(bz, dtype=torch.float64)
         self.radius_max = radius_max if radius_max is not None else radius
         self.half_length_max = half_length_max if half_length_max is not None else half_length
         self.device = device
@@ -77,27 +77,12 @@ class ParticlePropagator(nn.Module):
         
         Returns:
             dict with keys:
-                'all': All propagated particles (N_out, 15)
-                'charged_hadrons': Charged hadron tracks
-                'electrons': Electron tracks
-                'muons': Muon tracks
-                'neutrals': Neutral particles
+                'ParticleAfterProp': All propagated particles (N_out, 15)
+                'ChargedHadron': Charged hadron tracks
+                'Electron': Electron tracks
+                'Muon': Muon tracks
+                'NeutralParticleAfterProp': Neutral particles
         """
-        # Ensure 2D input (single event)
-        assert len(particles.shape) == 2, f"Expected 2D tensor (N, 15), got shape {particles.shape}"
-        n_particles, features = particles.shape
-        assert features == 15, f"Expected 15 features, got {features}"
-        
-        # Handle empty input
-        if n_particles == 0:
-            empty = torch.zeros((0, 15), dtype=torch.float64, device=self.device)
-            return {
-                'all': empty,
-                'charged_hadrons': empty,
-                'electrons': empty,
-                'muons': empty,
-                'neutrals': empty
-            }
         
         # Move to device and clone to avoid modifying input
         particles = particles.to(self.device).clone()
@@ -115,7 +100,6 @@ class ParticlePropagator(nn.Module):
         e = particles[:, 3]
         
         q = particles[:, 2]   # Charge
-        pid = particles[:, 0]  # PDG ID
         
         # Check if particles are within detector volume
         r = torch.sqrt(x**2 + y**2)
@@ -127,20 +111,8 @@ class ParticlePropagator(nn.Module):
         # Only propagate particles inside volume with valid PT
         valid_mask = inside_volume & valid_pt
         
-        if valid_mask.sum() == 0:
-            # No valid particles to propagate
-            empty = torch.zeros((0, 15), dtype=torch.float64, device=self.device)
-            return {
-                'all': empty,
-                'charged_hadrons': empty,
-                'electrons': empty,
-                'muons': empty,
-                'neutrals': empty
-            }
-        
         # Create output tensor (clone valid particles)
         output = particles[valid_mask].clone()
-        n_valid = valid_mask.sum().item()
         
         # Extract valid particle data
         x_v = x[valid_mask]
@@ -153,30 +125,24 @@ class ParticlePropagator(nn.Module):
         e_v = e[valid_mask]
         q_v = q[valid_mask]
         
+
         # Separate neutral and charged particles
-        neutral_mask = torch.abs(q_v) < 1.0e-9
+        # If no magnetic field, treat all as neutral
+        no_bfield = 1 if torch.abs(self.bz) < 1.0e-9 else 0
+        neutral_mask = no_bfield*(torch.ones_like(q_v, dtype=torch.bool)) + (1-no_bfield)*(torch.abs(q_v) < 1.0e-9)
         charged_mask = ~neutral_mask
         
-        # Also check if magnetic field is effectively zero
-        no_bfield = torch.abs(self.bz) < 1.0e-9
-        if no_bfield:
-            # Treat all as neutral (straight line)
-            neutral_mask = torch.ones_like(neutral_mask, dtype=torch.bool)
-            charged_mask = torch.zeros_like(charged_mask, dtype=torch.bool)
-        
         # ==================== NEUTRAL PARTICLE PROPAGATION ====================
-        if neutral_mask.any():
-            output = self._propagate_neutral(
-                output, neutral_mask,
-                x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v
-            )
-        
+        output = self._propagate_neutral(
+            output, neutral_mask,
+            x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v
+        )
+    
         # ==================== CHARGED PARTICLE PROPAGATION ====================
-        if charged_mask.any():
-            output = self._propagate_charged(
-                output, charged_mask,
-                x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v, q_v
-            )
+        output = self._propagate_charged(
+            output, charged_mask,
+            x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v, q_v
+        )
         
         # ==================== SEPARATE BY PARTICLE TYPE ====================
         # Use updated positions to check which particles made it
@@ -184,16 +150,6 @@ class ParticlePropagator(nn.Module):
         reached_detector = final_r > 0.0
         
         output = output[reached_detector]
-        
-        if output.shape[0] == 0:
-            empty = torch.zeros((0, 15), dtype=torch.float64, device=self.device)
-            return {
-                'all': empty,
-                'charged_hadrons': empty,
-                'electrons': empty,
-                'muons': empty,
-                'neutrals': empty
-            }
         
         # Separate by type using PID and charge
         pid_out = output[:, 0]
@@ -215,11 +171,11 @@ class ParticlePropagator(nn.Module):
         neutral_out_mask = ~is_charged
         
         return {
-            'all': output,
-            'charged_hadrons': output[charged_hadron_mask],
-            'electrons': output[electron_mask],
-            'muons': output[muon_mask],
-            'neutrals': output[neutral_out_mask]
+            'ParticleAfterProp': output,
+            'ChargedHadron': output[charged_hadron_mask],
+            'Electron': output[electron_mask],
+            'Muon': output[muon_mask],
+            'NeutralParticleAfterProp': output[neutral_out_mask]
         }
     
     def _propagate_neutral(self, output, mask, x, y, z, px, py, pz, pt, e):
@@ -377,22 +333,19 @@ class ParticlePropagator(nn.Module):
         
         # Update output for valid particles
         valid_indices = torch.where(mask)[0][valid]
-        
-        if len(valid_indices) > 0:
-            output[valid_indices, 4] = px_t[valid]  # Px
-            output[valid_indices, 5] = py_t[valid]  # Py
-            output[valid_indices, 9] = phi_t[valid]  # Phi
-            output[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm)
-            output[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm)
-            output[valid_indices, 13] = z_t[valid] * 1.0e3  # Z (m to mm)
-            output[valid_indices, 10] = output[valid_indices, 10] + t[valid] * self.c_light * 1.0e3  # T
+        output[valid_indices, 4] = px_t[valid]  # Px
+        output[valid_indices, 5] = py_t[valid]  # Py
+        output[valid_indices, 9] = phi_t[valid]  # Phi
+        output[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm)
+        output[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm)
+        output[valid_indices, 13] = z_t[valid] * 1.0e3  # Z (m to mm)
+        output[valid_indices, 10] = output[valid_indices, 10] + t[valid] * self.c_light * 1.0e3  # T
         
         # Mark invalid particles by setting position to zero
         invalid_indices = torch.where(mask)[0][~valid]
-        if len(invalid_indices) > 0:
-            output[invalid_indices, 11] = 0.0
-            output[invalid_indices, 12] = 0.0
-            output[invalid_indices, 13] = 0.0
+        output[invalid_indices, 11] = 0.0
+        output[invalid_indices, 12] = 0.0
+        output[invalid_indices, 13] = 0.0
         
         return output
 
@@ -465,14 +418,14 @@ if __name__ == "__main__":
     print("="*70)
     print("Propagation Results:")
     print("="*70)
-    
-    print(f"\nAll propagated particles: {result['all'].shape[0]}")
-    print(f"Charged hadrons: {result['charged_hadrons'].shape[0]}")
-    print(f"Electrons: {result['electrons'].shape[0]}")
-    print(f"Muons: {result['muons'].shape[0]}")
-    print(f"Neutrals: {result['neutrals'].shape[0]}")
-    
-    if result['all'].shape[0] > 0:
+
+    print(f"\nAll propagated particles: {result['ParticleAfterProp'].shape[0]}")
+    print(f"Charged hadrons: {result['ChargedHadron'].shape[0]}")
+    print(f"Electrons: {result['Electron'].shape[0]}")
+    print(f"Muons: {result['Muon'].shape[0]}")
+    print(f"Neutrals: {result['NeutralParticleAfterProp'].shape[0]}")
+
+    if result['ParticleAfterProp'].shape[0] > 0:
         print("\nFinal positions (first 5):")
         print("X (mm):", result['all'][:5, 11].numpy())
         print("Y (mm):", result['all'][:5, 12].numpy())
