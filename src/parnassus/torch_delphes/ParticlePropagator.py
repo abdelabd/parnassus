@@ -24,17 +24,24 @@ class ParticlePropagator(nn.Module):
     - Neutral particles (straight line propagation)
     - Charged particles (helix propagation in magnetic field)
     
+    IMPORTANT: This module computes PT and position-based Eta from raw data:
+    - PT (column 7): sqrt(Px² + Py²) 
+    - Eta (column 8): asinh(Z / sqrt(X² + Y²)) - POSITION-based, from production vertex
+    - Phi (column 9): atan2(Py, Px)
+    
+    Position-based Eta is used by the Efficiency module (matching C++ Delphes behavior).
+    
     Input shape: (N, 15) - GenParticle format where:
         - column 0: PID (Particle ID)
         - column 1: Status
         - column 2: Charge
         - column 3: E (Energy)
         - columns 4-6: Px, Py, Pz (3-momentum)
-        - column 7: PT (transverse momentum)
-        - column 8: Eta (pseudorapidity)
-        - column 9: Phi (azimuthal angle)
+        - column 7: PT (computed here, initially 0)
+        - column 8: Eta (computed here as position-based, initially 0)
+        - column 9: Phi (computed here, initially 0)
         - column 10: T (time)
-        - columns 11-13: X, Y, Z (position)
+        - columns 11-13: X, Y, Z (position at production vertex)
         - column 14: Mass
     
     Output: Propagated particles in Track format (same 15 columns but with updated positions)
@@ -87,18 +94,32 @@ class ParticlePropagator(nn.Module):
         # Move to device and clone to avoid modifying input
         particles = particles.to(self.device).clone()
         
-        # Extract particle properties (convert mm to m for calculations)
-        x = particles[:, 11] * 1.0e-3  # X position
-        y = particles[:, 12] * 1.0e-3  # Y position
-        z = particles[:, 13] * 1.0e-3  # Z position
-        t = particles[:, 10]  # Time
-        
+        # Compute PT and Phi from raw momentum components
         px = particles[:, 4]  # Momentum components (GeV)
         py = particles[:, 5]
         pz = particles[:, 6]
-        pt = particles[:, 7]
-        e = particles[:, 3]
         
+        # Compute PT from momentum components
+        pt = torch.sqrt(px**2 + py**2)
+        particles[:, 7] = pt  # Store in column 7
+        
+        # Compute Phi from momentum
+        phi = torch.atan2(py, px)
+        particles[:, 9] = phi  # Store in column 9
+        
+        # NOTE: Eta (column 8) will be computed as POSITION-BASED eta after propagation
+        # in _propagate_neutral and _propagate_charged methods
+        # This matches C++ Delphes which uses candidatePosition.Eta() at the detector surface
+        
+        # Extract positions (stored in cm, convert to m for calculations)
+        x_cm = particles[:, 11]  # X position in cm
+        y_cm = particles[:, 12]  # Y position in cm
+        z_cm = particles[:, 13]  # Z position in cm
+        x = x_cm * 1.0e-2  # Convert cm to m
+        y = y_cm * 1.0e-2
+        z = z_cm * 1.0e-2
+        t = particles[:, 10]  # Time
+        e = particles[:, 3]
         q = particles[:, 2]   # Charge
         
         # Check if particles are within detector volume
@@ -154,6 +175,17 @@ class ParticlePropagator(nn.Module):
             output, charged_mask,
             x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v, q_v
         )
+        
+        # ==================== COMPUTE ETA FOR "ALREADY OUTSIDE" PARTICLES ====================
+        # Particles that were already outside tracker don't go through propagation
+        # but still need position-based Eta computed at their current position
+        if already_outside_in_output.any():
+            x_out = output[already_outside_in_output, 11] * 1.0e-2  # cm to m
+            y_out = output[already_outside_in_output, 12] * 1.0e-2
+            z_out = output[already_outside_in_output, 13] * 1.0e-2
+            r_xy_out = torch.sqrt(x_out**2 + y_out**2)
+            eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
+            output[already_outside_in_output, 8] = eta_out
         
         # Filter out particles that didn't reach detector (r_t == 0)
         # In _propagate_charged, invalid particles have position set to zero
