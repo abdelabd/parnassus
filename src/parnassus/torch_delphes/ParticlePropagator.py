@@ -320,25 +320,27 @@ class ParticlePropagator(nn.Module):
         # Only update particles that successfully reached detector
         valid = r_t > 0.0
         
-        # Calculate track parameters at closest approach (for later use)
+        # Calculate track parameters at closest approach
+        # IMPORTANT: Momentum is updated at closest approach (phid), NOT at final position (phi_t)
+        # This matches C++ Delphes behavior (line 295-296 in ParticlePropagator.cc)
         phid = phi_0 - omega * td
         xd = x_center - r * torch.sin(phid)
         yd = y_center + r * torch.cos(phid)
         zd = z_c + vz * td
         
-        # Update momentum direction at final position
-        px_t = pt_c * torch.cos(phi_t)
-        py_t = pt_c * torch.sin(phi_t)
+        # Update momentum direction at CLOSEST APPROACH (not final position)
+        px_d = pt_c * torch.cos(phid)
+        py_d = pt_c * torch.sin(phid)
         # pz unchanged
         
         # Update output for valid particles
         valid_indices = torch.where(mask)[0][valid]
-        output[valid_indices, 4] = px_t[valid]  # Px
-        output[valid_indices, 5] = py_t[valid]  # Py
-        output[valid_indices, 9] = phi_t[valid]  # Phi
-        output[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm)
-        output[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm)
-        output[valid_indices, 13] = z_t[valid] * 1.0e3  # Z (m to mm)
+        output[valid_indices, 4] = px_d[valid]  # Px (at closest approach)
+        output[valid_indices, 5] = py_d[valid]  # Py (at closest approach)
+        output[valid_indices, 9] = phid[valid]  # Phi (at closest approach)
+        output[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm) - final position
+        output[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
+        output[valid_indices, 13] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
         output[valid_indices, 10] = output[valid_indices, 10] + t[valid] * self.c_light * 1.0e3  # T
         
         # Mark invalid particles by setting position to zero
