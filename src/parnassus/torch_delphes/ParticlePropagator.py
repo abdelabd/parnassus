@@ -236,7 +236,12 @@ class ParticlePropagator(nn.Module):
         dz = z_t - z_n
         path_length = torch.sqrt(dx**2 + dy**2 + dz**2)
         
-        # Update positions in output (convert m back to mm)
+        # Compute position-based eta at final position (EtaOuter)
+        r_t_xy = torch.sqrt(x_t**2 + y_t**2)
+        eta_outer = torch.asinh(z_t / (r_t_xy + 1e-10))
+        
+        # Update positions and EtaOuter in output (convert m back to mm)
+        output[mask, 8] = eta_outer  # EtaOuter (position eta at final position)
         output[mask, 11] = x_t * 1.0e3  # X
         output[mask, 12] = y_t * 1.0e3  # Y
         output[mask, 13] = z_t * 1.0e3  # Z
@@ -344,10 +349,15 @@ class ParticlePropagator(nn.Module):
         py_d = pt_c * torch.sin(phid)
         # pz unchanged
         
+        # Compute position-based eta at final position (EtaOuter)
+        r_t_xy = torch.sqrt(x_t[valid]**2 + y_t[valid]**2)
+        eta_outer = torch.asinh(z_t[valid] / (r_t_xy + 1e-10))
+        
         # Update output for valid particles
         valid_indices = torch.where(mask)[0][valid]
         output[valid_indices, 4] = px_d[valid]  # Px (at closest approach)
         output[valid_indices, 5] = py_d[valid]  # Py (at closest approach)
+        output[valid_indices, 8] = eta_outer  # EtaOuter (position eta at final position)
         output[valid_indices, 9] = phid[valid]  # Phi (at closest approach)
         output[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm) - final position
         output[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
