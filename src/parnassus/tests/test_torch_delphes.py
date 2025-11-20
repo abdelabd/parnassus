@@ -1,8 +1,8 @@
 """
-Apply PyTorch Delphes Efficiency and MomentumSmearing modules to ROOT file and save outputs.
+Apply PyTorch Delphes modules (ParticlePropagator, Efficiency, MomentumSmearing) to HepMC file and save outputs.
 
 This is a redesigned version that uses pure tensor operations:
-- ROOT → Tensor conversion happens once at the beginning
+- HepMC→ Tensor conversion happens once at the beginning
 - All processing happens in tensor space
 - Tensor → ROOT conversion happens once per output file
 
@@ -42,9 +42,9 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, MomentumSmearing
+from parnassus.torch_delphes import Efficiency, MomentumSmearing, ParticlePropagator
 from parnassus.torch_delphes.tensor_utils import (
-    load_all_particle_types,
+    hepmc_to_tensor,
     tensor_to_root_dict,
     write_root_file
 )
@@ -52,6 +52,45 @@ from parnassus.torch_delphes.tensor_utils import (
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
 
+def process_particle_propagator(genparticle_tensors):
+    """
+    Apply ParticlePropagator to GenParticle tensors.
+    
+    Args:
+        genparticle_tensors: List of tensors (one per event), each (N, 15)
+        
+    Returns:
+        Tuple of (ch_tensors, el_tensors, mu_tensors) after propagation
+        Each is a list of tensors (one per event)
+    """
+    n_events = len(genparticle_tensors)
+    
+    # Initialize ParticlePropagator module
+    propagator = ParticlePropagator(
+        radius=1.29,        # CMS tracker radius in meters
+        half_length=3.0,    # CMS tracker half-length in meters  
+        bz=3.8,             # Magnetic field in Tesla
+        device=DEVICE
+    )
+    
+    print("\nParticlePropagator...")
+    
+    ch_tensors = []
+    el_tensors = []
+    mu_tensors = []
+    
+    for i in tqdm(range(n_events)):
+        event_tensor = genparticle_tensors[i].to(DEVICE)
+        
+        # Propagate particles
+        outputs = propagator(event_tensor)
+        
+        # Extract separated outputs
+        ch_tensors.append(outputs['ChargedHadron'].cpu())
+        el_tensors.append(outputs['Electron'].cpu())
+        mu_tensors.append(outputs['Muon'].cpu())
+    
+    return ch_tensors, el_tensors, mu_tensors
 
 def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_tensors):
     """
@@ -85,26 +124,25 @@ def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_t
     )
     
     # Apply efficiency to each event
-    print("\nApplying ChargedHadronTrackingEfficiency...")
+    print("\nChargedHadronTrackingEfficiency...")
     ch_filtered = []
     for i in tqdm(range(n_events)):
         filtered = ch_eff_module(charged_hadron_tensors[i])
         ch_filtered.append(filtered)
     
-    print("\nApplying ElectronTrackingEfficiency...")
+    print("\nElectronTrackingEfficiency...")
     el_filtered = []
     for i in tqdm(range(n_events)):
         filtered = el_eff_module(electron_tensors[i])
         el_filtered.append(filtered)
     
-    print("\nApplying MuonTrackingEfficiency...")
+    print("\nMuonTrackingEfficiency...")
     mu_filtered = []
     for i in tqdm(range(n_events)):
         filtered = mu_eff_module(muon_tensors[i])
         mu_filtered.append(filtered)
     
     return ch_filtered, el_filtered, mu_filtered
-
 
 def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered):
     """
@@ -138,26 +176,25 @@ def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered):
     )
     
     # Apply smearing to each event
-    print("\nApplying ChargedHadronMomentumSmearing...")
+    print("\nChargedHadronMomentumSmearing...")
     ch_smeared = []
     for i in tqdm(range(n_events)):
         smeared = ch_smear_module(ch_filtered[i])
         ch_smeared.append(smeared)
     
-    print("\nApplying ElectronMomentumSmearing...")
+    print("\nElectronMomentumSmearing...")
     el_smeared = []
     for i in tqdm(range(n_events)):
         smeared = el_smear_module(el_filtered[i])
         el_smeared.append(smeared)
     
-    print("\nApplying MuonMomentumSmearing...")
+    print("\nMuonMomentumSmearing...")
     mu_smeared = []
     for i in tqdm(range(n_events)):
         smeared = mu_smear_module(mu_filtered[i])
         mu_smeared.append(smeared)
     
     return ch_smeared, el_smeared, mu_smeared
-
 
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     """
@@ -183,9 +220,12 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     # Kinematic variables to compare (Track objects have these attributes)
     kinematic_vars = ['Charge', 'P', 'PT', 'Eta', 'Phi']
     
-    # Branches to validate (efficiency modules + momentum smearing)
-    branches = ['ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency', 
-                'ChargedHadronSmeared', 'ElectronSmeared', 'MuonSmeared']
+    # Branches to validate
+    branches = [
+        'ChargedHadron', 'Electron', 'Muon',
+        'ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency',
+        'ChargedHadronSmeared', 'ElectronSmeared', 'MuonSmeared'
+    ]
     
     print(f"\nValidating branches: {', '.join(branches)}")
     print(f"Kinematic variables: {', '.join(kinematic_vars)}")
@@ -242,9 +282,9 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
                 
                 # Plot histograms
                 ax.hist(benchmark_np, bins=bins, histtype='step', color='orange', 
-                       linewidth=2, label='C++ Delphes', density=True)
+                       linewidth=2, label='C++ Delphes', density=False)
                 ax.hist(torch_np, bins=bins, histtype='step', color='blue', 
-                       linewidth=2, label='Parnassus.TorchDelphes', density=True)
+                       linewidth=2, label='Parnassus.TorchDelphes', density=False)
                 
                 ax.set_xlabel(var, fontsize=12)
                 ax.set_ylabel('Counts', fontsize=12)
@@ -275,131 +315,90 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     print(f"{'='*70}")
 
 
-def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2, 
-         output_file_v3_0, output_file_v3_1, output_file_v3_2, max_events=None):
+def main(input_file, output_file, max_events=None):
     """Main processing function."""
     
     print("\n" + "="*80)
-    print("PyTorch Delphes Processing (Redesigned Tensor-Based)")
+    print("Parnassus.TorchDelphes Processing")
     print("="*80)
     print(f"\nInput:  {input_file}")
     
-    # ==================== STEP 1: ROOT → Tensor ====================
+    # ========================================================================
+    # STEP 1: Load HepMC and convert to tensors
+    # ========================================================================
     print("\n" + "="*80)
-    print("STEP 1: Loading ROOT data and converting to tensors")
+    print(f"STEP 1: Loading HepMC file and converting to tensors: {input_file}")
     print("="*80)
     
-    input_root = uproot.open(input_file)
-    tree = input_root["Delphes"]
-    n_events_total = tree.num_entries
-    n_events = n_events_total if max_events is None else min(max_events, n_events_total)
+    genparticle_tensors = hepmc_to_tensor(input_file, max_events)
+    n_events = len(genparticle_tensors)
+    print(f"Loaded {n_events} events from HepMC")
+    print(f"  Total stable particles: {sum(t.shape[0] for t in genparticle_tensors)}")
     
-    print(f"Total events in file: {n_events_total}")
-    print(f"Processing: {n_events} events")
-    
-    # Load all three particle types at once
-    print("\nLoading ChargedHadron, Electron, and Muon branches...")
-    ch_tensors, el_tensors, mu_tensors = load_all_particle_types(tree, max_events)
-    
-    print(f"✓ Loaded {len(ch_tensors)} events")
-    print(f"  - ChargedHadrons: {sum(t.shape[0] for t in ch_tensors)} total particles")
-    print(f"  - Electrons: {sum(t.shape[0] for t in el_tensors)} total particles")
-    print(f"  - Muons: {sum(t.shape[0] for t in mu_tensors)} total particles")
-    
-    # ==================== STEP 2: Apply Efficiency Modules ====================
+
+    # ========================================================================
+    # STEP 2: Apply ParticlePropagator
+    # ========================================================================
     print("\n" + "="*80)
-    print("STEP 2: Applying tracking efficiency modules")
+    print("STEP 2: Applying ParticlePropagator")
     print("="*80)
     
+    ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genparticle_tensors)
+    
+    print(f"\nAfter ParticlePropagator: {len(ch_tensors)} events")
+    print(f"  ChargedHadrons: {sum(t.shape[0] for t in ch_tensors)} total particles")
+    print(f"  Electrons: {sum(t.shape[0] for t in el_tensors)} total particles")
+    print(f"  Muons: {sum(t.shape[0] for t in mu_tensors)} total particles")
+
+    # ========================================================================
+    # STEP 3: Apply tracking efficiency
+    # ========================================================================
+    
+    print("\n" + "="*80)
+    print("STEP 3: Applying Efficiency modules")
+    print("="*80)
+
     ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
         ch_tensors, el_tensors, mu_tensors
     )
+
+    print("\n✓ Efficiency applied")
+
+    # ========================================================================
+    # STEP 4: Apply momentum smearing
+    # ========================================================================
     
-    print("\n✓ Tracking efficiency applied")
-    print(f"  - ChargedHadrons: {sum(t.shape[0] for t in ch_filtered)} survived")
-    print(f"  - Electrons: {sum(t.shape[0] for t in el_filtered)} survived")
-    print(f"  - Muons: {sum(t.shape[0] for t in mu_filtered)} survived")
-    
-    # ==================== STEP 3: Apply Momentum Smearing ====================
     print("\n" + "="*80)
-    print("STEP 3: Applying momentum smearing modules")
+    print("STEP 4: Applying MomentumSmearing modules")
     print("="*80)
     
     ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
         ch_filtered, el_filtered, mu_filtered
     )
     
-    print("\n✓ Momentum smearing applied")
+    print("\n✓ MomentumSmearing applied")
     
-    # ==================== STEP 4: Tensor → ROOT (Write Outputs) ====================
-    print("\n" + "="*80)
-    print("STEP 4: Converting tensors to ROOT and writing output files")
-    print("="*80)
-    
-    # Output v2_0: ChargedHadronEfficiency only
-    print(f"\nWriting {output_file_v2_0}...")
-    branches_v2_0 = {
-        "ChargedHadronEfficiency": tensor_to_root_dict(ch_filtered, "ChargedHadronEfficiency")
-    }
-    write_root_file(output_file_v2_0, branches_v2_0)
-    print("✓ Done")
-    
-    # Output v2_1: ChargedHadronEfficiency + ElectronEfficiency
-    print(f"\nWriting {output_file_v2_1}...")
-    branches_v2_1 = {
-        "ChargedHadronEfficiency": tensor_to_root_dict(ch_filtered, "ChargedHadronEfficiency"),
-        "ElectronEfficiency": tensor_to_root_dict(el_filtered, "ElectronEfficiency")
-    }
-    write_root_file(output_file_v2_1, branches_v2_1)
-    print("✓ Done")
-    
-    # Output v2_2: All three efficiency outputs
-    print(f"\nWriting {output_file_v2_2}...")
-    branches_v2_2 = {
-        "ChargedHadronEfficiency": tensor_to_root_dict(ch_filtered, "ChargedHadronEfficiency"),
-        "ElectronEfficiency": tensor_to_root_dict(el_filtered, "ElectronEfficiency"),
-        "MuonEfficiency": tensor_to_root_dict(mu_filtered, "MuonEfficiency")
-    }
-    write_root_file(output_file_v2_2, branches_v2_2)
-    print("✓ Done")
-    
-    # Output v3_0: All efficiency + ChargedHadronSmeared
-    print(f"\nWriting {output_file_v3_0}...")
-    branches_v3_0 = {
-        "ChargedHadronEfficiency": tensor_to_root_dict(ch_filtered, "ChargedHadronEfficiency"),
-        "ElectronEfficiency": tensor_to_root_dict(el_filtered, "ElectronEfficiency"),
-        "MuonEfficiency": tensor_to_root_dict(mu_filtered, "MuonEfficiency"),
-        "ChargedHadronSmeared": tensor_to_root_dict(ch_smeared, "ChargedHadronSmeared")
-    }
-    write_root_file(output_file_v3_0, branches_v3_0)
-    print("✓ Done")
-    
-    # Output v3_1: All efficiency + ChargedHadron + Electron smearing
-    print(f"\nWriting {output_file_v3_1}...")
-    branches_v3_1 = {
-        "ChargedHadronEfficiency": tensor_to_root_dict(ch_filtered, "ChargedHadronEfficiency"),
-        "ElectronEfficiency": tensor_to_root_dict(el_filtered, "ElectronEfficiency"),
-        "MuonEfficiency": tensor_to_root_dict(mu_filtered, "MuonEfficiency"),
-        "ChargedHadronSmeared": tensor_to_root_dict(ch_smeared, "ChargedHadronSmeared"),
-        "ElectronSmeared": tensor_to_root_dict(el_smeared, "ElectronSmeared")
-    }
-    write_root_file(output_file_v3_1, branches_v3_1)
-    print("✓ Done")
-    
-    # Output v3_2: All efficiency + all smearing
-    print(f"\nWriting {output_file_v3_2}...")
+    # ========================================================================
+    # STEP 6: Write final output
+    # ========================================================================
+
+    print(f"Writing {output_file}...")
     branches_v3_2 = {
-        "ChargedHadronEfficiency": tensor_to_root_dict(ch_filtered, "ChargedHadronEfficiency"),
-        "ElectronEfficiency": tensor_to_root_dict(el_filtered, "ElectronEfficiency"),
-        "MuonEfficiency": tensor_to_root_dict(mu_filtered, "MuonEfficiency"),
-        "ChargedHadronSmeared": tensor_to_root_dict(ch_smeared, "ChargedHadronSmeared"),
-        "ElectronSmeared": tensor_to_root_dict(el_smeared, "ElectronSmeared"),
-        "MuonSmeared": tensor_to_root_dict(mu_smeared, "MuonSmeared")
+        'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
+        'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
+        'Muon': tensor_to_root_dict(mu_tensors, 'Muon'),
+        'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
+        'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
+        'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
+        'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
+        'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
+        'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared')
     }
-    write_root_file(output_file_v3_2, branches_v3_2)
-    print("✓ Done")
-    
-    # ==================== Summary ====================
+    write_root_file(output_file, branches_v3_2)
+
+    # ========================================================================
+    # STEP 7: Print summary
+    # ========================================================================
     print("\n" + "="*80)
     print("SUMMARY")
     print("="*80)
@@ -431,10 +430,9 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2,
     print("✓ ALL PROCESSING COMPLETE!")
     print("="*80 + "\n")
     
-    # ==================== STEP 5: Validation Against C++ Delphes ====================
-    print("\n" + "="*80)
-    print("STEP 5: Validation against C++ Delphes benchmark")
-    print("="*80)
+    # ========================================================================
+    # STEP 8: Validate Against C++ Delphes
+    # ========================================================================
     
     # Determine benchmark file location
     script_dir = Path(__file__).parent
@@ -444,7 +442,7 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2,
     if benchmark_file.exists():
         print(f"\nBenchmark file: {benchmark_file}")
         print(f"Validation directory: {validation_dir}")
-        validate_against_benchmark(output_file_v3_2, str(benchmark_file), validation_dir)
+        validate_against_benchmark(output_file, str(benchmark_file), validation_dir)
     else:
         print(f"\n⚠ Benchmark file not found: {benchmark_file}")
         print("  Skipping validation. To enable validation, provide HZZ4l_3_2.root")
@@ -454,31 +452,9 @@ def main(input_file, output_file_v2_0, output_file_v2_1, output_file_v2_2,
 if __name__ == "__main__":
     tic = time.time()
     
-    # Default file paths
-    default_input = "delphes_data/HZZ4l/HZZ4l_1.root"
-    default_outputs = [
-        "delphes_data/HZZ4l/HZZ4l_2_0_torch.root",
-        "delphes_data/HZZ4l/HZZ4l_2_1_torch.root",
-        "delphes_data/HZZ4l/HZZ4l_2_2_torch.root",
-        "delphes_data/HZZ4l/HZZ4l_3_0_torch.root",
-        "delphes_data/HZZ4l/HZZ4l_3_1_torch.root",
-        "delphes_data/HZZ4l/HZZ4l_3_2_torch.root",
-    ]
-    
-    # Parse command line arguments
-    if len(sys.argv) >= 7:
-        input_file = sys.argv[1]
-        output_files = sys.argv[2:8]
-    else:
-        input_file = default_input
-        output_files = default_outputs
-        print(f"Using default files:")
-        print(f"  Input: {input_file}")
-        for i, out in enumerate(output_files):
-            print(f"  Output {i}: {out}")
-    
-    # Run main processing
-    main(input_file, *output_files, max_events=None)
+    input_file = "delphes_data/HZZ4l/HZZ4l_0.hepmc"
+    output_file = "delphes_data/HZZ4l/HZZ4l_3_2_torch.root"
+    main(input_file, output_file, max_events=1000)
     
     toc = time.time()
     dur = toc - tic
