@@ -207,7 +207,10 @@ class MomentumSmearing(nn.Module):
         Apply momentum smearing to particles.
         
         Args:
-            particles: tensor of shape (N, 15) - single event
+            particles: tensor of shape (N, 15) or (B, N, 16)
+                If (N, 15): single event
+                If (B, N, 16): batched events with mask in column 15
+                
                 column 0: PID (Particle ID)
                 column 1: Status
                 column 2: Charge
@@ -219,30 +222,44 @@ class MomentumSmearing(nn.Module):
                 column 10: T (time)
                 columns 11-13: X, Y, Z (position)
                 column 14: Mass
-            return_resolution: if True, return (smeared_particles, resolution_values)
-                             if False, return only smeared_particles
+                column 15 (optional): Mask (1.0 = real particle, 0.0 = padding)
         
         Returns:
             smeared_particles: particles with smeared PT
-            resolution_values (optional): resolution values used for each particle
         """
-
         # Move to device
         particles = particles.to(self.device)
+        
+        # Detect batched input
+        is_batched = particles.ndim == 3
+        has_mask = particles.shape[-1] == 16
+        # Detect batched input
+        is_batched = particles.ndim == 3
+        has_mask = particles.shape[-1] == 16
         
         # Clone particles to avoid modifying input
         smeared = particles.clone()
         
+        # Extract mask if present
+        if has_mask:
+            mask = particles[..., 15]  # Works for both (N, 16) and (B, N, 16)
+        else:
+            # Create dummy mask of all ones
+            if is_batched:
+                mask = torch.ones(particles.shape[0], particles.shape[1], device=self.device)
+            else:
+                mask = torch.ones(particles.shape[0], device=self.device)
+        
         # Extract pre-computed kinematics from Delphes
-        pt = particles[:, 7]   # Column 7: PT (transverse momentum)
-        eta = particles[:, 8]  # Column 8: Eta (for resolution formula - typically position-based)
-        phi = particles[:, 9]  # Column 9: Phi (azimuthal angle)
-        mass = particles[:, 14]  # Column 14: Mass
+        pt = particles[..., 7]   # Column 7: PT (transverse momentum)
+        eta = particles[..., 8]  # Column 8: Eta (for resolution formula - typically position-based)
+        phi = particles[..., 9]  # Column 9: Phi (azimuthal angle)
+        mass = particles[..., 14]  # Column 14: Mass
         
         # Extract momentum components to compute momentum-based eta for reconstruction
-        px = particles[:, 4]  # Px
-        py = particles[:, 5]  # Py
-        pz = particles[:, 6]  # Pz
+        px = particles[..., 4]  # Px
+        py = particles[..., 5]  # Py
+        pz = particles[..., 6]  # Pz
         
         # Compute momentum-based eta and phi from the momentum vector
         # This matches C++ Delphes which uses candidateMomentum.Eta() and candidateMomentum.Phi()
@@ -261,19 +278,23 @@ class MomentumSmearing(nn.Module):
         # Apply smearing
         smeared_pt = self.log_normal_sample(pt, resolution)
         
+        # Apply smearing only to real particles (mask == 1.0)
+        # Keep original PT for padded particles (mask == 0.0)
+        smeared_pt = torch.where(mask > 0.5, smeared_pt, pt)
+        
         # Update PT in the tensor (column 7)
-        smeared[:, 7] = smeared_pt
+        smeared[..., 7] = smeared_pt
         
         # Recompute Px, Py, Pz with smeared PT but using MOMENTUM-based eta and phi
         # This matches C++ Delphes behavior: it uses candidateMomentum.Eta() and Phi()
         # for reconstruction, not the position-based values used for resolution
-        smeared[:, 4] = smeared_pt * torch.cos(momentum_phi)  # Px
-        smeared[:, 5] = smeared_pt * torch.sin(momentum_phi)  # Py
-        smeared[:, 6] = smeared_pt * torch.sinh(momentum_eta)  # Pz
+        smeared[..., 4] = smeared_pt * torch.cos(momentum_phi)  # Px
+        smeared[..., 5] = smeared_pt * torch.sin(momentum_phi)  # Py
+        smeared[..., 6] = smeared_pt * torch.sinh(momentum_eta)  # Pz
         
         # Recompute energy: E = sqrt(P^2 + M^2)
-        p_squared = smeared[:, 4]**2 + smeared[:, 5]**2 + smeared[:, 6]**2
-        smeared[:, 3] = torch.sqrt(p_squared + mass**2)  # E
+        p_squared = smeared[..., 4]**2 + smeared[..., 5]**2 + smeared[..., 6]**2
+        smeared[..., 3] = torch.sqrt(p_squared + mass**2)  # E
 
         return smeared
     

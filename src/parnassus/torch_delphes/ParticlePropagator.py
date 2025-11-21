@@ -80,17 +80,64 @@ class ParticlePropagator(nn.Module):
         Propagate particles to detector surface.
         
         Args:
-            particles: tensor of shape (N, 15) - single event in GenParticle format
+            particles: tensor of shape (N, 15) or (B, N, 16)
+                If (N, 15): single event
+                If (B, N, 16): batched events with mask in column 15
         
         Returns:
-            dict with keys:
-                'ParticleAfterProp': All propagated particles (N_out, 15)
-                'ChargedHadron': Charged hadron tracks
-                'Electron': Electron tracks
-                'Muon': Muon tracks
-                'NeutralParticleAfterProp': Neutral particles
+            For single event (N, 15):
+                dict with keys:
+                    'ParticleAfterProp': All propagated particles (M, 15) where M <= N
+                    'ChargedHadron': Charged hadron tracks
+                    'Electron': Electron tracks
+                    'Muon': Muon tracks
+                    'NeutralParticleAfterProp': Neutral particles
+            
+            For batched (B, N, 16):
+                dict with keys 'ParticleAfterProp' etc., each containing (B, N, 16) 
+                with updated masks
         """
         
+        # Detect batched input
+        is_batched = particles.ndim == 3
+        has_mask = particles.shape[-1] == 16
+        
+        if is_batched and has_mask:
+            # Process batch: apply forward to each event and restack
+            batch_size = particles.shape[0]
+            max_particles = particles.shape[1]
+            
+            # Process each event individually
+            results_list = []
+            for i in range(batch_size):
+                # Extract event and remove padding
+                event_with_mask = particles[i]  # (N, 16)
+                mask = event_with_mask[:, 15]
+                n_real = (mask > 0.5).sum().item()
+                
+                # Get real particles (without mask column)
+                event = event_with_mask[:n_real, :15]  # (n_real, 15)
+                
+                # Process single event (recursive call)
+                result_dict = self.forward(event)
+                
+                results_list.append(result_dict)
+            
+            # Restack results into batched format
+            # For each key, pad and stack
+            output_dict = {}
+            for key in results_list[0].keys():
+                # Collect results for this key
+                key_results = [r[key] for r in results_list]
+                
+                # Pad and batch
+                from .tensor_utils import pad_and_batch
+                batched_key = pad_and_batch(key_results, max_particles)
+                output_dict[key] = batched_key
+            
+            return output_dict
+        
+        # Single event processing (original code)
         # Move to device and clone to avoid modifying input
         particles = particles.to(self.device).clone()
         

@@ -175,27 +175,58 @@ class Efficiency(nn.Module):
 
         Returns:
             filtered_particles: tensor with only particles that passed efficiency
-                               (rows that failed are removed)
-            mask (optional): boolean mask indicating which particles passed
+                               Single event (N, 15) -> (M, 15) where M <= N
+                               Batched (B, N, 16) -> (B, N, 16) with updated mask
         """
         
         # Move to device
         particles = particles.to(self.device)
         
-        # Extract pre-computed kinematics from Delphes (columns 7-8)
-        pt = particles[:, 7]   # Column 7: PT (transverse momentum)
-        eta = particles[:, 8]  # Column 8: Eta (pseudorapidity)
+        # Detect batched input
+        is_batched = particles.ndim == 3
+        has_mask = particles.shape[-1] == 16
         
-        # Compute efficiency for each particle
-        efficiency = self.efficiency_func(pt, eta)
-        
-        # Apply efficiency stochastically
-        mask = torch.rand_like(efficiency) < efficiency
-        
-        # Filter particles - remove rows that didn't pass
-        filtered_particles = particles[mask]
-        
-        return filtered_particles
+        if is_batched:
+            # Batched processing with mask
+            # Extract mask
+            mask = particles[..., 15]  # (B, N)
+            
+            # Extract pre-computed kinematics from Delphes (columns 7-8)
+            pt = particles[..., 7]   # Column 7: PT (transverse momentum)
+            eta = particles[..., 8]  # Column 8: Eta (pseudorapidity)
+            
+            # Compute efficiency for each particle
+            efficiency = self.efficiency_func(pt, eta)  # (B, N)
+            
+            # Apply efficiency stochastically
+            passed = torch.rand_like(efficiency) < efficiency  # (B, N)
+            
+            # Update mask: new_mask = old_mask AND passed
+            # Only real particles (mask==1) can pass efficiency
+            new_mask = mask * passed.float()  # (B, N)
+            
+            # Create output with updated mask
+            filtered_particles = particles.clone()
+            filtered_particles[..., 15] = new_mask
+            
+            return filtered_particles
+            
+        else:
+            # Single event processing (backward compatible)
+            # Extract pre-computed kinematics from Delphes (columns 7-8)
+            pt = particles[:, 7]   # Column 7: PT (transverse momentum)
+            eta = particles[:, 8]  # Column 8: Eta (pseudorapidity)
+            
+            # Compute efficiency for each particle
+            efficiency = self.efficiency_func(pt, eta)
+            
+            # Apply efficiency stochastically
+            mask = torch.rand_like(efficiency) < efficiency
+            
+            # Filter particles - remove rows that didn't pass
+            filtered_particles = particles[mask]
+            
+            return filtered_particles
     
     def get_efficiency_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
                           n_pts=100, n_etas=100):

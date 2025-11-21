@@ -57,6 +57,91 @@ ELECTRON_MASS = 0.000511
 MUON_MASS = 0.10566
 
 
+# ==================== BATCHING UTILITIES ====================
+
+def compute_max_particles(event_tensors: List[torch.Tensor], scale: float = 1.2) -> int:
+    """
+    Compute max_particles for padding as scale * max particle count in dataset.
+    
+    Args:
+        event_tensors: List of (N_i, 15) tensors
+        scale: Scaling factor (default 1.2 = 20% buffer)
+        
+    Returns:
+        max_particles: Integer max particles for padding
+    """
+    if len(event_tensors) == 0:
+        return 0
+    max_count = max(t.shape[0] for t in event_tensors)
+    return int(max_count * scale)
+
+
+def pad_and_batch(event_tensors: List[torch.Tensor], max_particles: int) -> torch.Tensor:
+    """
+    Pad events to max_particles and stack into batch with mask.
+    
+    The mask is appended as column 15 to indicate real vs padded particles.
+    
+    Args:
+        event_tensors: List of (N_i, 15) tensors
+        max_particles: Max particles to pad to
+        
+    Returns:
+        batch: (B, max_particles, 16) where:
+               - batch[:, :, :15] = particle data (padded with zeros)
+               - batch[:, :, 15] = mask (1.0 for real particles, 0.0 for padding)
+    """
+    batch_size = len(event_tensors)
+    
+    # Get dtype and device from first tensor
+    dtype = event_tensors[0].dtype
+    device = event_tensors[0].device
+    
+    # Create padded batch tensor (B, max_particles, 16)
+    # Initialize with zeros (padding)
+    batch = torch.zeros((batch_size, max_particles, 16), dtype=dtype, device=device)
+    
+    for i, event in enumerate(event_tensors):
+        n_particles = event.shape[0]
+        if n_particles > max_particles:
+            # Truncate if exceeds max_particles
+            batch[i, :max_particles, :15] = event[:max_particles]
+            batch[i, :max_particles, 15] = 1.0
+        else:
+            # Pad with zeros
+            batch[i, :n_particles, :15] = event
+            batch[i, :n_particles, 15] = 1.0  # Mask for real particles
+            # Rest is already zeros (padding)
+    
+    return batch
+
+
+def unbatch_and_unpad(batch: torch.Tensor, mask_col: int = 15) -> List[torch.Tensor]:
+    """
+    Remove padding using mask column and split batch into list of events.
+    
+    Args:
+        batch: (B, N, 15+K) where column mask_col is the mask
+        mask_col: Column index containing the mask (default 15)
+        
+    Returns:
+        List of (N_i, 15) tensors with padding removed and mask column dropped
+    """
+    batch_size = batch.shape[0]
+    event_tensors = []
+    
+    for i in range(batch_size):
+        # Extract mask for this event
+        mask = batch[i, :, mask_col] > 0.5  # Boolean mask
+        
+        # Extract real particles (remove padding)
+        real_particles = batch[i, mask, :15]  # Take only data columns, drop mask
+        
+        event_tensors.append(real_particles)
+    
+    return event_tensors
+
+
 def root_track_to_tensor(track_arrays: ak.Array, branch_prefix: str, 
                         max_events: int = None) -> List[torch.Tensor]:
     """
@@ -416,7 +501,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 status = p.status
                 momentum = p.momentum
                 
-                # Lookup charge and mass from PDG ID (simple lookups are okay)
+                # Lookup charge and mass from PDG ID
                 charge = get_charge_from_pdg(pid)
                 mass = get_mass_from_pdg(pid)
                 

@@ -46,18 +46,22 @@ from parnassus.torch_delphes import Efficiency, MomentumSmearing, ParticlePropag
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
-    write_root_file
+    write_root_file,
+    compute_max_particles,
+    pad_and_batch,
+    unbatch_and_unpad
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
 
-def process_particle_propagator(genparticle_tensors):
+def process_particle_propagator(genparticle_tensors, batch_size=100):
     """
-    Apply ParticlePropagator to GenParticle tensors.
+    Apply ParticlePropagator to GenParticle tensors using batched processing.
     
     Args:
         genparticle_tensors: List of tensors (one per event), each (N, 15)
+        batch_size: Number of events to process in each batch
         
     Returns:
         Tuple of (ch_tensors, el_tensors, mu_tensors) after propagation
@@ -73,33 +77,47 @@ def process_particle_propagator(genparticle_tensors):
         device=DEVICE
     )
     
-    print("\nParticlePropagator...")
+    print(f"\nParticlePropagator (batch_size={batch_size})...")
     
     ch_tensors = []
     el_tensors = []
     mu_tensors = []
     
-    for i in tqdm(range(n_events)):
-        event_tensor = genparticle_tensors[i].to(DEVICE)
+    # Process in batches
+    for batch_start in tqdm(range(0, n_events, batch_size)):
+        batch_end = min(batch_start + batch_size, n_events)
+        batch_events = genparticle_tensors[batch_start:batch_end]
         
-        # Propagate particles
-        outputs = propagator(event_tensor)
+        # Compute max particles for this batch
+        max_particles = compute_max_particles(batch_events, scale=1.2)
         
-        # Extract separated outputs
-        ch_tensors.append(outputs['ChargedHadron'].cpu())
-        el_tensors.append(outputs['Electron'].cpu())
-        mu_tensors.append(outputs['Muon'].cpu())
+        # Pad and batch
+        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        
+        # Propagate particles (batched)
+        outputs = propagator(batched)
+        
+        # Unbatch each particle type
+        ch_batch = unbatch_and_unpad(outputs['ChargedHadron'].cpu(), mask_col=15)
+        el_batch = unbatch_and_unpad(outputs['Electron'].cpu(), mask_col=15)
+        mu_batch = unbatch_and_unpad(outputs['Muon'].cpu(), mask_col=15)
+        
+        # Collect results
+        ch_tensors.extend(ch_batch)
+        el_tensors.extend(el_batch)
+        mu_tensors.extend(mu_batch)
     
     return ch_tensors, el_tensors, mu_tensors
 
-def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_tensors):
+def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_tensors, batch_size=100):
     """
-    Apply tracking efficiency to all three particle types.
+    Apply tracking efficiency to all three particle types using batched processing.
     
     Args:
         charged_hadron_tensors: List of tensors (one per event)
         electron_tensors: List of tensors (one per event)
         muon_tensors: List of tensors (one per event)
+        batch_size: Number of events to process in each batch
         
     Returns:
         Tuple of (ch_filtered, el_filtered, mu_filtered)
@@ -123,35 +141,56 @@ def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_t
         device=DEVICE
     )
     
-    # Apply efficiency to each event
-    print("\nChargedHadronTrackingEfficiency...")
+    # Apply efficiency to charged hadrons
+    print(f"\nChargedHadronTrackingEfficiency (batch_size={batch_size})...")
     ch_filtered = []
-    for i in tqdm(range(n_events)):
-        filtered = ch_eff_module(charged_hadron_tensors[i])
-        ch_filtered.append(filtered)
+    for batch_start in tqdm(range(0, n_events, batch_size)):
+        batch_end = min(batch_start + batch_size, n_events)
+        batch_events = charged_hadron_tensors[batch_start:batch_end]
+        
+        max_particles = compute_max_particles(batch_events, scale=1.2)
+        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        filtered_batched = ch_eff_module(batched)
+        filtered_batch = unbatch_and_unpad(filtered_batched.cpu(), mask_col=15)
+        ch_filtered.extend(filtered_batch)
     
-    print("\nElectronTrackingEfficiency...")
+    # Apply efficiency to electrons
+    print(f"\nElectronTrackingEfficiency (batch_size={batch_size})...")
     el_filtered = []
-    for i in tqdm(range(n_events)):
-        filtered = el_eff_module(electron_tensors[i])
-        el_filtered.append(filtered)
+    for batch_start in tqdm(range(0, n_events, batch_size)):
+        batch_end = min(batch_start + batch_size, n_events)
+        batch_events = electron_tensors[batch_start:batch_end]
+        
+        max_particles = compute_max_particles(batch_events, scale=1.2)
+        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        filtered_batched = el_eff_module(batched)
+        filtered_batch = unbatch_and_unpad(filtered_batched.cpu(), mask_col=15)
+        el_filtered.extend(filtered_batch)
     
-    print("\nMuonTrackingEfficiency...")
+    # Apply efficiency to muons
+    print(f"\nMuonTrackingEfficiency (batch_size={batch_size})...")
     mu_filtered = []
-    for i in tqdm(range(n_events)):
-        filtered = mu_eff_module(muon_tensors[i])
-        mu_filtered.append(filtered)
+    for batch_start in tqdm(range(0, n_events, batch_size)):
+        batch_end = min(batch_start + batch_size, n_events)
+        batch_events = muon_tensors[batch_start:batch_end]
+        
+        max_particles = compute_max_particles(batch_events, scale=1.2)
+        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        filtered_batched = mu_eff_module(batched)
+        filtered_batch = unbatch_and_unpad(filtered_batched.cpu(), mask_col=15)
+        mu_filtered.extend(filtered_batch)
     
     return ch_filtered, el_filtered, mu_filtered
 
-def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered):
+def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered, batch_size=100):
     """
-    Apply momentum smearing to all three particle types.
+    Apply momentum smearing to all three particle types using batched processing.
     
     Args:
         ch_filtered: List of filtered charged hadron tensors
         el_filtered: List of filtered electron tensors
         mu_filtered: List of filtered muon tensors
+        batch_size: Number of events to process in each batch
         
     Returns:
         Tuple of (ch_smeared, el_smeared, mu_smeared)
@@ -175,24 +214,44 @@ def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered):
         device=DEVICE
     )
     
-    # Apply smearing to each event
-    print("\nChargedHadronMomentumSmearing...")
+    # Apply smearing to charged hadrons
+    print(f"\nChargedHadronMomentumSmearing (batch_size={batch_size})...")
     ch_smeared = []
-    for i in tqdm(range(n_events)):
-        smeared = ch_smear_module(ch_filtered[i])
-        ch_smeared.append(smeared)
+    for batch_start in tqdm(range(0, n_events, batch_size)):
+        batch_end = min(batch_start + batch_size, n_events)
+        batch_events = ch_filtered[batch_start:batch_end]
+        
+        max_particles = compute_max_particles(batch_events, scale=1.2)
+        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        smeared_batched = ch_smear_module(batched)
+        smeared_batch = unbatch_and_unpad(smeared_batched.cpu(), mask_col=15)
+        ch_smeared.extend(smeared_batch)
     
-    print("\nElectronMomentumSmearing...")
+    # Apply smearing to electrons
+    print(f"\nElectronMomentumSmearing (batch_size={batch_size})...")
     el_smeared = []
-    for i in tqdm(range(n_events)):
-        smeared = el_smear_module(el_filtered[i])
-        el_smeared.append(smeared)
+    for batch_start in tqdm(range(0, n_events, batch_size)):
+        batch_end = min(batch_start + batch_size, n_events)
+        batch_events = el_filtered[batch_start:batch_end]
+        
+        max_particles = compute_max_particles(batch_events, scale=1.2)
+        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        smeared_batched = el_smear_module(batched)
+        smeared_batch = unbatch_and_unpad(smeared_batched.cpu(), mask_col=15)
+        el_smeared.extend(smeared_batch)
     
-    print("\nMuonMomentumSmearing...")
+    # Apply smearing to muons
+    print(f"\nMuonMomentumSmearing (batch_size={batch_size})...")
     mu_smeared = []
-    for i in tqdm(range(n_events)):
-        smeared = mu_smear_module(mu_filtered[i])
-        mu_smeared.append(smeared)
+    for batch_start in tqdm(range(0, n_events, batch_size)):
+        batch_end = min(batch_start + batch_size, n_events)
+        batch_events = mu_filtered[batch_start:batch_end]
+        
+        max_particles = compute_max_particles(batch_events, scale=1.2)
+        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        smeared_batched = mu_smear_module(batched)
+        smeared_batch = unbatch_and_unpad(smeared_batched.cpu(), mask_col=15)
+        mu_smeared.extend(smeared_batch)
     
     return ch_smeared, el_smeared, mu_smeared
 
@@ -315,13 +374,22 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     print(f"{'='*70}")
 
 
-def main(input_file, output_file, max_events=None):
-    """Main processing function."""
+def main(input_file, output_file, max_events=None, batch_size=100):
+    """Main processing function.
+    
+    Args:
+        input_file: Path to input HepMC file
+        output_file: Path to output ROOT file
+        max_events: Maximum number of events to process (None = all)
+        batch_size: Number of events to process per batch (for GPU acceleration)
+    """
     
     print("\n" + "="*80)
-    print("Parnassus.TorchDelphes Processing")
+    print("Parnassus.TorchDelphes Processing (BATCHED)")
     print("="*80)
     print(f"\nInput:  {input_file}")
+    print(f"Batch size: {batch_size}")
+    print(f"Device: {DEVICE}")
     
     # ========================================================================
     # STEP 1: Load HepMC and convert to tensors
@@ -340,10 +408,10 @@ def main(input_file, output_file, max_events=None):
     # STEP 2: Apply ParticlePropagator
     # ========================================================================
     print("\n" + "="*80)
-    print("STEP 2: Applying ParticlePropagator")
+    print("STEP 2: Applying ParticlePropagator (batched)")
     print("="*80)
     
-    ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genparticle_tensors)
+    ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genparticle_tensors, batch_size=batch_size)
     
     print(f"\nAfter ParticlePropagator: {len(ch_tensors)} events")
     print(f"  ChargedHadrons: {sum(t.shape[0] for t in ch_tensors)} total particles")
@@ -355,11 +423,11 @@ def main(input_file, output_file, max_events=None):
     # ========================================================================
     
     print("\n" + "="*80)
-    print("STEP 3: Applying Efficiency modules")
+    print("STEP 3: Applying Efficiency modules (batched)")
     print("="*80)
 
     ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
-        ch_tensors, el_tensors, mu_tensors
+        ch_tensors, el_tensors, mu_tensors, batch_size=batch_size
     )
 
     print("\n✓ Efficiency applied")
@@ -369,11 +437,11 @@ def main(input_file, output_file, max_events=None):
     # ========================================================================
     
     print("\n" + "="*80)
-    print("STEP 4: Applying MomentumSmearing modules")
+    print("STEP 4: Applying MomentumSmearing modules (batched)")
     print("="*80)
     
     ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
-        ch_filtered, el_filtered, mu_filtered
+        ch_filtered, el_filtered, mu_filtered, batch_size=batch_size
     )
     
     print("\n✓ MomentumSmearing applied")
@@ -454,7 +522,12 @@ if __name__ == "__main__":
     
     input_file = "delphes_data/HZZ4l/HZZ4l_0.hepmc"
     output_file = "delphes_data/HZZ4l/HZZ4l_3_2_torch.root"
-    main(input_file, output_file, max_events=1000)
+    
+    # Batch size: Larger = better GPU utilization, but more memory
+    # Typical values: 100-1000 depending on available GPU memory
+    batch_size = 1000
+    
+    main(input_file, output_file, max_events=1000, batch_size=batch_size)
     
     toc = time.time()
     dur = toc - tic
