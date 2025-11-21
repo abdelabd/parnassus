@@ -407,6 +407,9 @@ def main(input_file, output_file, max_events=None, batch_size=100):
     # ========================================================================
     # STEP 2: Apply ParticlePropagator
     # ========================================================================
+
+    tic_torch = time.time()
+
     print("\n" + "="*80)
     print("STEP 2: Applying ParticlePropagator (batched)")
     print("="*80)
@@ -446,6 +449,9 @@ def main(input_file, output_file, max_events=None, batch_size=100):
     
     print("\n✓ MomentumSmearing applied")
     
+    toc_torch = time.time()
+    dur_torch = toc_torch - tic_torch
+    print(f"\n\nTorch duration: {dur_torch//60:.0f} minutes, {dur_torch%60:.2f} seconds\n\n")
     # ========================================================================
     # STEP 6: Write final output
     # ========================================================================
