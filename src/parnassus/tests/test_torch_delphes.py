@@ -329,8 +329,11 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
                 torch_np = np.asarray(torch_data)
                 benchmark_np = np.asarray(benchmark_data)
                 
-                # Create histogram
-                fig, ax = plt.subplots(figsize=(10, 6))
+                # Create figure with two subplots: histogram on top, ratio below
+                fig = plt.figure(figsize=(10, 8))
+                gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.05)
+                ax_hist = fig.add_subplot(gs[0])
+                ax_ratio = fig.add_subplot(gs[1], sharex=ax_hist)
                 
                 # Determine bin range
                 all_data = np.concatenate([torch_np, benchmark_np])
@@ -340,22 +343,41 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
                     bins = 50
                 
                 # Plot histograms
-                ax.hist(benchmark_np, bins=bins, histtype='step', color='orange', 
-                       linewidth=2, label='C++ Delphes', density=False)
-                ax.hist(torch_np, bins=bins, histtype='step', color='blue', 
-                       linewidth=2, label='Parnassus.TorchDelphes', density=False)
+                benchmark_counts, bin_edges, _ = ax_hist.hist(
+                    benchmark_np, bins=bins, histtype='step', color='orange', 
+                    linewidth=2, label='C++ Delphes', density=False
+                )
+                torch_counts, _, _ = ax_hist.hist(
+                    torch_np, bins=bins, histtype='step', color='blue', 
+                    linewidth=2, label='Parnassus.TorchDelphes', density=False
+                )
                 
-                ax.set_xlabel(var, fontsize=12)
-                ax.set_ylabel('Counts', fontsize=12)
-                ax.set_title(f'{branch_name}: {var}', fontsize=14, fontweight='bold')
-                ax.legend(fontsize=11)
-                ax.grid(True, alpha=0.3)
+                ax_hist.set_ylabel('Counts', fontsize=12)
+                ax_hist.set_title(f'{branch_name}: {var}', fontsize=14, fontweight='bold')
+                ax_hist.legend(fontsize=11)
+                ax_hist.grid(True, alpha=0.3)
+                ax_hist.tick_params(labelbottom=False)  # Hide x-axis labels for top plot
                 
                 # Add statistics text
                 stats_text = f'PyTorch: {len(torch_np)} particles\nC++ Delphes: {len(benchmark_np)} particles'
-                ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
+                ax_hist.text(0.95, 0.95, stats_text, transform=ax_hist.transAxes,
                        fontsize=10, verticalalignment='top', horizontalalignment='right',
                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                
+                # Plot ratio: TorchDelphes / C++ Delphes
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                ratio = np.divide(
+                    torch_counts, benchmark_counts, 
+                    out=np.ones_like(torch_counts), 
+                    where=benchmark_counts > 0
+                )
+                
+                ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
+                ax_ratio.set_xlabel(var, fontsize=12)
+                ax_ratio.set_ylabel('Torch / C++', fontsize=10)
+                ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±20% range
+                ax_ratio.grid(True, alpha=0.3)
                 
                 # Save plot
                 plot_file = branch_dir / f"{var}.png"
@@ -368,6 +390,96 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
             except Exception as e:
                 print(f"  ✗ {var}: Error - {e}")
                 continue
+        
+        # Create combined plot with all 4 kinematic variables (Eta, Phi, PT, P)
+        print(f"\n  Creating combined kinematic plot (Eta, Phi, PT, P)...")
+        combined_vars = ['Eta', 'Phi', 'PT', 'P']
+        
+        # Create figure with 2 rows (histogram + ratio) and 4 columns (one per variable)
+        fig = plt.figure(figsize=(30, 6))
+        
+        for idx, var in enumerate(combined_vars):
+            torch_key = f"{branch_name}/{branch_name}.{var}"
+            benchmark_key = f"{branch_name}/{branch_name}.{var}"
+            
+            if torch_key not in torch_tree.keys() or benchmark_key not in benchmark_tree.keys():
+                continue
+            
+            try:
+                # Load data
+                torch_data = torch_tree[torch_key].array()
+                torch_data = ak.flatten(torch_data)
+                benchmark_data = benchmark_tree[benchmark_key].array()
+                benchmark_data = ak.flatten(benchmark_data)
+                
+                # Convert to numpy
+                torch_np = np.asarray(torch_data)
+                benchmark_np = np.asarray(benchmark_data)
+                
+                # Create subplot with histogram on top, ratio below
+                # Use 4 rows to match the 3:1 height ratio, columns for each variable
+                gs = plt.GridSpec(4, 4, figure=fig, hspace=0.05, wspace=0.3, 
+                                  height_ratios=[3, 1, 0, 0])
+                
+                # Column position (0-3 for Eta, Phi, PT, P)
+                col = idx
+                
+                # Histogram subplot (row 0, takes 3 units of height)
+                ax_hist = fig.add_subplot(gs[0, col])
+                # Ratio subplot (row 1, takes 1 unit of height)
+                ax_ratio = fig.add_subplot(gs[1, col], sharex=ax_hist)
+                
+                # Determine bin range
+                all_data = np.concatenate([torch_np, benchmark_np])
+                if len(all_data) > 0:
+                    bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 40)
+                else:
+                    bins = 40
+                
+                # Plot histograms
+                benchmark_counts, bin_edges, _ = ax_hist.hist(
+                    benchmark_np, bins=bins, histtype='step', color='orange', 
+                    linewidth=2, label='C++ Delphes', density=False
+                )
+                torch_counts, _, _ = ax_hist.hist(
+                    torch_np, bins=bins, histtype='step', color='blue', 
+                    linewidth=2, label='Parnassus.TorchDelphes', density=False
+                )
+                
+                ax_hist.set_ylabel('Counts', fontsize=11)
+                ax_hist.set_title(f'{var}', fontsize=13, fontweight='bold')
+                if idx == 0:  # Only show legend on first subplot
+                    ax_hist.legend(fontsize=10)
+                ax_hist.grid(True, alpha=0.3)
+                ax_hist.tick_params(labelbottom=False)
+                
+                # Plot ratio
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                ratio = np.divide(
+                    torch_counts, benchmark_counts, 
+                    out=np.ones_like(torch_counts), 
+                    where=benchmark_counts > 0
+                )
+                
+                ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                ax_ratio.plot(bin_centers, ratio, color='blue', markersize=3, linewidth=2)
+                ax_ratio.set_xlabel(var, fontsize=11)
+                ax_ratio.set_ylabel('Torch/C++', fontsize=9)
+                ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])
+                ax_ratio.grid(True, alpha=0.3)
+                
+            except Exception as e:
+                print(f"    ✗ Error plotting {var} in combined plot: {e}")
+                continue
+        
+        # Add overall title
+        fig.suptitle(f'{branch_name}', fontsize=16, fontweight='bold', y=0.98)
+        
+        # Save combined figure
+        combined_plot_file = branch_dir / "all.png"
+        plt.savefig(combined_plot_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ Combined plot saved → {combined_plot_file.name}")
     
     print(f"\n{'='*70}")
     print(f"✓ Validation complete! Plots saved to {output_dir}")
@@ -385,7 +497,7 @@ def main(input_file, output_file, max_events=None, batch_size=100):
     """
     
     print("\n" + "="*80)
-    print("Parnassus.TorchDelphes Processing (BATCHED)")
+    print("Parnassus.TorchDelphes Processing")
     print("="*80)
     print(f"\nInput:  {input_file}")
     print(f"Batch size: {batch_size}")
