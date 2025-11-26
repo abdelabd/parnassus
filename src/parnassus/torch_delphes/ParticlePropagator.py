@@ -253,8 +253,6 @@ class ParticlePropagator(nn.Module):
         Solves: pt^2*t^2 + 2*(px*x + py*y)*t - (radius^2 - x^2 - y^2) = 0
         for time t to reach detector cylinder.
         """
-        if not mask.any():
-            return particles
         
         # Extract neutral particle data
         x_n = x[mask]
@@ -319,8 +317,6 @@ class ParticlePropagator(nn.Module):
         
         This implements the helix propagation from C++ Delphes ParticlePropagator.
         """
-        if not mask.any():
-            return particles
         
         # Extract charged particle data
         x_c = x[mask]
