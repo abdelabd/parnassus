@@ -75,31 +75,22 @@ class ParticlePropagator(nn.Module):
         # Physical constant
         self.c_light = 2.99792458e8  # Speed of light in m/s
         
-    def forward(self, particles, return_indices=False):
+    def forward(self, particles):
         """
-        Propagate particles to detector surface.
+        Propagate particles to detector surface using mask-based filtering.
         
         Args:
             particles: tensor of shape (N, 15) or (B, N, 16)
-                If (N, 15): single event
+                If (N, 15): single event, will add mask column
                 If (B, N, 16): batched events with mask in column 15
-            return_indices: if True, also return indices mapping outputs to inputs
         
         Returns:
-            For single event (N, 15):
-                dict with keys:
-                    'ParticleAfterProp': All propagated particles (M, 15) where M <= N
-                    'ChargedHadron': Charged hadron tracks
-                    'Electron': Electron tracks
-                    'Muon': Muon tracks
-                    'NeutralParticleAfterProp': Neutral particles
-                
-                If return_indices=True, also returns a dict with corresponding index arrays
-                mapping each output particle to its input index.
+            For single event: dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
+                Each value is a tensor of shape (N, 16) where column 15 is the mask
+                (1.0 = particle survived, 0.0 = filtered out)
             
-            For batched (B, N, 16):
-                dict with keys 'ParticleAfterProp' etc., each containing (B, N, 16) 
-                with updated masks
+            For batched: dict with keys 'ParticleAfterProp', etc., each containing (B, N, 16)
+                with updated masks indicating which particles survived propagation
         """
         
         # Detect batched input
@@ -107,87 +98,47 @@ class ParticlePropagator(nn.Module):
         has_mask = particles.shape[-1] == 16
         
         if is_batched and has_mask:
-            # Fully vectorized batch processing - NO LOOPS!
-            # Strategy: flatten batch, process all particles together, then reconstruct batches
+            # Batched processing with masks - TRIVIAL!
+            # Strategy: flatten batch, process all, reshape back (no scatter needed!)
             batch_size = particles.shape[0]
             max_particles = particles.shape[1]
             
             # Move to device
             particles = particles.to(self.device)
             
-            # Extract mask (batch_size, max_particles)
-            batch_mask = particles[:, :, 15] > 0.5
-            
-            # Create batch index tracker before flattening
-            # This tells us which batch each particle belongs to
-            batch_idx_grid = torch.arange(batch_size, device=self.device).unsqueeze(1).expand(-1, max_particles)
-            particle_idx_grid = torch.arange(max_particles, device=self.device).unsqueeze(0).expand(batch_size, -1)
-            
-            # Flatten everything: (batch_size, max_particles, 16) -> (batch_size*max_particles, 16)
+            # Flatten: (B, N, 16) -> (B*N, 16)
             particles_flat = particles.reshape(-1, 16)
-            batch_mask_flat = batch_mask.reshape(-1)
-            batch_idx_flat = batch_idx_grid.reshape(-1)
-            particle_idx_flat = particle_idx_grid.reshape(-1)
             
-            # Extract only real particles (remove padding)
-            particles_real = particles_flat[batch_mask_flat, :15]  # (N_real, 15)
-            N_real = particles_real.shape[0]
-            batch_idx_real = batch_idx_flat[batch_mask_flat]  # (N_real,) - tracks batch membership
-            particle_idx_real = particle_idx_flat[batch_mask_flat]  # (N_real,) - tracks position in batch
+            # Process all particles at once (recursive call)
+            result_dict_flat = self.forward(particles_flat)
             
-            # Process ALL real particles at once (recursive call with index tracking)
-            result_dict_flat, indices_dict = self.forward(particles_real, return_indices=True)
-            
-            # Now reconstruct batched outputs
-            # We now have exact mapping: indices_dict tells us which inputs produced which outputs!
-            
+            # Reshape back to batches: (B*N, 16) -> (B, N, 16)
+            # This is trivial because output[i] corresponds to input[i]!
             output_dict = {}
             for key in result_dict_flat.keys():
-                output_flat = result_dict_flat[key]  # (M, 15) where M <= N_real
-                M = output_flat.shape[0]
-                
-                # Create output tensor with masking
-                output_batched = torch.zeros(batch_size, max_particles, 16,
-                                            dtype=particles.dtype, device=self.device)
-                
-                if M == 0:
-                    # No particles survived - return empty with all masks=0
-                    output_dict[key] = output_batched
-                    continue
-                
-                # Get the exact indices mapping outputs to inputs
-                surviving_indices = indices_dict[key]  # (M,) - indices into particles_real
-                
-                # Map back to batch and particle indices
-                batch_idx_out = batch_idx_real[surviving_indices]
-                particle_idx_out = particle_idx_real[surviving_indices]
-                
-                # Vectorized scatter: NO LOOP!
-                # Convert (batch, particle) indices to flat indices
-                flat_indices = batch_idx_out * max_particles + particle_idx_out
-                
-                # Reshape output_batched to flat view
-                output_flat_view = output_batched.reshape(-1, 16)
-                
-                # Scatter results (vectorized)
-                output_flat_view[flat_indices, :15] = output_flat
-                output_flat_view[flat_indices, 15] = 1.0
-                
-                output_dict[key] = output_batched
+                output_dict[key] = result_dict_flat[key].reshape(batch_size, max_particles, 16)
             
             return output_dict
         
-        # Single event processing (original code)
+        # Single event processing with mask-based filtering
         # Move to device and clone to avoid modifying input
-        particles = particles.to(self.device).clone()
+        particles_input = particles.to(self.device)
         
-        # Initialize index tracking (if requested)
-        N_input = particles.shape[0]
-        if return_indices:
-            # Track original input indices
-            input_indices = torch.arange(N_input, device=self.device)
+        # Add mask column if not present
+        N_input = particles_input.shape[0]
+        if particles_input.shape[-1] == 15:
+            # Add mask column (all particles initially valid)
+            particles = torch.cat([
+                particles_input,
+                torch.ones(N_input, 1, dtype=particles_input.dtype, device=self.device)
+            ], dim=1)
+        else:
+            particles = particles_input.clone()
         
-        # Compute PT and Phi from raw momentum components
+        # Extract initial mask (will be updated as we filter)
+        mask = particles[:, 15] > 0.5
+        
+        # Compute PT and Phi from raw momentum components (for all particles)
         px = particles[:, 4]  # Momentum components (GeV)
         py = particles[:, 5]
         pz = particles[:, 6]
@@ -202,7 +153,6 @@ class ParticlePropagator(nn.Module):
         
         # NOTE: Eta (column 8) will be computed as POSITION-BASED eta after propagation
         # in _propagate_neutral and _propagate_charged methods
-        # This matches C++ Delphes which uses candidatePosition.Eta() at the detector surface
         
         # Extract positions (stored in cm, convert to m for calculations)
         x_cm = particles[:, 11]  # X position in cm
@@ -222,125 +172,93 @@ class ParticlePropagator(nn.Module):
         # Check minimum PT
         valid_pt = pt**2 >= 1.0e-9
         
-        # Base valid mask: inside volume with valid PT
-        valid_mask = inside_volume & valid_pt
+        # Update mask: filter out particles that fail these checks
+        mask = mask & inside_volume & valid_pt
         
         # ==================== HANDLE "ALREADY OUTSIDE TRACKER" CASE ====================
         # C++ Delphes: if(r > fRadius || |z| > fHalfLength) → pass through without propagation
-        # These are particles born between tracker radius and radius_max (or half_length and half_length_max)
         inside_tracker = (r <= self.radius) & (torch.abs(z) <= self.half_length)
-        needs_propagation = inside_tracker & valid_mask
-        already_outside_tracker = (~inside_tracker) & valid_mask
-        
-        # Clone all valid particles for output
-        output = particles[valid_mask].clone()
-        
-        # Track indices through valid_mask filter
-        if return_indices:
-            indices_after_valid = input_indices[valid_mask]  # Indices of particles that passed valid_mask
-        
-        # Create masks relative to output array (valid particles only)
-        # Map from full particle array to output array
-        needs_prop_in_output = needs_propagation[valid_mask]
-        already_outside_in_output = already_outside_tracker[valid_mask]
-        
-        # Extract particle data for propagation (only for particles that need it)
-        x_v = x[valid_mask]
-        y_v = y[valid_mask]
-        z_v = z[valid_mask]
-        px_v = px[valid_mask]
-        py_v = py[valid_mask]
-        pz_v = pz[valid_mask]
-        pt_v = pt[valid_mask]
-        e_v = e[valid_mask]
-        q_v = q[valid_mask]
+        needs_propagation = inside_tracker & mask
+        already_outside_tracker = (~inside_tracker) & mask
         
         # Separate neutral and charged particles (among those needing propagation)
-        # If no magnetic field, treat all as neutral
         no_bfield = 1 if torch.abs(self.bz) < 1.0e-9 else 0
-        neutral_mask = (no_bfield*(torch.ones_like(q_v, dtype=torch.bool)) + (1-no_bfield)*(torch.abs(q_v) < 1.0e-9)) & needs_prop_in_output
-        charged_mask = (~(torch.abs(q_v) < 1.0e-9)) & needs_prop_in_output
+        neutral_mask = (no_bfield*(torch.ones_like(q, dtype=torch.bool)) + (1-no_bfield)*(torch.abs(q) < 1.0e-9)) & needs_propagation
+        charged_mask = (~(torch.abs(q) < 1.0e-9)) & needs_propagation
         
         # ==================== NEUTRAL PARTICLE PROPAGATION ====================
-        output = self._propagate_neutral(
-            output, neutral_mask,
-            x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v
+        particles = self._propagate_neutral(
+            particles, neutral_mask,
+            x, y, z, px, py, pz, pt, e
         )
     
         # ==================== CHARGED PARTICLE PROPAGATION ====================
-        output = self._propagate_charged(
-            output, charged_mask,
-            x_v, y_v, z_v, px_v, py_v, pz_v, pt_v, e_v, q_v
+        particles = self._propagate_charged(
+            particles, charged_mask,
+            x, y, z, px, py, pz, pt, e, q
         )
         
         # ==================== COMPUTE ETA FOR "ALREADY OUTSIDE" PARTICLES ====================
         # Particles that were already outside tracker don't go through propagation
         # but still need position-based Eta computed at their current position
-        x_out = output[already_outside_in_output, 11] * 1.0e-2  # cm to m
-        y_out = output[already_outside_in_output, 12] * 1.0e-2
-        z_out = output[already_outside_in_output, 13] * 1.0e-2
+        x_out = particles[already_outside_tracker, 11] * 1.0e-2  # cm to m
+        y_out = particles[already_outside_tracker, 12] * 1.0e-2
+        z_out = particles[already_outside_tracker, 13] * 1.0e-2
         r_xy_out = torch.sqrt(x_out**2 + y_out**2)
         eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
-        output[already_outside_in_output, 8] = eta_out
+        particles[already_outside_tracker, 8] = eta_out
     
         # Filter out particles that didn't reach detector (r_t == 0)
         # In _propagate_charged, invalid particles have position set to zero
         # But DON'T filter particles that were already outside (they should keep their positions)
-        final_r = torch.sqrt(output[:, 11]**2 + output[:, 12]**2) * 1.0e-3
-        reached_detector = (final_r > 1.0e-6) | already_outside_in_output
-        output = output[reached_detector]
+        final_r = torch.sqrt(particles[:, 11]**2 + particles[:, 12]**2) * 1.0e-3
+        reached_detector = (final_r > 1.0e-6) | already_outside_tracker
+        mask = mask & reached_detector
         
-        # Track indices through reached_detector filter
-        if return_indices:
-            indices_after_reached = indices_after_valid[reached_detector]
+        # Update the mask column
+        particles[:, 15] = mask.float()
         
         # Separate by type using PID and charge
-        pid_out = output[:, 0]
-        q_out = output[:, 2]
+        pid = particles[:, 0]
+        q_final = particles[:, 2]
         
-        abs_pid = torch.abs(pid_out)
-        is_charged = torch.abs(q_out) > 1.0e-9
+        abs_pid = torch.abs(pid)
+        is_charged = torch.abs(q_final) > 1.0e-9
         
-        # Electrons: |PID| == 11
-        electron_mask = (abs_pid == 11) & is_charged
+        # Create type-specific masks (all relative to full particle array)
+        electron_mask = mask & (abs_pid == 11) & is_charged
+        muon_mask = mask & (abs_pid == 13) & is_charged
+        charged_hadron_mask = mask & is_charged & ~electron_mask & ~muon_mask
+        neutral_mask_out = mask & ~is_charged
         
-        # Muons: |PID| == 13
-        muon_mask = (abs_pid == 13) & is_charged
-        
-        # Charged hadrons: charged but not electron or muon
-        charged_hadron_mask = is_charged & ~electron_mask & ~muon_mask
-        
-        # Neutrals: uncharged
-        neutral_out_mask = ~is_charged
-        
+        # Create outputs with type-specific masks
         result = {
-            'ParticleAfterProp': output,
-            'ChargedHadron': output[charged_hadron_mask],
-            'Electron': output[electron_mask],
-            'Muon': output[muon_mask],
-            'NeutralParticleAfterProp': output[neutral_out_mask]
+            'ParticleAfterProp': particles.clone(),  # All particles with updated mask
+            'ChargedHadron': self._apply_type_mask(particles, charged_hadron_mask),
+            'Electron': self._apply_type_mask(particles, electron_mask),
+            'Muon': self._apply_type_mask(particles, muon_mask),
+            'NeutralParticleAfterProp': self._apply_type_mask(particles, neutral_mask_out)
         }
         
-        if return_indices:
-            # Return indices mapping each output particle type to original input
-            indices = {
-                'ParticleAfterProp': indices_after_reached,
-                'ChargedHadron': indices_after_reached[charged_hadron_mask],
-                'Electron': indices_after_reached[electron_mask],
-                'Muon': indices_after_reached[muon_mask],
-                'NeutralParticleAfterProp': indices_after_reached[neutral_out_mask]
-            }
-            return result, indices
-        else:
-            return result
+        return result
     
-    def _propagate_neutral(self, output, mask, x, y, z, px, py, pz, pt, e):
+    def _apply_type_mask(self, particles, type_mask):
+        """Apply a particle-type specific mask to the output."""
+        output = particles.clone()
+        output[:, 15] = type_mask.float()
+        return output
+    
+    def _propagate_neutral(self, particles, mask, x, y, z, px, py, pz, pt, e):
         """
         Propagate neutral particles in straight lines.
+        Updates positions in-place for particles where mask=True.
         
         Solves: pt^2*t^2 + 2*(px*x + py*y)*t - (radius^2 - x^2 - y^2) = 0
         for time t to reach detector cylinder.
         """
+        if not mask.any():
+            return particles
+        
         # Extract neutral particle data
         x_n = x[mask]
         y_n = y[mask]
@@ -385,24 +303,28 @@ class ParticlePropagator(nn.Module):
         r_t_xy = torch.sqrt(x_t**2 + y_t**2)
         eta_outer = torch.asinh(z_t / (r_t_xy + 1e-10))
         
-        # Update positions and EtaOuter in output (convert m back to mm)
-        output[mask, 8] = eta_outer  # EtaOuter (position eta at final position)
-        output[mask, 11] = x_t * 1.0e3  # X
-        output[mask, 12] = y_t * 1.0e3  # Y
-        output[mask, 13] = z_t * 1.0e3  # Z
-        output[mask, 10] = output[mask, 10] + t * e_n * 1.0e3  # T (time in mm/c)
+        # Update positions and EtaOuter in particles (convert m back to mm)
+        particles[mask, 8] = eta_outer  # EtaOuter (position eta at final position)
+        particles[mask, 11] = x_t * 1.0e3  # X
+        particles[mask, 12] = y_t * 1.0e3  # Y
+        particles[mask, 13] = z_t * 1.0e3  # Z
+        particles[mask, 10] = particles[mask, 10] + t * e_n * 1.0e3  # T (time in mm/c)
         
         # Store path length (could be stored in a new column if needed)
-        # For now we don't have a dedicated column for L in the 15-column format
+        # For now we don't have a dedicated column for L in the 16-column format
         
-        return output
+        return particles
     
-    def _propagate_charged(self, output, mask, x, y, z, px, py, pz, pt, e, q):
+    def _propagate_charged(self, particles, mask, x, y, z, px, py, pz, pt, e, q):
         """
         Propagate charged particles in helical paths through magnetic field.
+        Updates positions in-place for particles where mask=True.
         
         This implements the helix propagation from C++ Delphes ParticlePropagator.
         """
+        if not mask.any():
+            return particles
+        
         # Extract charged particle data
         x_c = x[mask]
         y_c = y[mask]
@@ -498,24 +420,27 @@ class ParticlePropagator(nn.Module):
         r_t_xy = torch.sqrt(x_t[valid]**2 + y_t[valid]**2)
         eta_outer = torch.asinh(z_t[valid] / (r_t_xy + 1e-10))
         
-        # Update output for valid particles
-        valid_indices = torch.where(mask)[0][valid]
-        output[valid_indices, 4] = px_d[valid]  # Px (at closest approach)
-        output[valid_indices, 5] = py_d[valid]  # Py (at closest approach)
-        output[valid_indices, 8] = eta_outer  # EtaOuter (position eta at final position)
-        output[valid_indices, 9] = phid[valid]  # Phi (at closest approach)
-        output[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm) - final position
-        output[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
-        output[valid_indices, 13] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
-        output[valid_indices, 10] = output[valid_indices, 10] + t[valid] * self.c_light * 1.0e3  # T
+        # Update particles for valid propagations
+        # We need to map from masked indices to full particle array
+        mask_indices = torch.where(mask)[0]
+        valid_indices = mask_indices[valid]
+        
+        particles[valid_indices, 4] = px_d[valid]  # Px (at closest approach)
+        particles[valid_indices, 5] = py_d[valid]  # Py (at closest approach)
+        particles[valid_indices, 8] = eta_outer  # EtaOuter (position eta at final position)
+        particles[valid_indices, 9] = phid[valid]  # Phi (at closest approach)
+        particles[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm) - final position
+        particles[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
+        particles[valid_indices, 13] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
+        particles[valid_indices, 10] = particles[valid_indices, 10] + t[valid] * self.c_light * 1.0e3  # T
         
         # Mark invalid particles by setting position to zero
-        invalid_indices = torch.where(mask)[0][~valid]
-        output[invalid_indices, 11] = 0.0
-        output[invalid_indices, 12] = 0.0
-        output[invalid_indices, 13] = 0.0
+        invalid_indices = mask_indices[~valid]
+        particles[invalid_indices, 11] = 0.0
+        particles[invalid_indices, 12] = 0.0
+        particles[invalid_indices, 13] = 0.0
         
-        return output
+        return particles
 
 
 # Example usage and testing
