@@ -95,33 +95,43 @@ class ParticlePropagator(nn.Module):
         
         # Detect batched input
         is_batched = particles.ndim == 3
-        has_mask = particles.shape[-1] == 16
         
-        if is_batched and has_mask:
-            # Batched processing with masks - TRIVIAL!
-            # Strategy: flatten batch, process all, reshape back (no scatter needed!)
+        if is_batched:
+            # Batched processing - flatten, process, reshape
             batch_size = particles.shape[0]
             max_particles = particles.shape[1]
             
-            # Move to device
-            particles = particles.to(self.device)
+            # Flatten: (B, N, 15/16) -> (B*N, 15/16)
+            particles_flat = particles.reshape(-1, particles.shape[-1])
             
-            # Flatten: (B, N, 16) -> (B*N, 16)
-            particles_flat = particles.reshape(-1, 16)
-            
-            # Process all particles at once (recursive call)
-            result_dict_flat = self.forward(particles_flat)
+            # Process all particles at once
+            result_dict_flat = self._process_particles(particles_flat)
             
             # Reshape back to batches: (B*N, 16) -> (B, N, 16)
-            # This is trivial because output[i] corresponds to input[i]!
             output_dict = {}
             for key in result_dict_flat.keys():
                 output_dict[key] = result_dict_flat[key].reshape(batch_size, max_particles, 16)
             
             return output_dict
+        else:
+            # Single event or unbatched particles
+            return self._process_particles(particles)
+    
+    def _process_particles(self, particles):
+        """
+        Core propagation logic - works on (N, 15) or (N, 16) particles.
         
-        # Single event processing with mask-based filtering
-        # Move to device and clone to avoid modifying input
+        This method contains all the actual physics logic and works identically
+        whether processing a single event or a flattened batch.
+        
+        Args:
+            particles: (N, 15) or (N, 16) tensor
+        
+        Returns:
+            Dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
+            Each value is a tensor of shape (N, 16) with mask in column 15
+        """
+        # Move to device
         particles_input = particles.to(self.device)
         
         # Add mask column if not present
@@ -133,6 +143,7 @@ class ParticlePropagator(nn.Module):
                 torch.ones(N_input, 1, dtype=particles_input.dtype, device=self.device)
             ], dim=1)
         else:
+            # Mask already present, just clone
             particles = particles_input.clone()
         
         # Extract initial mask (will be updated as we filter)
