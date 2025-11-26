@@ -131,21 +131,7 @@ class ParticlePropagator(nn.Module):
             Dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
             Each value is a tensor of shape (N, 16) with mask in column 15
         """
-        # Move to device
-        particles_input = particles.to(self.device)
-        
-        # Add mask column if not present
-        N_input = particles_input.shape[0]
-        if particles_input.shape[-1] == 15:
-            # Add mask column (all particles initially valid)
-            particles = torch.cat([
-                particles_input,
-                torch.ones(N_input, 1, dtype=particles_input.dtype, device=self.device)
-            ], dim=1)
-        else:
-            # Mask already present, just clone
-            particles = particles_input.clone()
-        
+
         # Extract initial mask (will be updated as we filter)
         mask = particles[:, 15] > 0.5
         
