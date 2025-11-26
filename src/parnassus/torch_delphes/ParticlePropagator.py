@@ -75,7 +75,7 @@ class ParticlePropagator(nn.Module):
         # Physical constant
         self.c_light = 2.99792458e8  # Speed of light in m/s
         
-    def forward(self, particles):
+    def forward(self, particles, return_indices=False):
         """
         Propagate particles to detector surface.
         
@@ -83,6 +83,7 @@ class ParticlePropagator(nn.Module):
             particles: tensor of shape (N, 15) or (B, N, 16)
                 If (N, 15): single event
                 If (B, N, 16): batched events with mask in column 15
+            return_indices: if True, also return indices mapping outputs to inputs
         
         Returns:
             For single event (N, 15):
@@ -92,6 +93,9 @@ class ParticlePropagator(nn.Module):
                     'Electron': Electron tracks
                     'Muon': Muon tracks
                     'NeutralParticleAfterProp': Neutral particles
+                
+                If return_indices=True, also returns a dict with corresponding index arrays
+                mapping each output particle to its input index.
             
             For batched (B, N, 16):
                 dict with keys 'ParticleAfterProp' etc., each containing (B, N, 16) 
@@ -131,12 +135,11 @@ class ParticlePropagator(nn.Module):
             batch_idx_real = batch_idx_flat[batch_mask_flat]  # (N_real,) - tracks batch membership
             particle_idx_real = particle_idx_flat[batch_mask_flat]  # (N_real,) - tracks position in batch
             
-            # Process ALL real particles at once (recursive call)
-            result_dict_flat = self.forward(particles_real)
+            # Process ALL real particles at once (recursive call with index tracking)
+            result_dict_flat, indices_dict = self.forward(particles_real, return_indices=True)
             
             # Now reconstruct batched outputs
-            # The challenge: forward() filters particles (valid_mask, reached_detector, etc.)
-            # so outputs have fewer particles than inputs
+            # We now have exact mapping: indices_dict tells us which inputs produced which outputs!
             
             output_dict = {}
             for key in result_dict_flat.keys():
@@ -152,34 +155,23 @@ class ParticlePropagator(nn.Module):
                     output_dict[key] = output_batched
                     continue
                 
-                # Key insight: we need to track which INPUT particles produced which OUTPUT particles
-                # The forward() method filters based on valid_mask and reached_detector
-                # We need to propagate batch_idx through these filters
+                # Get the exact indices mapping outputs to inputs
+                surviving_indices = indices_dict[key]  # (M,) - indices into particles_real
                 
-                # Problem: forward() doesn't currently return which input indices survived
-                # For proper vectorization, we need to modify forward() to return index mapping
+                # Map back to batch and particle indices
+                batch_idx_out = batch_idx_real[surviving_indices]
+                particle_idx_out = particle_idx_real[surviving_indices]
                 
-                # TEMPORARY SOLUTION: Use particle positions to match inputs to outputs
-                # This works because positions are unique and preserved (mostly)
-                # Match based on PID + initial position signature
-                # This is a heuristic and may not be perfect
+                # Vectorized scatter: NO LOOP!
+                # Convert (batch, particle) indices to flat indices
+                flat_indices = batch_idx_out * max_particles + particle_idx_out
                 
-                # Better solution: Return filter indices from forward()
-                # For now, assume 1:1 correspondence with first M particles (WRONG but maintains structure)
-                if M <= N_real:
-                    batch_idx_out = batch_idx_real[:M]
-                    particle_idx_out = particle_idx_real[:M]
-                    
-                    # Vectorized scatter: NO LOOP!
-                    # Convert (batch, particle) indices to flat indices
-                    flat_indices = batch_idx_out * max_particles + particle_idx_out
-                    
-                    # Reshape output_batched to flat view
-                    output_flat_view = output_batched.reshape(-1, 16)
-                    
-                    # Scatter results (vectorized)
-                    output_flat_view[flat_indices, :15] = output_flat
-                    output_flat_view[flat_indices, 15] = 1.0
+                # Reshape output_batched to flat view
+                output_flat_view = output_batched.reshape(-1, 16)
+                
+                # Scatter results (vectorized)
+                output_flat_view[flat_indices, :15] = output_flat
+                output_flat_view[flat_indices, 15] = 1.0
                 
                 output_dict[key] = output_batched
             
@@ -188,6 +180,12 @@ class ParticlePropagator(nn.Module):
         # Single event processing (original code)
         # Move to device and clone to avoid modifying input
         particles = particles.to(self.device).clone()
+        
+        # Initialize index tracking (if requested)
+        N_input = particles.shape[0]
+        if return_indices:
+            # Track original input indices
+            input_indices = torch.arange(N_input, device=self.device)
         
         # Compute PT and Phi from raw momentum components
         px = particles[:, 4]  # Momentum components (GeV)
@@ -236,6 +234,10 @@ class ParticlePropagator(nn.Module):
         
         # Clone all valid particles for output
         output = particles[valid_mask].clone()
+        
+        # Track indices through valid_mask filter
+        if return_indices:
+            indices_after_valid = input_indices[valid_mask]  # Indices of particles that passed valid_mask
         
         # Create masks relative to output array (valid particles only)
         # Map from full particle array to output array
@@ -288,6 +290,10 @@ class ParticlePropagator(nn.Module):
         reached_detector = (final_r > 1.0e-6) | already_outside_in_output
         output = output[reached_detector]
         
+        # Track indices through reached_detector filter
+        if return_indices:
+            indices_after_reached = indices_after_valid[reached_detector]
+        
         # Separate by type using PID and charge
         pid_out = output[:, 0]
         q_out = output[:, 2]
@@ -307,13 +313,26 @@ class ParticlePropagator(nn.Module):
         # Neutrals: uncharged
         neutral_out_mask = ~is_charged
         
-        return {
+        result = {
             'ParticleAfterProp': output,
             'ChargedHadron': output[charged_hadron_mask],
             'Electron': output[electron_mask],
             'Muon': output[muon_mask],
             'NeutralParticleAfterProp': output[neutral_out_mask]
         }
+        
+        if return_indices:
+            # Return indices mapping each output particle type to original input
+            indices = {
+                'ParticleAfterProp': indices_after_reached,
+                'ChargedHadron': indices_after_reached[charged_hadron_mask],
+                'Electron': indices_after_reached[electron_mask],
+                'Muon': indices_after_reached[muon_mask],
+                'NeutralParticleAfterProp': indices_after_reached[neutral_out_mask]
+            }
+            return result, indices
+        else:
+            return result
     
     def _propagate_neutral(self, output, mask, x, y, z, px, py, pz, pt, e):
         """
