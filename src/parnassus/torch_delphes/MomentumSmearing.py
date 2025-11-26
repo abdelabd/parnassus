@@ -240,15 +240,8 @@ class MomentumSmearing(nn.Module):
         # Clone particles to avoid modifying input
         smeared = particles.clone()
         
-        # Extract mask if present
-        if has_mask:
-            mask = particles[..., 15]  # Works for both (N, 16) and (B, N, 16)
-        else:
-            # Create dummy mask of all ones
-            if is_batched:
-                mask = torch.ones(particles.shape[0], particles.shape[1], device=self.device)
-            else:
-                mask = torch.ones(particles.shape[0], device=self.device)
+        # Extract mask
+        mask = particles[..., 15]  # Works for both (N, 16) and (B, N, 16)
         
         # Extract pre-computed kinematics from Delphes
         pt = particles[..., 7]   # Column 7: PT (transverse momentum)
