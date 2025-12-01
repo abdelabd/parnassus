@@ -112,17 +112,26 @@ class GenParticleCollection:
     def __repr__(self) -> str:
         return f"{self.name}"
 
-    def get4vecs(self) -> FloatArray:
-        assert self.mass is not None
-        return np.stack([self.pt, self.eta, self.phi, self.mass], axis=-1)
+    def get4vecs_numpy(self) -> FloatArray:
+        mass = np.zeros_like(self.pt) if self.mass is None else self.mass
+        return np.stack(
+            [
+                self.pt * np.cos(self.phi),
+                self.pt * np.sin(self.phi),
+                self.pt * np.sinh(self.eta),
+                np.sqrt(self.pt**2 * np.cosh(self.eta) ** 2 + mass**2),
+            ],
+            axis=1,
+        )
 
     def get4vecs_awkward(self) -> ak.Array:
+        mass = np.zeros_like(self.pt) if self.mass is None else self.mass
         return ak.Array(
             {
                 "px": self.pt * np.cos(self.phi),
                 "py": self.pt * np.sin(self.phi),
                 "pz": self.pt * np.sinh(self.eta),
-                "E": self.pt * np.cosh(self.eta),
+                "E": np.sqrt(self.pt**2 * np.cosh(self.eta) ** 2 + mass**2),
             },
             with_name="Momentum4D",
         )
@@ -223,7 +232,31 @@ class GenLeptonCollection:
 
 @dataclass(slots=True)
 class GenJetCollection:
-    """Class storing information about generic jet collection."""
+    """Class storing information about generic jet collection.
+
+    We use it to store information about jets inside an event.
+
+    Parameters
+    ----------
+    name : str
+        Name identifier for the jet collection.
+    num_jets : int
+        Total number of jets in the collection (automatically computed).
+    pt : FloatArray
+        Transverse momentum of jets.
+    eta : FloatArray
+        Pseudorapidity of jets.
+    phi : FloatArray
+        Azimuthal angle of jets.
+    mass : FloatArray | None, optional
+        Mass of jets.
+    jec : FloatArray | None, optional
+        Jet energy correction factors.
+    d2 : FloatArray | None, optional
+        D2 substructure variable.
+    c2 : FloatArray | None, optional
+        C2 substructure variable.
+    """
 
     # Jet properties
     name: str
@@ -232,7 +265,6 @@ class GenJetCollection:
     eta: FloatArray
     phi: FloatArray
     mass: FloatArray | None = None
-    particle_idx: list[IntArray] | None = None
 
     jec: FloatArray | None = None
     d2: FloatArray | None = None
