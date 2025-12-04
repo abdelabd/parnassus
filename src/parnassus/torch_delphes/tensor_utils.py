@@ -115,6 +115,41 @@ def pad_and_batch(event_tensors: List[torch.Tensor], max_particles: int) -> torc
     
     return batch
 
+def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor:
+    """
+    max_particles must be greater than or equal to the largest event in event_tensors.
+
+    Pad events to max_particles and stack into batch with mask.
+    
+    The mask is appended as column 15 to indicate real vs padded particles.
+    
+    Args:
+        event_tensors: List of (N_i, 15) tensors
+        max_particles: Max particles to pad to
+        
+    Returns:
+        batch: (B, max_particles, 16) where:
+               - batch[:, :, :15] = particle data (padded with zeros)
+               - batch[:, :, 15] = mask (1.0 for real particles, 0.0 for padding)
+    """
+
+    n_events = len(event_tensors)
+    max_particles = compute_max_particles(event_tensors)
+    dtype = event_tensors[0].dtype
+    device = event_tensors[0].device
+    
+    # Create padded batch tensor (B, max_particles, 16)
+    # Initialize with zeros (padding)
+    padded_events = torch.zeros((n_events, max_particles, 16), dtype=dtype, device=device)
+    
+    for i, event in enumerate(event_tensors):
+        n_particles = event.shape[0]
+        padded_events[i, :n_particles, :15] = event
+        padded_events[i, :n_particles, 15] = 1.0  # Mask for real particles
+        # Rest is already zeros (padding)
+
+    return padded_events
+
 
 def unbatch_and_unpad(batch: torch.Tensor, mask_col: int = 15) -> List[torch.Tensor]:
     """
@@ -541,7 +576,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
             # Convert to torch tensor
             event_tensors.append(torch.from_numpy(particles))
     
-    return event_tensors
+    return zero_pad_to_max_particles(event_tensors)
 
 # ==================== PDG ID UTILITIES ====================
 
