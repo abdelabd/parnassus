@@ -80,17 +80,13 @@ class ParticlePropagator(nn.Module):
         Propagate particles to detector surface using mask-based filtering.
         
         Args:
-            particles: tensor of shape (N, 15) or (B, N, 16)
-                If (N, 15): single event, will add mask column
-                If (B, N, 16): batched events with mask in column 15
-        
+            particles: tensor of shape (N, 15) (NOT (B, N, 15))
+                i.e. MUST BE UNBATCHED/FLATTENED, NOT GROUPED BY EVENT
+
         Returns:
-            For single event: dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
+            dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
                 Each value is a tensor of shape (N, 16) where column 15 is the mask
                 (1.0 = particle survived, 0.0 = filtered out)
-            
-            For batched: dict with keys 'ParticleAfterProp', etc., each containing (B, N, 16)
-                with updated masks indicating which particles survived propagation
         """
         
         # Detect batched input
@@ -102,22 +98,44 @@ class ParticlePropagator(nn.Module):
             max_particles = particles.shape[1]
             
             # Flatten: (B, N, 15/16) -> (B*N, 15/16)
-            particles_flat = particles.reshape(-1, particles.shape[-1])
+            particles = particles.reshape(-1, particles.shape[-1])
             
             # Process all particles at once
-            result_dict_flat = self._process_particles(particles_flat)
-            
-            # Reshape back to batches: (B*N, 16) -> (B, N, 16)
-            output_dict = {}
-            for key in result_dict_flat.keys():
-                output_dict[key] = result_dict_flat[key].reshape(batch_size, max_particles, 16)
-            
-            return output_dict
+            particles_propagated = self._propagate_particles(particles)
+        
         else:
             # Single event or unbatched particles
-            return self._process_particles(particles)
+            particles_propagated = self._propagate_particles(particles)
+
+
+        mask = particles_propagated[:, 15] > 0.5
+        pid = particles_propagated[:, 0]
+        q_final = particles_propagated[:, 2]
+
+        abs_pid = torch.abs(pid)
+        is_charged = torch.abs(q_final) > 1.0e-9
+        
+        # Create type-specific masks (all relative to full particle array)
+        electron_mask = mask & (abs_pid == 11) & is_charged
+        muon_mask = mask & (abs_pid == 13) & is_charged
+        charged_hadron_mask = mask & is_charged & ~electron_mask & ~muon_mask
+        neutral_mask_out = mask & ~is_charged
+
+        # Create outputs with type-specific masks
+        out_dict = {
+            'ParticleAfterProp': particles_propagated.clone(),  # All particles with updated mask
+            'ChargedHadron': self._apply_type_mask(particles_propagated, charged_hadron_mask),
+            'Electron': self._apply_type_mask(particles_propagated, electron_mask),
+            'Muon': self._apply_type_mask(particles_propagated, muon_mask),
+            'NeutralParticleAfterProp': self._apply_type_mask(particles_propagated, neutral_mask_out)
+        }
+        if is_batched:
+            for key in out_dict.keys():
+                out_dict[key] = out_dict[key].reshape(batch_size, max_particles, 16)
+            
+        return out_dict
     
-    def _process_particles(self, particles):
+    def _propagate_particles(self, particles):
         """
         Core propagation logic - works on (N, 15) or (N, 16) particles.
         
@@ -215,29 +233,7 @@ class ParticlePropagator(nn.Module):
         # Update the mask column
         particles[:, 15] = mask.float()
         
-        # Separate by type using PID and charge
-        pid = particles[:, 0]
-        q_final = particles[:, 2]
-        
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        # Create type-specific masks (all relative to full particle array)
-        electron_mask = mask & (abs_pid == 11) & is_charged
-        muon_mask = mask & (abs_pid == 13) & is_charged
-        charged_hadron_mask = mask & is_charged & ~electron_mask & ~muon_mask
-        neutral_mask_out = mask & ~is_charged
-        
-        # Create outputs with type-specific masks
-        result = {
-            'ParticleAfterProp': particles.clone(),  # All particles with updated mask
-            'ChargedHadron': self._apply_type_mask(particles, charged_hadron_mask),
-            'Electron': self._apply_type_mask(particles, electron_mask),
-            'Muon': self._apply_type_mask(particles, muon_mask),
-            'NeutralParticleAfterProp': self._apply_type_mask(particles, neutral_mask_out)
-        }
-        
-        return result
+        return particles
     
     def _apply_type_mask(self, particles, type_mask):
         """Apply a particle-type specific mask to the output."""
