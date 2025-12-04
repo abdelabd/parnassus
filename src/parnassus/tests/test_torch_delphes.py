@@ -6,16 +6,8 @@ This is a redesigned version that uses pure tensor operations:
 - All processing happens in tensor space
 - Tensor → ROOT conversion happens once per output file
 
-This script emulates delphes_card_CMS_3_2.tcl with six output files:
-1. v2_0: ChargedHadronEfficiency only
-2. v2_1: ChargedHadronEfficiency + ElectronEfficiency
-3. v2_2: ChargedHadronEfficiency + ElectronEfficiency + MuonEfficiency
-4. v3_0: All efficiency modules + ChargedHadronMomentumSmearing
-5. v3_1: All efficiency modules + ChargedHadronSmearing + ElectronSmearing
-6. v3_2: All efficiency modules + all momentum smearing
-
 Usage:
-    python test_torch_delphes_v2.py [input.root] [output_v2_0.root] ... [output_v3_2.root]
+    python test_torch_delphes_v2.py [input.root] [output.root]
     
 Default:
     Input:  delphes_data/HZZ4l/HZZ4l_1.root
@@ -87,16 +79,10 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
     # Process in batches
     for batch_start in tqdm(range(0, n_events, batch_size)):
         batch_end = min(batch_start + batch_size, n_events)
-        batch_events = genparticle_tensors[batch_start:batch_end]
-        
-        # Compute max particles for this batch
-        max_particles = compute_max_particles(batch_events, scale=1.2)
-        
-        # Pad and batch
-        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
+        batch_events = genparticle_tensors[batch_start:batch_end].to(DEVICE)
         
         # Propagate particles (batched)
-        outputs = propagator(batched)
+        outputs = propagator(batch_events)
         
         # Unbatch each particle type
         ch_batch = unbatch_and_unpad(outputs['ChargedHadron'].cpu(), mask_col=15)
@@ -566,6 +552,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     toc_torch = time.time()
     dur_torch = toc_torch - tic_torch
     print(f"\n\nTorch duration: {dur_torch//60:.0f} minutes, {dur_torch%60:.2f} seconds\n\n")
+
     # ========================================================================
     # STEP 6: Write final output
     # ========================================================================
@@ -654,7 +641,7 @@ def parse_args():
         help="Maximum number of events to process (default: 1000)"
     )
     parser.add_argument(
-        "--batch-size", "-bs", type=int, default=1000,
+        "--batch-size", "-bs", type=int, default=100,
         help="Batch size for processing (default: 1000)"
     )
     return parser.parse_args()
