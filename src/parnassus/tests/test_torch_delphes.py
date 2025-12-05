@@ -60,7 +60,7 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
         Tuple of (ch_tensors, el_tensors, mu_tensors) after propagation
         Each is a list of tensors (one per event)
     """
-    n_events = len(genparticle_tensors)
+    n_events, max_particles, n_dim = genparticle_tensors.shape
     
     # Initialize ParticlePropagator module
     propagator = ParticlePropagator(
@@ -72,6 +72,7 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
     
     print(f"\nParticlePropagator (batch_size={batch_size})...")
     
+    print(f"genparticle_tensors.shape: {genparticle_tensors.shape}")
     ch_tensors = []
     el_tensors = []
     mu_tensors = []
@@ -80,10 +81,38 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
     for batch_start in tqdm(range(0, n_events, batch_size)):
         batch_end = min(batch_start + batch_size, n_events)
         batch_events = genparticle_tensors[batch_start:batch_end].to(DEVICE)
+        batch_size = batch_events.shape[0]
         
         # Propagate particles (batched)
-        outputs = propagator(batch_events)
+        particles_propagated = propagator(batch_events)
+
+        mask = particles_propagated[:, 15] > 0.5
+        pid = particles_propagated[:, 0]
+        q_final = particles_propagated[:, 2]
+
+        abs_pid = torch.abs(pid)
+        is_charged = torch.abs(q_final) > 1.0e-9
         
+        # Create type-specific masks (all relative to full particle array)
+        electron_mask = mask & (abs_pid == 11) & is_charged
+        muon_mask = mask & (abs_pid == 13) & is_charged
+        charged_hadron_mask = mask & is_charged & ~electron_mask & ~muon_mask
+        neutral_mask_out = mask & ~is_charged
+
+        # Create outputs with type-specific masks
+        outputs = {
+            'ParticleAfterProp': particles_propagated.clone(),  # All particles with updated mask
+            'ChargedHadron': propagator._apply_type_mask(particles_propagated, charged_hadron_mask),
+            'Electron': propagator._apply_type_mask(particles_propagated, electron_mask),
+            'Muon': propagator._apply_type_mask(particles_propagated, muon_mask),
+            'NeutralParticleAfterProp': propagator._apply_type_mask(particles_propagated, neutral_mask_out)
+        }
+        for key in outputs.keys():
+            print(f"outputs[{key}].shape: {outputs[key].shape}")
+            if outputs[key].shape[0]>0:
+                n_dim_new = outputs[key].shape[1]
+                outputs[key] = outputs[key].reshape(batch_size, max_particles, n_dim_new)
+
         # Unbatch each particle type
         ch_batch = unbatch_and_unpad(outputs['ChargedHadron'].cpu(), mask_col=15)
         el_batch = unbatch_and_unpad(outputs['Electron'].cpu(), mask_col=15)
