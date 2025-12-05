@@ -84,7 +84,8 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
         batch_size = batch_events.shape[0]
         
         # Propagate particles (batched)
-        particles_propagated = propagator(batch_events)
+        particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
+        particles_propagated = propagator(particles)
 
         mask = particles_propagated[:, 15] > 0.5
         pid = particles_propagated[:, 0]
@@ -108,10 +109,8 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
             'NeutralParticleAfterProp': propagator._apply_type_mask(particles_propagated, neutral_mask_out)
         }
         for key in outputs.keys():
-            print(f"outputs[{key}].shape: {outputs[key].shape}")
-            if outputs[key].shape[0]>0:
-                n_dim_new = outputs[key].shape[1]
-                outputs[key] = outputs[key].reshape(batch_size, max_particles, n_dim_new)
+            n_dim_new = outputs[key].shape[1]
+            outputs[key] = outputs[key].reshape(batch_size, max_particles, n_dim_new)
 
         # Unbatch each particle type
         ch_batch = unbatch_and_unpad(outputs['ChargedHadron'].cpu(), mask_col=15)

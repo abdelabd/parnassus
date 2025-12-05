@@ -80,45 +80,13 @@ class ParticlePropagator(nn.Module):
         Propagate particles to detector surface using mask-based filtering.
         
         Args:
-            particles: tensor of shape (N, 15) (NOT (B, N, 15))
+            particles: tensor of shape (N, 15) or (N, 16) - NOT (B, N, 15))
                 i.e. MUST BE UNBATCHED/FLATTENED, NOT GROUPED BY EVENT
 
         Returns:
             dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
                 Each value is a tensor of shape (N, 16) where column 15 is the mask
                 (1.0 = particle survived, 0.0 = filtered out)
-        """
-        
-        # Detect batched input
-        is_batched = particles.ndim == 3
-        
-        if is_batched:
-            
-            # Flatten: (B, N, 15/16) -> (B*N, 15/16)
-            particles = particles.reshape(-1, particles.shape[-1])
-            
-            # Process all particles at once
-            particles_propagated = self._propagate_particles(particles)
-        
-        else:
-            # Single event or unbatched particles
-            particles_propagated = self._propagate_particles(particles)
-
-        return particles_propagated
-    
-    def _propagate_particles(self, particles):
-        """
-        Core propagation logic - works on (N, 15) or (N, 16) particles.
-        
-        This method contains all the actual physics logic and works identically
-        whether processing a single event or a flattened batch.
-        
-        Args:
-            particles: (N, 15) or (N, 16) tensor
-        
-        Returns:
-            Dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
-            Each value is a tensor of shape (N, 16) with mask in column 15
         """
 
         # Extract initial mask (will be updated as we filter)
