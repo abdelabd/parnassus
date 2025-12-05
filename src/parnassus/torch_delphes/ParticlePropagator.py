@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+
 
 class ParticlePropagator(nn.Module):
     """
@@ -43,6 +45,7 @@ class ParticlePropagator(nn.Module):
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position at production vertex)
         - column 14: Mass
+        - 
     
     Output: Propagated particles in Track format (same 15 columns but with updated positions)
     """
@@ -93,32 +96,32 @@ class ParticlePropagator(nn.Module):
         mask = particles[:, 15] > 0.5
         
         # Compute PT and Phi from raw momentum components (for all particles)
-        px = particles[:, 4]  # Momentum components (GeV)
-        py = particles[:, 5]
-        pz = particles[:, 6]
-        
+        px = particles[:, CMAP["PX"]]  # Momentum components (GeV)
+        py = particles[:, CMAP["PY"]]
+        pz = particles[:, CMAP["PZ"]]
+
         # Compute PT from momentum components
         pt = torch.sqrt(px**2 + py**2)
-        particles[:, 7] = pt  # Store in column 7
-        
+        particles[:, CMAP["PT"]] = pt  # Store in column 7
+
         # Compute Phi from momentum
         phi = torch.atan2(py, px)
-        particles[:, 9] = phi  # Store in column 9
-        
+        particles[:, CMAP["PHI"]] = phi  # Store in column 9
+
         # NOTE: Eta (column 8) will be computed as POSITION-BASED eta after propagation
         # in _propagate_neutral and _propagate_charged methods
         
         # Extract positions (stored in cm, convert to m for calculations)
-        x_cm = particles[:, 11]  # X position in cm
-        y_cm = particles[:, 12]  # Y position in cm
-        z_cm = particles[:, 13]  # Z position in cm
+        x_cm = particles[:, CMAP["X"]]  # X position in cm
+        y_cm = particles[:, CMAP["Y"]]  # Y position in cm
+        z_cm = particles[:, CMAP["Z"]]  # Z position in cm
         x = x_cm * 1.0e-2  # Convert cm to m
         y = y_cm * 1.0e-2
         z = z_cm * 1.0e-2
-        t = particles[:, 10]  # Time
-        e = particles[:, 3]
-        q = particles[:, 2]   # Charge
-        
+        t = particles[:, CMAP["T"]]  # Time
+        e = particles[:, CMAP["E"]]
+        q = particles[:, CMAP["CHARGE"]]  # Charge
+
         # Check if particles are within detector volume
         r = torch.sqrt(x**2 + y**2)
         inside_volume = (r <= self.radius_max) & (torch.abs(z) <= self.half_length_max)
@@ -155,22 +158,22 @@ class ParticlePropagator(nn.Module):
         # ==================== COMPUTE ETA FOR "ALREADY OUTSIDE" PARTICLES ====================
         # Particles that were already outside tracker don't go through propagation
         # but still need position-based Eta computed at their current position
-        x_out = particles[already_outside_tracker, 11] * 1.0e-2  # cm to m
-        y_out = particles[already_outside_tracker, 12] * 1.0e-2
-        z_out = particles[already_outside_tracker, 13] * 1.0e-2
+        x_out = particles[already_outside_tracker, CMAP["X"]] * 1.0e-2  # cm to m
+        y_out = particles[already_outside_tracker, CMAP["Y"]] * 1.0e-2
+        z_out = particles[already_outside_tracker, CMAP["Z"]] * 1.0e-2
         r_xy_out = torch.sqrt(x_out**2 + y_out**2)
         eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
-        particles[already_outside_tracker, 8] = eta_out
+        particles[already_outside_tracker, CMAP["ETA"]] = eta_out
     
         # Filter out particles that didn't reach detector (r_t == 0)
         # In _propagate_charged, invalid particles have position set to zero
         # But DON'T filter particles that were already outside (they should keep their positions)
-        final_r = torch.sqrt(particles[:, 11]**2 + particles[:, 12]**2) * 1.0e-3
+        final_r = torch.sqrt(particles[:, CMAP["X"]]**2 + particles[:, CMAP["Y"]]**2) * 1.0e-3
         reached_detector = (final_r > 1.0e-6) | already_outside_tracker
         mask = mask & reached_detector
         
         # Update the mask column
-        particles[:, 15] = mask.float()
+        particles[:, CMAP["IS_NOT_PAD"]] = mask.float()
         
         return particles
     

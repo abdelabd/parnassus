@@ -42,7 +42,8 @@ from parnassus.torch_delphes.tensor_utils import (
     write_root_file,
     compute_max_particles,
     pad_and_batch,
-    unbatch_and_unpad
+    unbatch_and_unpad,
+    COLUMN_MAP as CMAP
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,9 +88,9 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
         particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
         particles_propagated = propagator(particles)
 
-        mask = particles_propagated[:, 15] > 0.5
-        pid = particles_propagated[:, 0]
-        q_final = particles_propagated[:, 2]
+        mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] > 0.5
+        pid = particles_propagated[:, CMAP["PID"]]
+        q_final = particles_propagated[:, CMAP["CHARGE"]]
 
         abs_pid = torch.abs(pid)
         is_charged = torch.abs(q_final) > 1.0e-9

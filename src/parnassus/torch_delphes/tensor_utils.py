@@ -36,6 +36,31 @@ Y = 12         # Y position
 Z = 13         # Z position
 MASS = 14      # Mass (not stored in Track, will be computed/set based on PID)
 
+IS_NOT_PAD = 15  # Column index for initial validity mask (1=real, 0=padded)
+PASS_PROP = 16
+PASS_EFF = 17
+
+COLUMN_MAP = {
+    "PID": PID,
+    "STATUS": STATUS,
+    "CHARGE": CHARGE,
+    "E": E,
+    "PX": PX,
+    "PY": PY,
+    "PZ": PZ,
+    "PT": PT,
+    "ETA": ETA,
+    "PHI": PHI,
+    "T": T,
+    "X": X,
+    "Y": Y,
+    "Z": Z,
+    "MASS": MASS,
+    "IS_NOT_PAD": IS_NOT_PAD,
+    "PASS_PROP": PASS_PROP,
+    "PASS_EFF": PASS_EFF
+}
+
 # Number of features per particle
 N_FEATURES = 15
 

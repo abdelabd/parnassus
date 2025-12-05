@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 class MomentumSmearing(nn.Module):
     """
@@ -28,6 +29,7 @@ class MomentumSmearing(nn.Module):
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position)
         - column 14: Mass
+        - column 15: mask
     
     NOTE: The Eta in column 8 is used for evaluating the resolution formula.
     However, when reconstructing the 4-vector after smearing, we recompute
@@ -241,19 +243,19 @@ class MomentumSmearing(nn.Module):
         smeared = particles.clone()
         
         # Extract mask
-        mask = particles[..., 15]  # Works for both (N, 16) and (B, N, 16)
+        mask = particles[..., CMAP["IS_NOT_PAD"]]  # Works for both (N, 16) and (B, N, 16)
         
         # Extract pre-computed kinematics from Delphes
-        pt = particles[..., 7]   # Column 7: PT (transverse momentum)
-        eta = particles[..., 8]  # Column 8: Eta (for resolution formula - typically position-based)
-        phi = particles[..., 9]  # Column 9: Phi (azimuthal angle)
-        mass = particles[..., 14]  # Column 14: Mass
-        
+        pt = particles[..., CMAP["PT"]]   # Column 7: PT (transverse momentum)
+        eta = particles[..., CMAP["ETA"]]  # Column 8: Eta (for resolution formula - typically position-based)
+        phi = particles[..., CMAP["PHI"]]  # Column 9: Phi (azimuthal angle)
+        mass = particles[..., CMAP["MASS"]]  # Column 14: Mass
+
         # Extract momentum components to compute momentum-based eta for reconstruction
-        px = particles[..., 4]  # Px
-        py = particles[..., 5]  # Py
-        pz = particles[..., 6]  # Pz
-        
+        px = particles[..., CMAP["PX"]]  # Px
+        py = particles[..., CMAP["PY"]]  # Py
+        pz = particles[..., CMAP["PZ"]]  # Pz
+
         # Compute momentum-based eta and phi from the momentum vector
         # This matches C++ Delphes which uses candidateMomentum.Eta() and candidateMomentum.Phi()
         # for reconstructing the 4-vector after smearing
@@ -276,18 +278,18 @@ class MomentumSmearing(nn.Module):
         smeared_pt = torch.where(mask > 0.5, smeared_pt, pt)
         
         # Update PT in the tensor (column 7)
-        smeared[..., 7] = smeared_pt
-        
+        smeared[..., CMAP["PT"]] = smeared_pt
+
         # Recompute Px, Py, Pz with smeared PT but using MOMENTUM-based eta and phi
         # This matches C++ Delphes behavior: it uses candidateMomentum.Eta() and Phi()
         # for reconstruction, not the position-based values used for resolution
-        smeared[..., 4] = smeared_pt * torch.cos(momentum_phi)  # Px
-        smeared[..., 5] = smeared_pt * torch.sin(momentum_phi)  # Py
-        smeared[..., 6] = smeared_pt * torch.sinh(momentum_eta)  # Pz
-        
+        smeared[..., CMAP["PX"]] = smeared_pt * torch.cos(momentum_phi)  # Px
+        smeared[..., CMAP["PY"]] = smeared_pt * torch.sin(momentum_phi)  # Py
+        smeared[..., CMAP["PZ"]] = smeared_pt * torch.sinh(momentum_eta)  # Pz
+
         # Recompute energy: E = sqrt(P^2 + M^2)
-        p_squared = smeared[..., 4]**2 + smeared[..., 5]**2 + smeared[..., 6]**2
-        smeared[..., 3] = torch.sqrt(p_squared + mass**2)  # E
+        p_squared = smeared[..., CMAP["PX"]]**2 + smeared[..., CMAP["PY"]]**2 + smeared[..., CMAP["PZ"]]**2
+        smeared[..., CMAP["E"]] = torch.sqrt(p_squared + mass**2)  # E
 
         return smeared
     
@@ -327,23 +329,23 @@ if __name__ == "__main__":
     # Create test particles (N=5, features=15)
     # Columns: PID, Status, Charge, E, Px, Py, Pz, PT, Eta, Phi, T, X, Y, Z, Mass
     test_particles = torch.zeros(5, 15)
-    test_particles[:, 0] = torch.tensor([211, -211, 211, -211, 211])  # Pion PIDs
-    test_particles[:, 2] = torch.tensor([1, -1, 1, -1, 1])  # Charges
-    test_particles[:, 7] = torch.tensor([0.5, 1.0, 5.0, 10.0, 50.0])  # PT
-    test_particles[:, 8] = torch.tensor([0.3, 0.3, 1.0, 2.0, 0.5])  # Eta
-    test_particles[:, 9] = torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0])  # Phi
-    test_particles[:, 14] = 0.140  # Pion mass
+    test_particles[:, CMAP["PID"]] = torch.tensor([211, -211, 211, -211, 211])  # Pion PIDs
+    test_particles[:, CMAP["CHARGE"]] = torch.tensor([1, -1, 1, -1, 1])  # Charges
+    test_particles[:, CMAP["PT"]] = torch.tensor([0.5, 1.0, 5.0, 10.0, 50.0])  # PT
+    test_particles[:, CMAP["ETA"]] = torch.tensor([0.3, 0.3, 1.0, 2.0, 0.5])  # Eta
+    test_particles[:, CMAP["PHI"]] = torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0])  # Phi
+    test_particles[:, CMAP["MASS"]] = 0.140  # Pion mass
     
     # Compute Px, Py, Pz, E from PT, Eta, Phi, Mass
-    test_particles[:, 4] = test_particles[:, 7] * torch.cos(test_particles[:, 9])  # Px
-    test_particles[:, 5] = test_particles[:, 7] * torch.sin(test_particles[:, 9])  # Py
-    test_particles[:, 6] = test_particles[:, 7] * torch.sinh(test_particles[:, 8])  # Pz
-    p_squared = test_particles[:, 4]**2 + test_particles[:, 5]**2 + test_particles[:, 6]**2
-    test_particles[:, 3] = torch.sqrt(p_squared + test_particles[:, 14]**2)  # E
-    
+    test_particles[:, CMAP["PX"]] = test_particles[:, CMAP["PT"]] * torch.cos(test_particles[:, CMAP["PHI"]])  # Px
+    test_particles[:, CMAP["PY"]] = test_particles[:, CMAP["PT"]] * torch.sin(test_particles[:, CMAP["PHI"]])  # Py
+    test_particles[:, CMAP["PZ"]] = test_particles[:, CMAP["PT"]] * torch.sinh(test_particles[:, CMAP["ETA"]])  # Pz
+    p_squared = test_particles[:, CMAP["PX"]]**2 + test_particles[:, CMAP["PY"]]**2 + test_particles[:, CMAP["PZ"]]**2
+    test_particles[:, CMAP["E"]] = torch.sqrt(p_squared + test_particles[:, CMAP["MASS"]]**2)  # E
+
     print("\nOriginal particles:")
-    print(f"PT:  {test_particles[:, 7]}")
-    print(f"Eta: {test_particles[:, 8]}")
+    print(f"PT:  {test_particles[:, CMAP["PT"]]}")
+    print(f"Eta: {test_particles[:, CMAP["ETA"]]}")
     
     # Apply smearing
     smeared_particles, resolutions = smearing(test_particles, return_resolution=True)
@@ -352,10 +354,10 @@ if __name__ == "__main__":
     print(f"{resolutions}")
     
     print("\nSmeared particles:")
-    print(f"PT:  {smeared_particles[:, 7]}")
-    print(f"Eta: {smeared_particles[:, 8]}")  # Should be unchanged
-    
+    print(f"PT:  {smeared_particles[:, CMAP["PT"]]}")
+    print(f"Eta: {smeared_particles[:, CMAP["ETA"]]}")  # Should be unchanged
+
     print("\nRelative resolution (sigma/PT):")
-    print(f"{resolutions / test_particles[:, 7]}")
+    print(f"{resolutions / test_particles[:, CMAP["PT"]]}")
     
     print("\n✓ Test complete!")
