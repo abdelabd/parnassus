@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 class Efficiency(nn.Module):
     """
@@ -28,6 +29,8 @@ class Efficiency(nn.Module):
         - column 9: Phi (azimuthal angle)
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position)
+        - column 14: mass
+        - column 15: mask 
     
     The efficiency formula from CMS card:
         (pt <= 0.1)   * (0.00) +
@@ -181,12 +184,12 @@ class Efficiency(nn.Module):
         """
         
         # Extract mask
-        mask = particles[..., 15]  # (N,) or (B, N)
+        mask = particles[..., CMAP["IS_NOT_PAD"]]  # (N,) or (B, N)
         
         # Extract pre-computed kinematics from Delphes (columns 7-8)
-        pt = particles[..., 7]   # Column 7: PT (transverse momentum)
-        eta = particles[..., 8]  # Column 8: Eta (pseudorapidity)
-        
+        pt = particles[..., CMAP["PT"]]   # Column 7: PT (transverse momentum)
+        eta = particles[..., CMAP["ETA"]]  # Column 8: Eta (pseudorapidity)
+
         # Compute efficiency for each particle
         efficiency = self.efficiency_func(pt, eta)
         
@@ -199,7 +202,7 @@ class Efficiency(nn.Module):
         
         # Create output with updated mask
         filtered_particles = particles.clone()
-        filtered_particles[..., 15] = new_mask
+        filtered_particles[..., CMAP["IS_NOT_PAD"]] = new_mask
         
         return filtered_particles
     
@@ -247,28 +250,28 @@ if __name__ == "__main__":
     phi_values = torch.rand(n_particles) * 2 * np.pi - np.pi
     
     # Column 0: PID (charged pions)
-    particles[:, 0] = 211
+    particles[:, CMAP["PID"]] = 211
     # Column 1: Status (stable)
-    particles[:, 1] = 1
+    particles[:, CMAP["STATUS"]] = 1
     # Column 2: Charge
-    particles[:, 2] = 1
+    particles[:, CMAP["CHARGE"]] = 1
     # Column 3: E (approximate from pt for massless particles)
-    particles[:, 3] = pt_values * torch.cosh(eta_values)
+    particles[:, CMAP["E"]] = pt_values * torch.cosh(eta_values)
     # Columns 4-6: Px, Py, Pz
-    particles[:, 4] = pt_values * torch.cos(phi_values)  # Px
-    particles[:, 5] = pt_values * torch.sin(phi_values)  # Py
-    particles[:, 6] = pt_values * torch.sinh(eta_values)  # Pz
+    particles[:, CMAP["PX"]] = pt_values * torch.cos(phi_values)  # Px
+    particles[:, CMAP["PY"]] = pt_values * torch.sin(phi_values)  # Py
+    particles[:, CMAP["PZ"]] = pt_values * torch.sinh(eta_values)  # Pz
     # Column 7: PT (pre-computed)
-    particles[:, 7] = pt_values
+    particles[:, CMAP["PT"]] = pt_values
     # Column 8: Eta (pre-computed)
-    particles[:, 8] = eta_values
+    particles[:, CMAP["ETA"]] = eta_values
     # Column 9: Phi (pre-computed)
-    particles[:, 9] = phi_values
+    particles[:, CMAP["PHI"]] = phi_values
     # Column 10: T (time)
-    particles[:, 10] = torch.randn(n_particles)
+    particles[:, CMAP["T"]] = torch.randn(n_particles)
     # Columns 11-13: X, Y, Z (position)
-    particles[:, 11:14] = torch.randn(n_particles, 3)
-    
+    particles[:, CMAP["X"]:CMAP["Z"]+1] = torch.randn(n_particles, 3)
+
     print("Input particles:")
     print(f"Shape: {particles.shape}")
     print(f"Number of particles: {n_particles}\n")
@@ -295,8 +298,8 @@ if __name__ == "__main__":
         print(f"\nOutput shape: {filtered_particles.shape}")
         
         # Show which particles passed (use pre-computed PT and Eta from columns 7 and 8)
-        pt = particles[:, 7]
-        eta = particles[:, 8]
+        pt = particles[:, CMAP["PT"]]
+        eta = particles[:, CMAP["ETA"]]
         print(f"\nPer-particle results:")
         print(f"{'Index':<6} {'pt (GeV)':<10} {'eta':<10} {'Passed':<8}")
         print("-" * 40)
