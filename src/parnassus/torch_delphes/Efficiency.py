@@ -267,16 +267,20 @@ class Efficiency(nn.Module):
                                Single event: (N, 16) with mask
                                Batched: (B, N, 16) with updated mask
         """
-        
-        pid_mask = self.pdg_filter_func(particles)
+    
+        # We want to compute effiency vector based on particles that satisfy:
+            # 1. real particles (IS_NOT_PAD == 1)
+            # 2. particles that passed propagation (PASS_PROP == 1)
+            # 3. particles of the desired type
 
+        pid_mask = self.pdg_filter_func(particles)
         mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * pid_mask.float()
 
         has_pass_eff = False
         if particles.shape[1] > CMAP["PASS_EFF"]:
             has_pass_eff = True
-        if has_pass_eff:
-            mask = mask * (particles[:, CMAP["PASS_EFF"]]>0.5).float()
+        # if has_pass_eff:
+        #     mask = mask * (particles[:, CMAP["PASS_EFF"]]>0.5).float()
 
         # Extract pre-computed kinematics from Delphes (columns 7-8)
         mask_where = torch.where(mask > 0.5)[0]
@@ -288,16 +292,17 @@ class Efficiency(nn.Module):
         
         # Apply efficiency stochastically
         passed = torch.rand_like(efficiency) < efficiency
-
-        # Update mask: new_mask = old_mask AND passed
-        mask[mask_where] = passed.double()
         
         # Only real particles (mask==1) can pass efficiency
         if has_pass_eff:
-            particles[:, CMAP["PASS_EFF"]] = mask
+            passed_full = particles[:, CMAP["PASS_EFF"]].clone().bool().to(particles.device)
+            passed_full[mask_where] = passed
+            particles[:, CMAP["PASS_EFF"]] = passed_full.double()
         else:
+            passed_full = torch.zeros(particles.shape[0], device=particles.device, dtype=torch.bool)
+            passed_full[mask_where] = passed
             particles = torch.cat(
-                [particles, mask.unsqueeze(-1)], dim=-1
+                [particles, passed_full.unsqueeze(-1)], dim=-1
             )
         
         return particles
