@@ -56,12 +56,16 @@ class Efficiency(nn.Module):
         # Load efficiency formula
         if self.efficiency_formula == 'charged_hadron_cms':
             self.efficiency_func = self._charged_hadron_cms_efficiency
+            self.pdg_filter_func = self._charged_hadron_pdg_filter
         elif self.efficiency_formula == 'electron_cms':
             self.efficiency_func = self._electron_cms_efficiency
+            self.pdg_filter_func = self._electron_pdg_filter
         elif self.efficiency_formula == 'muon_cms':
             self.efficiency_func = self._muon_cms_efficiency
+            self.pdg_filter_func = self._muon_pdg_filter
         elif callable(self.efficiency_formula):
             self.efficiency_func = self.efficiency_formula
+            self.pdg_filter_func = None
         else:
             raise ValueError(f"Unknown efficiency formula: {efficiency_formula}")
     
@@ -160,6 +164,86 @@ class Efficiency(nn.Module):
         
         return eff
     
+    @staticmethod
+    def _charged_hadron_pdg_filter(particles):
+        """
+        Filter charged hadrons based on PDG IDs.
+        
+        Args:
+            particles: tensor of shape (N, 15) or (B, N, 15)
+            
+        Returns:
+            mask: boolean tensor indicating charged hadrons
+        """
+        pid = particles[..., CMAP["PID"]]
+        q_final = particles[..., CMAP["CHARGE"]]
+        abs_pid = torch.abs(pid)
+        is_charged = torch.abs(q_final) > 1.0e-9
+        
+        electron_mask = (abs_pid == 11) & is_charged
+        muon_mask = (abs_pid == 13) & is_charged
+        pid_mask = is_charged & ~electron_mask & ~muon_mask
+        
+        return pid_mask
+    
+    @staticmethod
+    def _electron_pdg_filter(particles):
+        """
+        Filter electrons based on PDG IDs.
+        
+        Args:
+            particles: tensor of shape (N, 15) or (B, N, 15)
+            
+        Returns:
+            mask: boolean tensor indicating electrons
+        """
+        pid = particles[..., CMAP["PID"]]
+        q_final = particles[..., CMAP["CHARGE"]]
+        abs_pid = torch.abs(pid)
+        is_charged = torch.abs(q_final) > 1.0e-9
+        
+        pid_mask = (abs_pid == 11) & is_charged
+        
+        return pid_mask
+    
+    @staticmethod
+    def _muon_pdg_filter(particles):
+        """
+        Filter muons based on PDG IDs.
+        
+        Args:
+            particles: tensor of shape (N, 15) or (B, N, 15)
+            
+        Returns:
+            mask: boolean tensor indicating muons
+        """
+        pid = particles[..., CMAP["PID"]]
+        q_final = particles[..., CMAP["CHARGE"]]
+        abs_pid = torch.abs(pid)
+        is_charged = torch.abs(q_final) > 1.0e-9
+        
+        pid_mask = (abs_pid == 13) & is_charged
+        
+        return pid_mask
+    
+    @staticmethod
+    def _neutral_pdg_filter(particles):
+        """
+        Filter neutral particles based on PDG IDs.
+        
+        Args:
+            particles: tensor of shape (N, 15) or (B, N, 15)
+            
+        Returns:
+            mask: boolean tensor indicating neutral particles
+        """
+        q_final = particles[..., CMAP["CHARGE"]]
+        is_charged = torch.abs(q_final) > 1.0e-9
+        
+        pid_mask = ~is_charged
+        
+        return pid_mask
+    
     def forward(self, particles):
         """
         Apply efficiency filter to particles using mask-based filtering.
@@ -184,22 +268,7 @@ class Efficiency(nn.Module):
                                Batched: (B, N, 16) with updated mask
         """
         
-        pid = particles[:, ..., CMAP["PID"]]
-        q_final = particles[:, ..., CMAP["CHARGE"]]
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        if self.efficiency_formula == 'charged_hadron_cms':
-            electron_mask = (abs_pid == 11) & is_charged
-            muon_mask = (abs_pid == 13) & is_charged
-            pid_mask = is_charged & ~electron_mask & ~muon_mask
-        elif self.efficiency_formula == 'electron_cms':
-            pid_mask = (abs_pid == 11) & is_charged
-        elif self.efficiency_formula == 'muon_cms':
-            pid_mask = (abs_pid == 13) & is_charged
-        elif self.efficiency_formula == "neutral_cms":
-            pid_mask = ~is_charged
-        else:
-            raise ValueError(f"Unknown efficiency formula: {self.efficiency_formula}")
+        pid_mask = self.pdg_filter_func(particles)
 
         mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * pid_mask.float()
 
