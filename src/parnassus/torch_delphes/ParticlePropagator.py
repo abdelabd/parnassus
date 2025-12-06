@@ -91,9 +91,6 @@ class ParticlePropagator(nn.Module):
                 Each value is a tensor of shape (N, 16) where column 15 is the mask
                 (1.0 = particle survived, 0.0 = filtered out)
         """
-
-        # Extract initial mask (will be updated as we filter)
-        mask = particles[:, 15] > 0.5
         
         # Compute PT and Phi from raw momentum components (for all particles)
         px = particles[:, CMAP["PX"]]  # Momentum components (GeV)
@@ -130,7 +127,7 @@ class ParticlePropagator(nn.Module):
         valid_pt = pt**2 >= 1.0e-9
         
         # Update mask: filter out particles that fail these checks
-        mask = mask & inside_volume & valid_pt
+        mask = inside_volume & valid_pt
         
         # ==================== HANDLE "ALREADY OUTSIDE TRACKER" CASE ====================
         # C++ Delphes: if(r > fRadius || |z| > fHalfLength) → pass through without propagation
@@ -173,7 +170,7 @@ class ParticlePropagator(nn.Module):
         mask = mask & reached_detector
         
         # Update the mask column
-        particles[:, CMAP["IS_NOT_PAD"]] = mask.float()
+        particles = torch.cat([particles, mask.unsqueeze(1).float()], dim=1)  # New column 15 is mask
         
         return particles
     

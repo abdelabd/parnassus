@@ -49,19 +49,20 @@ from parnassus.torch_delphes.tensor_utils import (
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
 
-def process_particle_propagator(genparticle_tensors, batch_size=100):
+def process_particle_propagator(genevent_tensors, batch_size=100):
     """
-    Apply ParticlePropagator to GenParticle tensors using batched processing.
+    Apply ParticlePropagator to GenEvent tensors using batched processing.
     
     Args:
-        genparticle_tensors: List of tensors (one per event), each (N, 15)
+        genevent_tensors: Tensor of shape N_EVENT x N_PARTICLES x 15
+                - Should be zero-padded such that all tensors have the same shape (number of particles)
         batch_size: Number of events to process in each batch
         
     Returns:
-        Tuple of (ch_tensors, el_tensors, mu_tensors) after propagation
-        Each is a list of tensors (one per event)
+        genevent_tensors: Tensor of shape N_EVENT x N_PARTICLES x 16
     """
-    n_events, max_particles, n_dim = genparticle_tensors.shape
+
+    n_event, n_part, n_dim = genevent_tensors.shape
     
     # Initialize ParticlePropagator module
     propagator = ParticlePropagator(
@@ -72,60 +73,26 @@ def process_particle_propagator(genparticle_tensors, batch_size=100):
     )
     
     print(f"\nParticlePropagator (batch_size={batch_size})...")
-    
-    print(f"genparticle_tensors.shape: {genparticle_tensors.shape}")
-    ch_tensors = []
-    el_tensors = []
-    mu_tensors = []
-    
+    print(f"genevent_tensors.shape: {genevent_tensors.shape}")
+
+    genevent_tensors_propagated = torch.zeros((n_event, n_part, n_dim + 1), dtype=genevent_tensors.dtype)
     # Process in batches
-    for batch_start in tqdm(range(0, n_events, batch_size)):
-        batch_end = min(batch_start + batch_size, n_events)
-        batch_events = genparticle_tensors[batch_start:batch_end].to(DEVICE)
+    for batch_start in tqdm(range(0, n_event, batch_size)):
+        batch_end = min(batch_start + batch_size, n_event)
+
+        # Flatten to (B*N, 15)
+        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
         batch_size = batch_events.shape[0]
         
         # Propagate particles (batched)
         particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
         particles_propagated = propagator(particles)
+        n_dim_new = particles_propagated.shape[1]
 
-        mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] > 0.5
-        pid = particles_propagated[:, CMAP["PID"]]
-        q_final = particles_propagated[:, CMAP["CHARGE"]]
+        genevent_tensors_propagated[batch_start:batch_end] = particles_propagated.reshape(batch_size, n_part, n_dim_new).cpu()
+    return genevent_tensors_propagated
 
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        # Create type-specific masks (all relative to full particle array)
-        electron_mask = mask & (abs_pid == 11) & is_charged
-        muon_mask = mask & (abs_pid == 13) & is_charged
-        charged_hadron_mask = mask & is_charged & ~electron_mask & ~muon_mask
-        neutral_mask_out = mask & ~is_charged
-
-        # Create outputs with type-specific masks
-        outputs = {
-            'ParticleAfterProp': particles_propagated.clone(),  # All particles with updated mask
-            'ChargedHadron': propagator._apply_type_mask(particles_propagated, charged_hadron_mask),
-            'Electron': propagator._apply_type_mask(particles_propagated, electron_mask),
-            'Muon': propagator._apply_type_mask(particles_propagated, muon_mask),
-            'NeutralParticleAfterProp': propagator._apply_type_mask(particles_propagated, neutral_mask_out)
-        }
-        for key in outputs.keys():
-            n_dim_new = outputs[key].shape[1]
-            outputs[key] = outputs[key].reshape(batch_size, max_particles, n_dim_new)
-
-        # Unbatch each particle type
-        ch_batch = unbatch_and_unpad(outputs['ChargedHadron'].cpu(), mask_col=15)
-        el_batch = unbatch_and_unpad(outputs['Electron'].cpu(), mask_col=15)
-        mu_batch = unbatch_and_unpad(outputs['Muon'].cpu(), mask_col=15)
-        
-        # Collect results
-        ch_tensors.extend(ch_batch)
-        el_tensors.extend(el_batch)
-        mu_tensors.extend(mu_batch)
-    
-    return ch_tensors, el_tensors, mu_tensors
-
-def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_tensors, batch_size=100):
+def process_efficiency_pipeline(genevent_tensors, batch_size=100):
     """
     Apply tracking efficiency to all three particle types using batched processing.
     
@@ -139,7 +106,9 @@ def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_t
         Tuple of (ch_filtered, el_filtered, mu_filtered)
         Each is a list of tensors (one per event)
     """
-    n_events = len(charged_hadron_tensors)
+
+    n_event, n_part, n_dim = genevent_tensors.shape
+    genparticle_tensors = genevent_tensors.reshape(-1, n_dim)  # Flatten to (N_EVENT*N_PARTICLES, 16)
     
     # Initialize efficiency modules
     ch_eff_module = Efficiency(
@@ -158,45 +127,18 @@ def process_efficiency_pipeline(charged_hadron_tensors, electron_tensors, muon_t
     )
     
     # Apply efficiency to charged hadrons
-    print(f"\nChargedHadronTrackingEfficiency (batch_size={batch_size})...")
-    ch_filtered = []
-    for batch_start in tqdm(range(0, n_events, batch_size)):
-        batch_end = min(batch_start + batch_size, n_events)
-        batch_events = charged_hadron_tensors[batch_start:batch_end]
-        
-        max_particles = compute_max_particles(batch_events, scale=1.2)
-        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
-        filtered_batched = ch_eff_module(batched)
-        filtered_batch = unbatch_and_unpad(filtered_batched.cpu(), mask_col=15)
-        ch_filtered.extend(filtered_batch)
+    genparticle_tensors = ch_eff_module(genparticle_tensors)
     
     # Apply efficiency to electrons
-    print(f"\nElectronTrackingEfficiency (batch_size={batch_size})...")
-    el_filtered = []
-    for batch_start in tqdm(range(0, n_events, batch_size)):
-        batch_end = min(batch_start + batch_size, n_events)
-        batch_events = electron_tensors[batch_start:batch_end]
-        
-        max_particles = compute_max_particles(batch_events, scale=1.2)
-        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
-        filtered_batched = el_eff_module(batched)
-        filtered_batch = unbatch_and_unpad(filtered_batched.cpu(), mask_col=15)
-        el_filtered.extend(filtered_batch)
+    genparticle_tensors = el_eff_module(genparticle_tensors)
     
     # Apply efficiency to muons
-    print(f"\nMuonTrackingEfficiency (batch_size={batch_size})...")
-    mu_filtered = []
-    for batch_start in tqdm(range(0, n_events, batch_size)):
-        batch_end = min(batch_start + batch_size, n_events)
-        batch_events = muon_tensors[batch_start:batch_end]
-        
-        max_particles = compute_max_particles(batch_events, scale=1.2)
-        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
-        filtered_batched = mu_eff_module(batched)
-        filtered_batch = unbatch_and_unpad(filtered_batched.cpu(), mask_col=15)
-        mu_filtered.extend(filtered_batch)
-    
-    return ch_filtered, el_filtered, mu_filtered
+    genparticle_tensors = mu_eff_module(genparticle_tensors)
+    n_dim_new = genparticle_tensors.shape[1]
+
+    genevent_tensors = genparticle_tensors.reshape(n_event, n_part, n_dim_new)
+
+    return genevent_tensors
 
 def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered, batch_size=100):
     """
@@ -527,11 +469,11 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print(f"STEP 1: Loading HepMC file and converting to tensors: {input_file}")
     print("="*80)
     
-    genparticle_tensors = hepmc_to_tensor(input_file, max_events)
-    n_events = len(genparticle_tensors)
+    genevent_tensors = hepmc_to_tensor(input_file, max_events)
+    n_events = len(genevent_tensors)
     print(f"Loaded {n_events} events from HepMC")
-    print(f"  Total stable particles: {sum(t.shape[0] for t in genparticle_tensors)}")
-    
+    print(f"  Total stable particles: {sum(t.shape[0] for t in genevent_tensors)}")
+
 
     # ========================================================================
     # STEP 2: Apply ParticlePropagator
@@ -542,13 +484,10 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("\n" + "="*80)
     print("STEP 2: Applying ParticlePropagator (batched)")
     print("="*80)
-    
-    ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genparticle_tensors, batch_size=batch_size)
-    
-    print(f"\nAfter ParticlePropagator: {len(ch_tensors)} events")
-    print(f"  ChargedHadrons: {sum(t.shape[0] for t in ch_tensors)} total particles")
-    print(f"  Electrons: {sum(t.shape[0] for t in el_tensors)} total particles")
-    print(f"  Muons: {sum(t.shape[0] for t in mu_tensors)} total particles")
+
+    genevent_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
+
+    print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
 
     # ========================================================================
     # STEP 3: Apply tracking efficiency
@@ -558,8 +497,8 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("STEP 3: Applying Efficiency modules (batched)")
     print("="*80)
 
-    ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
-        ch_tensors, el_tensors, mu_tensors, batch_size=batch_size
+    genevent_tensors = process_efficiency_pipeline(
+        genevent_tensors, batch_size=batch_size
     )
 
     print("\n✓ Efficiency applied")
