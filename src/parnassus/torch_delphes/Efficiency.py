@@ -51,16 +51,17 @@ class Efficiency(nn.Module):
         """
         super().__init__()
         self.device = device
+        self.efficiency_formula = efficiency_formula
         
         # Load efficiency formula
-        if efficiency_formula == 'charged_hadron_cms':
+        if self.efficiency_formula == 'charged_hadron_cms':
             self.efficiency_func = self._charged_hadron_cms_efficiency
-        elif efficiency_formula == 'electron_cms':
+        elif self.efficiency_formula == 'electron_cms':
             self.efficiency_func = self._electron_cms_efficiency
-        elif efficiency_formula == 'muon_cms':
+        elif self.efficiency_formula == 'muon_cms':
             self.efficiency_func = self._muon_cms_efficiency
-        elif callable(efficiency_formula):
-            self.efficiency_func = efficiency_formula
+        elif callable(self.efficiency_formula):
+            self.efficiency_func = self.efficiency_formula
         else:
             raise ValueError(f"Unknown efficiency formula: {efficiency_formula}")
     
@@ -183,28 +184,54 @@ class Efficiency(nn.Module):
                                Batched: (B, N, 16) with updated mask
         """
         
-        # Extract mask
-        mask = particles[..., CMAP["IS_NOT_PAD"]]  # (N,) or (B, N)
-        
+        pid = particles[:, ..., CMAP["PID"]]
+        q_final = particles[:, ..., CMAP["CHARGE"]]
+        abs_pid = torch.abs(pid)
+        is_charged = torch.abs(q_final) > 1.0e-9
+        if self.efficiency_formula == 'charged_hadron_cms':
+            electron_mask = (abs_pid == 11) & is_charged
+            muon_mask = (abs_pid == 13) & is_charged
+            pid_mask = is_charged & ~electron_mask & ~muon_mask
+        elif self.efficiency_formula == 'electron_cms':
+            pid_mask = (abs_pid == 11) & is_charged
+        elif self.efficiency_formula == 'muon_cms':
+            pid_mask = (abs_pid == 13) & is_charged
+        elif self.efficiency_formula == "neutral_cms":
+            pid_mask = ~is_charged
+        else:
+            raise ValueError(f"Unknown efficiency formula: {self.efficiency_formula}")
+
+        mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * pid_mask.float()
+
+        has_pass_eff = False
+        if particles.shape[1] > CMAP["PASS_EFF"]:
+            has_pass_eff = True
+        if has_pass_eff:
+            mask = mask * (particles[:, CMAP["PASS_EFF"]]>0.5).float()
+
         # Extract pre-computed kinematics from Delphes (columns 7-8)
-        pt = particles[..., CMAP["PT"]]   # Column 7: PT (transverse momentum)
-        eta = particles[..., CMAP["ETA"]]  # Column 8: Eta (pseudorapidity)
+        mask_where = torch.where(mask > 0.5)[0]
+        pt = particles[mask_where, CMAP["PT"]]   # Column 7: PT (transverse momentum)
+        eta = particles[mask_where, CMAP["ETA"]]  # Column 8: Eta (pseudorapidity)
 
         # Compute efficiency for each particle
         efficiency = self.efficiency_func(pt, eta)
         
         # Apply efficiency stochastically
         passed = torch.rand_like(efficiency) < efficiency
-        
+
         # Update mask: new_mask = old_mask AND passed
+        mask[mask_where] = passed.double()
+        
         # Only real particles (mask==1) can pass efficiency
-        new_mask = mask * passed.float()
+        if has_pass_eff:
+            particles[:, CMAP["PASS_EFF"]] = mask
+        else:
+            particles = torch.cat(
+                [particles, mask.unsqueeze(-1)], dim=-1
+            )
         
-        # Create output with updated mask
-        filtered_particles = particles.clone()
-        filtered_particles[..., CMAP["IS_NOT_PAD"]] = new_mask
-        
-        return filtered_particles
+        return particles
     
     def get_efficiency_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
                           n_pts=100, n_etas=100):
