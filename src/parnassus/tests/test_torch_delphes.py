@@ -76,6 +76,10 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
     print(f"genevent_tensors.shape: {genevent_tensors.shape}")
 
     genevent_tensors_propagated = torch.zeros((n_event, n_part, n_dim + 1), dtype=genevent_tensors.dtype)
+    # Collect charged_hadron, electron, muon tensors after propagation (for intermediate testing and validation)
+    ch_tensors = []
+    el_tensors = []
+    mu_tensors = []
     # Process in batches
     for batch_start in tqdm(range(0, n_event, batch_size)):
         batch_end = min(batch_start + batch_size, n_event)
@@ -90,7 +94,17 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
         n_dim_new = particles_propagated.shape[1]
 
         genevent_tensors_propagated[batch_start:batch_end] = particles_propagated.reshape(batch_size, n_part, n_dim_new).cpu()
-    return genevent_tensors_propagated
+
+        mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] * particles_propagated[:, CMAP["PASS_PROP"]]
+        charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles_propagated).float()
+        electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles_propagated).float()
+        muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles_propagated).float()
+
+        ch_tensors.append(particles[charged_hadron_pid_mask > 0.5].cpu())
+        el_tensors.append(particles[electron_pid_mask > 0.5].cpu())
+        mu_tensors.append(particles[muon_pid_mask > 0.5].cpu())
+
+    return genevent_tensors_propagated, ch_tensors, el_tensors, mu_tensors
 
 def process_efficiency_pipeline(genevent_tensors, batch_size=100):
     """
@@ -473,7 +487,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("STEP 2: Applying ParticlePropagator (batched)")
     print("="*80)
 
-    genevent_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
+    genevent_tensors, ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
 
@@ -518,12 +532,12 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
         'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
         'Muon': tensor_to_root_dict(mu_tensors, 'Muon'),
-        'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
-        'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
-        'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
-        'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
-        'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
-        'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared')
+        # 'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
+        # 'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
+        # 'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
+        # 'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
+        # 'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
+        # 'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared')
     }
     write_root_file(output_file, branches_v3_2)
 
@@ -538,24 +552,24 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     total_el_input = sum(t.shape[0] for t in el_tensors)
     total_mu_input = sum(t.shape[0] for t in mu_tensors)
     
-    total_ch_filtered = sum(t.shape[0] for t in ch_filtered)
-    total_el_filtered = sum(t.shape[0] for t in el_filtered)
-    total_mu_filtered = sum(t.shape[0] for t in mu_filtered)
+    # total_ch_filtered = sum(t.shape[0] for t in ch_filtered)
+    # total_el_filtered = sum(t.shape[0] for t in el_filtered)
+    # total_mu_filtered = sum(t.shape[0] for t in mu_filtered)
     
     print(f"\nChargedHadrons:")
     print(f"  Input:      {total_ch_input}")
-    print(f"  After eff:  {total_ch_filtered} ({100*total_ch_filtered/total_ch_input:.1f}%)")
-    print(f"  Smeared:    {sum(t.shape[0] for t in ch_smeared)}")
+    # print(f"  After eff:  {total_ch_filtered} ({100*total_ch_filtered/total_ch_input:.1f}%)")
+    # print(f"  Smeared:    {sum(t.shape[0] for t in ch_smeared)}")
     
     print(f"\nElectrons:")
     print(f"  Input:      {total_el_input}")
-    print(f"  After eff:  {total_el_filtered} ({100*total_el_filtered/total_el_input:.1f}%)")
-    print(f"  Smeared:    {sum(t.shape[0] for t in el_smeared)}")
+    # print(f"  After eff:  {total_el_filtered} ({100*total_el_filtered/total_el_input:.1f}%)")
+    # print(f"  Smeared:    {sum(t.shape[0] for t in el_smeared)}")
     
     print(f"\nMuons:")
     print(f"  Input:      {total_mu_input}")
-    print(f"  After eff:  {total_mu_filtered} ({100*total_mu_filtered/total_mu_input:.1f}%)")
-    print(f"  Smeared:    {sum(t.shape[0] for t in mu_smeared)}")
+    # print(f"  After eff:  {total_mu_filtered} ({100*total_mu_filtered/total_mu_input:.1f}%)")
+    # print(f"  Smeared:    {sum(t.shape[0] for t in mu_smeared)}")
     
     print("\n" + "="*80)
     print("✓ ALL PROCESSING COMPLETE!")
