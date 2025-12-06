@@ -138,6 +138,10 @@ def process_efficiency_pipeline(genevent_tensors, batch_size=100):
     )
 
     genevent_tensors_eff = []
+    # Collect charged_hadron, electron, muon tensors after propagation (for intermediate testing and validation)
+    ch_tensors = []
+    el_tensors = []
+    mu_tensors = []
     # Process in batches
     for batch_start in tqdm(range(0, n_event, batch_size)):
         batch_end = min(batch_start + batch_size, n_event)
@@ -155,10 +159,19 @@ def process_efficiency_pipeline(genevent_tensors, batch_size=100):
 
         genevent_tensors_eff.append(particles.reshape(batch_size, n_part, n_dim_new).cpu())
 
+        mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * particles[:, CMAP["PASS_EFF"]]
+        charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles).float()
+        electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles).float()
+        muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles).float()
+
+        ch_tensors.append(particles[charged_hadron_pid_mask > 0.5].cpu())
+        el_tensors.append(particles[electron_pid_mask > 0.5].cpu())
+        mu_tensors.append(particles[muon_pid_mask > 0.5].cpu())
+
     # Stack all event tensors into a single tensor
     genevent_tensors_eff = torch.cat(genevent_tensors_eff, dim=0)
 
-    return genevent_tensors
+    return genevent_tensors, ch_tensors, el_tensors, mu_tensors
 
 def process_smearing_pipeline(genevent_tensors, batch_size=100):
     """
@@ -499,7 +512,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("STEP 3: Applying Efficiency modules (batched)")
     print("="*80)
 
-    genevent_tensors = process_efficiency_pipeline(
+    genevent_tensors, ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
         genevent_tensors, batch_size=batch_size
     )
 
@@ -532,9 +545,9 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
         'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
         'Muon': tensor_to_root_dict(mu_tensors, 'Muon'),
-        # 'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
-        # 'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
-        # 'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
+        'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
+        'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
+        'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
         # 'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
         # 'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
         # 'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared')
