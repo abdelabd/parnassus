@@ -108,35 +108,41 @@ def process_efficiency_pipeline(genevent_tensors, batch_size=100):
     """
 
     n_event, n_part, n_dim = genevent_tensors.shape
-    genparticle_tensors = genevent_tensors.reshape(-1, n_dim)  # Flatten to (N_EVENT*N_PARTICLES, 16)
     
     # Initialize efficiency modules
     ch_eff_module = Efficiency(
         efficiency_formula='charged_hadron_cms',
         device=DEVICE
     )
-    
     el_eff_module = Efficiency(
         efficiency_formula='electron_cms',
         device=DEVICE
     )
-    
     mu_eff_module = Efficiency(
         efficiency_formula='muon_cms',
         device=DEVICE
     )
-    
-    # Apply efficiency to charged hadrons
-    genparticle_tensors = ch_eff_module(genparticle_tensors)
-    
-    # Apply efficiency to electrons
-    genparticle_tensors = el_eff_module(genparticle_tensors)
-    
-    # Apply efficiency to muons
-    genparticle_tensors = mu_eff_module(genparticle_tensors)
-    n_dim_new = genparticle_tensors.shape[1]
 
-    genevent_tensors = genparticle_tensors.reshape(n_event, n_part, n_dim_new)
+    genevent_tensors_eff = []
+    # Process in batches
+    for batch_start in tqdm(range(0, n_event, batch_size)):
+        batch_end = min(batch_start + batch_size, n_event)
+
+        # Flatten to (B*N, 15)
+        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
+        batch_size = batch_events.shape[0]
+
+        # Send through all 3 efficiency modules (batched)
+        particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
+        particles = ch_eff_module(particles)
+        particles = el_eff_module(particles)
+        particles = mu_eff_module(particles)
+        n_dim_new = particles.shape[1]
+
+        genevent_tensors_eff.append(particles.reshape(batch_size, n_part, n_dim_new).cpu())
+
+    # Stack all event tensors into a single tensor
+    genevent_tensors_eff = torch.cat(genevent_tensors_eff, dim=0)
 
     return genevent_tensors
 
