@@ -146,7 +146,7 @@ def process_efficiency_pipeline(genevent_tensors, batch_size=100):
 
     return genevent_tensors
 
-def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered, batch_size=100):
+def process_smearing_pipeline(genevent_tensors, batch_size=100):
     """
     Apply momentum smearing to all three particle types using batched processing.
     
@@ -160,7 +160,8 @@ def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered, batch_size=
         Tuple of (ch_smeared, el_smeared, mu_smeared)
         Each is a list of tensors (one per event)
     """
-    n_events = len(ch_filtered)
+
+    n_event, n_part, n_dim = genevent_tensors.shape
     
     # Initialize smearing modules
     ch_smear_module = MomentumSmearing(
@@ -177,47 +178,28 @@ def process_smearing_pipeline(ch_filtered, el_filtered, mu_filtered, batch_size=
         resolution_formula='muon_cms',
         device=DEVICE
     )
-    
-    # Apply smearing to charged hadrons
-    print(f"\nChargedHadronMomentumSmearing (batch_size={batch_size})...")
-    ch_smeared = []
-    for batch_start in tqdm(range(0, n_events, batch_size)):
-        batch_end = min(batch_start + batch_size, n_events)
-        batch_events = ch_filtered[batch_start:batch_end]
-        
-        max_particles = compute_max_particles(batch_events, scale=1.2)
-        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
-        smeared_batched = ch_smear_module(batched)
-        smeared_batch = unbatch_and_unpad(smeared_batched.cpu(), mask_col=15)
-        ch_smeared.extend(smeared_batch)
-    
-    # Apply smearing to electrons
-    print(f"\nElectronMomentumSmearing (batch_size={batch_size})...")
-    el_smeared = []
-    for batch_start in tqdm(range(0, n_events, batch_size)):
-        batch_end = min(batch_start + batch_size, n_events)
-        batch_events = el_filtered[batch_start:batch_end]
-        
-        max_particles = compute_max_particles(batch_events, scale=1.2)
-        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
-        smeared_batched = el_smear_module(batched)
-        smeared_batch = unbatch_and_unpad(smeared_batched.cpu(), mask_col=15)
-        el_smeared.extend(smeared_batch)
-    
-    # Apply smearing to muons
-    print(f"\nMuonMomentumSmearing (batch_size={batch_size})...")
-    mu_smeared = []
-    for batch_start in tqdm(range(0, n_events, batch_size)):
-        batch_end = min(batch_start + batch_size, n_events)
-        batch_events = mu_filtered[batch_start:batch_end]
-        
-        max_particles = compute_max_particles(batch_events, scale=1.2)
-        batched = pad_and_batch(batch_events, max_particles).to(DEVICE)
-        smeared_batched = mu_smear_module(batched)
-        smeared_batch = unbatch_and_unpad(smeared_batched.cpu(), mask_col=15)
-        mu_smeared.extend(smeared_batch)
-    
-    return ch_smeared, el_smeared, mu_smeared
+
+    genevent_tensors_smeared = []
+    for batch_start in tqdm(range(0, n_event, batch_size)):
+        batch_end = min(batch_start + batch_size, n_event)
+
+        # Flatten to (B*N, 15)
+        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
+        batch_size = batch_events.shape[0]
+
+        # Send through all 3 smearing modules (batched)
+        particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
+        particles = ch_smear_module(particles)
+        particles = el_smear_module(particles)
+        particles = mu_smear_module(particles)
+        n_dim_new = particles.shape[1]
+
+        genevent_tensors_smeared.append(particles.reshape(batch_size, n_part, n_dim_new).cpu())
+
+    # Stack all event tensors into a single tensor
+    genevent_tensors_smeared = torch.cat(genevent_tensors_smeared, dim=0)
+
+    return genevent_tensors_smeared
 
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     """
@@ -516,9 +498,9 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("\n" + "="*80)
     print("STEP 4: Applying MomentumSmearing modules (batched)")
     print("="*80)
-    
-    ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
-        ch_filtered, el_filtered, mu_filtered, batch_size=batch_size
+
+    genevent_tensors = process_smearing_pipeline(
+        genevent_tensors, batch_size=batch_size
     )
     
     print("\n✓ MomentumSmearing applied")
