@@ -39,6 +39,7 @@ MASS = 14      # Mass (not stored in Track, will be computed/set based on PID)
 IS_NOT_PAD = 15  # Column index for initial validity mask (1=real, 0=padded)
 PASS_PROP = 16
 PASS_EFF = 17
+PASS_MERGER = 18  # Column index for merger pass mask
 
 COLUMN_MAP = {
     "PID": PID,
@@ -58,7 +59,8 @@ COLUMN_MAP = {
     "MASS": MASS,
     "IS_NOT_PAD": IS_NOT_PAD,
     "PASS_PROP": PASS_PROP,
-    "PASS_EFF": PASS_EFF
+    "PASS_EFF": PASS_EFF,
+    "PASS_MERGER": PASS_MERGER
 }
 
 # Number of features per particle

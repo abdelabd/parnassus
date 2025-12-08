@@ -35,7 +35,7 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, MomentumSmearing, ParticlePropagator
+from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
@@ -240,6 +240,66 @@ def process_smearing_pipeline(genevent_tensors, batch_size=100):
 
     return genevent_tensors_smeared, ch_tensors_smeared, el_tensors_smeared, mu_tensors_smeared
 
+def process_merger_pipeline(genevent_tensors, batch_size=100):
+    """
+    Apply TrackMerger to combine charged hadrons, electrons, and muons.
+    
+    Args:
+        genevent_tensors: Tensor of shape (N_events, N_particles, D)
+        batch_size: Number of events to process in each batch
+        
+    Returns:
+        genevent_tensors: Tensor of shape (N_events, N_particles, D+1) with PASS_MERGER column
+        track_tensors: List of track tensors (for validation)
+    """
+    
+    n_event, n_part, n_dim = genevent_tensors.shape
+    
+    # Initialize TrackMerger module
+    merger = Merger(
+        particle_types=['charged_hadron', 'electron', 'muon'],
+        device=DEVICE
+    )
+    
+    print(f"\nTrackMerger (batch_size={batch_size})...")
+    print(f"genevent_tensors.shape: {genevent_tensors.shape}")
+    
+    genevent_tensors_merged = []
+    track_tensors = []  # For validation
+    
+    # Process in batches
+    for batch_start in tqdm(range(0, n_event, batch_size)):
+        batch_end = min(batch_start + batch_size, n_event)
+        
+        # Extract batch
+        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
+        batch_size_actual = batch_events.shape[0]
+        
+        # Apply merger (operates on batched input directly)
+        batch_merged = merger(batch_events)
+        n_dim_new = batch_merged.shape[-1]
+        
+        genevent_tensors_merged.append(batch_merged.cpu())
+        
+        # Extract valid tracks for this batch (for validation)
+        # Flatten batch to (B*N, D)
+        particles = batch_merged.reshape(-1, n_dim_new)
+        
+        # Mask for particles that passed merger
+        track_mask = (
+            particles[:, CMAP["IS_NOT_PAD"]] *
+            particles[:, CMAP["PASS_PROP"]] *
+            particles[:, CMAP["PASS_EFF"]] *
+            particles[:, CMAP["PASS_MERGER"]]
+        )
+        
+        track_tensors.append(particles[track_mask > 0.5].cpu())
+    
+    # Stack all event tensors into a single tensor
+    genevent_tensors_merged = torch.cat(genevent_tensors_merged, dim=0)
+    
+    return genevent_tensors_merged, track_tensors
+
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     """
     Validate PyTorch Delphes implementation against C++ Delphes benchmark.
@@ -256,10 +316,12 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     print(f"\nLoading PyTorch output: {torch_output_file}")
     torch_root = uproot.open(torch_output_file)
     torch_tree = torch_root["Delphes"]
+    print(f"torch_tree.keys(): {torch_tree.keys()}")
     
     print(f"Loading C++ Delphes benchmark: {benchmark_file}")
     benchmark_root = uproot.open(benchmark_file)
     benchmark_tree = benchmark_root["Delphes"]
+    print(f"benchmark_+tree.keys(): {benchmark_tree.keys()}")
     
     # Kinematic variables to compare (Track objects have these attributes)
     kinematic_vars = ['Charge', 'P', 'PT', 'Eta', 'Phi']
@@ -268,7 +330,8 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     branches = [
         'ChargedHadron', 'Electron', 'Muon',
         'ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency',
-        'ChargedHadronSmeared', 'ElectronSmeared', 'MuonSmeared'
+        'ChargedHadronSmeared', 'ElectronSmeared', 'MuonSmeared',
+        'MergedTracks'
     ]
     
     print(f"\nValidating branches: {', '.join(branches)}")
@@ -543,6 +606,20 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     )
     
     print("\n✓ MomentumSmearing applied")
+
+    # ========================================================================
+    # STEP 5: Apply TrackMerger
+    # ========================================================================
+    
+    print("\n" + "="*80)
+    print("STEP 5: Applying TrackMerger (batched)")
+    print("="*80)
+
+    genevent_tensors, track_merged = process_merger_pipeline(
+        genevent_tensors, batch_size=batch_size
+    )
+    
+    print("\n✓ TrackMerger applied")
     
     toc_torch = time.time()
     dur_torch = toc_torch - tic_torch
@@ -562,7 +639,8 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
         'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
         'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
-        'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared')
+        'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared'),
+        'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks')
     }
     write_root_file(output_file, branches_v3_2)
 
@@ -624,11 +702,11 @@ def parse_args():
         help="Input HepMC file"
     )
     parser.add_argument(
-        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_3_2_torch.root",
+        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_4_0_torch.root",
         help="Output ROOT file"
     )
     parser.add_argument(
-        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_3_2.root",
+        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_4_0.root",
         help="Benchmark ROOT file from C++ Delphes for validation"
     )
     parser.add_argument(
