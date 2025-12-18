@@ -419,21 +419,32 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     benchmark_tree = benchmark_root["Delphes"]
     print(f"benchmark_+tree.keys(): {benchmark_tree.keys()}")
     
-    # Kinematic variables to compare (Track objects have these attributes)
-    kinematic_vars = ['Charge', 'P', 'PT', 'Eta', 'Phi']
+    # Kinematic variables to compare
+    # Track objects: Charge, P, PT, Eta, Phi
+    # Tower objects: E, ET, Eta, Phi, Eem, Ehad
+    track_kinematic_vars = ['Charge', 'P', 'PT', 'Eta', 'Phi']
+    tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi']
     
-    # Branches to validate
+    # Branches to validate (branch_name, variable_list)
     branches = [
-        'ChargedHadron', 'Electron', 'Muon',
-        'ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency',
-        'ChargedHadronSmeared', 'ElectronSmeared', 'MuonSmeared',
-        'MergedTracks'
+        ('ChargedHadron', track_kinematic_vars),
+        ('Electron', track_kinematic_vars),
+        ('Muon', track_kinematic_vars),
+        ('ChargedHadronEfficiency', track_kinematic_vars),
+        ('ElectronEfficiency', track_kinematic_vars),
+        ('MuonEfficiency', track_kinematic_vars),
+        ('ChargedHadronSmeared', track_kinematic_vars),
+        ('ElectronSmeared', track_kinematic_vars),
+        ('MuonSmeared', track_kinematic_vars),
+        ('MergedTracks', track_kinematic_vars),
+        ('ECalTower', tower_kinematic_vars),
+        ('ECal_EFlowTrack', track_kinematic_vars),
+        ('EFlowPhoton', tower_kinematic_vars)
     ]
     
-    print(f"\nValidating branches: {', '.join(branches)}")
-    print(f"Kinematic variables: {', '.join(kinematic_vars)}")
+    print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
     
-    for branch_name in branches:
+    for branch_name, kinematic_vars in branches:
         print(f"\n{'='*70}")
         print(f"Validating {branch_name}...")
         print(f"{'='*70}")
@@ -535,9 +546,18 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
                 print(f"  ✗ {var}: Error - {e}")
                 continue
         
-        # Create combined plot with all 4 kinematic variables (Eta, Phi, PT, P)
-        print(f"\n  Creating combined kinematic plot (Eta, Phi, PT, P)...")
-        combined_vars = ['Eta', 'Phi', 'PT', 'P']
+        # Create combined plot with key kinematic variables
+        # For tracks: Eta, Phi, PT, P
+        # For towers: Eta, Phi, E, ET
+        if 'P' in kinematic_vars:
+            combined_vars = ['Eta', 'Phi', 'PT', 'P']
+            print(f"\n  Creating combined kinematic plot (Eta, Phi, PT, P)...")
+        elif 'E' in kinematic_vars:
+            combined_vars = ['Eta', 'Phi', 'E', 'ET']
+            print(f"\n  Creating combined kinematic plot (Eta, Phi, E, ET)...")
+        else:
+            combined_vars = kinematic_vars[:4]  # Take first 4 variables
+            print(f"\n  Creating combined kinematic plot ({', '.join(combined_vars)})...")
         
         # Create figure with 2 rows (histogram + ratio) and 4 columns (one per variable)
         fig = plt.figure(figsize=(30, 6))
