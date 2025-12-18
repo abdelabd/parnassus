@@ -321,23 +321,39 @@ def tensor_to_root_dict(event_tensors: List[torch.Tensor], branch_name: str) -> 
     Returns:
         Dictionary with keys like "BranchName/BranchName.Attribute" → awkward array
     """
-    # Track attributes we write to ROOT (11 attributes, not all 15 columns)
-    attributes = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
+    # Determine if this is a Tower object or Track object based on branch name
+    is_tower = any(keyword in branch_name for keyword in ['Tower', 'EFlowPhoton'])
     
-    # Column indices for each attribute in the tensor
-    column_map = {
-        'PID': PID,
-        'Charge': CHARGE,
-        'P': None,  # Will compute from Px, Py, Pz
-        'PT': PT,
-        'Eta': None,  # Will compute from Px, Py, Pz (momentum eta)
-        'EtaOuter': ETA,  # Position eta stored in ETA column
-        'Phi': PHI,
-        'T': T,
-        'X': X,
-        'Y': Y,
-        'Z': Z
-    }
+    if is_tower:
+        # Tower attributes: E, ET, Eta, Phi, T, Eem, Ehad
+        attributes = ['E', 'ET', 'Eta', 'Phi', 'T']
+        
+        # Column indices for tower attributes
+        column_map = {
+            'E': E,
+            'ET': None,  # Will compute as E / cosh(Eta)
+            'Eta': ETA,  # Position eta
+            'Phi': PHI,
+            'T': T
+        }
+    else:
+        # Track attributes (existing code)
+        attributes = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
+        
+        # Column indices for each attribute in the tensor
+        column_map = {
+            'PID': PID,
+            'Charge': CHARGE,
+            'P': None,  # Will compute from Px, Py, Pz
+            'PT': PT,
+            'Eta': None,  # Will compute from Px, Py, Pz (momentum eta)
+            'EtaOuter': ETA,  # Position eta stored in ETA column
+            'Phi': PHI,
+            'T': T,
+            'X': X,
+            'Y': Y,
+            'Z': Z
+        }
     
     # Build dictionary
     root_dict = {}
@@ -354,25 +370,38 @@ def tensor_to_root_dict(event_tensors: List[torch.Tensor], branch_name: str) -> 
             
             event_np = event_tensor.cpu().numpy()
             
-            if attr == 'P':
-                # Compute P = sqrt(Px^2 + Py^2 + Pz^2)
-                px = event_np[:, PX]
-                py = event_np[:, PY]
-                pz = event_np[:, PZ]
-                values = np.sqrt(px**2 + py**2 + pz**2)
-            elif attr == 'Eta':
-                # Compute momentum eta from Px, Py, Pz
-                px = event_np[:, PX]
-                py = event_np[:, PY]
-                pz = event_np[:, PZ]
-                pt = np.sqrt(px**2 + py**2)
-                values = np.arcsinh(pz / (pt + 1e-10))
-            elif attr == 'PID':
-                # PID should be integer
-                values = event_np[:, column_map[attr]].astype(np.int32)
+            if is_tower:
+                # Tower-specific computations
+                if attr == 'ET':
+                    # ET = E / cosh(Eta)
+                    e = event_np[:, E]
+                    eta = event_np[:, ETA]
+                    values = e / np.cosh(eta)
+                elif attr in column_map and column_map[attr] is not None:
+                    values = event_np[:, column_map[attr]]
+                else:
+                    values = np.zeros(event_np.shape[0])
             else:
-                # Direct extraction
-                values = event_np[:, column_map[attr]]
+                # Track-specific computations
+                if attr == 'P':
+                    # Compute P = sqrt(Px^2 + Py^2 + Pz^2)
+                    px = event_np[:, PX]
+                    py = event_np[:, PY]
+                    pz = event_np[:, PZ]
+                    values = np.sqrt(px**2 + py**2 + pz**2)
+                elif attr == 'Eta':
+                    # Compute momentum eta from Px, Py, Pz
+                    px = event_np[:, PX]
+                    py = event_np[:, PY]
+                    pz = event_np[:, PZ]
+                    pt = np.sqrt(px**2 + py**2)
+                    values = np.arcsinh(pz / (pt + 1e-10))
+                elif attr == 'PID':
+                    # PID should be integer
+                    values = event_np[:, column_map[attr]].astype(np.int32)
+                else:
+                    # Direct extraction
+                    values = event_np[:, column_map[attr]]
             
             attr_values.append(values)
         
