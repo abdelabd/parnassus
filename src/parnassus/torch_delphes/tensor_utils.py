@@ -40,6 +40,9 @@ IS_NOT_PAD = 15  # Column index for initial validity mask (1=real, 0=padded)
 PASS_PROP = 16
 PASS_EFF = 17
 PASS_MERGER = 18  # Column index for merger pass mask
+PASS_ECAL_TOWER = 19  # Column index for ECal tower mask
+PASS_EFLOW_TRACK = 20  # Column index for energy flow track mask
+PASS_EFLOW_PHOTON = 21  # Column index for energy flow photon mask
 
 COLUMN_MAP = {
     "PID": PID,
@@ -60,7 +63,10 @@ COLUMN_MAP = {
     "IS_NOT_PAD": IS_NOT_PAD,
     "PASS_PROP": PASS_PROP,
     "PASS_EFF": PASS_EFF,
-    "PASS_MERGER": PASS_MERGER
+    "PASS_MERGER": PASS_MERGER,
+    "PASS_ECAL_TOWER": PASS_ECAL_TOWER,
+    "PASS_EFLOW_TRACK": PASS_EFLOW_TRACK,
+    "PASS_EFLOW_PHOTON": PASS_EFLOW_PHOTON
 }
 
 # Number of features per particle
