@@ -1,17 +1,20 @@
 """
-Apply PyTorch Delphes modules (ParticlePropagator, Efficiency, MomentumSmearing) to HepMC file and save outputs.
+Apply PyTorch Delphes modules (ParticlePropagator, Efficiency, MomentumSmearing, Merger, SimpleCalorimeter) to HepMC file and save outputs.
 
 This is a redesigned version that uses pure tensor operations:
 - HepMC→ Tensor conversion happens once at the beginning
 - All processing happens in tensor space
 - Tensor → ROOT conversion happens once per output file
 
+Compares against C++ Delphes with delphes_card_CMS_5_0.tcl (includes ECal/SimpleCalorimeter).
+
 Usage:
-    python test_torch_delphes_v2.py [input.root] [output.root]
+    python test_torch_delphes.py [--input FILE] [--output FILE] [--benchmark FILE]
     
 Default:
-    Input:  delphes_data/HZZ4l/HZZ4l_1.root
-    Outputs: delphes_data/HZZ4l/HZZ4l_*_torch.root
+    Input:  delphes_data/HZZ4l/HZZ4l_0.hepmc
+    Output: delphes_data/HZZ4l/HZZ4l_5_0_torch.root
+    Benchmark: delphes_data/HZZ4l/HZZ4l_5_0.root
 """
 import sys
 import os
@@ -35,7 +38,7 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator
+from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
@@ -299,6 +302,99 @@ def process_merger_pipeline(genevent_tensors, batch_size=100):
     genevent_tensors_merged = torch.cat(genevent_tensors_merged, dim=0)
     
     return genevent_tensors_merged, track_tensors
+
+def process_ecal_pipeline(genevent_tensors, batch_size=100):
+    """
+    Apply SimpleCalorimeter (ECal) module.
+    
+    Args:
+        genevent_tensors: Tensor of shape (N_events, N_particles, D)
+        batch_size: Number of events to process in each batch
+        
+    Returns:
+        genevent_tensors: Tensor of shape (N_events, N_particles + N_towers, D+3) with ECAL masks
+        ecal_towers: List of tower tensors per event (for validation)
+        eflow_tracks: List of eflow track tensors per event (for validation)
+        eflow_photons: List of eflow photon tensors per event (for validation)
+    """
+    
+    n_event, n_part, n_dim = genevent_tensors.shape
+    
+    # Create eta and phi bins from CMS card
+    # Barrel: |eta| < 1.5, 0.02 x 0.02 resolution
+    eta_bins_barrel = [i * 0.0174 for i in range(-85, 87)]  # -1.479 to 1.496
+    
+    # Endcap: 1.5 < |eta| < 3.0, 0.02 x 0.02 resolution
+    eta_bins_endcap_neg = [-2.958 + i * 0.0174 for i in range(1, 85)]  # -2.941 to 1.479
+    eta_bins_endcap_pos = [1.4964 + i * 0.0174 for i in range(1, 85)]  # 1.514 to 2.958
+    
+    # HF: 3.0 < |eta| < 5.0
+    eta_bins_hf = [-5, -4.7, -4.525, -4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.958,
+                   3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525, 4.7, 5]
+    
+    # Combine all eta bins (sorted)
+    eta_bins = sorted(set(eta_bins_hf + eta_bins_endcap_neg + eta_bins_barrel + eta_bins_endcap_pos))
+    
+    # Phi bins: uniform from -pi to pi
+    phi_bins = [i * np.pi / 180.0 for i in range(-180, 181)]
+    
+    # Initialize ECal module
+    ecal_module = SimpleCalorimeter(
+        eta_bins=eta_bins,
+        phi_bins=phi_bins,
+        energy_min=0.5,
+        energy_sig_min=2.0,
+        resolution_formula='ecal_cms',
+        is_ecal=True,
+        smear_tower_center=True,
+        max_towers_per_event=500,
+        device=DEVICE
+    )
+    
+    print(f"\nECal (batch_size={batch_size})...")
+    print(f"genevent_tensors.shape: {genevent_tensors.shape}")
+    print(f"Number of eta bins: {len(eta_bins)}")
+    print(f"Number of phi bins: {len(phi_bins)}")
+    
+    genevent_tensors_ecal = []
+    all_ecal_towers = []
+    all_eflow_tracks = []
+    all_eflow_photons = []
+    
+    # Process in batches
+    for batch_start in tqdm(range(0, n_event, batch_size)):
+        batch_end = min(batch_start + batch_size, n_event)
+        
+        # Extract batch
+        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
+        
+        # Apply ECal
+        batch_ecal, outputs = ecal_module(batch_events)
+        
+        genevent_tensors_ecal.append(batch_ecal.cpu())
+        
+        # Collect outputs for validation - concatenate all events in batch into single tensor
+        if len(outputs['ecalTowers']) > 0:
+            batch_towers = torch.cat([t for t in outputs['ecalTowers'] if t.shape[0] > 0], dim=0) if any(t.shape[0] > 0 for t in outputs['ecalTowers']) else torch.zeros((0, batch_ecal.shape[-1]), dtype=torch.float64)
+            all_ecal_towers.append(batch_towers.cpu())
+        
+        if len(outputs['eflowTracks']) > 0:
+            batch_eflow_tracks = torch.cat([t for t in outputs['eflowTracks'] if t.shape[0] > 0], dim=0) if any(t.shape[0] > 0 for t in outputs['eflowTracks']) else torch.zeros((0, batch_ecal.shape[-1]), dtype=torch.float64)
+            all_eflow_tracks.append(batch_eflow_tracks.cpu())
+        
+        if len(outputs['eflowPhotons']) > 0:
+            batch_eflow_photons = torch.cat([t for t in outputs['eflowPhotons'] if t.shape[0] > 0], dim=0) if any(t.shape[0] > 0 for t in outputs['eflowPhotons']) else torch.zeros((0, batch_ecal.shape[-1]), dtype=torch.float64)
+            all_eflow_photons.append(batch_eflow_photons.cpu())
+    
+    # Stack all event tensors into a single tensor
+    genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
+    
+    print(f"\nECal output shape: {genevent_tensors_ecal.shape}")
+    print(f"Total towers: {sum(t.shape[0] for t in all_ecal_towers)}")
+    print(f"Total eflow tracks: {sum(t.shape[0] for t in all_eflow_tracks)}")
+    print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
+    
+    return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
 
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     """
@@ -621,15 +717,46 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     
     print("\n✓ TrackMerger applied")
     
+    # ========================================================================
+    # STEP 6: Apply ECal (SimpleCalorimeter)
+    # ========================================================================
+    
+    print("\n" + "="*80)
+    print("STEP 6: Applying ECal (SimpleCalorimeter) (batched)")
+    print("="*80)
+    
+    genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
+        genevent_tensors, batch_size=batch_size
+    )
+    
+    print("\n✓ ECal applied")
+    
     toc_torch = time.time()
     dur_torch = toc_torch - tic_torch
     print(f"\n\nTorch duration: {dur_torch//60:.0f} minutes, {dur_torch%60:.2f} seconds\n\n")
 
     # ========================================================================
-    # STEP 6: Write final output
+    # STEP 7: Write final output
     # ========================================================================
 
     print(f"Writing {output_file}...")
+    
+    # Debug: print number of events in each output list
+    print(f"\nDebug - Number of events per branch:")
+    print(f"  ChargedHadron: {len(ch_tensors)}")
+    print(f"  Electron: {len(el_tensors)}")
+    print(f"  Muon: {len(mu_tensors)}")
+    print(f"  ChargedHadronEfficiency: {len(ch_filtered)}")
+    print(f"  ElectronEfficiency: {len(el_filtered)}")
+    print(f"  MuonEfficiency: {len(mu_filtered)}")
+    print(f"  ChargedHadronSmeared: {len(ch_smeared)}")
+    print(f"  ElectronSmeared: {len(el_smeared)}")
+    print(f"  MuonSmeared: {len(mu_smeared)}")
+    print(f"  MergedTracks: {len(track_merged)}")
+    print(f"  ECalTower: {len(ecal_towers)}")
+    print(f"  ECal_EFlowTrack: {len(eflow_tracks)}")
+    print(f"  EFlowPhoton: {len(eflow_photons)}")
+    
     branches_v3_2 = {
         'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
         'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
@@ -640,12 +767,15 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
         'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
         'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared'),
-        'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks')
+        'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks'),
+        'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
+        'ECal_EFlowTrack': tensor_to_root_dict(eflow_tracks, 'ECal_EFlowTrack'),
+        'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
     }
     write_root_file(output_file, branches_v3_2)
 
     # ========================================================================
-    # STEP 7: Print summary
+    # STEP 8: Print summary
     # ========================================================================
     print("\n" + "="*80)
     print("SUMMARY")
@@ -674,6 +804,11 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     # print(f"  After eff:  {total_mu_filtered} ({100*total_mu_filtered/total_mu_input:.1f}%)")
     # print(f"  Smeared:    {sum(t.shape[0] for t in mu_smeared)}")
     
+    print(f"\nECal:")
+    print(f"  Towers:        {sum(t.shape[0] for t in ecal_towers)}")
+    print(f"  EFlow Tracks:  {sum(t.shape[0] for t in eflow_tracks)}")
+    print(f"  EFlow Photons: {sum(t.shape[0] for t in eflow_photons)}")
+    
     print("\n" + "="*80)
     print("✓ ALL PROCESSING COMPLETE!")
     print("="*80 + "\n")
@@ -692,8 +827,8 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         validate_against_benchmark(output_file, benchmark_file, validation_dir)
     else:
         print(f"\n⚠ Benchmark file not found: {benchmark_file}")
-        print("  Skipping validation. To enable validation, provide HZZ4l_3_2.root")
-        print("  (Generated by C++ Delphes with delphes_card_CMS_3_2.tcl)")
+        print("  Skipping validation. To enable validation, provide HZZ4l_5_0.root")
+        print("  (Generated by C++ Delphes with delphes_card_CMS_5_0.tcl)")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Parnassus TorchDelphes HepMC Processing")
@@ -702,12 +837,12 @@ def parse_args():
         help="Input HepMC file"
     )
     parser.add_argument(
-        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_4_0_torch.root",
+        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_5_0_torch.root",
         help="Output ROOT file"
     )
     parser.add_argument(
-        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_4_0.root",
-        help="Benchmark ROOT file from C++ Delphes for validation"
+        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_5_0.root",
+        help="Benchmark ROOT file from C++ Delphes for validation (CMS_5_0 card with ECal)"
     )
     parser.add_argument(
         "--max-events", "-n", type=int, default=1000,
