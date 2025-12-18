@@ -353,11 +353,9 @@ class SimpleCalorimeter(nn.Module):
         # Recompute sigma after smearing
         tower_sigma = self.resolution_fn(tower_energies_smeared, tower_eta)
         
-        # Apply energy threshold
-        significant_mask = (
-            (tower_energies_smeared >= self.energy_min) &
-            (tower_energies_smeared >= self.energy_sig_min * tower_sigma)
-        )
+        # Apply energy threshold (for towers, only require energy_min)
+        # Significance threshold is only for eflow photons
+        significant_mask = tower_energies_smeared >= self.energy_min
         
         # Filter towers
         if not significant_mask.any():
@@ -424,9 +422,18 @@ class SimpleCalorimeter(nn.Module):
             else:
                 neutral_sigma = 0.0
             
-            # Energy flow logic
+            # Always create tower for ECalTower output if energy > threshold
+            if tower_energy > self.energy_min:
+                tower_obj = self._create_tower_object(
+                    tower_eta[tower_idx], tower_phi[tower_idx],
+                    tower_energy, tower_times[tower_idx],
+                    event_tensor.shape[1]
+                )
+                towers_list.append(tower_obj)
+            
+            # Energy flow logic for creating eflow objects
             if neutral_energy > self.energy_min and neutral_sigma > self.energy_sig_min:
-                # Create neutral tower (eflow photon)
+                # Significant neutral energy - create eflow photon
                 neutral_tower = self._create_tower_object(
                     tower_eta[tower_idx], tower_phi[tower_idx],
                     neutral_energy, tower_times[tower_idx],
@@ -434,11 +441,12 @@ class SimpleCalorimeter(nn.Module):
                 )
                 eflow_photons_list.append(neutral_tower)
                 
-                # Pass tracks through unchanged
+                # Pass tracks through unchanged (they coexist with neutral energy)
                 for track in tower_tracks:
                     eflow_tracks_list.append(track.unsqueeze(0))
             
             elif total_track_energy > 0.0:
+                # No significant neutral energy, but we have tracks
                 # Rescale tracks to match best energy estimate
                 weight_track = 1.0 / total_track_sigma**2 if total_track_sigma > 0 else 0.0
                 weight_calo = 1.0 / tower_sigma_val**2 if tower_sigma_val > 0 else 0.0
@@ -450,7 +458,7 @@ class SimpleCalorimeter(nn.Module):
                 else:
                     rescale_factor = 1.0
                 
-                # Rescale and add tracks
+                # Rescale and add tracks as eflow tracks
                 for track in tower_tracks:
                     rescaled_track = track.clone()
                     rescaled_track[CMAP["PT"]] *= rescale_factor
@@ -459,14 +467,6 @@ class SimpleCalorimeter(nn.Module):
                     rescaled_track[CMAP["PY"]] *= rescale_factor
                     rescaled_track[CMAP["PZ"]] *= rescale_factor
                     eflow_tracks_list.append(rescaled_track.unsqueeze(0))
-            
-            # Create tower object
-            tower_obj = self._create_tower_object(
-                tower_eta[tower_idx], tower_phi[tower_idx],
-                tower_energy, tower_times[tower_idx],
-                event_tensor.shape[1]
-            )
-            towers_list.append(tower_obj)
         
         # Concatenate results
         if len(towers_list) > 0:
