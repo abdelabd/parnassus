@@ -249,12 +249,29 @@ class SimpleCalorimeter(nn.Module):
         
         # Get particle and track subsets
         particles = event_tensor[valid_particles_mask]  # All particles after propagation
-        tracks = event_tensor[valid_tracks_mask]  # Tracks (charged particles that passed all filters)
+        all_tracks = event_tensor[valid_tracks_mask]  # Tracks (charged particles that passed all filters)
         
         if particles.shape[0] == 0:
             # No particles in this event
             empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
             return empty, empty, empty
+        
+        # Split tracks into depositing (pions, kaons, protons) and non-depositing (muons)
+        # This matches C++ logic (lines 364-378) where tracks with zero energy fraction
+        # are passed directly to eflow output without entering tower processing
+        if all_tracks.shape[0] > 0:
+            track_pids = all_tracks[:, CMAP["PID"]]
+            track_energy_fractions = self.get_energy_fraction(track_pids)
+            
+            # Depositing tracks: energy_fraction > 1e-9 (enter tower processing)
+            depositing_mask = track_energy_fractions > 1.0e-9
+            tracks = all_tracks[depositing_mask]
+            
+            # Non-depositing tracks: energy_fraction <= 1e-9 (bypass towers, go to eflow)
+            non_depositing_tracks = all_tracks[~depositing_mask]
+        else:
+            tracks = all_tracks
+            non_depositing_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
         
         # Bin particles into towers
         particle_eta = particles[:, CMAP["ETA"]]
@@ -290,6 +307,21 @@ class SimpleCalorimeter(nn.Module):
         # Get energy fractions
         energy_fractions = self.get_energy_fraction(particle_pid)
         particle_energy_deposited = particle_energy * energy_fractions
+        
+        # Filter out particles that deposit zero energy (muons, neutrinos, etc.)
+        nonzero_energy_mask = particle_energy_deposited > 0.0
+        if not nonzero_energy_mask.any():
+            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
+            return empty, empty, empty
+        
+        particles = particles[nonzero_energy_mask]
+        particle_eta_bin = particle_eta_bin[nonzero_energy_mask]
+        particle_phi_bin = particle_phi_bin[nonzero_energy_mask]
+        particle_energy = particle_energy[nonzero_energy_mask]
+        particle_pid = particle_pid[nonzero_energy_mask]
+        particle_position = particle_position[nonzero_energy_mask]
+        particle_time = particle_time[nonzero_energy_mask]
+        particle_energy_deposited = particle_energy_deposited[nonzero_energy_mask]
         
         # Create unique tower IDs (eta_bin * n_phi_bins + phi_bin)
         n_phi_bins = len(self.phi_bins) - 1
@@ -353,21 +385,10 @@ class SimpleCalorimeter(nn.Module):
         # Recompute sigma after smearing
         tower_sigma = self.resolution_fn(tower_energies_smeared, tower_eta)
         
-        # Apply energy threshold (for towers, only require energy_min)
-        # Significance threshold is only for eflow photons
-        significant_mask = tower_energies_smeared >= self.energy_min
+        # DON'T pre-filter towers here! The C++ code applies the threshold check
+        # INSIDE FinalizeTower(), after computing the energy flow logic.
+        # We'll check the threshold in the per-tower loop below.
         
-        # Filter towers
-        if not significant_mask.any():
-            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            return empty, empty, empty
-        
-        tower_energies_smeared = tower_energies_smeared[significant_mask]
-        tower_eta = tower_eta[significant_mask]
-        tower_phi = tower_phi[significant_mask]
-        tower_times = tower_times[significant_mask]
-        tower_sigma = tower_sigma[significant_mask]
-        unique_tower_ids = unique_tower_ids[significant_mask]
         n_towers = len(tower_energies_smeared)
         
         # Now handle track-tower matching for energy flow
@@ -422,8 +443,13 @@ class SimpleCalorimeter(nn.Module):
             else:
                 neutral_sigma = 0.0
             
-            # Always create tower for ECalTower output if energy > threshold
-            if tower_energy > self.energy_min:
+            # Apply significance threshold to tower energy (C++ line 436)
+            # if(energy < fEnergyMin || energy < fEnergySignificanceMin * sigma) energy = 0.0;
+            if tower_energy < self.energy_min or tower_energy < self.energy_sig_min * tower_sigma_val:
+                tower_energy = 0.0  # Zero the tower energy like C++ does
+            
+            # Create tower object for ECalTower output if energy > 0
+            if tower_energy > 0.0:
                 tower_obj = self._create_tower_object(
                     tower_eta[tower_idx], tower_phi[tower_idx],
                     tower_energy, tower_times[tower_idx],
@@ -478,6 +504,14 @@ class SimpleCalorimeter(nn.Module):
             eflow_tracks = torch.cat(eflow_tracks_list, dim=0)
         else:
             eflow_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
+        
+        # Add non-depositing tracks (muons) that bypassed tower processing
+        # These tracks go directly to eflow output (C++ line 377)
+        if non_depositing_tracks.shape[0] > 0:
+            if eflow_tracks.shape[0] > 0:
+                eflow_tracks = torch.cat([eflow_tracks, non_depositing_tracks], dim=0)
+            else:
+                eflow_tracks = non_depositing_tracks
         
         if len(eflow_photons_list) > 0:
             eflow_photons = torch.cat(eflow_photons_list, dim=0)

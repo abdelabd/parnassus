@@ -373,18 +373,15 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         
         genevent_tensors_ecal.append(batch_ecal.cpu())
         
-        # Collect outputs for validation - concatenate all events in batch into single tensor
-        if len(outputs['ecalTowers']) > 0:
-            batch_towers = torch.cat([t for t in outputs['ecalTowers'] if t.shape[0] > 0], dim=0) if any(t.shape[0] > 0 for t in outputs['ecalTowers']) else torch.zeros((0, batch_ecal.shape[-1]), dtype=torch.float64)
-            all_ecal_towers.append(batch_towers.cpu())
+        # Collect outputs for validation - match upstream per-batch pattern
+        # Concatenate all outputs from this batch into single tensors
+        batch_towers = torch.cat(outputs['ecalTowers'], dim=0).cpu() if outputs['ecalTowers'] else torch.empty(0, 5)
+        batch_tracks = torch.cat(outputs['eflowTracks'], dim=0).cpu() if outputs['eflowTracks'] else torch.empty(0, 5)
+        batch_photons = torch.cat(outputs['eflowPhotons'], dim=0).cpu() if outputs['eflowPhotons'] else torch.empty(0, 5)
         
-        if len(outputs['eflowTracks']) > 0:
-            batch_eflow_tracks = torch.cat([t for t in outputs['eflowTracks'] if t.shape[0] > 0], dim=0) if any(t.shape[0] > 0 for t in outputs['eflowTracks']) else torch.zeros((0, batch_ecal.shape[-1]), dtype=torch.float64)
-            all_eflow_tracks.append(batch_eflow_tracks.cpu())
-        
-        if len(outputs['eflowPhotons']) > 0:
-            batch_eflow_photons = torch.cat([t for t in outputs['eflowPhotons'] if t.shape[0] > 0], dim=0) if any(t.shape[0] > 0 for t in outputs['eflowPhotons']) else torch.zeros((0, batch_ecal.shape[-1]), dtype=torch.float64)
-            all_eflow_photons.append(batch_eflow_photons.cpu())
+        all_ecal_towers.append(batch_towers)
+        all_eflow_tracks.append(batch_tracks)
+        all_eflow_photons.append(batch_photons)
     
     # Stack all event tensors into a single tensor
     genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
