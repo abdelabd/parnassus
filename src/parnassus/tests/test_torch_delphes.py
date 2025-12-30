@@ -76,7 +76,7 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
     print(f"\nParticlePropagator (batch_size={batch_size})...")
     print(f"genevent_tensors.shape: {genevent_tensors.shape}")
 
-    genevent_tensors_propagated = torch.zeros((n_event, n_part, n_dim + 1), dtype=genevent_tensors.dtype)
+    genevent_tensors_propagated = torch.zeros(genevent_tensors.shape, dtype=genevent_tensors.dtype)
     # Collect charged_hadron, electron, muon tensors after propagation (for intermediate testing and validation)
     ch_tensors = []
     el_tensors = []
@@ -85,16 +85,15 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
     for batch_start in tqdm(range(0, n_event, batch_size)):
         batch_end = min(batch_start + batch_size, n_event)
 
-        # Flatten to (B*N, 15)
+        # Flatten to (B*N, N_FEATURES)
         batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
         batch_size = batch_events.shape[0]
         
         # Propagate particles (batched)
-        particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
+        particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, N_FEATURES)
         particles_propagated = propagator(particles)
-        n_dim_new = particles_propagated.shape[1]
 
-        genevent_tensors_propagated[batch_start:batch_end] = particles_propagated.reshape(batch_size, n_part, n_dim_new).cpu()
+        genevent_tensors_propagated[batch_start:batch_end] = particles_propagated.reshape(batch_size, n_part, n_dim).cpu()
 
         mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] * particles_propagated[:, CMAP["PASS_PROP"]]
         charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles_propagated).float()
@@ -412,7 +411,6 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
     print(f"Loading C++ Delphes benchmark: {benchmark_file}")
     benchmark_root = uproot.open(benchmark_file)
     benchmark_tree = benchmark_root["Delphes"]
-    print(f"benchmark_+tree.keys(): {benchmark_tree.keys()}")
     
     # Kinematic variables to compare
     # Track objects: Charge, P, PT, Eta, Phi
