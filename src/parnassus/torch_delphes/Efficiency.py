@@ -18,7 +18,7 @@ class Efficiency(nn.Module):
     Applies tracking efficiency based on particle kinematics (pt, eta_outer)
     similar to Delphes ChargedHadronTrackingEfficiency.
     
-    Input shape: (N, 18) where:
+    Input shape: (N, N_FEATURES) where:
         - column 0: PID (Particle ID)
         - column 1: Status
         - column 2: Charge
@@ -262,7 +262,9 @@ class Efficiency(nn.Module):
                 column 9: Phi (azimuthal angle, pre-computed)
                 column 10: T (time)
                 columns 11-13: X, Y, Z (position)
-                column 15 (optional): mask (1.0 for real particles, 0.0 for padding)
+                column 15: etaOuter (pseudorapidity at outer position)
+                column 16: phiOuter (azimuthal angle at outer position)
+                columns 17->23: masks
 
         Returns:
             filtered_particles: tensor with mask in column 15

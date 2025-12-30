@@ -31,10 +31,10 @@ class Merger(nn.Module):
     For TrackMerger, this combines charged hadrons, electrons, and muons
     that have passed propagation, efficiency, and momentum smearing.
     
-    Input shape: (N_events, N_particles, D) where D >= 18
+    Input shape: (N_events, N_particles, N_FEATURES)
         Must contain IS_NOT_PAD, PASS_PROP, PASS_EFF mask columns
     
-    Output shape: (N_events, N_particles, D+1) with new PASS_MERGER column
+    Output shape: (N_events, N_particles, D) with filled-in PASS_MERGER column
     """
     
     def __init__(self, 
@@ -99,11 +99,10 @@ class Merger(nn.Module):
         # Create PASS_MERGER mask: valid particles that match PID filter
         pass_merger_mask = valid_mask * combined_pid_mask
         
-        # Append PASS_MERGER as new column
-        pass_merger_col = pass_merger_mask.unsqueeze(-1)  # (N_events, N_particles, 1)
-        genevent_tensors_merged = torch.cat([genevent_tensors, pass_merger_col], dim=-1)
-        
-        return genevent_tensors_merged
+        # Fill in on PASS_MERGER column
+        genevent_tensors[:, :, CMAP["PASS_MERGER"]] = pass_merger_mask
+
+        return genevent_tensors
     
     def compute_aggregate_stats(self, genevent_tensors):
         """
