@@ -409,7 +409,6 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     print(f"\nLoading PyTorch output: {torch_output_file}")
     torch_root = uproot.open(torch_output_file)
     torch_tree = torch_root["Delphes"]
-    print(f"torch_tree.keys(): {torch_tree.keys()}")
     
     print(f"Loading C++ Delphes benchmark: {benchmark_file}")
     benchmark_root = uproot.open(benchmark_file)
@@ -757,23 +756,6 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     # ========================================================================
 
     print(f"Writing {output_file}...")
-    
-    # Debug: print number of events in each output list
-    print(f"\nDebug - Number of events per branch:")
-    print(f"  ChargedHadron: {len(ch_tensors)}")
-    print(f"  Electron: {len(el_tensors)}")
-    print(f"  Muon: {len(mu_tensors)}")
-    print(f"  ChargedHadronEfficiency: {len(ch_filtered)}")
-    print(f"  ElectronEfficiency: {len(el_filtered)}")
-    print(f"  MuonEfficiency: {len(mu_filtered)}")
-    print(f"  ChargedHadronSmeared: {len(ch_smeared)}")
-    print(f"  ElectronSmeared: {len(el_smeared)}")
-    print(f"  MuonSmeared: {len(mu_smeared)}")
-    print(f"  MergedTracks: {len(track_merged)}")
-    print(f"  ECalTower: {len(ecal_towers)}")
-    print(f"  ECal_EFlowTrack: {len(eflow_tracks)}")
-    print(f"  EFlowPhoton: {len(eflow_photons)}")
-    
     branches_v3_2 = {
         'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
         'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
