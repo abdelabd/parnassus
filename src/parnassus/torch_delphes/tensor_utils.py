@@ -74,7 +74,7 @@ COLUMN_MAP = {
 }
 
 # Number of features per particle
-N_FEATURES = 17
+N_FEATURES = max(COLUMN_MAP.values()) + 1
 
 
 # ==================== PDG ID CONSTANTS ====================
@@ -119,16 +119,16 @@ def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor
 
     Pad events to max_particles and stack into batch with mask.
     
-    The mask is appended as column N_FEATURES to indicate real vs padded particles.
+    The mask is filled in on column IS_NOT_PAD to indicate real vs padded particles.
     
     Args:
         event_tensors: List of (N_i, N_FEATURES) tensors
         max_particles: Max particles to pad to
         
     Returns:
-        batch: (B, max_particles, N_FEATURES+1) where:
-               - batch[:, :, :N_FEATURES] = particle data (padded with zeros)
-               - batch[:, :, N_FEATURES] = mask (1.0 for real particles, 0.0 for padding)
+        batch: (B, max_particles, N_FEATURES) where:
+               - batch[:, :, :IS_NOT_PAD] = particle data (padded with zeros)
+               - batch[:, :, IS_NOT_PAD] = mask (1.0 for real particles, 0.0 for padding)
     """
 
     n_events = len(event_tensors)
@@ -138,12 +138,12 @@ def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor
     
     # Create padded batch tensor (B, max_particles, N_FEATURES+1)
     # Initialize with zeros (padding)
-    padded_events = torch.zeros((n_events, max_particles, N_FEATURES+1), dtype=dtype, device=device)
+    padded_events = torch.zeros((n_events, max_particles, N_FEATURES), dtype=dtype, device=device)
     
     for i, event in enumerate(event_tensors):
         n_particles = event.shape[0]
-        padded_events[i, :n_particles, :N_FEATURES] = event
-        padded_events[i, :n_particles, N_FEATURES] = 1.0  # Mask for real particles
+        padded_events[i, :n_particles, :] = event
+        padded_events[i, :n_particles, IS_NOT_PAD] = 1.0  # Mask for real particles
         # Rest is already zeros (padding)
 
     return padded_events
