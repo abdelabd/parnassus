@@ -17,7 +17,7 @@ class MomentumSmearing(nn.Module):
     Applies momentum resolution smearing to particles based on their kinematics (pt, eta_outer).
     The smearing is applied using a log-normal distribution to ensure positive PT values.
     
-    Input shape: (N, 18) where:
+    Input shape: (N, N_FEATURES) where:
         - column 0: PID (Particle ID)
         - column 1: Status
         - column 2: Charge
@@ -31,7 +31,7 @@ class MomentumSmearing(nn.Module):
         - column 14: Mass
         - column 15: EtaOuter (pseudorapidity at outer position)
         - column 16: PhiOuter (azimuthal angle at closest approach to z-axis)
-        - column 17: mask
+        - columns 17->23: masks
     
     NOTE: Position-Eta is used for evaluating the resolution formula, but Momentum-Eta is updated
 
@@ -224,7 +224,9 @@ class MomentumSmearing(nn.Module):
                 column 10: T (time)
                 columns 11-13: X, Y, Z (position)
                 column 14: Mass
-                column 15 (optional): Mask (1.0 = real particle, 0.0 = padding)
+                column 15: etaOuter (pseudorapidity at outer position)
+                column 16: phiOuter (azimuthal angle at outer position)
+                columns 17->23: masks
         
         Returns:
             smeared_particles: particles with smeared PT

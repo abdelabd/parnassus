@@ -276,13 +276,12 @@ def process_merger_pipeline(genevent_tensors, batch_size=100):
         
         # Apply merger (operates on batched input directly)
         batch_merged = merger(batch_events)
-        n_dim_new = batch_merged.shape[-1]
         
         genevent_tensors_merged.append(batch_merged.cpu())
         
         # Extract valid tracks for this batch (for validation)
         # Flatten batch to (B*N, D)
-        particles = batch_merged.reshape(-1, n_dim_new)
+        particles = batch_merged.reshape(-1, n_dim)
         
         # Mask for particles that passed merger
         track_mask = (
