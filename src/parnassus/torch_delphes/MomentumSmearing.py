@@ -231,8 +231,12 @@ class MomentumSmearing(nn.Module):
         Returns:
             smeared_particles: particles with smeared PT
         """
+
         # Move to device
         particles = particles.to(self.device)
+
+        # Initialize TRACK_RESOLUTION column to zeros
+        particles[..., CMAP["TRACK_RESOLUTION"]] = 0.0
 
         # Clone particles to avoid modifying input
         smeared = particles.clone()
@@ -283,6 +287,9 @@ class MomentumSmearing(nn.Module):
         # Recompute energy: E = sqrt(P^2 + M^2)
         p_squared = smeared[..., CMAP["PX"]]**2 + smeared[..., CMAP["PY"]]**2 + smeared[..., CMAP["PZ"]]**2
         smeared[..., CMAP["E"]] = torch.sqrt(p_squared + mass**2)  # E
+
+        # Update TRACK_RESOLUTION column
+        smeared[..., CMAP["TRACK_RESOLUTION"]] = resolution
 
         return smeared
     

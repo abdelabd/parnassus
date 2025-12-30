@@ -41,10 +41,11 @@ PHI_OUTER = 16 # Azimuthal angle at closest-approach to z-axis (position)
 IS_NOT_PAD = 17  # Column index for initial validity mask (1=real, 0=padded)
 PASS_PROP = 18
 PASS_EFF = 19
-PASS_MERGER = 20  # Column index for merger pass mask
-PASS_ECAL_TOWER = 21  # Column index for ECal tower mask
-PASS_EFLOW_TRACK = 22  # Column index for energy flow track mask
-PASS_EFLOW_PHOTON = 23  # Column index for energy flow photon mask
+TRACK_RESOLUTION = 20 # Track momentum resolution (not stored in Track, to be filled later by MomentumSmearing module)
+PASS_MERGER = 21  # Column index for merger pass mask
+PASS_ECAL_TOWER = 22  # Column index for ECal tower mask
+PASS_EFLOW_TRACK = 23  # Column index for energy flow track mask
+PASS_EFLOW_PHOTON = 24  # Column index for energy flow photon mask
 
 COLUMN_MAP = {
     "PID": PID,
@@ -67,6 +68,7 @@ COLUMN_MAP = {
     "IS_NOT_PAD": IS_NOT_PAD,
     "PASS_PROP": PASS_PROP,
     "PASS_EFF": PASS_EFF,
+    "TRACK_RESOLUTION": TRACK_RESOLUTION,
     "PASS_MERGER": PASS_MERGER,
     "PASS_ECAL_TOWER": PASS_ECAL_TOWER,
     "PASS_EFLOW_TRACK": PASS_EFLOW_TRACK,
