@@ -274,8 +274,8 @@ class SimpleCalorimeter(nn.Module):
             non_depositing_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
         
         # Bin particles into towers
-        particle_eta = particles[:, CMAP["ETA"]]
-        particle_phi = particles[:, CMAP["PHI"]]
+        particle_eta = particles[:, CMAP["ETA_OUTER"]]
+        particle_phi = particles[:, CMAP["PHI_OUTER"]]
         particle_energy = particles[:, CMAP["E"]]
         particle_pid = particles[:, CMAP["PID"]]
         particle_position = particles[:, CMAP["X"]:CMAP["Z"]+1]  # X, Y, Z
@@ -405,8 +405,8 @@ class SimpleCalorimeter(nn.Module):
             # Find tracks in this tower
             track_mask = valid_tracks_mask.clone()
             if tracks.shape[0] > 0:
-                track_eta = tracks[:, CMAP["ETA"]]
-                track_phi = tracks[:, CMAP["PHI"]]
+                track_eta = tracks[:, CMAP["ETA_OUTER"]]
+                track_phi = tracks[:, CMAP["PHI_OUTER"]]
                 track_eta_bin = torch.searchsorted(self.eta_bins, track_eta, right=False) - 1
                 track_phi_bin = torch.searchsorted(self.phi_bins, track_phi, right=False) - 1
                 track_tower_ids = track_eta_bin * n_phi_bins + track_phi_bin
