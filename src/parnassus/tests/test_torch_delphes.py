@@ -155,9 +155,8 @@ def process_efficiency_pipeline(genevent_tensors, batch_size=100):
         particles = ch_eff_module(particles)
         particles = el_eff_module(particles)
         particles = mu_eff_module(particles)
-        n_dim_new = particles.shape[1]
 
-        genevent_tensors_eff.append(particles.reshape(batch_size, n_part, n_dim_new).cpu())
+        genevent_tensors_eff.append(particles.reshape(batch_size, n_part, n_dim).cpu())
 
         mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * particles[:, CMAP["PASS_EFF"]]
         charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles).float()

@@ -15,7 +15,6 @@ import torch.nn as nn
 import numpy as np
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
-from parnassus.torch_delphes.tensor_utils import PASS_PROP, N_FEATURES
 
 
 class ParticlePropagator(nn.Module):
@@ -168,7 +167,7 @@ class ParticlePropagator(nn.Module):
         
         # Update the mask column
         # particles = torch.cat([particles, mask.unsqueeze(1).float()], dim=1)  # New column 15 is mask
-        particles[:, PASS_PROP] = mask.float()
+        particles[:, CMAP["PASS_PROP"]] = mask.float()
 
         return particles
     
