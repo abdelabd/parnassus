@@ -15,6 +15,7 @@ import torch.nn as nn
 import numpy as np
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+from parnassus.torch_delphes.tensor_utils import PASS_PROP, N_FEATURES
 
 
 class ParticlePropagator(nn.Module):
@@ -32,7 +33,7 @@ class ParticlePropagator(nn.Module):
     
     Position-based Eta is used by the Efficiency module (matching C++ Delphes behavior).
     
-    Input shape: (N, 17) - GenParticle format where:
+    Input shape: (N, N_FEATURES) - GenParticle format where:
         - column 0: PID (Particle ID)
         - column 1: Status
         - column 2: Charge
@@ -46,6 +47,7 @@ class ParticlePropagator(nn.Module):
         - column 14: Mass
         - column 15: EtaOuter (computed here, initially zero)
         - column 16: PhiOuter (computed here, initially zero)
+        - column 16->23: zeros (reserved for future use)
 
     Output: Propagated particles in Track format (same 15 columns but with updated positions)
     """
@@ -83,12 +85,12 @@ class ParticlePropagator(nn.Module):
         Propagate particles to detector surface using mask-based filtering.
         
         Args:
-            particles: tensor of shape (N, 17) or (N, 18) - NOT (B, N, 15))
+            particles: tensor of shape (N, N_FEATURES) - NOT (B, N, N_FEATURES))
                 i.e. MUST BE UNBATCHED/FLATTENED, NOT GROUPED BY EVENT
 
         Returns:
             dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
-                Each value is a tensor of shape (N, 16) where column 15 is the mask
+                Each value is a tensor of shape (N, N_FEATURES) where column PASS_PROP is the mask
                 (1.0 = particle survived, 0.0 = filtered out)
         """
         
@@ -165,8 +167,9 @@ class ParticlePropagator(nn.Module):
         mask = mask & reached_detector
         
         # Update the mask column
-        particles = torch.cat([particles, mask.unsqueeze(1).float()], dim=1)  # New column 15 is mask
-        
+        # particles = torch.cat([particles, mask.unsqueeze(1).float()], dim=1)  # New column 15 is mask
+        particles[:, PASS_PROP] = mask.float()
+
         return particles
     
     def _apply_type_mask(self, particles, type_mask):
