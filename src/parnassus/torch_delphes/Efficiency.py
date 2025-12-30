@@ -15,10 +15,10 @@ class Efficiency(nn.Module):
     """
     PyTorch implementation of Delphes Efficiency module.
     
-    Applies tracking efficiency based on particle kinematics (pt, eta)
+    Applies tracking efficiency based on particle kinematics (pt, eta_outer)
     similar to Delphes ChargedHadronTrackingEfficiency.
     
-    Input shape: (N, 15) where:
+    Input shape: (N, 18) where:
         - column 0: PID (Particle ID)
         - column 1: Status
         - column 2: Charge
@@ -30,15 +30,17 @@ class Efficiency(nn.Module):
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position)
         - column 14: mass
-        - column 15: mask 
+        - column 15: etaOuter (pseudorapidity at outer position)
+        - column 16: phiOuter (azimuthal angle at outer position)
+        - column 17: mask
     
     The efficiency formula from CMS card:
         (pt <= 0.1)   * (0.00) +
-        (abs(eta) <= 1.5) * (pt > 0.1 && pt <= 1.0)   * (0.70) +
-        (abs(eta) <= 1.5) * (pt > 1.0)                * (0.95) +
-        (abs(eta) > 1.5 && abs(eta) <= 2.5) * (pt > 0.1 && pt <= 1.0)   * (0.60) +
-        (abs(eta) > 1.5 && abs(eta) <= 2.5) * (pt > 1.0)                * (0.85) +
-        (abs(eta) > 2.5)                                                * (0.00)
+        (abs(eta_outer) <= 1.5) * (pt > 0.1 && pt <= 1.0)   * (0.70) +
+        (abs(eta_outer) <= 1.5) * (pt > 1.0)                * (0.95) +
+        (abs(eta_outer) > 1.5 && abs(eta_outer) <= 2.5) * (pt > 0.1 && pt <= 1.0)   * (0.60) +
+        (abs(eta_outer) > 1.5 && abs(eta_outer) <= 2.5) * (pt > 1.0)                * (0.85) +
+        (abs(eta_outer) > 2.5)                                                * (0.00)
     """
     
     def __init__(self, 
@@ -70,95 +72,95 @@ class Efficiency(nn.Module):
             raise ValueError(f"Unknown efficiency formula: {efficiency_formula}")
     
     @staticmethod
-    def _charged_hadron_cms_efficiency(pt, eta):
+    def _charged_hadron_cms_efficiency(pt, eta_outer):
         """
         CMS charged hadron tracking efficiency formula.
         
         Args:
             pt: transverse momentum (GeV)
-            eta: pseudorapidity
+            eta_outer: pseudorapidity
             
         Returns:
             efficiency: value between 0 and 1
         """
-        abs_eta = torch.abs(eta)
+        abs_eta_outer = torch.abs(eta_outer)
         
         # Initialize with zeros
         eff = torch.zeros_like(pt)
         
-        # Region 1: Central barrel, low pt (0.1 < pt <= 1.0, |eta| <= 1.5)
-        mask1 = (pt > 0.1) & (pt <= 1.0) & (abs_eta <= 1.5)
+        # Region 1: Central barrel, low pt (0.1 < pt <= 1.0, |eta_outer| <= 1.5)
+        mask1 = (pt > 0.1) & (pt <= 1.0) & (abs_eta_outer <= 1.5)
         eff = torch.where(mask1, torch.tensor(0.70, device=pt.device), eff)
         
-        # Region 2: Central barrel, high pt (pt > 1.0, |eta| <= 1.5)
-        mask2 = (pt > 1.0) & (abs_eta <= 1.5)
+        # Region 2: Central barrel, high pt (pt > 1.0, |eta_outer| <= 1.5)
+        mask2 = (pt > 1.0) & (abs_eta_outer <= 1.5)
         eff = torch.where(mask2, torch.tensor(0.95, device=pt.device), eff)
         
-        # Region 3: Forward endcap, low pt (0.1 < pt <= 1.0, 1.5 < |eta| <= 2.5)
-        mask3 = (pt > 0.1) & (pt <= 1.0) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        # Region 3: Forward endcap, low pt (0.1 < pt <= 1.0, 1.5 < |eta_outer| <= 2.5)
+        mask3 = (pt > 0.1) & (pt <= 1.0) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff = torch.where(mask3, torch.tensor(0.60, device=pt.device), eff)
         
-        # Region 4: Forward endcap, high pt (pt > 1.0, 1.5 < |eta| <= 2.5)
-        mask4 = (pt > 1.0) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        # Region 4: Forward endcap, high pt (pt > 1.0, 1.5 < |eta_outer| <= 2.5)
+        mask4 = (pt > 1.0) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff = torch.where(mask4, torch.tensor(0.85, device=pt.device), eff)
         
-        # Region 5: Very forward (|eta| > 2.5) - efficiency is 0 (already initialized)
+        # Region 5: Very forward (|eta_outer| > 2.5) - efficiency is 0 (already initialized)
         
         return eff
     
     @staticmethod
-    def _electron_cms_efficiency(pt, eta):
+    def _electron_cms_efficiency(pt, eta_outer):
         """CMS electron tracking efficiency formula."""
-        abs_eta = torch.abs(eta)
+        abs_eta_outer = torch.abs(eta_outer)
         eff = torch.zeros_like(pt)
         
         # Central barrel
-        mask1 = (pt > 0.1) & (pt <= 1.0) & (abs_eta <= 1.5)
+        mask1 = (pt > 0.1) & (pt <= 1.0) & (abs_eta_outer <= 1.5)
         eff = torch.where(mask1, torch.tensor(0.73, device=pt.device), eff)
         
-        mask2 = (pt > 1.0) & (pt <= 1.0e2) & (abs_eta <= 1.5)
+        mask2 = (pt > 1.0) & (pt <= 1.0e2) & (abs_eta_outer <= 1.5)
         eff = torch.where(mask2, torch.tensor(0.95, device=pt.device), eff)
         
-        mask3 = (pt > 1.0e2) & (abs_eta <= 1.5)
+        mask3 = (pt > 1.0e2) & (abs_eta_outer <= 1.5)
         eff = torch.where(mask3, torch.tensor(0.99, device=pt.device), eff)
         
         # Forward endcap
-        mask4 = (pt > 0.1) & (pt <= 1.0) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        mask4 = (pt > 0.1) & (pt <= 1.0) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff = torch.where(mask4, torch.tensor(0.50, device=pt.device), eff)
         
-        mask5 = (pt > 1.0) & (pt <= 1.0e2) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        mask5 = (pt > 1.0) & (pt <= 1.0e2) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff = torch.where(mask5, torch.tensor(0.83, device=pt.device), eff)
         
-        mask6 = (pt > 1.0e2) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        mask6 = (pt > 1.0e2) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff = torch.where(mask6, torch.tensor(0.90, device=pt.device), eff)
         
         return eff
     
     @staticmethod
-    def _muon_cms_efficiency(pt, eta):
+    def _muon_cms_efficiency(pt, eta_outer):
         """CMS muon tracking efficiency formula."""
-        abs_eta = torch.abs(eta)
+        abs_eta_outer = torch.abs(eta_outer)
         eff = torch.zeros_like(pt)
         
         # Central barrel
-        mask1 = (pt > 0.1) & (pt <= 1.0) & (abs_eta <= 1.5)
+        mask1 = (pt > 0.1) & (pt <= 1.0) & (abs_eta_outer <= 1.5)
         eff = torch.where(mask1, torch.tensor(0.75, device=pt.device), eff)
         
-        mask2 = (pt > 1.0) & (pt <= 1.0e3) & (abs_eta <= 1.5)
+        mask2 = (pt > 1.0) & (pt <= 1.0e3) & (abs_eta_outer <= 1.5)
         eff = torch.where(mask2, torch.tensor(0.99, device=pt.device), eff)
         
-        mask3 = (pt > 1.0e3) & (abs_eta <= 1.5)
+        mask3 = (pt > 1.0e3) & (abs_eta_outer <= 1.5)
         eff3 = 0.99 * torch.exp(0.5 - pt * 5.0e-4)
         eff = torch.where(mask3, eff3, eff)
         
         # Forward endcap
-        mask4 = (pt > 0.1) & (pt <= 1.0) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        mask4 = (pt > 0.1) & (pt <= 1.0) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff = torch.where(mask4, torch.tensor(0.70, device=pt.device), eff)
         
-        mask5 = (pt > 1.0) & (pt <= 1.0e3) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        mask5 = (pt > 1.0) & (pt <= 1.0e3) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff = torch.where(mask5, torch.tensor(0.98, device=pt.device), eff)
         
-        mask6 = (pt > 1.0e3) & (abs_eta > 1.5) & (abs_eta <= 2.5)
+        mask6 = (pt > 1.0e3) & (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5)
         eff6 = 0.98 * torch.exp(0.5 - pt * 5.0e-4)
         eff = torch.where(mask6, eff6, eff)
         
@@ -284,11 +286,11 @@ class Efficiency(nn.Module):
 
         # Extract pre-computed kinematics from Delphes (columns 7-8)
         mask_where = torch.where(mask > 0.5)[0]
-        pt = particles[mask_where, CMAP["PT"]]   # Column 7: PT (transverse momentum)
-        eta = particles[mask_where, CMAP["ETA"]]  # Column 8: Eta (pseudorapidity)
+        pt = particles[mask_where, CMAP["PT"]]   # PT (transverse momentum)
+        eta_outer = particles[mask_where, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)
 
         # Compute efficiency for each particle
-        efficiency = self.efficiency_func(pt, eta)
+        efficiency = self.efficiency_func(pt, eta_outer)
         
         # Apply efficiency stochastically
         passed = torch.rand_like(efficiency) < efficiency
@@ -333,7 +335,7 @@ class Efficiency(nn.Module):
 
 
 # Example usage and testing
-if __name__ == "__main__":
+if __name__ == "__main__": # TODO: Update to use EtaOuter and PhiOuter
     print("Testing Delphes Efficiency PyTorch Module\n")
     
     # Set random seed for reproducibility
