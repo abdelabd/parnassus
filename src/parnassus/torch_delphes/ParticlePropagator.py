@@ -26,27 +26,27 @@ class ParticlePropagator(nn.Module):
     - Neutral particles (straight line propagation)
     - Charged particles (helix propagation in magnetic field)
     
-    IMPORTANT: This module computes PT and position-based Eta from raw data:
-    - PT (column 7): sqrt(Px² + Py²) 
-    - Eta (column 8): asinh(Z / sqrt(X² + Y²)) - POSITION-based, from production vertex
-    - Phi (column 9): atan2(Py, Px)
+    IMPORTANT: This module computes position-based EtaOuter and PhiOuter from raw data:
+    - EtaOuter: asinh(Z / sqrt(X² + Y²)) - POSITION-based, at intersection with detector
+    - PhiOuter (column 9): atan2(Py, Px) (p) - POSITION-based, from closest approach to z-axis
     
     Position-based Eta is used by the Efficiency module (matching C++ Delphes behavior).
     
-    Input shape: (N, 15) - GenParticle format where:
+    Input shape: (N, 17) - GenParticle format where:
         - column 0: PID (Particle ID)
         - column 1: Status
         - column 2: Charge
         - column 3: E (Energy)
         - columns 4-6: Px, Py, Pz (3-momentum)
-        - column 7: PT (computed here, initially 0)
-        - column 8: Eta (computed here as position-based, initially 0)
-        - column 9: Phi (computed here, initially 0)
+        - column 7: PT 
+        - column 8: Eta
+        - column 9: Phi 
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position at production vertex)
         - column 14: Mass
-        - 
-    
+        - column 15: EtaOuter (computed here, initially zero)
+        - column 16: PhiOuter (computed here, initially zero)
+
     Output: Propagated particles in Track format (same 15 columns but with updated positions)
     """
     
@@ -83,7 +83,7 @@ class ParticlePropagator(nn.Module):
         Propagate particles to detector surface using mask-based filtering.
         
         Args:
-            particles: tensor of shape (N, 15) or (N, 16) - NOT (B, N, 15))
+            particles: tensor of shape (N, 17) or (N, 18) - NOT (B, N, 15))
                 i.e. MUST BE UNBATCHED/FLATTENED, NOT GROUPED BY EVENT
 
         Returns:
@@ -96,16 +96,11 @@ class ParticlePropagator(nn.Module):
         px = particles[:, CMAP["PX"]]  # Momentum components (GeV)
         py = particles[:, CMAP["PY"]]
         pz = particles[:, CMAP["PZ"]]
+        pt = particles[:, CMAP["PT"]]
+        eta = particles[:, CMAP["ETA"]]
+        phi = particles[:, CMAP["PHI"]]
 
-        # Compute PT from momentum components
-        pt = torch.sqrt(px**2 + py**2)
-        particles[:, CMAP["PT"]] = pt  # Store in column 7
-
-        # Compute Phi from momentum
-        phi = torch.atan2(py, px)
-        particles[:, CMAP["PHI"]] = phi  # Store in column 9
-
-        # NOTE: Eta (column 8) will be computed as POSITION-BASED eta after propagation
+        # NOTE: EtaOuter and PhiOuter will be computed as POSITION-BASED eta after propagation
         # in _propagate_neutral and _propagate_charged methods
         
         # Extract positions (stored in cm, convert to m for calculations)
@@ -234,7 +229,8 @@ class ParticlePropagator(nn.Module):
         eta_outer = torch.asinh(z_t / (r_t_xy + 1e-10))
         
         # Update positions and EtaOuter in particles (convert m back to mm)
-        particles[mask, CMAP["ETA"]] = eta_outer  # EtaOuter (position eta at final position)
+        particles[mask, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
+        particles[mask, CMAP["PHI_OUTER"]] = particles[mask, CMAP["PHI"]]  # PhiOuter (same as momentum phi for neutral)
         particles[mask, CMAP["X"]] = x_t * 1.0e3  # X
         particles[mask, CMAP["Y"]] = y_t * 1.0e3  # Y
         particles[mask, CMAP["Z"]] = z_t * 1.0e3  # Z
@@ -355,8 +351,8 @@ class ParticlePropagator(nn.Module):
         
         particles[valid_indices, CMAP["PX"]] = px_d[valid]  # Px (at closest approach)
         particles[valid_indices, CMAP["PY"]] = py_d[valid]  # Py (at closest approach)
-        particles[valid_indices, CMAP["ETA"]] = eta_outer  # EtaOuter (position eta at final position)
-        particles[valid_indices, CMAP["PHI"]] = phid[valid]  # Phi (at closest approach)
+        particles[valid_indices, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
+        particles[valid_indices, CMAP["PHI_OUTER"]] = phid[valid]  # Phi (at closest approach)
         particles[valid_indices, CMAP["X"]] = x_t[valid] * 1.0e3  # X (m to mm) - final position
         particles[valid_indices, CMAP["Y"]] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
         particles[valid_indices, CMAP["Z"]] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
