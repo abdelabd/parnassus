@@ -252,8 +252,7 @@ class MomentumSmearing(nn.Module):
         # Compute momentum-based eta and phi from the momentum vector
         # This matches C++ Delphes which uses candidateMomentum.Eta() and candidateMomentum.Phi()
         # for reconstructing the 4-vector after smearing
-        momentum_pt = torch.sqrt(px**2 + py**2)
-        momentum_eta = torch.asinh(pz / (momentum_pt + 1e-10))  # atanh(pz/p) = asinh(pz/pt)
+        momentum_eta = torch.asinh(pz / (pt + 1e-10))  # atanh(pz/p) = asinh(pz/pt)
         momentum_phi = torch.atan2(py, px)
         
         # Compute resolution for each particle using the eta from column 8
