@@ -393,7 +393,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     
     return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
 
-def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
+def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, debug=False):
     """
     Validate PyTorch Delphes implementation against C++ Delphes benchmark.
     
@@ -401,6 +401,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
         torch_output_file: Path to PyTorch output ROOT file (e.g., HZZ4l_3_2_torch.root)
         benchmark_file: Path to benchmark ROOT file from C++ Delphes
         output_dir: Directory to save validation plots
+        debug: If True, print histogram bin counts and edges
     """
     # Create output directory
     output_dir = Path(output_dir)
@@ -502,6 +503,35 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
                     torch_np, bins=bins, histtype='step', color='blue', 
                     linewidth=2, label='Parnassus.TorchDelphes', density=False
                 )
+                
+                # Debug: print histogram statistics
+                if debug:
+                    print(f"\n  --- DEBUG: {branch_name}.{var} ---")
+                    print(f"  Number of bins: {len(bin_edges) - 1}")
+                    print(f"  Bin edges (first 10): {bin_edges[:10]}")
+                    print(f"  Bin edges (last 10): {bin_edges[-10:]}")
+                    print(f"  C++ bin counts (first 10): {benchmark_counts[:10]}")
+                    print(f"  C++ bin counts (last 10): {benchmark_counts[-10:]}")
+                    print(f"  Torch bin counts (first 10): {torch_counts[:10]}")
+                    print(f"  Torch bin counts (last 10): {torch_counts[-10:]}")
+                    print(f"  Total C++ counts: {np.sum(benchmark_counts):.0f}")
+                    print(f"  Total Torch counts: {np.sum(torch_counts):.0f}")
+                    print(f"  Ratio (Torch/C++): {np.sum(torch_counts) / np.sum(benchmark_counts):.4f}")
+                    
+                    # Compute and print ratio statistics
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts, 
+                        out=np.ones_like(torch_counts), 
+                        where=benchmark_counts > 0
+                    )
+                    valid_ratio = ratio[benchmark_counts > 0]
+                    if len(valid_ratio) > 0:
+                        print(f"  Ratio mean: {np.mean(valid_ratio):.4f}")
+                        print(f"  Ratio std: {np.std(valid_ratio):.4f}")
+                        print(f"  Ratio min: {np.min(valid_ratio):.4f}")
+                        print(f"  Ratio max: {np.max(valid_ratio):.4f}")
+                    print(f"  --- END DEBUG ---\n")
                 
                 ax_hist.set_ylabel('Counts', fontsize=12)
                 ax_hist.set_title(f'{branch_name}: {var}', fontsize=14, fontweight='bold')
@@ -646,7 +676,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir):
     print(f"{'='*70}")
 
 
-def main(input_file, output_file, benchmark_file, max_events=None, batch_size=100):
+def main(input_file, output_file, benchmark_file, max_events=None, batch_size=100, debug=False):
     """Main processing function.
     
     Args:
@@ -655,6 +685,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         benchmark_file: Path to benchmark ROOT file
         max_events: Maximum number of events to process (None = all)
         batch_size: Number of events to process per batch (for GPU acceleration)
+        debug: If True, print histogram bin counts and edges for debugging
     """
     
     print("\n" + "="*80)
@@ -823,7 +854,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     if Path(benchmark_file).exists():
         print(f"\nBenchmark file: {benchmark_file}")
         print(f"Validation directory: {validation_dir}")
-        validate_against_benchmark(output_file, benchmark_file, validation_dir)
+        validate_against_benchmark(output_file, benchmark_file, validation_dir, debug=debug)
     else:
         print(f"\n⚠ Benchmark file not found: {benchmark_file}")
         print("  Skipping validation. To enable validation, provide HZZ4l_5_0.root")
@@ -851,13 +882,17 @@ def parse_args():
         "--batch-size", "-bs", type=int, default=100,
         help="Batch size for processing (default: 1000)"
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Print histogram bin counts and edges for debugging"
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
     tic = time.time()
     args = parse_args()
 
-    main(args.input, args.output, args.benchmark, max_events=args.max_events, batch_size=args.batch_size)
+    main(args.input, args.output, args.benchmark, max_events=args.max_events, batch_size=args.batch_size, debug=args.debug)
 
     toc = time.time()
     dur = toc - tic
