@@ -44,8 +44,6 @@ from parnassus.torch_delphes.tensor_utils import (
     tensor_to_root_dict,
     write_root_file,
     compute_max_particles,
-    pad_and_batch,
-    unbatch_and_unpad,
     COLUMN_MAP as CMAP
 )
 
