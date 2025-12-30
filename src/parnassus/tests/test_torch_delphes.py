@@ -500,16 +500,12 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 
                 # Debug: print histogram statistics
                 if debug:
-                    print(f"\n  --- DEBUG: {branch_name}.{var} ---")
-                    print(f"  Number of bins: {len(bin_edges) - 1}")
-                    print(f"  Bin edges (first 10): {bin_edges[:10]}")
-                    print(f"  Bin edges (last 10): {bin_edges[-10:]}")
-                    print(f"  C++ bin counts (first 10): {benchmark_counts[:10]}")
-                    print(f"  C++ bin counts (last 10): {benchmark_counts[-10:]}")
-                    print(f"  Torch bin counts (first 10): {torch_counts[:10]}")
-                    print(f"  Torch bin counts (last 10): {torch_counts[-10:]}")
+                    print(f"\n{branch_name}.{var} bins:")
+                    print(f"  Bin edges: {bin_edges}, len(bin_edges)={len(bin_edges)}")
+                    print(f"  C++ counts: {benchmark_counts}")
+                    print(f"  TorchDelphes counts: {torch_counts}")
                     print(f"  Total C++ counts: {np.sum(benchmark_counts):.0f}")
-                    print(f"  Total Torch counts: {np.sum(torch_counts):.0f}")
+                    print(f"  Total TorchDelphes counts: {np.sum(torch_counts):.0f}")
                     print(f"  Ratio (Torch/C++): {np.sum(torch_counts) / np.sum(benchmark_counts):.4f}")
                     
                     # Compute and print ratio statistics
