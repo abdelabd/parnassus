@@ -14,10 +14,10 @@ class MomentumSmearing(nn.Module):
     """
     PyTorch implementation of Delphes MomentumSmearing module.
     
-    Applies momentum resolution smearing to particles based on their kinematics (pt, eta).
+    Applies momentum resolution smearing to particles based on their kinematics (pt, eta_outer).
     The smearing is applied using a log-normal distribution to ensure positive PT values.
     
-    Input shape: (N, 15) where:
+    Input shape: (N, 18) where:
         - column 0: PID (Particle ID)
         - column 1: Status
         - column 2: Charge
@@ -29,16 +29,16 @@ class MomentumSmearing(nn.Module):
         - column 10: T (time)
         - columns 11-13: X, Y, Z (position)
         - column 14: Mass
-        - column 15: mask
+        - column 15: EtaOuter (pseudorapidity at outer position)
+        - column 16: PhiOuter (azimuthal angle at closest approach to z-axis)
+        - column 17: mask
     
-    NOTE: The Eta in column 8 is used for evaluating the resolution formula.
-    However, when reconstructing the 4-vector after smearing, we recompute
-    Eta from the momentum components (Px, Py, Pz) to match C++ Delphes behavior.
-    
+    NOTE: Position-Eta is used for evaluating the resolution formula, but Momentum-Eta is updated
+
     The resolution formula from CMS card (for charged hadrons):
-        (abs(eta) <= 0.5) * (pt > 0.1) * sqrt(0.06^2 + pt^2*1.3e-3^2) +
-        (abs(eta) > 0.5 && abs(eta) <= 1.5) * (pt > 0.1) * sqrt(0.10^2 + pt^2*1.7e-3^2) +
-        (abs(eta) > 1.5 && abs(eta) <= 2.5) * (pt > 0.1) * sqrt(0.25^2 + pt^2*3.1e-3^2)
+        (abs(eta_outer) <= 0.5) * (pt > 0.1) * sqrt(0.06^2 + pt^2*1.3e-3^2) +
+        (abs(eta_outer) > 0.5 && abs(eta_outer) <= 1.5) * (pt > 0.1) * sqrt(0.10^2 + pt^2*1.7e-3^2) +
+        (abs(eta_outer) > 1.5 && abs(eta_outer) <= 2.5) * (pt > 0.1) * sqrt(0.25^2 + pt^2*3.1e-3^2)
     """
     
     def __init__(self, 
@@ -66,104 +66,104 @@ class MomentumSmearing(nn.Module):
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
     @staticmethod
-    def _charged_hadron_cms_resolution(pt, eta):
+    def _charged_hadron_cms_resolution(pt, eta_outer):
         """
         CMS charged hadron momentum resolution formula.
         Based on arXiv:1405.6569
         
         Args:
             pt: transverse momentum (GeV)
-            eta: pseudorapidity
+            eta_outer: pseudorapidity
             
         Returns:
             resolution: absolute momentum resolution (GeV)
         """
-        abs_eta = torch.abs(eta)
+        abs_eta_outer = torch.abs(eta_outer)
         
         # Initialize with zeros
         res = torch.zeros_like(pt)
         
-        # Region 1: Central barrel (|eta| <= 0.5, pt > 0.1)
+        # Region 1: Central barrel (|eta_outer| <= 0.5, pt > 0.1)
         # Resolution = sqrt(0.06^2 + pt^2 * 1.3e-3^2)
-        mask1 = (abs_eta <= 0.5) & (pt > 0.1)
+        mask1 = (abs_eta_outer <= 0.5) & (pt > 0.1)
         res1 = torch.sqrt(0.06**2 + pt**2 * (1.3e-3)**2)
         res = torch.where(mask1, res1, res)
         
-        # Region 2: Intermediate (0.5 < |eta| <= 1.5, pt > 0.1)
+        # Region 2: Intermediate (0.5 < |eta_outer| <= 1.5, pt > 0.1)
         # Resolution = sqrt(0.10^2 + pt^2 * 1.7e-3^2)
-        mask2 = (abs_eta > 0.5) & (abs_eta <= 1.5) & (pt > 0.1)
+        mask2 = (abs_eta_outer > 0.5) & (abs_eta_outer <= 1.5) & (pt > 0.1)
         res2 = torch.sqrt(0.10**2 + pt**2 * (1.7e-3)**2)
         res = torch.where(mask2, res2, res)
         
-        # Region 3: Forward (1.5 < |eta| <= 2.5, pt > 0.1)
+        # Region 3: Forward (1.5 < |eta_outer| <= 2.5, pt > 0.1)
         # Resolution = sqrt(0.25^2 + pt^2 * 3.1e-3^2)
-        mask3 = (abs_eta > 1.5) & (abs_eta <= 2.5) & (pt > 0.1)
+        mask3 = (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5) & (pt > 0.1)
         res3 = torch.sqrt(0.25**2 + pt**2 * (3.1e-3)**2)
         res = torch.where(mask3, res3, res)
         
         return res
     
     @staticmethod
-    def _electron_cms_resolution(pt, eta):
+    def _electron_cms_resolution(pt, eta_outer):
         """
         CMS electron momentum resolution formula.
         Based on arXiv:1502.02701
         
         Args:
             pt: transverse momentum (GeV)
-            eta: pseudorapidity
+            eta_outer: pseudorapidity
             
         Returns:
             resolution: absolute momentum resolution (GeV)
         """
-        abs_eta = torch.abs(eta)
+        abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)
         
         # Central barrel
-        mask1 = (abs_eta <= 0.5) & (pt > 0.1)
+        mask1 = (abs_eta_outer <= 0.5) & (pt > 0.1)
         res1 = torch.sqrt(0.03**2 + pt**2 * (1.3e-3)**2)
         res = torch.where(mask1, res1, res)
         
         # Intermediate
-        mask2 = (abs_eta > 0.5) & (abs_eta <= 1.5) & (pt > 0.1)
+        mask2 = (abs_eta_outer > 0.5) & (abs_eta_outer <= 1.5) & (pt > 0.1)
         res2 = torch.sqrt(0.05**2 + pt**2 * (1.7e-3)**2)
         res = torch.where(mask2, res2, res)
         
         # Forward
-        mask3 = (abs_eta > 1.5) & (abs_eta <= 2.5) & (pt > 0.1)
+        mask3 = (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5) & (pt > 0.1)
         res3 = torch.sqrt(0.15**2 + pt**2 * (3.1e-3)**2)
         res = torch.where(mask3, res3, res)
         
         return res
     
     @staticmethod
-    def _muon_cms_resolution(pt, eta):
+    def _muon_cms_resolution(pt, eta_outer):
         """
         CMS muon momentum resolution formula.
         Based on arXiv:1306.2016
         
         Args:
             pt: transverse momentum (GeV)
-            eta: pseudorapidity
+            eta_outer: pseudorapidity
             
         Returns:
             resolution: absolute momentum resolution (GeV)
         """
-        abs_eta = torch.abs(eta)
+        abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)
         
         # Central barrel
-        mask1 = (abs_eta <= 0.5) & (pt > 0.1)
+        mask1 = (abs_eta_outer <= 0.5) & (pt > 0.1)
         res1 = torch.sqrt(0.01**2 + pt**2 * (1.0e-3)**2)
         res = torch.where(mask1, res1, res)
         
         # Intermediate
-        mask2 = (abs_eta > 0.5) & (abs_eta <= 1.5) & (pt > 0.1)
+        mask2 = (abs_eta_outer > 0.5) & (abs_eta_outer <= 1.5) & (pt > 0.1)
         res2 = torch.sqrt(0.02**2 + pt**2 * (1.3e-3)**2)
         res = torch.where(mask2, res2, res)
         
         # Forward
-        mask3 = (abs_eta > 1.5) & (abs_eta <= 2.5) & (pt > 0.1)
+        mask3 = (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5) & (pt > 0.1)
         res3 = torch.sqrt(0.10**2 + pt**2 * (2.0e-3)**2)
         res = torch.where(mask3, res3, res)
         
@@ -240,8 +240,8 @@ class MomentumSmearing(nn.Module):
         
         # Extract pre-computed kinematics from Delphes
         pt = particles[..., CMAP["PT"]]   # Column 7: PT (transverse momentum)
-        eta = particles[..., CMAP["ETA"]]  # Column 8: Eta (for resolution formula - typically position-based)
-        phi = particles[..., CMAP["PHI"]]  # Column 9: Phi (azimuthal angle)
+        eta_outer = particles[..., CMAP["ETA_OUTER"]]  # Column 8: Eta (for resolution formula - typically position-based)
+        phi_outer = particles[..., CMAP["PHI_OUTER"]]  # Column 9: Phi (azimuthal angle)
         mass = particles[..., CMAP["MASS"]]  # Column 14: Mass
 
         # Extract momentum components to compute momentum-based eta for reconstruction
@@ -252,12 +252,11 @@ class MomentumSmearing(nn.Module):
         # Compute momentum-based eta and phi from the momentum vector
         # This matches C++ Delphes which uses candidateMomentum.Eta() and candidateMomentum.Phi()
         # for reconstructing the 4-vector after smearing
-        momentum_eta = torch.asinh(pz / (pt + 1e-10))  # atanh(pz/p) = asinh(pz/pt)
-        momentum_phi = torch.atan2(py, px)
+        eta = particles[..., CMAP["ETA"]]  # atanh(pz/p) = asinh(pz/pt)
+        phi = particles[..., CMAP["PHI"]]
         
-        # Compute resolution for each particle using the eta from column 8
-        # (which may be position-based depending on configuration)
-        resolution = self.resolution_func(pt, eta)
+        # Compute resolution for each particle using eta_outer
+        resolution = self.resolution_func(pt, eta_outer)
         
         # Clamp resolution to maximum of 1.0 (100% of PT)
         resolution = torch.clamp(resolution, max=1.0)
@@ -275,9 +274,9 @@ class MomentumSmearing(nn.Module):
         # Recompute Px, Py, Pz with smeared PT but using MOMENTUM-based eta and phi
         # This matches C++ Delphes behavior: it uses candidateMomentum.Eta() and Phi()
         # for reconstruction, not the position-based values used for resolution
-        smeared[..., CMAP["PX"]] = smeared_pt * torch.cos(momentum_phi)  # Px
-        smeared[..., CMAP["PY"]] = smeared_pt * torch.sin(momentum_phi)  # Py
-        smeared[..., CMAP["PZ"]] = smeared_pt * torch.sinh(momentum_eta)  # Pz
+        smeared[..., CMAP["PX"]] = smeared_pt * torch.cos(phi)  # Px
+        smeared[..., CMAP["PY"]] = smeared_pt * torch.sin(phi)  # Py
+        smeared[..., CMAP["PZ"]] = smeared_pt * torch.sinh(eta)  # Pz
 
         # Recompute energy: E = sqrt(P^2 + M^2)
         p_squared = smeared[..., CMAP["PX"]]**2 + smeared[..., CMAP["PY"]]**2 + smeared[..., CMAP["PZ"]]**2
