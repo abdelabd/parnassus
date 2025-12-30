@@ -231,14 +231,7 @@ class MomentumSmearing(nn.Module):
         """
         # Move to device
         particles = particles.to(self.device)
-        
-        # Detect batched input
-        is_batched = particles.ndim == 3
-        has_mask = particles.shape[-1] == 16
-        # Detect batched input
-        is_batched = particles.ndim == 3
-        has_mask = particles.shape[-1] == 16
-        
+
         # Clone particles to avoid modifying input
         smeared = particles.clone()
         

@@ -234,12 +234,12 @@ class ParticlePropagator(nn.Module):
         eta_outer = torch.asinh(z_t / (r_t_xy + 1e-10))
         
         # Update positions and EtaOuter in particles (convert m back to mm)
-        particles[mask, 8] = eta_outer  # EtaOuter (position eta at final position)
-        particles[mask, 11] = x_t * 1.0e3  # X
-        particles[mask, 12] = y_t * 1.0e3  # Y
-        particles[mask, 13] = z_t * 1.0e3  # Z
-        particles[mask, 10] = particles[mask, 10] + t * e_n * 1.0e3  # T (time in mm/c)
-        
+        particles[mask, CMAP["ETA"]] = eta_outer  # EtaOuter (position eta at final position)
+        particles[mask, CMAP["X"]] = x_t * 1.0e3  # X
+        particles[mask, CMAP["Y"]] = y_t * 1.0e3  # Y
+        particles[mask, CMAP["Z"]] = z_t * 1.0e3  # Z
+        particles[mask, CMAP["T"]] = particles[mask, CMAP["T"]] + t * e_n * 1.0e3  # T (time in mm/c)
+
         # Store path length (could be stored in a new column if needed)
         # For now we don't have a dedicated column for L in the 16-column format
         
@@ -353,20 +353,20 @@ class ParticlePropagator(nn.Module):
         mask_indices = torch.where(mask)[0]
         valid_indices = mask_indices[valid]
         
-        particles[valid_indices, 4] = px_d[valid]  # Px (at closest approach)
-        particles[valid_indices, 5] = py_d[valid]  # Py (at closest approach)
-        particles[valid_indices, 8] = eta_outer  # EtaOuter (position eta at final position)
-        particles[valid_indices, 9] = phid[valid]  # Phi (at closest approach)
-        particles[valid_indices, 11] = x_t[valid] * 1.0e3  # X (m to mm) - final position
-        particles[valid_indices, 12] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
-        particles[valid_indices, 13] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
-        particles[valid_indices, 10] = particles[valid_indices, 10] + t[valid] * self.c_light * 1.0e3  # T
+        particles[valid_indices, CMAP["PX"]] = px_d[valid]  # Px (at closest approach)
+        particles[valid_indices, CMAP["PY"]] = py_d[valid]  # Py (at closest approach)
+        particles[valid_indices, CMAP["ETA"]] = eta_outer  # EtaOuter (position eta at final position)
+        particles[valid_indices, CMAP["PHI"]] = phid[valid]  # Phi (at closest approach)
+        particles[valid_indices, CMAP["X"]] = x_t[valid] * 1.0e3  # X (m to mm) - final position
+        particles[valid_indices, CMAP["Y"]] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
+        particles[valid_indices, CMAP["Z"]] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
+        particles[valid_indices, CMAP["T"]] = particles[valid_indices, CMAP["T"]] + t[valid] * self.c_light * 1.0e3  # T
         
         # Mark invalid particles by setting position to zero
         invalid_indices = mask_indices[~valid]
-        particles[invalid_indices, 11] = 0.0
-        particles[invalid_indices, 12] = 0.0
-        particles[invalid_indices, 13] = 0.0
+        particles[invalid_indices, CMAP["X"]] = 0.0
+        particles[invalid_indices, CMAP["Y"]] = 0.0
+        particles[invalid_indices, CMAP["Z"]] = 0.0
         
         return particles
 
@@ -394,30 +394,30 @@ if __name__ == "__main__":
     pids = torch.tensor([211, -211, 22, 11, -11, 2112, 13, 2212, 111, -13], dtype=torch.float64)
     
     # Fill particle data
-    particles[:, 0] = pids  # PID
-    particles[:, 1] = 1  # Status
-    particles[:, 2] = charges  # Charge
+    particles[:, CMAP["PID"]] = pids  # PID
+    particles[:, CMAP["STATUS"]] = 1  # Status
+    particles[:, CMAP["CHARGE"]] = charges  # Charge
     
     # Momentum
-    particles[:, 4] = pt_values * torch.cos(phi_values)  # Px
-    particles[:, 5] = pt_values * torch.sin(phi_values)  # Py
-    particles[:, 6] = pt_values * torch.sinh(eta_values)  # Pz
-    particles[:, 7] = pt_values  # PT
-    particles[:, 8] = eta_values  # Eta
-    particles[:, 9] = phi_values  # Phi
-    
+    particles[:, CMAP["PX"]] = pt_values * torch.cos(phi_values)  # Px
+    particles[:, CMAP["PY"]] = pt_values * torch.sin(phi_values)  # Py
+    particles[:, CMAP["PZ"]] = pt_values * torch.sinh(eta_values)  # Pz
+    particles[:, CMAP["PT"]] = pt_values  # PT
+    particles[:, CMAP["ETA"]] = eta_values  # Eta
+    particles[:, CMAP["PHI"]] = phi_values  # Phi
+
     # Energy (approximate for massless)
-    p = torch.sqrt(particles[:, 4]**2 + particles[:, 5]**2 + particles[:, 6]**2)
-    particles[:, 3] = p  # E
-    
+    p = torch.sqrt(particles[:, CMAP["PX"]]**2 + particles[:, CMAP["PY"]]**2 + particles[:, CMAP["PZ"]]**2)
+    particles[:, CMAP["E"]] = p  # E
+
     # Position (at origin, mm)
-    particles[:, 11] = 0.0  # X
-    particles[:, 12] = 0.0  # Y
-    particles[:, 13] = 0.0  # Z
-    particles[:, 10] = 0.0  # T
-    
+    particles[:, CMAP["X"]] = 0.0  # X
+    particles[:, CMAP["Y"]] = 0.0  # Y
+    particles[:, CMAP["Z"]] = 0.0  # Z
+    particles[:, CMAP["T"]] = 0.0  # T
+
     # Mass
-    particles[:, 14] = 0.140  # Pion mass
+    particles[:, CMAP["MASS"]] = 0.140  # Pion mass
     
     print("Input particles:")
     print(f"Shape: {particles.shape}")
