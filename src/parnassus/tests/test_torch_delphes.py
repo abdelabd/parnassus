@@ -499,7 +499,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 )
                 
                 # Debug: print histogram statistics
-                if debug:
+                if debug and (branch_name in {"ECal_EFlowTrack", "ECalTower", "EFlowPhoton"}):
                     print(f"\n{branch_name}.{var} bins:")
                     print(f"  Bin edges: {bin_edges}, len(bin_edges)={len(bin_edges)}")
                     print(f"  C++ counts: {benchmark_counts}")
