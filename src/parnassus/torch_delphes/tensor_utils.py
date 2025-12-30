@@ -28,15 +28,15 @@ PX = 4         # X-component of momentum
 PY = 5         # Y-component of momentum
 PZ = 6         # Z-component of momentum
 PT = 7         # Transverse momentum
-ETA = 8        # Pseudorapidity (position-based EtaOuter for efficiency, momentum-based for smearing)
-PHI = 9        # Azimuthal angle
+ETA = 8        # Pseudorapidity (momentum)
+PHI = 9        # Azimuthal angle (momentum)
 T = 10         # Time
 X = 11         # X position
 Y = 12         # Y position
 Z = 13         # Z position
 MASS = 14      # Mass (not stored in Track, will be computed/set based on PID)
-ETA_OUTER = 15
-PHI_OUTER = 16
+ETA_OUTER = 15 # Pseudorapidity at point of intersection with detector (position)
+PHI_OUTER = 16 # Azimuthal angle at closest-approach to z-axis (position)
 
 IS_NOT_PAD = 17  # Column index for initial validity mask (1=real, 0=padded)
 PASS_PROP = 18
@@ -101,7 +101,7 @@ def compute_max_particles(event_tensors: List[torch.Tensor], scale: float = 1.2)
     Compute max_particles for padding as scale * max particle count in dataset.
     
     Args:
-        event_tensors: List of (N_i, 15) tensors
+        event_tensors: List of (N_i, N_FEATURES) tensors
         scale: Scaling factor (default 1.2 = 20% buffer)
         
     Returns:
@@ -112,45 +112,6 @@ def compute_max_particles(event_tensors: List[torch.Tensor], scale: float = 1.2)
     max_count = max(t.shape[0] for t in event_tensors)
     return int(max_count * scale)
 
-
-def pad_and_batch(event_tensors: List[torch.Tensor], max_particles: int) -> torch.Tensor:
-    """
-    Pad events to max_particles and stack into batch with mask.
-    
-    The mask is appended as column 15 to indicate real vs padded particles.
-    
-    Args:
-        event_tensors: List of (N_i, 15) tensors
-        max_particles: Max particles to pad to
-        
-    Returns:
-        batch: (B, max_particles, 16) where:
-               - batch[:, :, :15] = particle data (padded with zeros)
-               - batch[:, :, 15] = mask (1.0 for real particles, 0.0 for padding)
-    """
-    batch_size = len(event_tensors)
-    
-    # Get dtype and device from first tensor
-    dtype = event_tensors[0].dtype
-    device = event_tensors[0].device
-    
-    # Create padded batch tensor (B, max_particles, 16)
-    # Initialize with zeros (padding)
-    batch = torch.zeros((batch_size, max_particles, 16), dtype=dtype, device=device)
-    
-    for i, event in enumerate(event_tensors):
-        n_particles = event.shape[0]
-        if n_particles > max_particles:
-            # Truncate if exceeds max_particles
-            batch[i, :max_particles, :N_FEATURES] = event[:max_particles]
-            batch[i, :max_particles, N_FEATURES] = 1.0
-        else:
-            # Pad with zeros
-            batch[i, :n_particles, :N_FEATURES] = event
-            batch[i, :n_particles, N_FEATURES] = 1.0  # Mask for real particles
-            # Rest is already zeros (padding)
-    
-    return batch
 
 def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor:
     """
@@ -186,32 +147,6 @@ def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor
         # Rest is already zeros (padding)
 
     return padded_events
-
-
-def unbatch_and_unpad(batch: torch.Tensor, mask_col: int = N_FEATURES) -> List[torch.Tensor]:
-    """
-    Remove padding using mask column and split batch into list of events.
-    
-    Args:
-        batch: (B, N, 15+K) where column mask_col is the mask
-        mask_col: Column index containing the mask (default 15)
-        
-    Returns:
-        List of (N_i, 15) tensors with padding removed and mask column dropped
-    """
-    batch_size = batch.shape[0]
-    event_tensors = []
-    
-    for i in range(batch_size):
-        # Extract mask for this event
-        mask = batch[i, :, mask_col] > 0.5  # Boolean mask
-        
-        # Extract real particles (remove padding)
-        real_particles = batch[i, mask, :N_FEATURES]  # Take only data columns, drop mask
-        
-        event_tensors.append(real_particles)
-    
-    return event_tensors
 
 
 def tensor_to_root_dict(event_tensors: List[torch.Tensor], branch_name: str) -> Dict[str, ak.Array]:
@@ -343,86 +278,6 @@ def write_root_file(output_file: str, branches_dict: Dict[str, Dict[str, ak.Arra
     # Write to ROOT file
     with uproot.recreate(output_file) as f:
         f[tree_name] = combined_dict
-
-
-def root_genparticle_to_tensor(particle_arrays: ak.Array, branch_prefix: str = "Particle",
-                                max_events: int = None) -> List[torch.Tensor]:
-    """
-    Convert ROOT GenParticle branch to list of PyTorch tensors (one per event).
-    
-    GenParticle objects (from Delphes/stableParticles before PropParticlegator) have:
-    - PID, Status, Charge, E, Px, Py, Pz, PT, Eta, Phi, T, X, Y, Z, Mass (15 attributes)
-    
-    Args:
-        particle_arrays: awkward array with particle data from uproot
-        branch_prefix: branch name (default: "Particle")
-        max_events: maximum number of events to process
-        
-    Returns:
-        List of tensors, one per event, each of shape (n_particles, 15)
-    """
-    # Determine number of events
-    n_events = len(particle_arrays[f"{branch_prefix}/{branch_prefix}.PT"])
-    if max_events is not None:
-        n_events = min(n_events, max_events)
-    
-    event_tensors = []
-    
-    for i in range(n_events):
-        n_particles = len(particle_arrays[f"{branch_prefix}/{branch_prefix}.PT"][i])
-        
-        if n_particles == 0:
-            event_tensors.append(torch.zeros((0, N_FEATURES), dtype=torch.float64))
-            continue
-        
-        # Create tensor for this event
-        particles = np.zeros((n_particles, N_FEATURES))
-        
-        # Extract data from ROOT (GenParticle has all 15 attributes)
-        particles[:, PID] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.PID"][i])
-        particles[:, STATUS] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Status"][i])
-        particles[:, CHARGE] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Charge"][i])
-        particles[:, E] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.E"][i])
-        particles[:, PX] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Px"][i])
-        particles[:, PY] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Py"][i])
-        particles[:, PZ] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Pz"][i])
-        particles[:, PT] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.PT"][i])
-        particles[:, ETA] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Eta"][i]) #TODO: Prob is EtaOuter
-        particles[:, PHI] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Phi"][i]) # TODO: Prob is PhiOuter
-        particles[:, T] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.T"][i])
-        particles[:, X] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.X"][i])
-        particles[:, Y] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Y"][i])
-        particles[:, Z] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Z"][i])
-        particles[:, MASS] = np.array(particle_arrays[f"{branch_prefix}/{branch_prefix}.Mass"][i])
-        
-        # Convert to torch tensor
-        event_tensors.append(torch.from_numpy(particles))
-    
-    return event_tensors
-
-
-def load_genparticles(tree, max_events: int = None) -> List[torch.Tensor]:
-    """
-    Load GenParticle (Delphes/stableParticles) from ROOT tree.
-    
-    Args:
-        tree: uproot TTree object
-        max_events: Maximum number of events to load
-        
-    Returns:
-        List of tensors, one per event, each of shape (n_particles, 15)
-    """
-    branch_name = "Particle"
-    attrs = ['PID', 'Status', 'Charge', 'E', 'Px', 'Py', 'Pz', 'PT', 'Eta', 'Phi', 'T', 'X', 'Y', 'Z', 'Mass']
-    
-    # Build list of keys
-    branch_keys = [f"{branch_name}/{branch_name}.{attr}" for attr in attrs]
-    
-    # Read from ROOT
-    arrays = tree.arrays(branch_keys, entry_stop=max_events, library="ak")
-    
-    # Convert to tensors
-    return root_genparticle_to_tensor(arrays, branch_name, max_events)
 
 
 def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tensor]:
@@ -632,5 +487,4 @@ def get_mass_from_pdg(pdg_id: int) -> float:
     
     # Default mass for unknown particles (use pion mass as reasonable default)
     return PION_MASS
-
 
