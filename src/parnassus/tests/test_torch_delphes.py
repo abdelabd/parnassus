@@ -357,6 +357,17 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         max_towers_per_event=500,
         device=DEVICE
     )
+    eflowphoton_module = ECal.EFlowPhoton(
+        eta_bins=eta_bins,
+        phi_bins=phi_bins,
+        energy_min=0.5,
+        energy_sig_min=2.0,
+        resolution_formula='ecal_cms',
+        is_ecal=True,
+        smear_tower_center=True,
+        max_towers_per_event=500,
+        device=DEVICE
+    )
     
     print(f"\nECal (batch_size={batch_size})...")
     print(f"genevent_tensors.shape: {genevent_tensors.shape}")
@@ -366,7 +377,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     genevent_tensors_ecal = []
     all_ecal_towers = []
     all_eflow_tracks = []
-    # all_eflow_photons = []
+    all_eflow_photons = []
     
     # Process in batches
     for batch_start in tqdm(range(0, n_event, batch_size)):
@@ -376,22 +387,24 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
         
         # Apply ECal
+
+        # 1. EFlowTracks
         batch_eflow_tracks = eflowtrack_module(batch_events)
         batch_tracks = torch.cat(batch_eflow_tracks, dim=0).cpu() if batch_eflow_tracks else torch.empty(0, 5)
         all_eflow_tracks.append(batch_tracks)
         
+        # 2. EFlowPhotons
+        batch_photons = eflowphoton_module(batch_events)
+        batch_photons = torch.cat(batch_photons, dim=0).cpu() if batch_photons else torch.empty(0, 5)
+        all_eflow_photons.append(batch_photons)
 
-        # batch_photons = torch.cat(outputs['eflowPhotons'], dim=0).cpu() if outputs['eflowPhotons'] else torch.empty(0, 5)
-        # all_eflow_photons.append(batch_photons)
-
+        # 3. Towers
         batch_ecal, batch_towers = tower_module(batch_events)
         batch_towers = torch.cat(batch_towers, dim=0).cpu() if batch_towers else torch.empty(0, 5)
         all_ecal_towers.append(batch_towers)
 
         genevent_tensors_ecal.append(batch_ecal.cpu())
         
-
-    
     # Stack all event tensors into a single tensor
     genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
     
@@ -400,8 +413,8 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     print(f"Total eflow tracks: {sum(t.shape[0] for t in all_eflow_tracks)}")
     # print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
     
-    # return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
-    return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks
+    return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
+    # return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks
 
 
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, debug=False):
@@ -446,7 +459,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
         ('MergedTracks', track_kinematic_vars),
         ('ECalTower', tower_kinematic_vars),
         ('ECal_EFlowTrack', track_kinematic_vars),
-        # ('EFlowPhoton', tower_kinematic_vars)
+        ('EFlowPhoton', tower_kinematic_vars)
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -778,12 +791,12 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("STEP 6: Applying ECal (SimpleCalorimeter) (batched)")
     print("="*80)
     
-    # genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
-    #     genevent_tensors, batch_size=batch_size
-    # )
-    genevent_tensors, ecal_towers, eflow_tracks = process_ecal_pipeline(
+    genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
         genevent_tensors, batch_size=batch_size
     )
+    # genevent_tensors, ecal_towers, eflow_tracks = process_ecal_pipeline(
+    #     genevent_tensors, batch_size=batch_size
+    # )
     
     print("\n✓ ECal applied")
     
@@ -809,7 +822,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks'),
         'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
         'ECal_EFlowTrack': tensor_to_root_dict(eflow_tracks, 'ECal_EFlowTrack'),
-        # 'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
+        'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
     }
     write_root_file(output_file, branches_v3_2)
 
