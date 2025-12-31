@@ -9,14 +9,13 @@ This module:
 """
 import torch
 import torch.nn as nn
-import numpy as np
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 
 class Tower(nn.Module):
     """
-    PyTorch implementation of Delphes Tower module.
+    PyTorch implementation of Delphes SimpleCalorimeter.Tower module.
     
     Simulates electromagnetic or hadronic calorimeter response by:
     - Binning particles into eta-phi towers
@@ -30,10 +29,7 @@ class Tower(nn.Module):
     Output: genevent_tensors with shape (N_events, N_particles + N_towers, D+3)
             New masks: PASS_ECAL_TOWER, PASS_EFLOW_TRACK, PASS_EFLOW_PHOTON
             
-            Dictionary with:
-            - 'ecalTowers': List of tower tensors per event
-            - 'eflowTracks': List of energy flow track tensors per event  
-            - 'eflowPhotons': List of energy flow photon tensors per event
+            ecalTowers: List of tower tensors per event
     """
     
     def __init__(self,
