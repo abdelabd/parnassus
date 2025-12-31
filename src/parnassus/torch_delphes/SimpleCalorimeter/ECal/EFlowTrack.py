@@ -203,13 +203,8 @@ class EFlowTrack(nn.Module):
             # Process this event
             eflow_tracks = self._process_event(event_tensor)
             all_eflow_tracks.append(eflow_tracks)
-
         
-        outputs = {
-            'eflowTracks': all_eflow_tracks,
-        }
-        
-        return genevent_tensors, outputs
+        return all_eflow_tracks
     
     def _process_event(self, event_tensor):
         """
@@ -335,7 +330,6 @@ class EFlowTrack(nn.Module):
         
         # Get tower eta/phi from bin indices
         tower_eta_bins = unique_tower_ids // n_phi_bins
-        tower_phi_bins = unique_tower_ids % n_phi_bins
         
         # Tower center positions
         tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
@@ -368,7 +362,6 @@ class EFlowTrack(nn.Module):
             tower_sigma_val = tower_sigma[tower_idx]
             
             # Find tracks in this tower
-            track_mask = valid_tracks_mask.clone()
             if tracks.shape[0] > 0:
                 track_eta = tracks[:, CMAP["ETA_OUTER"]]
                 track_phi = tracks[:, CMAP["PHI_OUTER"]]
@@ -457,123 +450,3 @@ class EFlowTrack(nn.Module):
                 eflow_tracks = non_depositing_tracks
         
         return eflow_tracks
-    
-    def _create_tower_object(self, eta, phi, energy, time, n_features):
-        """
-        Create a tower object as a particle-like tensor.
-        """
-        tower = torch.zeros(1, n_features, dtype=torch.float64, device=self.device)
-        
-        # Set tower properties
-        tower[0, CMAP["PID"]] = 22 if self.is_ecal else 0  # Photon for ECAL, neutral for HCAL
-        tower[0, CMAP["STATUS"]] = 1
-        tower[0, CMAP["CHARGE"]] = 0.0
-        tower[0, CMAP["E"]] = energy
-        
-        # Momentum (massless)
-        pt = energy / torch.cosh(eta)
-        px = pt * torch.cos(phi)
-        py = pt * torch.sin(phi)
-        pz = pt * torch.sinh(eta)
-        
-        tower[0, CMAP["PT"]] = pt
-        tower[0, CMAP["ETA"]] = eta
-        tower[0, CMAP["PHI"]] = phi
-        tower[0, CMAP["PX"]] = px
-        tower[0, CMAP["PY"]] = py
-        tower[0, CMAP["PZ"]] = pz
-        
-        # Position (approximate from eta/phi at calorimeter surface)
-        # For simplicity, use R=1.29m (tracker radius) as reference
-        r = 1.29  # meters
-        x = r * torch.cos(phi)
-        y = r * torch.sin(phi)
-        z = r * torch.sinh(eta)
-        
-        tower[0, CMAP["X"]] = x * 1000  # convert to mm
-        tower[0, CMAP["Y"]] = y * 1000
-        tower[0, CMAP["Z"]] = z * 1000
-        tower[0, CMAP["T"]] = time
-        tower[0, CMAP["MASS"]] = 0.0
-        
-        return tower
-    
-# Example usage and testing
-if __name__ == "__main__":
-    print("Testing EFlowTrack PyTorch Module\n")
-    
-    # Set random seed
-    torch.manual_seed(42)
-    np.random.seed(42)
-    
-    # Create example event
-    n_events = 2
-    n_particles = 50
-    n_dim = 19  # After Merger module
-    
-    genevent_tensors = torch.zeros((n_events, n_particles, n_dim), dtype=torch.float64)
-    
-    # Fill with example particles
-    for event_idx in range(n_events):
-        n_real = np.random.randint(20, 40)
-        
-        # Create mix of particles
-        for i in range(n_real):
-            # Random kinematics
-            pt = np.random.uniform(1.0, 50.0)
-            eta = np.random.uniform(-2.5, 2.5)
-            phi = np.random.uniform(-np.pi, np.pi)
-            
-            # Random PID (electrons, photons, charged hadrons)
-            pid = np.random.choice([11, 22, 211])
-            
-            genevent_tensors[event_idx, i, CMAP["PID"]] = pid
-            genevent_tensors[event_idx, i, CMAP["CHARGE"]] = 1.0 if abs(pid) == 211 or abs(pid) == 11 else 0.0
-            genevent_tensors[event_idx, i, CMAP["PT"]] = pt
-            genevent_tensors[event_idx, i, CMAP["ETA"]] = eta
-            genevent_tensors[event_idx, i, CMAP["PHI"]] = phi
-            genevent_tensors[event_idx, i, CMAP["E"]] = pt * np.cosh(eta)
-            
-            # Set masks
-            genevent_tensors[event_idx, i, CMAP["IS_NOT_PAD"]] = 1.0
-            genevent_tensors[event_idx, i, CMAP["PASS_PROP"]] = 1.0
-            
-            # Some are tracks
-            if i < n_real // 2:
-                genevent_tensors[event_idx, i, CMAP["PASS_MERGER"]] = 1.0
-    
-    # Create EFlowTrack module
-    # CMS-like binning (simplified)
-    eta_bins = np.linspace(-2.5, 2.5, 50)
-    phi_bins = np.linspace(-np.pi, np.pi, 50)
-    
-    ecal = EFlowTrack(
-        eta_bins=eta_bins,
-        phi_bins=phi_bins,
-        energy_min=0.5,
-        energy_sig_min=2.0,
-        resolution_formula='ecal_cms',
-        is_ecal=True,
-        max_towers_per_event=100,
-        device='cpu'
-    )
-    
-    print("Input shape:", genevent_tensors.shape)
-    
-    # Process
-    genevent_out, outputs = ecal(genevent_tensors)
-    
-    print("\nOutput shape:", genevent_out.shape)
-    print("\nNumber of towers per event:")
-    for i, towers in enumerate(outputs['ecalTowers']):
-        print(f"  Event {i}: {towers.shape[0]} towers")
-    
-    print("\nNumber of eflow tracks per event:")
-    for i, tracks in enumerate(outputs['eflowTracks']):
-        print(f"  Event {i}: {tracks.shape[0]} eflow tracks")
-    
-    print("\nNumber of eflow photons per event:")
-    for i, photons in enumerate(outputs['eflowPhotons']):
-        print(f"  Event {i}: {photons.shape[0]} eflow photons")
-    
-    print("\n✓ EFlowTrack test completed!")

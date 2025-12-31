@@ -195,33 +195,21 @@ class Tower(nn.Module):
         
         # Initialize output lists
         all_towers = []
-        all_eflow_tracks = []
-        all_eflow_photons = []
-        
         # Process each event independently (towers are event-specific)
         for event_idx in range(n_events):
             event_tensor = genevent_tensors[event_idx]  # (N_particles, D)
             
             # Process this event
-            towers, eflow_tracks, eflow_photons = self._process_event(event_tensor)
-            
+            towers = self._process_event(event_tensor)
             all_towers.append(towers)
-            all_eflow_tracks.append(eflow_tracks)
-            all_eflow_photons.append(eflow_photons)
         
         # Now we need to append towers to genevent_tensors and add masks
         # Pad towers to max_towers_per_event and concatenate
         genevent_tensors_out = self._append_towers_to_events(
-            genevent_tensors, all_towers, all_eflow_tracks, all_eflow_photons
+            genevent_tensors, all_towers
         )
         
-        outputs = {
-            'ecalTowers': all_towers,
-            'eflowTracks': all_eflow_tracks,
-            'eflowPhotons': all_eflow_photons
-        }
-        
-        return genevent_tensors_out, outputs
+        return genevent_tensors_out, all_towers
     
     def _process_event(self, event_tensor):
         """
@@ -241,37 +229,8 @@ class Tower(nn.Module):
             event_tensor[:, CMAP["PASS_PROP"]]
         ).bool()
         
-        valid_tracks_mask = (
-            event_tensor[:, CMAP["IS_NOT_PAD"]] *
-            event_tensor[:, CMAP["PASS_PROP"]] *
-            event_tensor[:, CMAP["PASS_MERGER"]]
-        ).bool()
-        
         # Get particle and track subsets
         particles = event_tensor[valid_particles_mask]  # All particles after propagation
-        all_tracks = event_tensor[valid_tracks_mask]  # Tracks (charged particles that passed all filters)
-        
-        if particles.shape[0] == 0:
-            # No particles in this event
-            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            return empty, empty, empty
-        
-        # Split tracks into depositing (pions, kaons, protons) and non-depositing (muons)
-        # This matches C++ logic (lines 364-378) where tracks with zero energy fraction
-        # are passed directly to eflow output without entering tower processing
-        if all_tracks.shape[0] > 0:
-            track_pids = all_tracks[:, CMAP["PID"]]
-            track_energy_fractions = self.get_energy_fraction(track_pids)
-            
-            # Depositing tracks: energy_fraction > 1e-9 (enter tower processing)
-            depositing_mask = track_energy_fractions > 1.0e-9
-            tracks = all_tracks[depositing_mask]
-            
-            # Non-depositing tracks: energy_fraction <= 1e-9 (bypass towers, go to eflow)
-            non_depositing_tracks = all_tracks[~depositing_mask]
-        else:
-            tracks = all_tracks
-            non_depositing_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
         
         # Bin particles into towers
         particle_eta = particles[:, CMAP["ETA_OUTER"]]
@@ -291,10 +250,6 @@ class Tower(nn.Module):
             (particle_phi_bin >= 0) & (particle_phi_bin < len(self.phi_bins) - 1)
         )
         
-        if not valid_bin_mask.any():
-            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            return empty, empty, empty
-        
         # Apply bin filter
         particles = particles[valid_bin_mask]
         particle_eta_bin = particle_eta_bin[valid_bin_mask]
@@ -310,10 +265,6 @@ class Tower(nn.Module):
         
         # Filter out particles that deposit zero energy (muons, neutrinos, etc.)
         nonzero_energy_mask = particle_energy_deposited > 0.0
-        if not nonzero_energy_mask.any():
-            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            return empty, empty, empty
-        
         particles = particles[nonzero_energy_mask]
         particle_eta_bin = particle_eta_bin[nonzero_energy_mask]
         particle_phi_bin = particle_phi_bin[nonzero_energy_mask]
@@ -385,63 +336,15 @@ class Tower(nn.Module):
         # Recompute sigma after smearing
         tower_sigma = self.resolution_fn(tower_energies_smeared, tower_eta)
         
-        # DON'T pre-filter towers here! The C++ code applies the threshold check
-        # INSIDE FinalizeTower(), after computing the energy flow logic.
-        # We'll check the threshold in the per-tower loop below.
-        
         n_towers = len(tower_energies_smeared)
         
         # Now handle track-tower matching for energy flow
         # For each tower, find tracks in the same tower
-        eflow_tracks_list = []
-        eflow_photons_list = []
         towers_list = []
         
         for tower_idx in range(n_towers):
-            tid = unique_tower_ids[tower_idx]
             tower_energy = tower_energies_smeared[tower_idx]
             tower_sigma_val = tower_sigma[tower_idx]
-            
-            # Find tracks in this tower
-            track_mask = valid_tracks_mask.clone()
-            if tracks.shape[0] > 0:
-                track_eta = tracks[:, CMAP["ETA_OUTER"]]
-                track_phi = tracks[:, CMAP["PHI_OUTER"]]
-                track_eta_bin = torch.searchsorted(self.eta_bins, track_eta, right=False) - 1
-                track_phi_bin = torch.searchsorted(self.phi_bins, track_phi, right=False) - 1
-                track_tower_ids = track_eta_bin * n_phi_bins + track_phi_bin
-                
-                tower_tracks_mask = track_tower_ids == tid
-                tower_tracks = tracks[tower_tracks_mask]
-            else:
-                tower_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            
-            # Compute total track energy and track resolution
-            if tower_tracks.shape[0] > 0:
-                track_energies = tower_tracks[:, CMAP["E"]]
-                track_resolutions = tower_tracks[:, CMAP["PT"]] * 0.01  # Approximate track resolution
-                
-                # Get energy fractions for tracks
-                track_pids = tower_tracks[:, CMAP["PID"]]
-                track_energy_fractions = self.get_energy_fraction(track_pids)
-                track_energies_deposited = track_energies * track_energy_fractions
-                
-                total_track_energy = track_energies_deposited.sum()
-                total_track_sigma = torch.sqrt((track_resolutions * track_energies)**2).sum()
-            else:
-                total_track_energy = 0.0
-                total_track_sigma = 0.0
-            
-            # Compute neutral energy
-            neutral_energy = max(tower_energy - total_track_energy, 0.0)
-            
-            # Compute neutral significance
-            if total_track_sigma**2 + tower_sigma_val**2 > 0:
-                neutral_sigma = neutral_energy / torch.sqrt(
-                    torch.tensor(total_track_sigma**2 + tower_sigma_val**2, device=self.device)
-                )
-            else:
-                neutral_sigma = 0.0
             
             # Apply significance threshold to tower energy (C++ line 436)
             # if(energy < fEnergyMin || energy < fEnergySignificanceMin * sigma) energy = 0.0;
@@ -455,44 +358,7 @@ class Tower(nn.Module):
                     tower_energy, tower_times[tower_idx],
                     event_tensor.shape[1]
                 )
-                towers_list.append(tower_obj)
-            
-            # Energy flow logic for creating eflow objects
-            if neutral_energy > self.energy_min and neutral_sigma > self.energy_sig_min:
-                # Significant neutral energy - create eflow photon
-                neutral_tower = self._create_tower_object(
-                    tower_eta[tower_idx], tower_phi[tower_idx],
-                    neutral_energy, tower_times[tower_idx],
-                    event_tensor.shape[1]
-                )
-                eflow_photons_list.append(neutral_tower)
-                
-                # Pass tracks through unchanged (they coexist with neutral energy)
-                for track in tower_tracks:
-                    eflow_tracks_list.append(track.unsqueeze(0))
-            
-            elif total_track_energy > 0.0:
-                # No significant neutral energy, but we have tracks
-                # Rescale tracks to match best energy estimate
-                weight_track = 1.0 / total_track_sigma**2 if total_track_sigma > 0 else 0.0
-                weight_calo = 1.0 / tower_sigma_val**2 if tower_sigma_val > 0 else 0.0
-                
-                if weight_track + weight_calo > 0:
-                    best_energy = (weight_track * total_track_energy + weight_calo * tower_energy) / \
-                                  (weight_track + weight_calo)
-                    rescale_factor = best_energy / total_track_energy
-                else:
-                    rescale_factor = 1.0
-                
-                # Rescale and add tracks as eflow tracks
-                for track in tower_tracks:
-                    rescaled_track = track.clone()
-                    rescaled_track[CMAP["PT"]] *= rescale_factor
-                    rescaled_track[CMAP["E"]] *= rescale_factor
-                    rescaled_track[CMAP["PX"]] *= rescale_factor
-                    rescaled_track[CMAP["PY"]] *= rescale_factor
-                    rescaled_track[CMAP["PZ"]] *= rescale_factor
-                    eflow_tracks_list.append(rescaled_track.unsqueeze(0))
+                towers_list.append(tower_obj)       
         
         # Concatenate results
         if len(towers_list) > 0:
@@ -500,25 +366,7 @@ class Tower(nn.Module):
         else:
             towers = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
         
-        if len(eflow_tracks_list) > 0:
-            eflow_tracks = torch.cat(eflow_tracks_list, dim=0)
-        else:
-            eflow_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-        
-        # Add non-depositing tracks (muons) that bypassed tower processing
-        # These tracks go directly to eflow output (C++ line 377)
-        if non_depositing_tracks.shape[0] > 0:
-            if eflow_tracks.shape[0] > 0:
-                eflow_tracks = torch.cat([eflow_tracks, non_depositing_tracks], dim=0)
-            else:
-                eflow_tracks = non_depositing_tracks
-        
-        if len(eflow_photons_list) > 0:
-            eflow_photons = torch.cat(eflow_photons_list, dim=0)
-        else:
-            eflow_photons = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-        
-        return towers, eflow_tracks, eflow_photons
+        return towers
     
     def _create_tower_object(self, eta, phi, energy, time, n_features):
         """
@@ -560,8 +408,7 @@ class Tower(nn.Module):
         
         return tower
     
-    def _append_towers_to_events(self, genevent_tensors, all_towers, 
-                                 all_eflow_tracks, all_eflow_photons):
+    def _append_towers_to_events(self, genevent_tensors, all_towers):
         """
         Append towers to genevent_tensors and add masks.
         
@@ -585,8 +432,6 @@ class Tower(nn.Module):
         # Process each event
         for event_idx in range(n_events):
             towers = all_towers[event_idx]
-            eflow_tracks = all_eflow_tracks[event_idx]
-            eflow_photons = all_eflow_photons[event_idx]
             
             n_towers = towers.shape[0]
             
@@ -603,17 +448,17 @@ class Tower(nn.Module):
                 genevent_tensors_out[event_idx, tower_start:tower_end, CMAP["IS_NOT_PAD"]] = 1.0
                 genevent_tensors_out[event_idx, tower_start:tower_end, CMAP["PASS_ECAL_TOWER"]] = 1.0
             
-            # Mark eflow tracks
-            if eflow_tracks.shape[0] > 0:
+            # TODO: Mark eflow tracks
+            # if eflow_tracks.shape[0] > 0:
                 # Find matching particles in original tensor and mark them
                 # For simplicity, we'll create a new mask based on particle IDs
-                # (TODO: This is a simplified approach; production code might need particle tracking)
+                # (This is a simplified approach; production code might need particle tracking)
                 pass
             
-            # Mark eflow photons  
-            if eflow_photons.shape[0] > 0:
+            # TODO: Mark eflow photons  
+            # if eflow_photons.shape[0] > 0:
                 # These are actually the towers that had neutral excess
                 # TODO: Already marked above with PASS_ECAL_TOWER
-                pass
+                # pass
         
         return genevent_tensors_out
