@@ -38,7 +38,8 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter
+from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator
+from parnassus.torch_delphes.SimpleCalorimeter import ECal
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
@@ -334,7 +335,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     phi_bins = [i * np.pi / 180.0 for i in range(-180, 181)]
     
     # Initialize ECal module
-    ecal_module = SimpleCalorimeter(
+    ecal_module = ECal.EFlowTrack(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
         energy_min=0.5,
@@ -352,9 +353,9 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     print(f"Number of phi bins: {len(phi_bins)}")
     
     genevent_tensors_ecal = []
-    all_ecal_towers = []
+    # all_ecal_towers = []
     all_eflow_tracks = []
-    all_eflow_photons = []
+    # all_eflow_photons = []
     
     # Process in batches
     for batch_start in tqdm(range(0, n_event, batch_size)):
@@ -370,23 +371,25 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         
         # Collect outputs for validation - match upstream per-batch pattern
         # Concatenate all outputs from this batch into single tensors
-        batch_towers = torch.cat(outputs['ecalTowers'], dim=0).cpu() if outputs['ecalTowers'] else torch.empty(0, 5)
+        # batch_towers = torch.cat(outputs['ecalTowers'], dim=0).cpu() if outputs['ecalTowers'] else torch.empty(0, 5)
         batch_tracks = torch.cat(outputs['eflowTracks'], dim=0).cpu() if outputs['eflowTracks'] else torch.empty(0, 5)
-        batch_photons = torch.cat(outputs['eflowPhotons'], dim=0).cpu() if outputs['eflowPhotons'] else torch.empty(0, 5)
+        # batch_photons = torch.cat(outputs['eflowPhotons'], dim=0).cpu() if outputs['eflowPhotons'] else torch.empty(0, 5)
         
-        all_ecal_towers.append(batch_towers)
+        # all_ecal_towers.append(batch_towers)
         all_eflow_tracks.append(batch_tracks)
-        all_eflow_photons.append(batch_photons)
+        # all_eflow_photons.append(batch_photons)
     
     # Stack all event tensors into a single tensor
     genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
     
     print(f"\nECal output shape: {genevent_tensors_ecal.shape}")
-    print(f"Total towers: {sum(t.shape[0] for t in all_ecal_towers)}")
+    # print(f"Total towers: {sum(t.shape[0] for t in all_ecal_towers)}")
     print(f"Total eflow tracks: {sum(t.shape[0] for t in all_eflow_tracks)}")
-    print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
+    # print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
     
-    return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
+    # return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
+    return genevent_tensors_ecal, all_eflow_tracks
+
 
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, debug=False):
     """
@@ -428,9 +431,9 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
         ('ElectronSmeared', track_kinematic_vars),
         ('MuonSmeared', track_kinematic_vars),
         ('MergedTracks', track_kinematic_vars),
-        ('ECalTower', tower_kinematic_vars),
+        # ('ECalTower', tower_kinematic_vars),
         ('ECal_EFlowTrack', track_kinematic_vars),
-        ('EFlowPhoton', tower_kinematic_vars)
+        # ('EFlowPhoton', tower_kinematic_vars)
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -762,7 +765,10 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("STEP 6: Applying ECal (SimpleCalorimeter) (batched)")
     print("="*80)
     
-    genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
+    # genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
+    #     genevent_tensors, batch_size=batch_size
+    # )
+    genevent_tensors, eflow_tracks = process_ecal_pipeline(
         genevent_tensors, batch_size=batch_size
     )
     
@@ -788,9 +794,9 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
         'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared'),
         'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks'),
-        'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
+        # 'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
         'ECal_EFlowTrack': tensor_to_root_dict(eflow_tracks, 'ECal_EFlowTrack'),
-        'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
+        # 'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
     }
     write_root_file(output_file, branches_v3_2)
 
@@ -825,9 +831,9 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     # print(f"  Smeared:    {sum(t.shape[0] for t in mu_smeared)}")
     
     print(f"\nECal:")
-    print(f"  Towers:        {sum(t.shape[0] for t in ecal_towers)}")
+    # print(f"  Towers:        {sum(t.shape[0] for t in ecal_towers)}")
     print(f"  EFlow Tracks:  {sum(t.shape[0] for t in eflow_tracks)}")
-    print(f"  EFlow Photons: {sum(t.shape[0] for t in eflow_photons)}")
+    # print(f"  EFlow Photons: {sum(t.shape[0] for t in eflow_photons)}")
     
     print("\n" + "="*80)
     print("✓ ALL PROCESSING COMPLETE!")
