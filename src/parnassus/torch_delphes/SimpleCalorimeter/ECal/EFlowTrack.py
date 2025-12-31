@@ -1,5 +1,5 @@
 """
-PyTorch implementation of Delphes SimpleCalorimeter module.
+PyTorch implementation of Delphes EFlowTrack module.
 
 Implements calorimeter tower binning, energy smearing, and energy flow object creation.
 This module:
@@ -14,9 +14,9 @@ import numpy as np
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 
-class SimpleCalorimeter(nn.Module):
+class EFlowTrack(nn.Module):
     """
-    PyTorch implementation of Delphes SimpleCalorimeter module.
+    PyTorch implementation of Delphes EFlowTrack module.
     
     Simulates electromagnetic or hadronic calorimeter response by:
     - Binning particles into eta-phi towers
@@ -181,7 +181,7 @@ class SimpleCalorimeter(nn.Module):
     
     def forward(self, genevent_tensors):
         """
-        Apply SimpleCalorimeter to generate calorimeter towers and energy flow objects.
+        Apply EFlowTrack to generate calorimeter towers and energy flow objects.
         
         Args:
             genevent_tensors: (N_events, N_particles, D) tensor with masks
@@ -193,35 +193,23 @@ class SimpleCalorimeter(nn.Module):
         genevent_tensors = genevent_tensors.to(self.device)
         n_events, n_particles, n_dim = genevent_tensors.shape
         
-        # Initialize output lists
-        all_towers = []
+        # Initialize output list
         all_eflow_tracks = []
-        all_eflow_photons = []
         
         # Process each event independently (towers are event-specific)
         for event_idx in range(n_events):
             event_tensor = genevent_tensors[event_idx]  # (N_particles, D)
             
             # Process this event
-            towers, eflow_tracks, eflow_photons = self._process_event(event_tensor)
-            
-            all_towers.append(towers)
+            eflow_tracks = self._process_event(event_tensor)
             all_eflow_tracks.append(eflow_tracks)
-            all_eflow_photons.append(eflow_photons)
-        
-        # Now we need to append towers to genevent_tensors and add masks
-        # Pad towers to max_towers_per_event and concatenate
-        genevent_tensors_out = self._append_towers_to_events(
-            genevent_tensors, all_towers, all_eflow_tracks, all_eflow_photons
-        )
+
         
         outputs = {
-            'ecalTowers': all_towers,
             'eflowTracks': all_eflow_tracks,
-            'eflowPhotons': all_eflow_photons
         }
         
-        return genevent_tensors_out, outputs
+        return genevent_tensors, outputs
     
     def _process_event(self, event_tensor):
         """
@@ -250,11 +238,6 @@ class SimpleCalorimeter(nn.Module):
         # Get particle and track subsets
         particles = event_tensor[valid_particles_mask]  # All particles after propagation
         all_tracks = event_tensor[valid_tracks_mask]  # Tracks (charged particles that passed all filters)
-        
-        if particles.shape[0] == 0:
-            # No particles in this event
-            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            return empty, empty, empty
         
         # Split tracks into depositing (pions, kaons, protons) and non-depositing (muons)
         # This matches C++ logic (lines 364-378) where tracks with zero energy fraction
@@ -291,10 +274,6 @@ class SimpleCalorimeter(nn.Module):
             (particle_phi_bin >= 0) & (particle_phi_bin < len(self.phi_bins) - 1)
         )
         
-        if not valid_bin_mask.any():
-            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            return empty, empty, empty
-        
         # Apply bin filter
         particles = particles[valid_bin_mask]
         particle_eta_bin = particle_eta_bin[valid_bin_mask]
@@ -310,10 +289,6 @@ class SimpleCalorimeter(nn.Module):
         
         # Filter out particles that deposit zero energy (muons, neutrinos, etc.)
         nonzero_energy_mask = particle_energy_deposited > 0.0
-        if not nonzero_energy_mask.any():
-            empty = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-            return empty, empty, empty
-        
         particles = particles[nonzero_energy_mask]
         particle_eta_bin = particle_eta_bin[nonzero_energy_mask]
         particle_phi_bin = particle_phi_bin[nonzero_energy_mask]
@@ -364,19 +339,15 @@ class SimpleCalorimeter(nn.Module):
         
         # Tower center positions
         tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
-        tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1])
         
         # Optionally smear tower centers
         if self.smear_tower_center:
             tower_eta = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
                         (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
                         self.eta_bins[tower_eta_bins]
-            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
-                        (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
-                        self.phi_bins[tower_phi_bins]
+
         else:
             tower_eta = tower_eta_center
-            tower_phi = tower_phi_center
         
         # Apply energy smearing
         tower_sigma = self.resolution_fn(tower_energies, tower_eta)
@@ -385,18 +356,12 @@ class SimpleCalorimeter(nn.Module):
         # Recompute sigma after smearing
         tower_sigma = self.resolution_fn(tower_energies_smeared, tower_eta)
         
-        # DON'T pre-filter towers here! The C++ code applies the threshold check
-        # INSIDE FinalizeTower(), after computing the energy flow logic.
-        # We'll check the threshold in the per-tower loop below.
-        
         n_towers = len(tower_energies_smeared)
         
         # Now handle track-tower matching for energy flow
         # For each tower, find tracks in the same tower
         eflow_tracks_list = []
-        eflow_photons_list = []
-        towers_list = []
-        
+
         for tower_idx in range(n_towers):
             tid = unique_tower_ids[tower_idx]
             tower_energy = tower_energies_smeared[tower_idx]
@@ -448,25 +413,9 @@ class SimpleCalorimeter(nn.Module):
             if tower_energy < self.energy_min or tower_energy < self.energy_sig_min * tower_sigma_val:
                 tower_energy = 0.0  # Zero the tower energy like C++ does
             
-            # Create tower object for ECalTower output if energy > 0
-            if tower_energy > 0.0:
-                tower_obj = self._create_tower_object(
-                    tower_eta[tower_idx], tower_phi[tower_idx],
-                    tower_energy, tower_times[tower_idx],
-                    event_tensor.shape[1]
-                )
-                towers_list.append(tower_obj)
             
             # Energy flow logic for creating eflow objects
             if neutral_energy > self.energy_min and neutral_sigma > self.energy_sig_min:
-                # Significant neutral energy - create eflow photon
-                neutral_tower = self._create_tower_object(
-                    tower_eta[tower_idx], tower_phi[tower_idx],
-                    neutral_energy, tower_times[tower_idx],
-                    event_tensor.shape[1]
-                )
-                eflow_photons_list.append(neutral_tower)
-                
                 # Pass tracks through unchanged (they coexist with neutral energy)
                 for track in tower_tracks:
                     eflow_tracks_list.append(track.unsqueeze(0))
@@ -494,12 +443,6 @@ class SimpleCalorimeter(nn.Module):
                     rescaled_track[CMAP["PZ"]] *= rescale_factor
                     eflow_tracks_list.append(rescaled_track.unsqueeze(0))
         
-        # Concatenate results
-        if len(towers_list) > 0:
-            towers = torch.cat(towers_list, dim=0)
-        else:
-            towers = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-        
         if len(eflow_tracks_list) > 0:
             eflow_tracks = torch.cat(eflow_tracks_list, dim=0)
         else:
@@ -513,12 +456,7 @@ class SimpleCalorimeter(nn.Module):
             else:
                 eflow_tracks = non_depositing_tracks
         
-        if len(eflow_photons_list) > 0:
-            eflow_photons = torch.cat(eflow_photons_list, dim=0)
-        else:
-            eflow_photons = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
-        
-        return towers, eflow_tracks, eflow_photons
+        return eflow_tracks
     
     def _create_tower_object(self, eta, phi, energy, time, n_features):
         """
@@ -560,68 +498,9 @@ class SimpleCalorimeter(nn.Module):
         
         return tower
     
-    def _append_towers_to_events(self, genevent_tensors, all_towers, 
-                                 all_eflow_tracks, all_eflow_photons):
-        """
-        Append towers to genevent_tensors and add masks.
-        
-        Pad to (N_particles + max_towers_per_event) per event.
-        """
-        n_events, n_particles, n_dim = genevent_tensors.shape
-        
-        # New dimension includes 3 new mask columns
-        n_dim_out = n_dim + 3
-        max_size = n_particles + self.max_towers_per_event
-        
-        # Initialize output tensor
-        genevent_tensors_out = torch.zeros(
-            (n_events, max_size, n_dim_out),
-            dtype=torch.float64, device=self.device
-        )
-        
-        # Copy original particle data (first n_particles entries per event)
-        genevent_tensors_out[:, :n_particles, :n_dim] = genevent_tensors
-        
-        # Process each event
-        for event_idx in range(n_events):
-            towers = all_towers[event_idx]
-            eflow_tracks = all_eflow_tracks[event_idx]
-            eflow_photons = all_eflow_photons[event_idx]
-            
-            n_towers = towers.shape[0]
-            
-            # Append towers after particles
-            if n_towers > 0:
-                tower_start = n_particles
-                tower_end = min(n_particles + n_towers, max_size)
-                actual_towers = tower_end - tower_start
-                
-                genevent_tensors_out[event_idx, tower_start:tower_end, :n_dim] = \
-                    towers[:actual_towers, :n_dim]
-                
-                # Set tower masks
-                genevent_tensors_out[event_idx, tower_start:tower_end, CMAP["IS_NOT_PAD"]] = 1.0
-                genevent_tensors_out[event_idx, tower_start:tower_end, CMAP["PASS_ECAL_TOWER"]] = 1.0
-            
-            # Mark eflow tracks
-            if eflow_tracks.shape[0] > 0:
-                # Find matching particles in original tensor and mark them
-                # For simplicity, we'll create a new mask based on particle IDs
-                # (This is a simplified approach; production code might need particle tracking)
-                pass
-            
-            # Mark eflow photons  
-            if eflow_photons.shape[0] > 0:
-                # These are actually the towers that had neutral excess
-                # Already marked above with PASS_ECAL_TOWER
-                pass
-        
-        return genevent_tensors_out
-
-
 # Example usage and testing
 if __name__ == "__main__":
-    print("Testing SimpleCalorimeter PyTorch Module\n")
+    print("Testing EFlowTrack PyTorch Module\n")
     
     # Set random seed
     torch.manual_seed(42)
@@ -663,12 +542,12 @@ if __name__ == "__main__":
             if i < n_real // 2:
                 genevent_tensors[event_idx, i, CMAP["PASS_MERGER"]] = 1.0
     
-    # Create SimpleCalorimeter module
+    # Create EFlowTrack module
     # CMS-like binning (simplified)
     eta_bins = np.linspace(-2.5, 2.5, 50)
     phi_bins = np.linspace(-np.pi, np.pi, 50)
     
-    ecal = SimpleCalorimeter(
+    ecal = EFlowTrack(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
         energy_min=0.5,
@@ -697,4 +576,4 @@ if __name__ == "__main__":
     for i, photons in enumerate(outputs['eflowPhotons']):
         print(f"  Event {i}: {photons.shape[0]} eflow photons")
     
-    print("\n✓ SimpleCalorimeter test completed!")
+    print("\n✓ EFlowTrack test completed!")
