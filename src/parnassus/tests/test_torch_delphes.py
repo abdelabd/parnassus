@@ -335,7 +335,18 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     phi_bins = [i * np.pi / 180.0 for i in range(-180, 181)]
     
     # Initialize ECal module
-    ecal_module = ECal.EFlowTrack(
+    eflowtrack_module = ECal.EFlowTrack(
+        eta_bins=eta_bins,
+        phi_bins=phi_bins,
+        energy_min=0.5,
+        energy_sig_min=2.0,
+        resolution_formula='ecal_cms',
+        is_ecal=True,
+        smear_tower_center=True,
+        max_towers_per_event=500,
+        device=DEVICE
+    )
+    tower_module = ECal.Tower(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
         energy_min=0.5,
@@ -353,7 +364,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     print(f"Number of phi bins: {len(phi_bins)}")
     
     genevent_tensors_ecal = []
-    # all_ecal_towers = []
+    all_ecal_towers = []
     all_eflow_tracks = []
     # all_eflow_photons = []
     
@@ -365,9 +376,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
         
         # Apply ECal
-        batch_ecal, outputs = ecal_module(batch_events)
-        
-        genevent_tensors_ecal.append(batch_ecal.cpu())
+        batch_ecal, outputs = eflowtrack_module(batch_events)
         
         # Collect outputs for validation - match upstream per-batch pattern
         # Concatenate all outputs from this batch into single tensors
@@ -378,6 +387,15 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         # all_ecal_towers.append(batch_towers)
         all_eflow_tracks.append(batch_tracks)
         # all_eflow_photons.append(batch_photons)
+
+        batch_ecal, outputs = tower_module(batch_events)
+        batch_towers = torch.cat(outputs['ecalTowers'], dim=0).cpu() if outputs['ecalTowers'] else torch.empty(0, 5)
+        all_ecal_towers.append(batch_towers)
+
+
+        genevent_tensors_ecal.append(batch_ecal.cpu())
+        
+
     
     # Stack all event tensors into a single tensor
     genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
@@ -388,7 +406,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     # print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
     
     # return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
-    return genevent_tensors_ecal, all_eflow_tracks
+    return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks
 
 
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, debug=False):
@@ -431,7 +449,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
         ('ElectronSmeared', track_kinematic_vars),
         ('MuonSmeared', track_kinematic_vars),
         ('MergedTracks', track_kinematic_vars),
-        # ('ECalTower', tower_kinematic_vars),
+        ('ECalTower', tower_kinematic_vars),
         ('ECal_EFlowTrack', track_kinematic_vars),
         # ('EFlowPhoton', tower_kinematic_vars)
     ]
@@ -768,7 +786,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     # genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
     #     genevent_tensors, batch_size=batch_size
     # )
-    genevent_tensors, eflow_tracks = process_ecal_pipeline(
+    genevent_tensors, ecal_towers, eflow_tracks = process_ecal_pipeline(
         genevent_tensors, batch_size=batch_size
     )
     
@@ -794,7 +812,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
         'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
         'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared'),
         'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks'),
-        # 'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
+        'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
         'ECal_EFlowTrack': tensor_to_root_dict(eflow_tracks, 'ECal_EFlowTrack'),
         # 'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
     }
