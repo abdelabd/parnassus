@@ -38,13 +38,11 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator
-from parnassus.torch_delphes.SimpleCalorimeter import ECal
+from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
     write_root_file,
-    compute_max_particles,
     COLUMN_MAP as CMAP
 )
 
@@ -335,7 +333,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     phi_bins = [i * np.pi / 180.0 for i in range(-180, 181)]
     
     # Initialize ECal module
-    eflowtrack_module = ECal.EFlowTrack(
+    eflowtrack_module = SimpleCalorimeter.EFlowTrack(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
         energy_min=0.5,
@@ -346,7 +344,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         max_towers_per_event=500,
         device=DEVICE
     )
-    tower_module = ECal.Tower(
+    tower_module = SimpleCalorimeter.Tower(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
         energy_min=0.5,
@@ -357,7 +355,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         max_towers_per_event=500,
         device=DEVICE
     )
-    eflowphoton_module = ECal.EFlowPhoton(
+    eflowphoton_module = SimpleCalorimeter.EFlowPhoton(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
         energy_min=0.5,
@@ -409,12 +407,11 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
     
     print(f"\nECal output shape: {genevent_tensors_ecal.shape}")
-    # print(f"Total towers: {sum(t.shape[0] for t in all_ecal_towers)}")
+    print(f"Total towers: {sum(t.shape[0] for t in all_ecal_towers)}")
     print(f"Total eflow tracks: {sum(t.shape[0] for t in all_eflow_tracks)}")
-    # print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
+    print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
     
     return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
-    # return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks
 
 
 def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, debug=False):
@@ -794,9 +791,6 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
         genevent_tensors, batch_size=batch_size
     )
-    # genevent_tensors, ecal_towers, eflow_tracks = process_ecal_pipeline(
-    #     genevent_tensors, batch_size=batch_size
-    # )
     
     print("\n✓ ECal applied")
     
@@ -837,29 +831,22 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     total_el_input = sum(t.shape[0] for t in el_tensors)
     total_mu_input = sum(t.shape[0] for t in mu_tensors)
     
-    # total_ch_filtered = sum(t.shape[0] for t in ch_filtered)
-    # total_el_filtered = sum(t.shape[0] for t in el_filtered)
-    # total_mu_filtered = sum(t.shape[0] for t in mu_filtered)
-    
     print(f"\nChargedHadrons:")
     print(f"  Input:      {total_ch_input}")
-    # print(f"  After eff:  {total_ch_filtered} ({100*total_ch_filtered/total_ch_input:.1f}%)")
-    # print(f"  Smeared:    {sum(t.shape[0] for t in ch_smeared)}")
+
     
     print(f"\nElectrons:")
     print(f"  Input:      {total_el_input}")
-    # print(f"  After eff:  {total_el_filtered} ({100*total_el_filtered/total_el_input:.1f}%)")
-    # print(f"  Smeared:    {sum(t.shape[0] for t in el_smeared)}")
+
     
     print(f"\nMuons:")
     print(f"  Input:      {total_mu_input}")
-    # print(f"  After eff:  {total_mu_filtered} ({100*total_mu_filtered/total_mu_input:.1f}%)")
-    # print(f"  Smeared:    {sum(t.shape[0] for t in mu_smeared)}")
+
     
     print(f"\nECal:")
-    # print(f"  Towers:        {sum(t.shape[0] for t in ecal_towers)}")
+    print(f"  Towers:        {sum(t.shape[0] for t in ecal_towers)}")
     print(f"  EFlow Tracks:  {sum(t.shape[0] for t in eflow_tracks)}")
-    # print(f"  EFlow Photons: {sum(t.shape[0] for t in eflow_photons)}")
+    print(f"  EFlow Photons: {sum(t.shape[0] for t in eflow_photons)}")
     
     print("\n" + "="*80)
     print("✓ ALL PROCESSING COMPLETE!")
