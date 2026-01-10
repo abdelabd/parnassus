@@ -135,7 +135,7 @@ def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor
 
     n_events = len(event_tensors)
     max_particles = compute_max_particles(event_tensors)
-    dtype = event_tensors[0].dtype
+    dtype = torch.float64 
     device = event_tensors[0].device
     
     # Create padded batch tensor (B, max_particles, N_FEATURES+1)
@@ -296,7 +296,6 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
     Returns:
         List of tensors, one per event, each of shape (n_particles, 15)
     """
-    import pyhepmc
     
     event_tensors = []
     
@@ -314,7 +313,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 continue
             
             # Create tensor for this event
-            particles = np.zeros((n_particles, N_FEATURES))
+            particles = np.zeros((n_particles, N_FEATURES)).astype(np.float64)
             
             for i, p in enumerate(stable_particles):
                 # Extract raw particle properties - NO COMPUTATIONS
@@ -328,10 +327,10 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 mass = get_mass_from_pdg(pid)
                 
                 # Extract raw momentum components
-                e = momentum.e
-                px = torch.tensor(momentum.px)
-                py = torch.tensor(momentum.py)
-                pz = torch.tensor(momentum.pz)
+                e = torch.tensor(momentum.e).to(torch.float64)
+                px = torch.tensor(momentum.px).to(torch.float64)
+                py = torch.tensor(momentum.py).to(torch.float64)
+                pz = torch.tensor(momentum.pz).to(torch.float64)
                 pt = torch.sqrt(px**2 + py**2)
                 eta = torch.asinh(pz / (pt + 1e-10))
                 phi = torch.atan2(py, px)
@@ -339,13 +338,13 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 # Extract production vertex
                 if p.production_vertex:
                     vertex = p.production_vertex.position
-                    x = vertex.x  # mm in HepMC
-                    y = vertex.y
-                    z = vertex.z
-                    t = vertex.t
+                    x = torch.tensor(vertex.x).to(torch.float64)  # mm in HepMC
+                    y = torch.tensor(vertex.y).to(torch.float64)
+                    z = torch.tensor(vertex.z).to(torch.float64)
+                    t = torch.tensor(vertex.t).to(torch.float64)
                 else:
-                    x = y = z = t = 0.0
-                
+                    x = y = z = t = torch.tensor(0.0).to(torch.float64)
+
                 # Fill tensor row with RAW data only
                 particles[i, PID] = pid
                 particles[i, STATUS] = status
@@ -366,7 +365,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 # PHI_outer - will be computed by ParticlePropagator
             
             # Convert to torch tensor
-            event_tensors.append(torch.from_numpy(particles))
+            event_tensors.append(torch.from_numpy(particles).to(torch.float64))
     
     return zero_pad_to_max_particles(event_tensors)
 

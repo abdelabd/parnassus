@@ -111,11 +111,11 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
         electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles_propagated).float()
         muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles_propagated).float()
 
-        pbp_tensors.append(particles[pbp_pid_mask > 0.5].cpu())
-        pap_tensors.append(particles_propagated[pap_pid_mask > 0.5].cpu())
-        ch_tensors.append(particles_propagated[charged_hadron_pid_mask > 0.5].cpu())
-        el_tensors.append(particles_propagated[electron_pid_mask > 0.5].cpu())
-        mu_tensors.append(particles_propagated[muon_pid_mask > 0.5].cpu())
+        pbp_tensors.append(particles[pbp_pid_mask > 0.5].to(torch.float32).cpu())
+        pap_tensors.append(particles_propagated[pap_pid_mask > 0.5].to(torch.float32).cpu())
+        ch_tensors.append(particles_propagated[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
+        el_tensors.append(particles_propagated[electron_pid_mask > 0.5].to(torch.float32).cpu())
+        mu_tensors.append(particles_propagated[muon_pid_mask > 0.5].to(torch.float32).cpu())
 
     return genevent_tensors_propagated, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors
 
@@ -176,9 +176,9 @@ def process_efficiency_pipeline(genevent_tensors, batch_size=100):
         electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles).float()
         muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles).float()
 
-        ch_tensors_eff.append(particles[charged_hadron_pid_mask > 0.5].cpu())
-        el_tensors_eff.append(particles[electron_pid_mask > 0.5].cpu())
-        mu_tensors_eff.append(particles[muon_pid_mask > 0.5].cpu())
+        ch_tensors_eff.append(particles[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
+        el_tensors_eff.append(particles[electron_pid_mask > 0.5].to(torch.float32).cpu())
+        mu_tensors_eff.append(particles[muon_pid_mask > 0.5].to(torch.float32).cpu())
 
     # Stack all event tensors into a single tensor
     genevent_tensors_eff = torch.cat(genevent_tensors_eff, dim=0)
@@ -243,9 +243,9 @@ def process_smearing_pipeline(genevent_tensors, batch_size=100):
         electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles).float()
         muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles).float()
 
-        ch_tensors_smeared.append(particles[charged_hadron_pid_mask > 0.5].cpu())
-        el_tensors_smeared.append(particles[electron_pid_mask > 0.5].cpu())
-        mu_tensors_smeared.append(particles[muon_pid_mask > 0.5].cpu())
+        ch_tensors_smeared.append(particles[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
+        el_tensors_smeared.append(particles[electron_pid_mask > 0.5].to(torch.float32).cpu())
+        mu_tensors_smeared.append(particles[muon_pid_mask > 0.5].to(torch.float32).cpu())
 
     # Stack all event tensors into a single tensor
     genevent_tensors_smeared = torch.cat(genevent_tensors_smeared, dim=0)
@@ -304,7 +304,7 @@ def process_merger_pipeline(genevent_tensors, batch_size=100):
             particles[:, CMAP["PASS_MERGER"]]
         )
         
-        track_tensors.append(particles[track_mask > 0.5].cpu())
+        track_tensors.append(particles[track_mask > 0.5].to(torch.float32).cpu())
     
     # Stack all event tensors into a single tensor
     genevent_tensors_merged = torch.cat(genevent_tensors_merged, dim=0)
@@ -403,17 +403,17 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         # 1. EFlowTracks
         batch_eflow_tracks = eflowtrack_module(batch_events)
         batch_tracks = torch.cat(batch_eflow_tracks, dim=0).cpu() if batch_eflow_tracks else torch.empty(0, 5)
-        all_eflow_tracks.append(batch_tracks)
+        all_eflow_tracks.append(batch_tracks.to(torch.float32))
         
         # 2. EFlowPhotons
         batch_photons = eflowphoton_module(batch_events)
         batch_photons = torch.cat(batch_photons, dim=0).cpu() if batch_photons else torch.empty(0, 5)
-        all_eflow_photons.append(batch_photons)
+        all_eflow_photons.append(batch_photons.to(torch.float32))
 
         # 3. Towers
         batch_ecal, batch_towers = tower_module(batch_events)
         batch_towers = torch.cat(batch_towers, dim=0).cpu() if batch_towers else torch.empty(0, 5)
-        all_ecal_towers.append(batch_towers)
+        all_ecal_towers.append(batch_towers.to(torch.float32))
 
         genevent_tensors_ecal.append(batch_ecal.cpu())
         
