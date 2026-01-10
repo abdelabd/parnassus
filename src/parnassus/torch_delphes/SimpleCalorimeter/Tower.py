@@ -216,8 +216,6 @@ class Tower(nn.Module):
             
         Returns:
             towers: (N_towers, D) tensor of tower objects
-            eflow_tracks: (N_eflow_tracks, D) tensor of eflow track objects
-            eflow_photons: (N_eflow_photons, D) tensor of eflow photon objects
         """
         # Extract valid particles (propagated) and tracks (merged)
         valid_particles_mask = (
@@ -228,7 +226,7 @@ class Tower(nn.Module):
         # Get particle and track subsets
         particles = event_tensor[valid_particles_mask]  # All particles after propagation
         
-        # Bin particles into towers
+        # Bin particles into towers 
         particle_eta = particles[:, CMAP["ETA_OUTER"]]
         particle_phi = particles[:, CMAP["PHI_OUTER"]]
         particle_energy = particles[:, CMAP["E"]]
@@ -307,11 +305,11 @@ class Tower(nn.Module):
         
         # Get tower eta/phi from bin indices
         tower_eta_bins = unique_tower_ids // n_phi_bins
-        tower_phi_bins = unique_tower_ids % n_phi_bins
+        tower_phi_bins = unique_tower_ids % n_phi_bins # SUSPECT
         
         # Tower center positions
         tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
-        tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1])
+        tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1]) # SUSPECT
         
         # Optionally smear tower centers
         if self.smear_tower_center:
@@ -320,10 +318,10 @@ class Tower(nn.Module):
                         self.eta_bins[tower_eta_bins]
             tower_phi = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
                         (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
-                        self.phi_bins[tower_phi_bins]
+                        self.phi_bins[tower_phi_bins] # SUSPECT
         else:
             tower_eta = tower_eta_center
-            tower_phi = tower_phi_center
+            tower_phi = tower_phi_center # SUSPECT
         
         # Apply energy smearing
         tower_sigma = self.resolution_fn(tower_energies, tower_eta)
@@ -337,7 +335,6 @@ class Tower(nn.Module):
         # Now handle track-tower matching for energy flow
         # For each tower, find tracks in the same tower
         towers_list = []
-        
         for tower_idx in range(n_towers):
             tower_energy = tower_energies_smeared[tower_idx]
             tower_sigma_val = tower_sigma[tower_idx]
@@ -348,7 +345,7 @@ class Tower(nn.Module):
                 tower_energy = 0.0  # Zero the tower energy like C++ does
             
             # Create tower object for ECalTower output if energy > 0
-            if tower_energy > 0.0:
+            if tower_energy > 0.0: # DEF SUSPECT
                 tower_obj = self._create_tower_object(
                     tower_eta[tower_idx], tower_phi[tower_idx],
                     tower_energy, tower_times[tower_idx],
