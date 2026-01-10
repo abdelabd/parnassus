@@ -211,8 +211,6 @@ class EFlowPhoton(nn.Module):
             event_tensor: (N_particles, D) tensor for one event
             
         Returns:
-            towers: (N_towers, D) tensor of tower objects
-            eflow_tracks: (N_eflow_tracks, D) tensor of eflow track objects
             eflow_photons: (N_eflow_photons, D) tensor of eflow photon objects
         """
         # Extract valid particles (propagated) and tracks (merged)
@@ -324,11 +322,11 @@ class EFlowPhoton(nn.Module):
         
         # Get tower eta/phi from bin indices
         tower_eta_bins = unique_tower_ids // n_phi_bins
-        tower_phi_bins = unique_tower_ids % n_phi_bins
+        tower_phi_bins = unique_tower_ids % n_phi_bins # SUSPECT
         
         # Tower center positions
         tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
-        tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1])
+        tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1]) # SUSPECT
         
         # Optionally smear tower centers
         if self.smear_tower_center:
@@ -337,10 +335,10 @@ class EFlowPhoton(nn.Module):
                         self.eta_bins[tower_eta_bins]
             tower_phi = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
                         (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
-                        self.phi_bins[tower_phi_bins]
+                        self.phi_bins[tower_phi_bins] # SUSPECT
         else:
             tower_eta = tower_eta_center
-            tower_phi = tower_phi_center
+            tower_phi = tower_phi_center # SUSPECT
         
         # Apply energy smearing
         tower_sigma = self.resolution_fn(tower_energies, tower_eta)
@@ -352,7 +350,7 @@ class EFlowPhoton(nn.Module):
         n_towers = len(tower_energies_smeared)
         
         # Now handle track-tower matching for energy flow
-        eflow_photons_list = []
+        eflow_photons_list = [] # SUSPECT, obviously
         for tower_idx in range(n_towers):
             tid = unique_tower_ids[tower_idx]
             tower_energy = tower_energies_smeared[tower_idx]
@@ -399,12 +397,12 @@ class EFlowPhoton(nn.Module):
                 neutral_sigma = 0.0
             
             # Energy flow logic for creating eflow objects
-            if neutral_energy > self.energy_min and neutral_sigma > self.energy_sig_min:
+            if neutral_energy > self.energy_min and neutral_sigma > self.energy_sig_min: # SUSPECT
                 neutral_tower = self._create_tower_object(
                     tower_eta[tower_idx], tower_phi[tower_idx],
                     neutral_energy, tower_times[tower_idx],
                     event_tensor.shape[1]
-                )
+                ) # SUSPECT
                 eflow_photons_list.append(neutral_tower)
             
         if len(eflow_photons_list) > 0:

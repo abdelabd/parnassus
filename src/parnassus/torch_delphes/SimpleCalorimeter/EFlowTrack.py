@@ -210,9 +210,7 @@ class EFlowTrack(nn.Module):
             event_tensor: (N_particles, D) tensor for one event
             
         Returns:
-            towers: (N_towers, D) tensor of tower objects
             eflow_tracks: (N_eflow_tracks, D) tensor of eflow track objects
-            eflow_photons: (N_eflow_photons, D) tensor of eflow photon objects
         """
         # Extract valid particles (propagated) and tracks (merged)
         valid_particles_mask = (
@@ -351,7 +349,6 @@ class EFlowTrack(nn.Module):
         # Now handle track-tower matching for energy flow
         # For each tower, find tracks in the same tower
         eflow_tracks_list = []
-
         for tower_idx in range(n_towers):
             tid = unique_tower_ids[tower_idx]
             tower_energy = tower_energies_smeared[tower_idx]
