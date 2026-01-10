@@ -439,8 +439,8 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
     # Kinematic variables to compare
     # Track objects: PID, Charge, P, PT, Eta, Phi
     # Tower objects: E, ET, Eta, Phi, Eem, Ehad (no PID - towers are aggregated)
-    track_kinematic_vars = ['PID', 'Charge', 'P', 'PT', 'Eta', 'Phi']
-    tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi']
+    track_kinematic_vars = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
+    tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi', 'T']
     
     # Branches to validate (branch_name, variable_list)
     branches = [
