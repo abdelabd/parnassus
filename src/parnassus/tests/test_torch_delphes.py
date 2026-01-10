@@ -738,6 +738,124 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
         plt.savefig(combined_plot_file, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"  ✓ Combined plot saved → {combined_plot_file.name}")
+        
+        # Create PID-specific combined plots (only for branches with PID field)
+        torch_pid_key = f"{branch_name}/{branch_name}.PID"
+        benchmark_pid_key = f"{branch_name}/{branch_name}.PID"
+        
+        if torch_pid_key in torch_tree.keys() and benchmark_pid_key in benchmark_tree.keys():
+            print(f"\n  Creating PID-specific combined plots...")
+            
+            # Load PID data to get unique PIDs
+            torch_pids = torch_tree[torch_pid_key].array()
+            benchmark_pids = benchmark_tree[benchmark_pid_key].array()
+            
+            # Get unique PIDs across both datasets
+            torch_pids_flat = ak.flatten(torch_pids)
+            benchmark_pids_flat = ak.flatten(benchmark_pids)
+            unique_pids = np.unique(np.concatenate([
+                np.asarray(torch_pids_flat),
+                np.asarray(benchmark_pids_flat)
+            ]))
+            
+            # For each unique PID, create a combined plot
+            for pid in unique_pids:
+                pid_int = int(pid)
+                print(f"    Creating combined plot for PID={pid_int}...")
+                
+                # Create figure with 2 rows (histogram + ratio) and 4 columns (one per variable)
+                fig = plt.figure(figsize=(30, 6))
+                
+                for idx, var in enumerate(combined_vars):
+                    torch_key = f"{branch_name}/{branch_name}.{var}"
+                    benchmark_key = f"{branch_name}/{branch_name}.{var}"
+                    
+                    if torch_key not in torch_tree.keys() or benchmark_key not in benchmark_tree.keys():
+                        continue
+                    
+                    # Load data (event-wise, not flattened yet)
+                    torch_data_events = torch_tree[torch_key].array()
+                    benchmark_data_events = benchmark_tree[benchmark_key].array()
+                    
+                    # Filter by PID: for each event, select only particles with matching PID
+                    torch_pid_events = torch_tree[torch_pid_key].array()
+                    benchmark_pid_events = benchmark_tree[benchmark_pid_key].array()
+                    
+                    # Apply PID mask and flatten
+                    torch_data_filtered = ak.flatten(torch_data_events[torch_pid_events == pid])
+                    benchmark_data_filtered = ak.flatten(benchmark_data_events[benchmark_pid_events == pid])
+                    
+                    # Convert to numpy
+                    torch_np = np.asarray(torch_data_filtered)
+                    benchmark_np = np.asarray(benchmark_data_filtered)
+                    
+                    # Skip if no data for this PID
+                    if len(torch_np) == 0 and len(benchmark_np) == 0:
+                        continue
+                    
+                    # Create subplot with histogram on top, ratio below
+                    gs = plt.GridSpec(4, 4, figure=fig, hspace=0.05, wspace=0.3, 
+                                        height_ratios=[3, 1, 0, 0])
+                    
+                    # Column position (0-3 for variables)
+                    col = idx
+                    
+                    # Histogram subplot (row 0, takes 3 units of height)
+                    ax_hist = fig.add_subplot(gs[0, col])
+                    # Ratio subplot (row 1, takes 1 unit of height)
+                    ax_ratio = fig.add_subplot(gs[1, col], sharex=ax_hist)
+                    
+                    # Determine bin range
+                    all_data = np.concatenate([torch_np, benchmark_np])
+                    if len(all_data) > 0:
+                        bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 40)
+                    else:
+                        bins = 40
+                    
+                    # Plot histograms
+                    benchmark_counts, bin_edges, _ = ax_hist.hist(
+                        benchmark_np, bins=bins, histtype='step', color='orange', 
+                        linewidth=2, label='C++ Delphes', density=False
+                    )
+                    torch_counts, _, _ = ax_hist.hist(
+                        torch_np, bins=bins, histtype='step', color='blue', 
+                        linewidth=2, label='Parnassus.TorchDelphes', density=False
+                    )
+                    
+                    ax_hist.set_ylabel('Counts', fontsize=11)
+                    ax_hist.set_title(f'{var}', fontsize=13, fontweight='bold')
+                    if idx == 0:  # Only show legend on first subplot
+                        ax_hist.legend(fontsize=10)
+                    ax_hist.grid(True, alpha=0.3)
+                    ax_hist.tick_params(labelbottom=False)
+                    
+                    # Plot ratio
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts, 
+                        out=np.ones_like(torch_counts), 
+                        where=benchmark_counts > 0
+                    )
+                    
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.plot(bin_centers, ratio, color='blue', markersize=3, linewidth=2)
+                    ax_ratio.set_xlabel(var, fontsize=11)
+                    ax_ratio.set_ylabel('Torch/C++', fontsize=9)
+                    ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])
+                    ax_ratio.grid(True, alpha=0.3)
+                        
+                
+                # Add overall title with PID
+                fig.suptitle(f'{branch_name} (PID={pid_int})', fontsize=16, fontweight='bold', y=0.98)
+                
+                # Save PID-specific combined figure
+                pid_plot_file = branch_dir / f"pid_{pid_int}.png"
+                plt.savefig(pid_plot_file, dpi=150, bbox_inches='tight')
+                plt.close()
+                print(f"    ✓ PID={pid_int} combined plot saved → {pid_plot_file.name}")
+                    
+        else:
+            print(f"  ℹ No PID field - skipping PID-specific plots (normal for Tower objects)")
     
     print(f"\n{'='*70}")
     print(f"✓ Validation complete! Plots saved to {output_dir}")
