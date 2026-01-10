@@ -437,9 +437,9 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
     benchmark_tree = benchmark_root["Delphes"]
     
     # Kinematic variables to compare
-    # Track objects: Charge, P, PT, Eta, Phi
-    # Tower objects: E, ET, Eta, Phi, Eem, Ehad
-    track_kinematic_vars = ['Charge', 'P', 'PT', 'Eta', 'Phi']
+    # Track objects: PID, Charge, P, PT, Eta, Phi
+    # Tower objects: E, ET, Eta, Phi, Eem, Ehad (no PID - towers are aggregated)
+    track_kinematic_vars = ['PID', 'Charge', 'P', 'PT', 'Eta', 'Phi']
     tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi']
     
     # Branches to validate (branch_name, variable_list)
@@ -507,25 +507,73 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 ax_hist = fig.add_subplot(gs[0])
                 ax_ratio = fig.add_subplot(gs[1], sharex=ax_hist)
                 
-                # Determine bin range
-                all_data = np.concatenate([torch_np, benchmark_np])
-                if len(all_data) > 0:
-                    bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 50)
+                # Special handling for PID: use discrete bins
+                if var == 'PID':
+                    # Get unique PIDs across both datasets
+                    unique_pids = np.unique(np.concatenate([torch_np, benchmark_np]))
+                    
+                    # Count occurrences of each PID
+                    torch_counts = np.array([np.sum(torch_np == pid) for pid in unique_pids])
+                    benchmark_counts = np.array([np.sum(benchmark_np == pid) for pid in unique_pids])
+                    
+                    # Create bar positions
+                    x = np.arange(len(unique_pids))
+                    width = 0.35
+                    
+                    # Plot bars
+                    ax_hist.bar(x - width/2, benchmark_counts, width, label='C++ Delphes', 
+                               color='orange', alpha=0.7)
+                    ax_hist.bar(x + width/2, torch_counts, width, label='Parnassus.TorchDelphes', 
+                               color='blue', alpha=0.7)
+                    
+                    ax_hist.set_xticks(x)
+                    ax_hist.set_xticklabels([f'{int(pid)}' for pid in unique_pids], rotation=45, ha='right')
+                    ax_hist.tick_params(labelbottom=False)
+                    
+                    # For ratio plot
+                    bin_centers = x
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts,
+                        out=np.ones_like(torch_counts, dtype=float),
+                        where=benchmark_counts > 0
+                    )
+                    
+                    # Print PID counts if debug mode
+                    if debug:
+                        print(f"\n  PID Counts for {branch_name}:")
+                        for pid, torch_count, bench_count in zip(unique_pids, torch_counts, benchmark_counts):
+                            ratio_val = torch_count / bench_count if bench_count > 0 else np.inf
+                            print(f"    PID {int(pid):6d}: PyTorch={torch_count:5d}, C++={bench_count:5d}, Ratio={ratio_val:.4f}")
+                    
                 else:
-                    bins = 50
-                
-                # Plot histograms
-                benchmark_counts, bin_edges, _ = ax_hist.hist(
-                    benchmark_np, bins=bins, histtype='step', color='orange', 
-                    linewidth=2, label='C++ Delphes', density=False
-                )
-                torch_counts, _, _ = ax_hist.hist(
-                    torch_np, bins=bins, histtype='step', color='blue', 
-                    linewidth=2, label='Parnassus.TorchDelphes', density=False
-                )
+                    # Standard continuous histogram
+                    # Determine bin range
+                    all_data = np.concatenate([torch_np, benchmark_np])
+                    if len(all_data) > 0:
+                        bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 50)
+                    else:
+                        bins = 50
+                    
+                    # Plot histograms
+                    benchmark_counts, bin_edges, _ = ax_hist.hist(
+                        benchmark_np, bins=bins, histtype='step', color='orange', 
+                        linewidth=2, label='C++ Delphes', density=False
+                    )
+                    torch_counts, _, _ = ax_hist.hist(
+                        torch_np, bins=bins, histtype='step', color='blue', 
+                        linewidth=2, label='Parnassus.TorchDelphes', density=False
+                    )
+                    
+                    # For ratio plot
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts, 
+                        out=np.ones_like(torch_counts), 
+                        where=benchmark_counts > 0
+                    )
                 
                 # Debug: print histogram statistics
-                if debug and (branch_name in {"ECal_EFlowTrack", "ECalTower", "EFlowPhoton"}):
+                if debug and (branch_name in {"ECal_EFlowTrack", "ECalTower", "EFlowPhoton"}) and var != 'PID':
                     print(f"\n{branch_name}.{var} bins:")
                     print(f"  Bin edges: {bin_edges}, len(bin_edges)={len(bin_edges)}")
                     print(f"  C++ counts: {benchmark_counts}")
@@ -553,7 +601,8 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 ax_hist.set_title(f'{branch_name}: {var}', fontsize=14, fontweight='bold')
                 ax_hist.legend(fontsize=11)
                 ax_hist.grid(True, alpha=0.3)
-                ax_hist.tick_params(labelbottom=False)  # Hide x-axis labels for top plot
+                if var != 'PID':
+                    ax_hist.tick_params(labelbottom=False)  # Hide x-axis labels for top plot
                 
                 # Add statistics text
                 stats_text = f'PyTorch: {len(torch_np)} particles\nC++ Delphes: {len(benchmark_np)} particles'
@@ -562,18 +611,21 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
                 
                 # Plot ratio: TorchDelphes / C++ Delphes
-                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                ratio = np.divide(
-                    torch_counts, benchmark_counts, 
-                    out=np.ones_like(torch_counts), 
-                    where=benchmark_counts > 0
-                )
+                if var == 'PID':
+                    # Bar plot for PID
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.bar(bin_centers, ratio, width*2, color='blue', alpha=0.7)
+                    ax_ratio.set_xticks(bin_centers)
+                    ax_ratio.set_xticklabels([f'{int(pid)}' for pid in unique_pids], rotation=45, ha='right')
+                    ax_ratio.set_ylim([0.5, 1.5])  # Focus on reasonable ratio range
+                else:
+                    # Line plot for continuous variables
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
+                    ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±20% range
                 
-                ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
-                ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
                 ax_ratio.set_xlabel(var, fontsize=12)
                 ax_ratio.set_ylabel('Torch / C++', fontsize=10)
-                ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±20% range
                 ax_ratio.grid(True, alpha=0.3)
                 
                 # Save plot
