@@ -248,7 +248,6 @@ class EFlowPhoton(nn.Module):
         particle_phi = particles[:, CMAP["PHI_OUTER"]]
         particle_energy = particles[:, CMAP["E"]]
         particle_pid = particles[:, CMAP["PID"]]
-        particle_position = particles[:, CMAP["X"]:CMAP["Z"]+1]  # X, Y, Z
         particle_time = particles[:, CMAP["T"]]
         
         # Find bin indices for particles
@@ -262,12 +261,10 @@ class EFlowPhoton(nn.Module):
         )
         
         # Apply bin filter
-        particles = particles[valid_bin_mask]
         particle_eta_bin = particle_eta_bin[valid_bin_mask]
         particle_phi_bin = particle_phi_bin[valid_bin_mask]
         particle_energy = particle_energy[valid_bin_mask]
         particle_pid = particle_pid[valid_bin_mask]
-        particle_position = particle_position[valid_bin_mask]
         particle_time = particle_time[valid_bin_mask]
         
         # Get energy fractions
@@ -276,12 +273,10 @@ class EFlowPhoton(nn.Module):
         
         # Filter out particles that deposit zero energy (muons, neutrinos, etc.)
         nonzero_energy_mask = particle_energy_deposited > 0.0
-        particles = particles[nonzero_energy_mask]
         particle_eta_bin = particle_eta_bin[nonzero_energy_mask]
         particle_phi_bin = particle_phi_bin[nonzero_energy_mask]
         particle_energy = particle_energy[nonzero_energy_mask]
         particle_pid = particle_pid[nonzero_energy_mask]
-        particle_position = particle_position[nonzero_energy_mask]
         particle_time = particle_time[nonzero_energy_mask]
         particle_energy_deposited = particle_energy_deposited[nonzero_energy_mask]
         
@@ -346,9 +341,7 @@ class EFlowPhoton(nn.Module):
         
         # Recompute sigma after smearing
         tower_sigma = self.resolution_fn(tower_energies_smeared, tower_eta)
-        
-        n_towers = len(tower_energies_smeared)
-        
+                
         # Now handle track-tower matching for energy flow
         eflow_photons_list = [] # SUSPECT, obviously
         for tower_idx in range(n_towers):
