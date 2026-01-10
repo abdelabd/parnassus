@@ -250,8 +250,6 @@ class EFlowTrack(nn.Module):
         particle_phi = particles[:, CMAP["PHI_OUTER"]]
         particle_energy = particles[:, CMAP["E"]]
         particle_pid = particles[:, CMAP["PID"]]
-        particle_position = particles[:, CMAP["X"]:CMAP["Z"]+1]  # X, Y, Z
-        particle_time = particles[:, CMAP["T"]]
         
         # Find bin indices for particles
         particle_eta_bin = torch.searchsorted(self.eta_bins, particle_eta, right=False) - 1
@@ -264,13 +262,10 @@ class EFlowTrack(nn.Module):
         )
         
         # Apply bin filter
-        particles = particles[valid_bin_mask]
         particle_eta_bin = particle_eta_bin[valid_bin_mask]
         particle_phi_bin = particle_phi_bin[valid_bin_mask]
         particle_energy = particle_energy[valid_bin_mask]
         particle_pid = particle_pid[valid_bin_mask]
-        particle_position = particle_position[valid_bin_mask]
-        particle_time = particle_time[valid_bin_mask]
         
         # Get energy fractions
         energy_fractions = self.get_energy_fraction(particle_pid)
@@ -278,13 +273,10 @@ class EFlowTrack(nn.Module):
         
         # Filter out particles that deposit zero energy (muons, neutrinos, etc.)
         nonzero_energy_mask = particle_energy_deposited > 0.0
-        particles = particles[nonzero_energy_mask]
         particle_eta_bin = particle_eta_bin[nonzero_energy_mask]
         particle_phi_bin = particle_phi_bin[nonzero_energy_mask]
         particle_energy = particle_energy[nonzero_energy_mask]
         particle_pid = particle_pid[nonzero_energy_mask]
-        particle_position = particle_position[nonzero_energy_mask]
-        particle_time = particle_time[nonzero_energy_mask]
         particle_energy_deposited = particle_energy_deposited[nonzero_energy_mask]
         
         # Create unique tower IDs (eta_bin * n_phi_bins + phi_bin)
@@ -297,8 +289,6 @@ class EFlowTrack(nn.Module):
         
         # Aggregate energy per tower using scatter_add
         tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
         
         # Map tower_ids to indices
         tower_id_to_idx = {tid.item(): idx for idx, tid in enumerate(unique_tower_ids)}
@@ -309,18 +299,6 @@ class EFlowTrack(nn.Module):
         
         # Accumulate energy and time
         tower_energies.scatter_add_(0, particle_tower_idx, particle_energy_deposited)
-        
-        # Time weighted by E^2 (sigma_t ~ 1/E)
-        time_contribution = particle_energy_deposited**2 * particle_time
-        tower_times.scatter_add_(0, particle_tower_idx, time_contribution)
-        tower_time_weights.scatter_add_(0, particle_tower_idx, particle_energy_deposited**2)
-        
-        # Compute average time per tower
-        tower_times = torch.where(
-            tower_time_weights > 1e-9,
-            tower_times / tower_time_weights,
-            torch.zeros_like(tower_times)
-        )
         
         # Get tower eta/phi from bin indices
         tower_eta_bins = unique_tower_ids // n_phi_bins
@@ -343,9 +321,7 @@ class EFlowTrack(nn.Module):
         
         # Recompute sigma after smearing
         tower_sigma = self.resolution_fn(tower_energies_smeared, tower_eta)
-        
-        n_towers = len(tower_energies_smeared)
-        
+                
         # Now handle track-tower matching for energy flow
         # For each tower, find tracks in the same tower
         eflow_tracks_list = []
