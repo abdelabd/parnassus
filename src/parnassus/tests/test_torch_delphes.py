@@ -60,7 +60,8 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
         
     Returns:
         genevent_tensors: Tensor of shape N_EVENT x N_PARTICLES x 16
-        pap_tensors: List of tensors (all particles that passed propagation)
+        pbp_tensors: List of tensors for all particles BEFORE propagation
+        pap_tensors: List of tensors for all particles AFTER propagation
         ch_tensors: List of charged hadron tensors
         el_tensors: List of electron tensors  
         mu_tensors: List of muon tensors
@@ -81,6 +82,8 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
 
     genevent_tensors_propagated = torch.zeros(genevent_tensors.shape, dtype=genevent_tensors.dtype)
     # Collect particle_after_prop, charged_hadron, electron, muon tensors after propagation (for intermediate testing and validation)
+    
+    pbp_tensors = [] # pbp = particles_before_prop
     pap_tensors = [] # pap = particles_after_prop
     ch_tensors = []
     el_tensors = []
@@ -102,17 +105,19 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
         # Extract particles that passed propagation for this batch (collect as single tensor per batch)
         mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] * particles_propagated[:, CMAP["PASS_PROP"]]
 
+        pbp_pid_mask = particles[:, CMAP["IS_NOT_PAD"]].float()
         pap_pid_mask = particles_propagated[:, CMAP["IS_NOT_PAD"]].float() # TODO: why not use PASS_PROP here? I suppose Delphes writes all particles regardless if they pass propagation
         charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles_propagated).float()
         electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles_propagated).float()
         muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles_propagated).float()
 
+        pbp_tensors.append(particles[pbp_pid_mask > 0.5].cpu())
         pap_tensors.append(particles_propagated[pap_pid_mask > 0.5].cpu())
         ch_tensors.append(particles_propagated[charged_hadron_pid_mask > 0.5].cpu())
         el_tensors.append(particles_propagated[electron_pid_mask > 0.5].cpu())
         mu_tensors.append(particles_propagated[muon_pid_mask > 0.5].cpu())
 
-    return genevent_tensors_propagated, pap_tensors, ch_tensors, el_tensors, mu_tensors
+    return genevent_tensors_propagated, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors
 
 def process_efficiency_pipeline(genevent_tensors, batch_size=100):
     """
@@ -453,6 +458,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
     
     # Branches to validate (branch_name, variable_list)
     branches = [
+        ('ParticleBeforeProp', track_kinematic_vars),
         ('ParticleAfterProp', track_kinematic_vars),
         ('ChargedHadron', track_kinematic_vars),
         ('Electron', track_kinematic_vars),
@@ -914,7 +920,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
     print("STEP 2: Applying ParticlePropagator (batched)")
     print("="*80)
 
-    genevent_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
+    genevent_tensors, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
     print(f"  Total ParticleAfterProp: {sum(t.shape[0] for t in pap_tensors)}")
@@ -985,6 +991,7 @@ def main(input_file, output_file, benchmark_file, max_events=None, batch_size=10
 
     print(f"Writing {output_file}...")
     branches_v3_2 = {
+        'ParticleBeforeProp': tensor_to_root_dict(pbp_tensors, 'ParticleBeforeProp'),
         'ParticleAfterProp': tensor_to_root_dict(pap_tensors, 'ParticleAfterProp'),
         'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
         'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
