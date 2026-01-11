@@ -357,9 +357,9 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 particles[i, ETA] = eta
                 particles[i, PHI] = phi
                 particles[i, T] = t
-                particles[i, X] = x / 10.0  # Convert mm to cm
-                particles[i, Y] = y / 10.0
-                particles[i, Z] = z / 10.0
+                particles[i, X] = x
+                particles[i, Y] = y
+                particles[i, Z] = z
                 particles[i, MASS] = mass
                 # ETA_OUTER - will be computed by ParticlePropagator  
                 # PHI_outer - will be computed by ParticlePropagator
