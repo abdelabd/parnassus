@@ -108,9 +108,9 @@ class ParticlePropagator(nn.Module):
         x_cm = particles[:, CMAP["X"]]  # X position in cm
         y_cm = particles[:, CMAP["Y"]]  # Y position in cm
         z_cm = particles[:, CMAP["Z"]]  # Z position in cm
-        x = x_cm * 1.0e-2  # Convert cm to m
-        y = y_cm * 1.0e-2
-        z = z_cm * 1.0e-2
+        x = x_cm * 1.0e-3  # Convert mm to m
+        y = y_cm * 1.0e-3
+        z = z_cm * 1.0e-3
         t = particles[:, CMAP["T"]]  # Time
         e = particles[:, CMAP["E"]]
         q = particles[:, CMAP["CHARGE"]]  # Charge
