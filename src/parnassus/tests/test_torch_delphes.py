@@ -98,20 +98,22 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
         
         # Propagate particles (batched)
         particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, N_FEATURES)
+        
+        # IMPORTANT: Extract ParticleBeforeProp BEFORE propagation (because propagator modifies positions in-place!)
+        pbp_pid_mask = particles[:, CMAP["IS_NOT_PAD"]].float()
+        pbp_tensors.append(particles[pbp_pid_mask > 0.5].clone().to(torch.float32).cpu())
+        
         particles_propagated = propagator(particles)
 
         genevent_tensors_propagated[batch_start:batch_end] = particles_propagated.reshape(batch_size_actual, n_part, n_dim).cpu()
 
         # Extract particles that passed propagation for this batch (collect as single tensor per batch)
         mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] * particles_propagated[:, CMAP["PASS_PROP"]]
-
-        pbp_pid_mask = particles[:, CMAP["IS_NOT_PAD"]].float()
         pap_pid_mask = particles_propagated[:, CMAP["IS_NOT_PAD"]].float() # TODO: why not use PASS_PROP here? I suppose Delphes writes all particles regardless if they pass propagation
         charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles_propagated).float()
         electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles_propagated).float()
         muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles_propagated).float()
 
-        pbp_tensors.append(particles[pbp_pid_mask > 0.5].to(torch.float32).cpu())
         pap_tensors.append(particles_propagated[pap_pid_mask > 0.5].to(torch.float32).cpu())
         ch_tensors.append(particles_propagated[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
         el_tensors.append(particles_propagated[electron_pid_mask > 0.5].to(torch.float32).cpu())
