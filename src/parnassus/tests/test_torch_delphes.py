@@ -715,11 +715,11 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 # Plot histograms
                 benchmark_counts, bin_edges, _ = ax_hist.hist(
                     benchmark_np, bins=bins, histtype='step', color='orange', 
-                    linewidth=2, label='C++ Delphes', density=False
+                    linewidth=2, label=f'C++ Delphes: {len(benchmark_np)} particles', density=False
                 )
                 torch_counts, _, _ = ax_hist.hist(
                     torch_np, bins=bins, histtype='step', color='blue', 
-                    linewidth=2, label='Parnassus.TorchDelphes', density=False
+                    linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_np)} particles', density=False
                 )
                 
                 ax_hist.set_ylabel('Counts', fontsize=11)
