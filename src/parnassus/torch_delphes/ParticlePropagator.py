@@ -16,6 +16,7 @@ import numpy as np
 from typing import Tuple, Optional
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+from parnassus.torch_delphes import pdg_filters
 
 
 class ParticlePropagator(nn.Module):
@@ -192,19 +193,19 @@ class ParticlePropagator(nn.Module):
         # NOTE: We purposely/manually leave their positions unchanged (i.e. leave it as production vertex)
         #       This is for consistency with C++ logic in order to help debugging
         # TODO: Remove this after debugging. Unnecessary and memory-intensive.
-        charged_hadron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * self._charged_hadron_pdg_filter(particles)
+        charged_hadron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.charged_hadron_filter(particles)
         charged_hadrons = particles[charged_hadron_pid_mask > 0.5].to(torch.float32)
         charged_hadrons_before_prop = particles_before_prop[charged_hadron_pid_mask > 0.5].to(torch.float32)
 
-        electron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * self._electron_pdg_filter(particles)
+        electron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.electron_filter(particles)
         electrons = particles[electron_pid_mask > 0.5].to(torch.float32)
         electrons_before_prop = particles_before_prop[electron_pid_mask > 0.5].to(torch.float32)
 
-        muon_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * self._muon_pdg_filter(particles)
+        muon_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.muon_filter(particles)
         muons = particles[muon_pid_mask > 0.5].to(torch.float32)
         muons_before_prop = particles_before_prop[muon_pid_mask > 0.5].to(torch.float32)
 
-        neutral_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * self._neutral_pdg_filter(particles)
+        neutral_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.neutral_filter(particles)
         neutrals = particles[neutral_pid_mask > 0.5].to(torch.float32)
         neutrals_before_prop = particles_before_prop[neutral_pid_mask > 0.5].to(torch.float32)
 
@@ -440,87 +441,6 @@ class ParticlePropagator(nn.Module):
         particles[invalid_indices, CMAP["Z"]] = 0.0
         
         return particles
-    
-    @staticmethod
-    def _charged_hadron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter charged hadrons based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating charged hadrons
-        """
-        pid = particles[..., CMAP["PID"]]
-        q_final = particles[..., CMAP["CHARGE"]]
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        electron_mask = (abs_pid == 11) & is_charged
-        muon_mask = (abs_pid == 13) & is_charged
-        pid_mask = is_charged & ~electron_mask & ~muon_mask
-        
-        return pid_mask
-    
-    @staticmethod
-    def _electron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter electrons based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating electrons
-        """
-        pid = particles[..., CMAP["PID"]]
-        q_final = particles[..., CMAP["CHARGE"]]
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        pid_mask = (abs_pid == 11) & is_charged
-        
-        return pid_mask
-    
-    @staticmethod
-    def _muon_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter muons based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating muons
-        """
-        pid = particles[..., CMAP["PID"]]
-        q_final = particles[..., CMAP["CHARGE"]]
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        pid_mask = (abs_pid == 13) & is_charged
-        
-        return pid_mask
-    
-    @staticmethod
-    def _neutral_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter neutral particles based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating neutral particles
-        """
-        q_final = particles[..., CMAP["CHARGE"]]
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        pid_mask = ~is_charged
-        
-        return pid_mask
-    
 
 
 # Example usage and testing

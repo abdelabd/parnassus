@@ -11,6 +11,7 @@ import numpy as np
 from typing import Callable, Union, Tuple, Optional
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+from parnassus.torch_delphes import pdg_filters
 
 class Efficiency(nn.Module):
     """
@@ -61,13 +62,13 @@ class Efficiency(nn.Module):
         # Load efficiency formula
         if self.efficiency_formula == 'charged_hadron_cms':
             self.efficiency_func = self._charged_hadron_cms_efficiency
-            self.pdg_filter_func = self._charged_hadron_pdg_filter
+            self.pdg_filter_func = pdg_filters.charged_hadron_filter
         elif self.efficiency_formula == 'electron_cms':
             self.efficiency_func = self._electron_cms_efficiency
-            self.pdg_filter_func = self._electron_pdg_filter
+            self.pdg_filter_func = pdg_filters.electron_filter
         elif self.efficiency_formula == 'muon_cms':
             self.efficiency_func = self._muon_cms_efficiency
-            self.pdg_filter_func = self._muon_pdg_filter
+            self.pdg_filter_func = pdg_filters.muon_filter
         elif callable(self.efficiency_formula):
             self.efficiency_func = self.efficiency_formula
             self.pdg_filter_func = None
@@ -126,6 +127,7 @@ class Efficiency(nn.Module):
         particles[:, CMAP["PASS_EFF"]] = passed_full.double()
         
         return particles
+    
     @staticmethod
     def _charged_hadron_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
@@ -220,86 +222,6 @@ class Efficiency(nn.Module):
         eff = torch.where(mask6, eff6, eff)
         
         return eff
-    
-    @staticmethod
-    def _charged_hadron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter charged hadrons based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating charged hadrons
-        """
-        pid = particles[..., CMAP["PID"]]
-        q_final = particles[..., CMAP["CHARGE"]]
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        electron_mask = (abs_pid == 11) & is_charged
-        muon_mask = (abs_pid == 13) & is_charged
-        pid_mask = is_charged & ~electron_mask & ~muon_mask
-        
-        return pid_mask
-    
-    @staticmethod
-    def _electron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter electrons based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating electrons
-        """
-        pid = particles[..., CMAP["PID"]]
-        q_final = particles[..., CMAP["CHARGE"]]
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        pid_mask = (abs_pid == 11) & is_charged
-        
-        return pid_mask
-    
-    @staticmethod
-    def _muon_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter muons based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating muons
-        """
-        pid = particles[..., CMAP["PID"]]
-        q_final = particles[..., CMAP["CHARGE"]]
-        abs_pid = torch.abs(pid)
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        pid_mask = (abs_pid == 13) & is_charged
-        
-        return pid_mask
-    
-    @staticmethod
-    def _neutral_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
-        """
-        Filter neutral particles based on PDG IDs.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 15)
-            
-        Returns:
-            mask: boolean tensor indicating neutral particles
-        """
-        q_final = particles[..., CMAP["CHARGE"]]
-        is_charged = torch.abs(q_final) > 1.0e-9
-        
-        pid_mask = ~is_charged
-        
-        return pid_mask
     
     def get_efficiency_map(
         self, 

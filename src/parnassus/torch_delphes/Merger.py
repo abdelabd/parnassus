@@ -17,7 +17,7 @@ import numpy as np
 from typing import List
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
-from parnassus.torch_delphes.Efficiency import Efficiency
+from parnassus.torch_delphes import pdg_filters
 
 
 class Merger(nn.Module):
@@ -55,10 +55,10 @@ class Merger(nn.Module):
         
         # Map particle types to their PDG filter functions
         self.pdg_filters = {
-            'charged_hadron': Efficiency._charged_hadron_pdg_filter,
-            'electron': Efficiency._electron_pdg_filter,
-            'muon': Efficiency._muon_pdg_filter,
-            'neutral': Efficiency._neutral_pdg_filter
+            'charged_hadron': pdg_filters.charged_hadron_filter,
+            'electron': pdg_filters.electron_filter,
+            'muon': pdg_filters.muon_filter,
+            'neutral': pdg_filters.neutral_filter
         }
     
     def forward(self, genevent_tensors: torch.Tensor) -> torch.Tensor:
