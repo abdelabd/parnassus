@@ -39,7 +39,7 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter
+from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter, pdg_filters
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
@@ -186,9 +186,9 @@ def process_efficiency_pipeline(
         genevent_tensors_eff.append(particles.reshape(batch_size, n_part, n_dim).cpu())
 
         mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * particles[:, CMAP["PASS_EFF"]]
-        charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles).float()
-        electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles).float()
-        muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles).float()
+        charged_hadron_pid_mask = mask * pdg_filters.charged_hadron_filter(particles).float()
+        electron_pid_mask = mask * pdg_filters.electron_filter(particles).float()
+        muon_pid_mask = mask * pdg_filters.muon_filter(particles).float()
 
         ch_tensors_eff.append(particles[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
         el_tensors_eff.append(particles[electron_pid_mask > 0.5].to(torch.float32).cpu())
@@ -256,10 +256,10 @@ def process_smearing_pipeline(
         genevent_tensors_smeared.append(particles.reshape(batch_size, n_part, n_dim_new).cpu())
 
         mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * particles[:, CMAP["PASS_EFF"]]
-        charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles).float()
-        electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles).float()
-        muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles).float()
-
+        charged_hadron_pid_mask = mask * pdg_filters.charged_hadron_filter(particles).float()
+        electron_pid_mask = mask * pdg_filters.electron_filter(particles).float()
+        muon_pid_mask = mask * pdg_filters.muon_filter(particles).float()
+        
         ch_tensors_smeared.append(particles[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
         el_tensors_smeared.append(particles[electron_pid_mask > 0.5].to(torch.float32).cpu())
         mu_tensors_smeared.append(particles[muon_pid_mask > 0.5].to(torch.float32).cpu())
