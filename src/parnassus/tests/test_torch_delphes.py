@@ -109,7 +109,7 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
 
         # Extract particles that passed propagation for this batch (collect as single tensor per batch)
         mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] * particles_propagated[:, CMAP["PASS_PROP"]]
-        pap_pid_mask = particles_propagated[:, CMAP["IS_NOT_PAD"]].float() # TODO: why not use PASS_PROP here? I suppose Delphes writes all particles regardless if they pass propagation
+        pap_pid_mask = particles_propagated[:, CMAP["IS_NOT_PAD"]].float() * particles_propagated[:, CMAP["PASS_PROP"]].float()
         charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles_propagated).float()
         electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles_propagated).float()
         muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles_propagated).float()

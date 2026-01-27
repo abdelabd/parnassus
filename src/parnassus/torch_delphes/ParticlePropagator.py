@@ -151,22 +151,32 @@ class ParticlePropagator(nn.Module):
         # ==================== COMPUTE ETA FOR "ALREADY OUTSIDE" PARTICLES ====================
         # Particles that were already outside tracker don't go through propagation
         # but still need position-based Eta computed at their current position
-        x_out = particles[already_outside_tracker, CMAP["X"]] * 1.0e-2  # cm to m
-        y_out = particles[already_outside_tracker, CMAP["Y"]] * 1.0e-2
-        z_out = particles[already_outside_tracker, CMAP["Z"]] * 1.0e-2
+        x_out = particles[already_outside_tracker, CMAP["X"]] * 1.0e-3  # mm to m
+        y_out = particles[already_outside_tracker, CMAP["Y"]] * 1.0e-3  # mm to m
+        z_out = particles[already_outside_tracker, CMAP["Z"]] * 1.0e-3  # mm to m
         r_xy_out = torch.sqrt(x_out**2 + y_out**2)
         eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
         particles[already_outside_tracker, CMAP["ETA"]] = eta_out
     
-        # Filter out particles that didn't reach detector (r_t == 0)
-        # In _propagate_charged, invalid particles have position set to zero
-        # But DON'T filter particles that were already outside (they should keep their positions)
-        final_r = torch.sqrt(particles[:, CMAP["X"]]**2 + particles[:, CMAP["Y"]]**2) * 1.0e-3
-        reached_detector = (final_r > 1.0e-6) | already_outside_tracker
-        mask = mask & reached_detector
+        # ==================== FILTER CHARGED PARTICLES THAT FAILED PROPAGATION ====================
+        # C++ Delphes: for charged particles, only add to output if r_t > 0.0 (line 338)
+        # For neutral particles, always add to output (no check after propagation)
+        # The check is: did the charged particle successfully reach the detector?
+        # We detect failure by checking if r_t is very small (position set to ~zero indicates failure)
+        final_x = particles[:, CMAP["X"]] * 1.0e-3  # mm to m
+        final_y = particles[:, CMAP["Y"]] * 1.0e-3
+        final_r = torch.sqrt(final_x**2 + final_y**2)
+        
+        # Charged particles with r_t ≈ 0 failed propagation (helix doesn't reach detector)
+        # Neutral particles always succeed (straight line always reaches somewhere)
+        # Particles already outside always succeed (pass through)
+        is_charged = torch.abs(particles[:, CMAP["CHARGE"]]) > 1.0e-9
+        charged_failed = is_charged & (final_r < 1.0e-6) & needs_propagation
+        
+        # Update mask: remove charged particles that failed propagation
+        mask = mask & (~charged_failed)
         
         # Update the mask column
-        # particles = torch.cat([particles, mask.unsqueeze(1).float()], dim=1)  # New column 15 is mask
         particles[:, CMAP["PASS_PROP"]] = mask.float()
 
         return particles
