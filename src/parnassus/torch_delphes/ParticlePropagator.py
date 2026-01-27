@@ -196,6 +196,9 @@ class ParticlePropagator(nn.Module):
         for time t to reach detector cylinder.
         """
         
+        # Convert mask to boolean if needed (it might be int64 from operations)
+        mask = mask.bool()
+        
         # Extract neutral particle data
         x_n = x[mask]
         y_n = y[mask]
@@ -219,7 +222,7 @@ class ParticlePropagator(nn.Module):
         t_z = torch.where(
             torch.abs(pz_n) > 1e-10,
             (torch.sign(pz_n) * self.half_length - z_n) / pz_n,
-            torch.tensor(1.0e99, device=self.device)
+            torch.full_like(pz_n, 1.0e99)
         )
         
         # Take minimum time
@@ -241,12 +244,15 @@ class ParticlePropagator(nn.Module):
         eta_outer = torch.asinh(z_t / (r_t_xy + 1e-10))
         
         # Update positions and EtaOuter in particles (convert m back to mm)
-        particles[mask, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
-        particles[mask, CMAP["PHI_OUTER"]] = particles[mask, CMAP["PHI"]]  # PhiOuter (same as momentum phi for neutral)
-        particles[mask, CMAP["X"]] = x_t * 1.0e3  # X
-        particles[mask, CMAP["Y"]] = y_t * 1.0e3  # Y
-        particles[mask, CMAP["Z"]] = z_t * 1.0e3  # Z
-        particles[mask, CMAP["T"]] = particles[mask, CMAP["T"]] + t * e_n * 1.0e3  # T (time in mm/c)
+        # We need to map from masked indices to full particle array
+        mask_indices = torch.where(mask)[0]
+        
+        particles[mask_indices, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
+        particles[mask_indices, CMAP["PHI_OUTER"]] = particles[mask_indices, CMAP["PHI"]]  # PhiOuter (same as momentum phi for neutral)
+        particles[mask_indices, CMAP["X"]] = x_t * 1.0e3  # X
+        particles[mask_indices, CMAP["Y"]] = y_t * 1.0e3  # Y
+        particles[mask_indices, CMAP["Z"]] = z_t * 1.0e3  # Z
+        particles[mask_indices, CMAP["T"]] = particles[mask_indices, CMAP["T"]] + t * e_n * 1.0e3  # T (time in mm/c)
 
         # Store path length (could be stored in a new column if needed)
         # For now we don't have a dedicated column for L in the 16-column format
@@ -260,6 +266,9 @@ class ParticlePropagator(nn.Module):
         
         This implements the helix propagation from C++ Delphes ParticlePropagator.
         """
+        
+        # Convert mask to boolean if needed (it might be int64 from operations)
+        mask = mask.bool()
         
         # Extract charged particle data
         x_c = x[mask]
@@ -298,7 +307,7 @@ class ParticlePropagator(nn.Module):
         t_z = torch.where(
             torch.abs(vz) > 1e-10,
             (torch.sign(pz_c) * self.half_length - z_c) / vz,
-            torch.tensor(1.0e99, device=self.device)
+            torch.full_like(vz, 1.0e99)
         )
         
         # Check if helix crosses cylinder sides
