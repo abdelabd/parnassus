@@ -14,6 +14,7 @@ into a unified "tracks" collection.
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import List
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes.Efficiency import Efficiency
@@ -37,9 +38,11 @@ class Merger(nn.Module):
     Output shape: (N_events, N_particles, D) with filled-in PASS_MERGER column
     """
     
-    def __init__(self, 
-                 particle_types=['charged_hadron', 'electron', 'muon'],
-                 device='cpu'):
+    def __init__(
+        self, 
+        particle_types: List[str] = ['charged_hadron', 'electron', 'muon'],
+        device: str = 'cpu'
+    ) -> None:
         """
         Args:
             particle_types: List of particle types to include in merger
@@ -58,7 +61,7 @@ class Merger(nn.Module):
             'neutral': Efficiency._neutral_pdg_filter
         }
     
-    def forward(self, genevent_tensors):
+    def forward(self, genevent_tensors: torch.Tensor) -> torch.Tensor:
         """
         Apply merger to create unified output with PASS_MERGER mask.
         
@@ -104,7 +107,7 @@ class Merger(nn.Module):
 
         return genevent_tensors
     
-    def compute_aggregate_stats(self, genevent_tensors):
+    def compute_aggregate_stats(self, genevent_tensors: torch.Tensor) -> torch.Tensor:
         """
         Compute per-event aggregate statistics for particles that pass merger.
         

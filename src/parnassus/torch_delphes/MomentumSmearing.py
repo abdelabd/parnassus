@@ -7,6 +7,7 @@ Performs transverse momentum resolution smearing using a log-normal distribution
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import Callable, Union, Tuple
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
@@ -41,9 +42,11 @@ class MomentumSmearing(nn.Module):
         (abs(eta_outer) > 1.5 && abs(eta_outer) <= 2.5) * (pt > 0.1) * sqrt(0.25^2 + pt^2*3.1e-3^2)
     """
     
-    def __init__(self, 
-                 resolution_formula='charged_hadron_cms',
-                 device='cpu'):
+    def __init__(
+        self, 
+        resolution_formula: Union[str, Callable] = 'charged_hadron_cms',
+        device: str = 'cpu'
+    ) -> None:
         """
         Args:
             resolution_formula: Name of predefined formula or custom callable
@@ -65,7 +68,7 @@ class MomentumSmearing(nn.Module):
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
-    def forward(self, particles):
+    def forward(self, particles: torch.Tensor) -> torch.Tensor:
         """
         Apply momentum smearing to particles.
         
@@ -155,7 +158,7 @@ class MomentumSmearing(nn.Module):
         return smeared
     
     @staticmethod
-    def _charged_hadron_cms_resolution(pt, eta_outer):
+    def _charged_hadron_cms_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
         CMS charged hadron momentum resolution formula.
         Based on arXiv:1405.6569
@@ -193,7 +196,7 @@ class MomentumSmearing(nn.Module):
         return res
     
     @staticmethod
-    def _electron_cms_resolution(pt, eta_outer):
+    def _electron_cms_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
         CMS electron momentum resolution formula.
         Based on arXiv:1502.02701
@@ -226,7 +229,7 @@ class MomentumSmearing(nn.Module):
         return res
     
     @staticmethod
-    def _muon_cms_resolution(pt, eta_outer):
+    def _muon_cms_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
         CMS muon momentum resolution formula.
         Based on arXiv:1306.2016
@@ -259,7 +262,7 @@ class MomentumSmearing(nn.Module):
         return res
     
     @staticmethod
-    def log_normal_sample(mean, sigma):
+    def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         """
         Sample from a log-normal distribution.
         
@@ -294,8 +297,13 @@ class MomentumSmearing(nn.Module):
         return result
     
 
-    def get_resolution_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
-                          n_pts=100, n_etas=100):
+    def get_resolution_map(
+        self, 
+        pt_range: Tuple[float, float] = (0, 100), 
+        eta_range: Tuple[float, float] = (-3, 3), 
+        n_pts: int = 100, 
+        n_etas: int = 100
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate a 2D map of resolution values for visualization.
         
