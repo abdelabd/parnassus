@@ -13,6 +13,7 @@ This module:
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import Tuple, Optional
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
@@ -26,9 +27,9 @@ class ParticlePropagator(nn.Module):
     - Neutral particles (straight line propagation)
     - Charged particles (helix propagation in magnetic field)
     
-    IMPORTANT: This module computes position-based EtaOuter and PhiOuter from raw data:
+    Module also computes position-based EtaOuter and PhiOuter from raw data:
     - EtaOuter: asinh(Z / sqrt(X² + Y²)) - POSITION-based, at intersection with detector
-    - PhiOuter (column 9): atan2(Py, Px) (p) - POSITION-based, from closest approach to z-axis
+    - PhiOuter: atan2(Py, Px) (p) - POSITION-based, from closest approach to z-axis
     
     Position-based Eta is used by the Efficiency module (matching C++ Delphes behavior).
     
@@ -51,13 +52,15 @@ class ParticlePropagator(nn.Module):
     Output: Propagated particles in Track format (same 15 columns but with updated positions)
     """
     
-    def __init__(self,
-                 radius=1.29,           # Detector radius in meters
-                 half_length=3.0,       # Detector half-length in meters
-                 bz=3.8,                # Magnetic field in Tesla
-                 radius_max=None,       # Max radius for initial position check
-                 half_length_max=None,  # Max half-length for initial position check
-                 device='cpu'):
+    def __init__(
+        self,
+        radius: float = 1.29,           # Detector radius in meters
+        half_length: float = 3.0,       # Detector half-length in meters
+        bz: float = 3.8,                # Magnetic field in Tesla
+        radius_max: Optional[float] = None,       # Max radius for initial position check
+        half_length_max: Optional[float] = None,  # Max half-length for initial position check
+        device: str = 'cpu'
+    ) -> None:
         """
         Args:
             radius: Detector cylinder radius in meters (default: 1.29m for CMS)
@@ -79,7 +82,10 @@ class ParticlePropagator(nn.Module):
         # Physical constant
         self.c_light = 2.99792458e8  # Speed of light in m/s
         
-    def forward(self, particles):
+    def forward(
+        self, 
+        particles: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Propagate particles to detector surface using mask-based filtering.
         
@@ -210,7 +216,19 @@ class ParticlePropagator(nn.Module):
 
         return particles, neutrals, charged_hadrons, electrons, muons
     
-    def _propagate_neutral(self, particles, mask, x, y, z, px, py, pz, pt, e):
+    def _propagate_neutral(
+        self, 
+        particles: torch.Tensor, 
+        mask: torch.Tensor, 
+        x: torch.Tensor, 
+        y: torch.Tensor, 
+        z: torch.Tensor, 
+        px: torch.Tensor, 
+        py: torch.Tensor, 
+        pz: torch.Tensor, 
+        pt: torch.Tensor, 
+        e: torch.Tensor
+    ) -> torch.Tensor:
         """
         Propagate neutral particles in straight lines.
         Updates positions in-place for particles where mask=True.
@@ -282,7 +300,20 @@ class ParticlePropagator(nn.Module):
         
         return particles
     
-    def _propagate_charged(self, particles, mask, x, y, z, px, py, pz, pt, e, q):
+    def _propagate_charged(
+        self, 
+        particles: torch.Tensor, 
+        mask: torch.Tensor, 
+        x: torch.Tensor, 
+        y: torch.Tensor, 
+        z: torch.Tensor, 
+        px: torch.Tensor, 
+        py: torch.Tensor, 
+        pz: torch.Tensor, 
+        pt: torch.Tensor, 
+        e: torch.Tensor, 
+        q: torch.Tensor
+    ) -> torch.Tensor:
         """
         Propagate charged particles in helical paths through magnetic field.
         Updates positions in-place for particles where mask=True.
@@ -411,7 +442,7 @@ class ParticlePropagator(nn.Module):
         return particles
     
     @staticmethod
-    def _charged_hadron_pdg_filter(particles):
+    def _charged_hadron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter charged hadrons based on PDG IDs.
         
@@ -433,7 +464,7 @@ class ParticlePropagator(nn.Module):
         return pid_mask
     
     @staticmethod
-    def _electron_pdg_filter(particles):
+    def _electron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter electrons based on PDG IDs.
         
@@ -453,7 +484,7 @@ class ParticlePropagator(nn.Module):
         return pid_mask
     
     @staticmethod
-    def _muon_pdg_filter(particles):
+    def _muon_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter muons based on PDG IDs.
         
@@ -473,7 +504,7 @@ class ParticlePropagator(nn.Module):
         return pid_mask
     
     @staticmethod
-    def _neutral_pdg_filter(particles):
+    def _neutral_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter neutral particles based on PDG IDs.
         

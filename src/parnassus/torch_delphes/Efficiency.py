@@ -8,6 +8,7 @@ as a differentiable PyTorch module.
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import Callable, Union, Tuple, Optional
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
@@ -43,9 +44,11 @@ class Efficiency(nn.Module):
         (abs(eta_outer) > 2.5)                                                * (0.00)
     """
     
-    def __init__(self, 
-                 efficiency_formula='charged_hadron_cms',
-                 device='cpu'):
+    def __init__(
+        self, 
+        efficiency_formula: Union[str, Callable] = 'charged_hadron_cms',
+        device: str = 'cpu'
+    ) -> None:
         """
         Args:
             efficiency_formula: Name of predefined formula or custom callable
@@ -72,7 +75,7 @@ class Efficiency(nn.Module):
             raise ValueError(f"Unknown efficiency formula: {efficiency_formula}")
     
 
-    def forward(self, particles):
+    def forward(self, particles: torch.Tensor) -> torch.Tensor:
         """
         Apply efficiency filter to particles using mask-based filtering.
         
@@ -124,7 +127,7 @@ class Efficiency(nn.Module):
         
         return particles
     @staticmethod
-    def _charged_hadron_cms_efficiency(pt, eta_outer):
+    def _charged_hadron_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
         CMS charged hadron tracking efficiency formula.
         
@@ -161,7 +164,7 @@ class Efficiency(nn.Module):
         return eff
     
     @staticmethod
-    def _electron_cms_efficiency(pt, eta_outer):
+    def _electron_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """CMS electron tracking efficiency formula."""
         abs_eta_outer = torch.abs(eta_outer)
         eff = torch.zeros_like(pt)
@@ -189,7 +192,7 @@ class Efficiency(nn.Module):
         return eff
     
     @staticmethod
-    def _muon_cms_efficiency(pt, eta_outer):
+    def _muon_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """CMS muon tracking efficiency formula."""
         abs_eta_outer = torch.abs(eta_outer)
         eff = torch.zeros_like(pt)
@@ -219,7 +222,7 @@ class Efficiency(nn.Module):
         return eff
     
     @staticmethod
-    def _charged_hadron_pdg_filter(particles):
+    def _charged_hadron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter charged hadrons based on PDG IDs.
         
@@ -241,7 +244,7 @@ class Efficiency(nn.Module):
         return pid_mask
     
     @staticmethod
-    def _electron_pdg_filter(particles):
+    def _electron_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter electrons based on PDG IDs.
         
@@ -261,7 +264,7 @@ class Efficiency(nn.Module):
         return pid_mask
     
     @staticmethod
-    def _muon_pdg_filter(particles):
+    def _muon_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter muons based on PDG IDs.
         
@@ -281,7 +284,7 @@ class Efficiency(nn.Module):
         return pid_mask
     
     @staticmethod
-    def _neutral_pdg_filter(particles):
+    def _neutral_pdg_filter(particles: torch.Tensor) -> torch.Tensor:
         """
         Filter neutral particles based on PDG IDs.
         
@@ -298,8 +301,13 @@ class Efficiency(nn.Module):
         
         return pid_mask
     
-    def get_efficiency_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
-                          n_pts=100, n_etas=100):
+    def get_efficiency_map(
+        self, 
+        pt_range: Tuple[float, float] = (0, 100), 
+        eta_range: Tuple[float, float] = (-3, 3), 
+        n_pts: int = 100, 
+        n_etas: int = 100
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate a 2D efficiency map for visualization.
         

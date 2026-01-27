@@ -9,6 +9,7 @@ This module:
 """
 import torch
 import torch.nn as nn
+from typing import List, Dict, Optional, Callable, Union, Tuple
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
@@ -32,17 +33,19 @@ class Tower(nn.Module):
             ecalTowers: List of tower tensors per event
     """
     
-    def __init__(self,
-                 eta_bins,
-                 phi_bins, 
-                 energy_min=0.5,
-                 energy_sig_min=2.0,
-                 resolution_formula='ecal_cms',
-                 is_ecal=True,
-                 smear_tower_center=True,
-                 energy_fractions=None,
-                 max_towers_per_event=500,
-                 device='cpu'):
+    def __init__(
+        self,
+        eta_bins: List[float],
+        phi_bins: List[float], 
+        energy_min: float = 0.5,
+        energy_sig_min: float = 2.0,
+        resolution_formula: Union[str, Callable] = 'ecal_cms',
+        is_ecal: bool = True,
+        smear_tower_center: bool = True,
+        energy_fractions: Optional[Dict[int, float]] = None,
+        max_towers_per_event: int = 500,
+        device: str = 'cpu'
+    ) -> None:
         """
         Args:
             eta_bins: List of eta bin edges (sorted)
@@ -107,7 +110,7 @@ class Tower(nn.Module):
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
-    def forward(self, genevent_tensors):
+    def forward(self, genevent_tensors: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Apply Tower to generate calorimeter towers and energy flow objects.
         
@@ -139,7 +142,7 @@ class Tower(nn.Module):
         
         return genevent_tensors_out, all_towers
   
-    def _process_event(self, event_tensor):
+    def _process_event(self, event_tensor: torch.Tensor) -> List[torch.Tensor]:
         """
         Process a single event to create towers and energy flow objects.
         
@@ -286,7 +289,14 @@ class Tower(nn.Module):
         
         return towers
    
-    def _create_tower_object(self, eta, phi, energy, time, n_features):
+    def _create_tower_object(
+        self, 
+        eta: float, 
+        phi: float, 
+        energy: float, 
+        time: float, 
+        n_features: int
+    ) -> torch.Tensor:
         """
         Create a tower object as a particle-like tensor.
         """
@@ -326,7 +336,11 @@ class Tower(nn.Module):
         
         return tower
     
-    def _append_towers_to_events(self, genevent_tensors, all_towers):
+    def _append_towers_to_events(
+        self, 
+        genevent_tensors: torch.Tensor, 
+        all_towers: List[List[torch.Tensor]]
+    ) -> torch.Tensor:
         """
         Append towers to genevent_tensors and add masks.
         
@@ -382,7 +396,7 @@ class Tower(nn.Module):
         return genevent_tensors_out
 
     @staticmethod
-    def _ecal_cms_resolution(energy, eta):
+    def _ecal_cms_resolution(energy: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
         """
         CMS ECAL energy resolution formula.
         From delphes_card_CMS_5_0.tcl
@@ -413,7 +427,7 @@ class Tower(nn.Module):
         return resolution
     
     @staticmethod
-    def _hcal_cms_resolution(energy, eta):
+    def _hcal_cms_resolution(energy: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
         """
         CMS HCAL energy resolution formula (placeholder).
         """
@@ -421,7 +435,7 @@ class Tower(nn.Module):
         return torch.sqrt(energy**2 * 0.1**2 + energy * 0.5**2 + 1.0**2)
     
     @staticmethod
-    def log_normal_sample(mean, sigma):
+    def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         """
         Sample from log-normal distribution to ensure positive energies.
         Same as used in MomentumSmearing module.
@@ -442,7 +456,7 @@ class Tower(nn.Module):
         
         return result
     
-    def get_energy_fraction(self, pid):
+    def get_energy_fraction(self, pid: int) -> float:
         """
         Get energy fraction for a given PDG ID.
         """
