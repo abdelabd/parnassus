@@ -65,6 +65,95 @@ class MomentumSmearing(nn.Module):
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
+    def forward(self, particles):
+        """
+        Apply momentum smearing to particles.
+        
+        Args:
+            particles: tensor of shape (N, 15) or (B, N, 16)
+                If (N, 15): single event
+                If (B, N, 16): batched events with mask in column 15
+                
+                column 0: PID (Particle ID)
+                column 1: Status
+                column 2: Charge
+                column 3: E (Energy)
+                columns 4-6: Px, Py, Pz (3-momentum)
+                column 7: PT (transverse momentum, pre-computed)
+                column 8: Eta (pseudorapidity, pre-computed)
+                column 9: Phi (azimuthal angle, pre-computed)
+                column 10: T (time)
+                columns 11-13: X, Y, Z (position)
+                column 14: Mass
+                column 15: etaOuter (pseudorapidity at outer position)
+                column 16: phiOuter (azimuthal angle at outer position)
+                columns 17->23: masks
+        
+        Returns:
+            smeared_particles: particles with smeared PT
+        """
+
+        # Move to device
+        particles = particles.to(self.device)
+
+        # Initialize TRACK_RESOLUTION column to zeros
+        particles[..., CMAP["TRACK_RESOLUTION"]] = 0.0
+
+        # Clone particles to avoid modifying input
+        smeared = particles.clone()
+        
+        # Extract mask
+        mask = particles[..., CMAP["IS_NOT_PAD"]]  # Works for both (N, 16) and (B, N, 16)
+        
+        # Extract pre-computed kinematics from Delphes
+        pt = particles[..., CMAP["PT"]]   # Column 7: PT (transverse momentum)
+        eta_outer = particles[..., CMAP["ETA_OUTER"]]  # Column 8: Eta (for resolution formula - typically position-based)
+        phi_outer = particles[..., CMAP["PHI_OUTER"]]  # Column 9: Phi (azimuthal angle)
+        mass = particles[..., CMAP["MASS"]]  # Column 14: Mass
+
+        # Extract momentum components to compute momentum-based eta for reconstruction
+        px = particles[..., CMAP["PX"]]  # Px
+        py = particles[..., CMAP["PY"]]  # Py
+        pz = particles[..., CMAP["PZ"]]  # Pz
+
+        # Compute momentum-based eta and phi from the momentum vector
+        # This matches C++ Delphes which uses candidateMomentum.Eta() and candidateMomentum.Phi()
+        # for reconstructing the 4-vector after smearing
+        eta = particles[..., CMAP["ETA"]]  # atanh(pz/p) = asinh(pz/pt)
+        phi = particles[..., CMAP["PHI"]]
+        
+        # Compute resolution for each particle using eta_outer
+        resolution = self.resolution_func(pt, eta_outer)
+        
+        # Clamp resolution to maximum of 1.0 (100% of PT)
+        resolution = torch.clamp(resolution, max=1.0)
+        
+        # Apply smearing
+        smeared_pt = self.log_normal_sample(pt, resolution)
+        
+        # Apply smearing only to real particles (mask == 1.0)
+        # Keep original PT for padded particles (mask == 0.0)
+        smeared_pt = torch.where(mask > 0.5, smeared_pt, pt)
+        
+        # Update PT in the tensor (column 7)
+        smeared[..., CMAP["PT"]] = smeared_pt
+
+        # Recompute Px, Py, Pz with smeared PT but using MOMENTUM-based eta and phi
+        # This matches C++ Delphes behavior: it uses candidateMomentum.Eta() and Phi()
+        # for reconstruction, not the position-based values used for resolution
+        smeared[..., CMAP["PX"]] = smeared_pt * torch.cos(phi)  # Px
+        smeared[..., CMAP["PY"]] = smeared_pt * torch.sin(phi)  # Py
+        smeared[..., CMAP["PZ"]] = smeared_pt * torch.sinh(eta)  # Pz
+
+        # Recompute energy: E = sqrt(P^2 + M^2)
+        p_squared = smeared[..., CMAP["PX"]]**2 + smeared[..., CMAP["PY"]]**2 + smeared[..., CMAP["PZ"]]**2
+        smeared[..., CMAP["E"]] = torch.sqrt(p_squared + mass**2)  # E
+
+        # Update TRACK_RESOLUTION column
+        smeared[..., CMAP["TRACK_RESOLUTION"]] = resolution
+
+        return smeared
+    
     @staticmethod
     def _charged_hadron_cms_resolution(pt, eta_outer):
         """
@@ -204,95 +293,7 @@ class MomentumSmearing(nn.Module):
         
         return result
     
-    def forward(self, particles):
-        """
-        Apply momentum smearing to particles.
-        
-        Args:
-            particles: tensor of shape (N, 15) or (B, N, 16)
-                If (N, 15): single event
-                If (B, N, 16): batched events with mask in column 15
-                
-                column 0: PID (Particle ID)
-                column 1: Status
-                column 2: Charge
-                column 3: E (Energy)
-                columns 4-6: Px, Py, Pz (3-momentum)
-                column 7: PT (transverse momentum, pre-computed)
-                column 8: Eta (pseudorapidity, pre-computed)
-                column 9: Phi (azimuthal angle, pre-computed)
-                column 10: T (time)
-                columns 11-13: X, Y, Z (position)
-                column 14: Mass
-                column 15: etaOuter (pseudorapidity at outer position)
-                column 16: phiOuter (azimuthal angle at outer position)
-                columns 17->23: masks
-        
-        Returns:
-            smeared_particles: particles with smeared PT
-        """
 
-        # Move to device
-        particles = particles.to(self.device)
-
-        # Initialize TRACK_RESOLUTION column to zeros
-        particles[..., CMAP["TRACK_RESOLUTION"]] = 0.0
-
-        # Clone particles to avoid modifying input
-        smeared = particles.clone()
-        
-        # Extract mask
-        mask = particles[..., CMAP["IS_NOT_PAD"]]  # Works for both (N, 16) and (B, N, 16)
-        
-        # Extract pre-computed kinematics from Delphes
-        pt = particles[..., CMAP["PT"]]   # Column 7: PT (transverse momentum)
-        eta_outer = particles[..., CMAP["ETA_OUTER"]]  # Column 8: Eta (for resolution formula - typically position-based)
-        phi_outer = particles[..., CMAP["PHI_OUTER"]]  # Column 9: Phi (azimuthal angle)
-        mass = particles[..., CMAP["MASS"]]  # Column 14: Mass
-
-        # Extract momentum components to compute momentum-based eta for reconstruction
-        px = particles[..., CMAP["PX"]]  # Px
-        py = particles[..., CMAP["PY"]]  # Py
-        pz = particles[..., CMAP["PZ"]]  # Pz
-
-        # Compute momentum-based eta and phi from the momentum vector
-        # This matches C++ Delphes which uses candidateMomentum.Eta() and candidateMomentum.Phi()
-        # for reconstructing the 4-vector after smearing
-        eta = particles[..., CMAP["ETA"]]  # atanh(pz/p) = asinh(pz/pt)
-        phi = particles[..., CMAP["PHI"]]
-        
-        # Compute resolution for each particle using eta_outer
-        resolution = self.resolution_func(pt, eta_outer)
-        
-        # Clamp resolution to maximum of 1.0 (100% of PT)
-        resolution = torch.clamp(resolution, max=1.0)
-        
-        # Apply smearing
-        smeared_pt = self.log_normal_sample(pt, resolution)
-        
-        # Apply smearing only to real particles (mask == 1.0)
-        # Keep original PT for padded particles (mask == 0.0)
-        smeared_pt = torch.where(mask > 0.5, smeared_pt, pt)
-        
-        # Update PT in the tensor (column 7)
-        smeared[..., CMAP["PT"]] = smeared_pt
-
-        # Recompute Px, Py, Pz with smeared PT but using MOMENTUM-based eta and phi
-        # This matches C++ Delphes behavior: it uses candidateMomentum.Eta() and Phi()
-        # for reconstruction, not the position-based values used for resolution
-        smeared[..., CMAP["PX"]] = smeared_pt * torch.cos(phi)  # Px
-        smeared[..., CMAP["PY"]] = smeared_pt * torch.sin(phi)  # Py
-        smeared[..., CMAP["PZ"]] = smeared_pt * torch.sinh(eta)  # Pz
-
-        # Recompute energy: E = sqrt(P^2 + M^2)
-        p_squared = smeared[..., CMAP["PX"]]**2 + smeared[..., CMAP["PY"]]**2 + smeared[..., CMAP["PZ"]]**2
-        smeared[..., CMAP["E"]] = torch.sqrt(p_squared + mass**2)  # E
-
-        # Update TRACK_RESOLUTION column
-        smeared[..., CMAP["TRACK_RESOLUTION"]] = resolution
-
-        return smeared
-    
     def get_resolution_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
                           n_pts=100, n_etas=100):
         """
