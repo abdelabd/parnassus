@@ -620,7 +620,8 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                     )
                 
                 # Debug: print histogram statistics
-                if debug and (branch_name in {"ECal_EFlowTrack", "ECalTower", "EFlowPhoton"}) and var != 'PID':
+                # if debug and (branch_name in {"ECal_EFlowTrack", "ECalTower", "EFlowPhoton"}) and var != 'PID':
+                if debug and (branch_name in {"ParticleAfterProp"}) and var != 'PID':
                     print(f"\n{branch_name}.{var} bins:")
                     print(f"  Bin edges: {bin_edges}, len(bin_edges)={len(bin_edges)}")
                     print(f"  C++ counts: {benchmark_counts}")
@@ -743,7 +744,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 
                 # Plot histograms
                 benchmark_counts, bin_edges, _ = ax_hist.hist(
-                    benchmark_np, bins=bins, histtype='step', color='orange', 
+                    benchmark_np, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
                     linewidth=2, label=f'C++ Delphes: {len(benchmark_np)} particles', density=False
                 )
                 torch_counts, _, _ = ax_hist.hist(
