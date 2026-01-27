@@ -98,45 +98,31 @@ def process_particle_propagator(genevent_tensors, batch_size=100):
         
         # Propagate particles (batched)
         particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, N_FEATURES)
-        particles_clone = particles.clone()
-        particles_propagated = propagator(particles)
-        genevent_tensors_propagated[batch_start:batch_end] = particles_propagated.reshape(batch_size_actual, n_part, n_dim).cpu()
+        particles_before_prop_batch = particles.clone()
+        particles_after_prop_batch, _, charged_hadrons_batch, electrons_batch, muons_batch = propagator(particles)
+
+        # Update genevnt_tensors
+        genevent_tensors_propagated[batch_start:batch_end] = particles_after_prop_batch.reshape(batch_size_actual, n_part, n_dim).cpu()
         
-        # Extract particles that passed propagation for this batch (collect as single tensor per batch)
-        mask = particles_propagated[:, CMAP["IS_NOT_PAD"]] * particles_propagated[:, CMAP["PASS_PROP"]]
+        # For debugging: Collect ParticleBeforeProp, ParticleAfterProp, ChargedHadron, Electron, and Muon tensors after propagation
+        mask = particles_after_prop_batch[:, CMAP["IS_NOT_PAD"]] * particles_after_prop_batch[:, CMAP["PASS_PROP"]]
+        
+        # ParticleBeforeProp
+        pbp_mask = particles_before_prop_batch[:, CMAP["IS_NOT_PAD"]].float()
+        pbp_tensors.append(particles_before_prop_batch[pbp_mask > 0.5].clone().to(torch.float32).cpu())
 
-        # Collect propagated particles
-        pap_mask = particles_propagated[:, CMAP["IS_NOT_PAD"]].float() * particles_propagated[:, CMAP["PASS_PROP"]].float()
-        pap_tensors.append(particles_propagated[pap_mask > 0.5].to(torch.float32).cpu())
+        # ParticleAfterProp
+        pap_mask = particles_after_prop_batch[:, CMAP["IS_NOT_PAD"]].float() * particles_after_prop_batch[:, CMAP["PASS_PROP"]].float()
+        pap_tensors.append(particles_after_prop_batch[pap_mask > 0.5].to(torch.float32).cpu())
 
-        # Collect original particles (for debugging)
-        pbp_mask = particles_clone[:, CMAP["IS_NOT_PAD"]].float()
-        pbp_tensors.append(particles_clone[pbp_mask > 0.5].clone().to(torch.float32).cpu())
+        # ChargedHadron
+        ch_tensors.append(charged_hadrons_batch)
 
+        # Electron
+        el_tensors.append(electrons_batch)
 
-        # Collect ChargedHadron, Electron, Muon tensors after propagation
-        # NOTE: To match C++ logic, keep original positions (production vertices) for ChargedHadron, Electron, and Muon branches
-        # TODO: Probably remove after debugging. Unnecessary and memory-intensive.
-        charged_hadron_pid_mask = mask * Efficiency()._charged_hadron_pdg_filter(particles_propagated).float()
-        ch_tensors_batch_og = particles_clone[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu()
-        ch_tensors_batch_propagated = particles_propagated[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu()
-
-        electron_pid_mask = mask * Efficiency()._electron_pdg_filter(particles_propagated).float()
-        el_tensors_batch_og = particles_clone[electron_pid_mask > 0.5].to(torch.float32).cpu()
-        el_tensors_batch_propagated = particles_propagated[electron_pid_mask > 0.5].to(torch.float32).cpu()
-
-        muon_pid_mask = mask * Efficiency()._muon_pdg_filter(particles_propagated).float()
-        mu_tensors_batch_og = particles_clone[muon_pid_mask > 0.5].to(torch.float32).cpu()
-        mu_tensors_batch_propagated = particles_propagated[muon_pid_mask > 0.5].to(torch.float32).cpu()
-
-        for var in ["X", "Y", "Z", "T"]:
-            ch_tensors_batch_propagated[:, CMAP[var]] = ch_tensors_batch_og[:, CMAP[var]]
-            el_tensors_batch_propagated[:, CMAP[var]] = el_tensors_batch_og[:, CMAP[var]]
-            mu_tensors_batch_propagated[:, CMAP[var]] = mu_tensors_batch_og[:, CMAP[var]]
-
-        ch_tensors.append(ch_tensors_batch_propagated)
-        el_tensors.append(el_tensors_batch_propagated)
-        mu_tensors.append(mu_tensors_batch_propagated)
+        # Muon
+        mu_tensors.append(muons_batch)
 
     return genevent_tensors_propagated, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors
 
