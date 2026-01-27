@@ -528,6 +528,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
             print(f"  ⚠ {branch_name} not found in PyTorch output, skipping...")
             continue
         
+        ### 1. Standalone plots for each kinematic variable
         for var in kinematic_vars:
             # Check if variable exists in both datasets
             torch_key = f"{branch_name}/{branch_name}.{var}"
@@ -693,7 +694,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 print(f"  ✗ {var}: Error - {e}")
                 continue
         
-        # Create combined plot with key kinematic variables
+        ### 2. Combined plot with key kinematic variables
         # For tracks: Eta, Phi, PT, P
         # For towers: Eta, Phi, E, ET
         if 'P' in kinematic_vars:
@@ -792,7 +793,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
         plt.close()
         print(f"  ✓ Combined plot saved → {combined_plot_file.name}")
         
-        # Create PID-specific combined plots (only for branches with PID field)
+        ### 3. PID-specific combined plots (only for branches with PID field)
         torch_pid_key = f"{branch_name}/{branch_name}.PID"
         benchmark_pid_key = f"{branch_name}/{branch_name}.PID"
         
@@ -907,7 +908,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
         else:
             print(f"  ℹ No PID field - skipping PID-specific plots (normal for Tower objects)")
     
-
+        ### 4. Tower energies at eta=phi=0 for ECalTower and EFlowPhoton
         if branch_name in ["ECalTower", "EFlowPhoton"]:
             print(f"\n\nPlotting tower energies at eta=phi=0")
 
