@@ -70,8 +70,9 @@ class Tower(nn.Module):
         
         # Energy fractions: default essentials (e/gamma/pi0=1.0, muons/neutrinos=0.0, hadrons=0.3)
         if energy_fractions is None:
+            # default CMS energy fractions
             energy_fractions = {
-                0: 1.0,      # default
+                0: 0.0,      # default
                 11: 1.0,     # electron
                 -11: 1.0,    # positron
                 22: 1.0,     # photon
@@ -83,6 +84,16 @@ class Tower(nn.Module):
                 -13: 0.0,    # antimuon
                 310: 0.3,    # K0short
                 3122: 0.3,   # Lambda
+                1000022: 0.0,   # neutralino
+                1000023: 0.0,   # neutralino2
+                1000025: 0.0,   # neutralino3
+                1000035: 0.0,   # neutralino4
+                1000045: 0.0,    # neutralino5
+                -1000022: 0.0,   # neutralino
+                -1000023: 0.0,   # neutralino2
+                -1000025: 0.0,   # neutralino3
+                -1000035: 0.0,   # neutralino4
+                -1000045: 0.0,    # neutralino5
             }
         self.energy_fractions = energy_fractions
         
@@ -106,19 +117,19 @@ class Tower(nn.Module):
         
         # Barrel: |eta| <= 1.5
         barrel_mask = abs_eta <= 1.5
-        barrel_res = (1.0 + 0.64 * eta**2) * torch.sqrt(
-            energy**2 * 0.008**2 + energy * 0.11**2 + 0.40**2
+        barrel_res = (1.0 + 0.64 * (eta**2)) * torch.sqrt(
+            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
         )
         
         # Endcap: 1.5 < |eta| <= 2.5
         endcap_mask = (abs_eta > 1.5) & (abs_eta <= 2.5)
         endcap_res = (2.16 + 5.6 * (abs_eta - 2.0)**2) * torch.sqrt(
-            energy**2 * 0.008**2 + energy * 0.11**2 + 0.40**2
+            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
         )
         
         # HF: 2.5 < |eta| <= 5.0
         hf_mask = (abs_eta > 2.5) & (abs_eta <= 5.0)
-        hf_res = torch.sqrt(energy**2 * 0.107**2 + energy * 2.08**2)
+        hf_res = torch.sqrt(energy**2 * (0.107**2) + energy * (2.08**2))
         
         resolution = torch.zeros_like(energy)
         resolution = torch.where(barrel_mask, barrel_res, resolution)
@@ -233,7 +244,7 @@ class Tower(nn.Module):
         particle_pid = particles[:, CMAP["PID"]]
         particle_time = particles[:, CMAP["T"]]
         
-        # Find bin indices for particles
+        # Find bin indices for particles # <-- SUSPECT
         particle_eta_bin = torch.searchsorted(self.eta_bins, particle_eta, right=False) - 1
         particle_phi_bin = torch.searchsorted(self.phi_bins, particle_phi, right=False) - 1
         
