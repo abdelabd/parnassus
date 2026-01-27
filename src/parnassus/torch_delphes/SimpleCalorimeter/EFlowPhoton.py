@@ -12,6 +12,7 @@ import torch.nn as nn
 from typing import List, Dict, Optional, Callable, Union, Tuple
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+from parnassus.torch_delphes.stochastic_utils import log_normal_sample
 
 
 class EFlowPhoton(nn.Module):
@@ -272,7 +273,7 @@ class EFlowPhoton(nn.Module):
         
         # Apply energy smearing
         tower_sigma = self.resolution_fn(tower_energies, tower_eta)
-        tower_energies_smeared = self.log_normal_sample(tower_energies, tower_sigma)
+        tower_energies_smeared = log_normal_sample(tower_energies, tower_sigma)
         
         # Recompute sigma after smearing
         tower_sigma = self.resolution_fn(tower_energies_smeared, tower_eta)
@@ -378,28 +379,6 @@ class EFlowPhoton(nn.Module):
         """
         # Simple parametrization for HCAL
         return torch.sqrt(energy**2 * 0.1**2 + energy * 0.5**2 + 1.0**2)
-    
-    @staticmethod
-    def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-        """
-        Sample from log-normal distribution to ensure positive energies.
-        Same as used in MomentumSmearing module.
-        """
-        # Avoid log(0) issues
-        valid_mask = mean > 0.0
-        
-        result = torch.zeros_like(mean)
-        
-        if valid_mask.any():
-            mean_valid = mean[valid_mask]
-            sigma_valid = sigma[valid_mask]
-            
-            b = torch.sqrt(torch.log(1.0 + (sigma_valid**2) / (mean_valid**2)))
-            a = torch.log(mean_valid) - 0.5 * b**2
-            
-            result[valid_mask] = torch.exp(a + b * torch.randn_like(a))
-        
-        return result
     
     def get_energy_fraction(self, pid: int) -> float:
         """
