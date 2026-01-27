@@ -509,8 +509,6 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
     
     for branch_name, kinematic_vars in branches:
-        if branch_name not in ["ECal_EFlowTrack", "ECalTower", "EFlowPhoton"]: # TODO: Remove after debugging
-            continue
         print(f"\n{'='*70}")
         print(f"Validating {branch_name}...")
         print(f"{'='*70}")
@@ -605,7 +603,7 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                     
                     # Plot histograms
                     benchmark_counts, bin_edges, _ = ax_hist.hist(
-                        benchmark_np, bins=bins, histtype='step', color='orange', 
+                        benchmark_np, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
                         linewidth=2, label='C++ Delphes', density=False
                     )
                     torch_counts, _, _ = ax_hist.hist(
@@ -793,7 +791,6 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
         benchmark_pid_key = f"{branch_name}/{branch_name}.PID"
         
         if torch_pid_key in torch_tree.keys() and benchmark_pid_key in benchmark_tree.keys():
-            print(f"\n  Creating PID-specific combined plots...")
             
             # Load PID data to get unique PIDs
             torch_pids = torch_tree[torch_pid_key].array()
@@ -810,7 +807,6 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
             # For each unique PID, create a combined plot
             for pid in unique_pids:
                 pid_int = int(pid)
-                print(f"    Creating combined plot for PID={pid_int}...")
                 
                 # Create figure with 2 rows (histogram + ratio) and 4 columns (one per variable)
                 fig = plt.figure(figsize=(30, 6))
@@ -901,7 +897,6 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 pid_plot_file = branch_dir / f"pid_{pid_int}.png"
                 plt.savefig(pid_plot_file, dpi=150, bbox_inches='tight')
                 plt.close()
-                print(f"    ✓ PID={pid_int} combined plot saved → {pid_plot_file.name}")
                     
         else:
             print(f"  ℹ No PID field - skipping PID-specific plots (normal for Tower objects)")
