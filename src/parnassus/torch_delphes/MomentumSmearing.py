@@ -10,6 +10,7 @@ import numpy as np
 from typing import Callable, Union, Tuple
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+from parnassus.torch_delphes.stochastic_utils import log_normal_sample
 
 class MomentumSmearing(nn.Module):
     """
@@ -131,8 +132,8 @@ class MomentumSmearing(nn.Module):
         # Clamp resolution to maximum of 1.0 (100% of PT)
         resolution = torch.clamp(resolution, max=1.0)
         
-        # Apply smearing
-        smeared_pt = self.log_normal_sample(pt, resolution)
+        # Apply smearing using log-normal distribution
+        smeared_pt = log_normal_sample(pt, resolution)
         
         # Apply smearing only to real particles (mask == 1.0)
         # Keep original PT for padded particles (mask == 0.0)
@@ -260,42 +261,6 @@ class MomentumSmearing(nn.Module):
         res = torch.where(mask3, res3, res)
         
         return res
-    
-    @staticmethod
-    def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-        """
-        Sample from a log-normal distribution.
-        
-        This ensures the smeared PT is always positive.
-        
-        Args:
-            mean: mean value (original PT)
-            sigma: standard deviation (resolution)
-            
-        Returns:
-            sample: value from log-normal distribution
-        """
-        # Handle edge cases
-        mask_positive = mean > 0.0
-        
-        # For positive means, compute log-normal parameters
-        # Variance = sigma^2, Mean = mean
-        # Then: ln(mean) = mu + 0.5*s^2 and sigma^2 = mean^2 * (exp(s^2) - 1)
-        # Solving: s^2 = ln(1 + (sigma/mean)^2), mu = ln(mean) - 0.5*s^2
-        
-        s_squared = torch.log(1.0 + (sigma / (mean + 1e-10))**2)
-        s = torch.sqrt(s_squared)
-        mu = torch.log(mean + 1e-10) - 0.5 * s_squared
-        
-        # Sample from standard normal and transform
-        z = torch.randn_like(mean)
-        sample = torch.exp(mu + s * z)
-        
-        # Return mean for non-positive cases
-        result = torch.where(mask_positive, sample, mean)
-        
-        return result
-    
 
     def get_resolution_map(
         self, 
