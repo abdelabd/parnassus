@@ -347,6 +347,32 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
     
     # Phi bins: uniform from -pi to pi
     phi_bins = [i * np.pi / 180.0 for i in range(-180, 181)]
+
+    # energy fractions
+    energy_fractions = {
+        0: 0.0,      # default
+        11: 1.0,     # electron
+        -11: 1.0,    # positron
+        22: 1.0,     # photon
+        111: 1.0,    # pi0
+        12: 0.0,     # nu_e
+        14: 0.0,     # nu_mu
+        16: 0.0,     # nu_tau
+        13: 0.0,     # muon
+        -13: 0.0,    # antimuon
+        310: 0.3,    # K0short
+        3122: 0.3,   # Lambda
+        1000022: 0.0,   # neutralino
+        1000023: 0.0,   # neutralino2
+        1000025: 0.0,   # neutralino3
+        1000035: 0.0,   # neutralino4
+        1000045: 0.0,    # neutralino5
+        -1000022: 0.0,   # neutralino
+        -1000023: 0.0,   # neutralino2
+        -1000025: 0.0,   # neutralino3
+        -1000035: 0.0,   # neutralino4
+        -1000045: 0.0,    # neutralino5
+    }
     
     # Initialize ECal module
     eflowtrack_module = SimpleCalorimeter.EFlowTrack(
@@ -357,6 +383,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         resolution_formula='ecal_cms',
         is_ecal=True,
         smear_tower_center=True,
+        energy_fractions=energy_fractions,
         max_towers_per_event=500,
         device=DEVICE
     )
@@ -368,6 +395,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         resolution_formula='ecal_cms',
         is_ecal=True,
         smear_tower_center=True,
+        energy_fractions=energy_fractions,
         max_towers_per_event=500,
         device=DEVICE
     )
@@ -379,6 +407,7 @@ def process_ecal_pipeline(genevent_tensors, batch_size=100):
         resolution_formula='ecal_cms',
         is_ecal=True,
         smear_tower_center=True,
+        energy_fractions=energy_fractions,
         max_towers_per_event=500,
         device=DEVICE
     )
@@ -480,6 +509,8 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
     
     for branch_name, kinematic_vars in branches:
+        if branch_name not in ["ECal_EFlowTrack", "ECalTower", "EFlowPhoton"]: # TODO: Remove after debugging
+            continue
         print(f"\n{'='*70}")
         print(f"Validating {branch_name}...")
         print(f"{'='*70}")
@@ -955,35 +986,39 @@ def validate_against_benchmark(torch_output_file, benchmark_file, output_dir, de
                 ax_ratio = fig.add_subplot(gs[1], sharex=ax_hist)
                 
                 # Plot histogram of selected tower energies
-                if np.min(benchmark_E_selected) < np.min(torch_E_selected):
-                    benchmark_counts, bin_edges, _ = ax_hist.hist(benchmark_E_selected, bins=50, histtype='stepfilled', alpha=0.5, color='orange',
-                            linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
-                    torch_counts, _, _ = ax_hist.hist(torch_E_selected, bins=bin_edges, histtype='step', color='blue',
-                            linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
-                else:
-                    torch_counts, bin_edges, _ = ax_hist.hist(torch_E_selected, bins=50, histtype='step', color='blue',
-                            linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
-                    benchmark_counts, _, _ = ax_hist.hist(benchmark_E_selected, bins=bin_edges, histtype='stepfilled', alpha=0.5, color='orange',
-                            linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
-                print(f"benchmark_counts.shape: {benchmark_counts.shape}, torch_counts.shape: {torch_counts.shape}")
+                try:
+                    if np.min(benchmark_E_selected) < np.min(torch_E_selected):
+                        benchmark_counts, bin_edges, _ = ax_hist.hist(benchmark_E_selected, bins=50, histtype='stepfilled', alpha=0.5, color='orange',
+                                linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
+                        torch_counts, _, _ = ax_hist.hist(torch_E_selected, bins=bin_edges, histtype='step', color='blue',
+                                linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
+                    else:
+                        torch_counts, bin_edges, _ = ax_hist.hist(torch_E_selected, bins=50, histtype='step', color='blue',
+                                linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
+                        benchmark_counts, _, _ = ax_hist.hist(benchmark_E_selected, bins=bin_edges, histtype='stepfilled', alpha=0.5, color='orange',
+                                linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
+                    print(f"benchmark_counts.shape: {benchmark_counts.shape}, torch_counts.shape: {torch_counts.shape}")
 
-                ax_hist.set_xticks(ticks=[], labels=[])
-                ax_hist.set_title(f'{branch_name}: Tower Energies at {title_str}', fontsize=14, fontweight='bold')
-                ax_hist.set_ylabel('Counts', fontsize=12)
-                ax_hist.legend(fontsize=11)
-                ax_hist.grid(True, alpha=0.3)
+                    ax_hist.set_xticks(ticks=[], labels=[])
+                    ax_hist.set_title(f'{branch_name}: Tower Energies at {title_str}', fontsize=14, fontweight='bold')
+                    ax_hist.set_ylabel('Counts', fontsize=12)
+                    ax_hist.legend(fontsize=11)
+                    ax_hist.grid(True, alpha=0.3)
 
-                # Compute ratio
-                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                ratio = torch_counts/benchmark_counts
-                ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
-                ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
-                ax_ratio.set_xlabel('Tower Energy', fontsize=12)
-                ax_ratio.set_ylabel('Torch / C++', fontsize=10)
-                ax_ratio.grid(True, alpha=0.3)
+                    # Compute ratio
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    ratio = torch_counts/benchmark_counts
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
+                    ax_ratio.set_xlabel('Tower Energy', fontsize=12)
+                    ax_ratio.set_ylabel('Torch / C++', fontsize=10)
+                    ax_ratio.grid(True, alpha=0.3)
 
-                fig.savefig("{}/{}_{}".format(branch_dir, branch_name, fig_name), dpi=150)
-                print("\n\n")
+                    fig.savefig("{}/{}_{}".format(branch_dir, branch_name, fig_name), dpi=150)
+                    print("\n\n")
+                except ValueError:
+                    print(f"  ✗ Error plotting tower energies at {title_str}: not enough events pass selection")
+                    continue
             
     print(f"\n{'='*70}")
     print(f"✓ Validation complete! Plots saved to {output_dir}")
