@@ -241,6 +241,8 @@ def tensor_to_root_dict(event_tensors: List[torch.Tensor], branch_name: str) -> 
                     pz = event_np[:, PZ]
                     pt = np.sqrt(px**2 + py**2) 
                     values = np.arcsinh(pz / (pt + 1e-10))
+                elif attr == "T":
+                    values = event_np[:, T]*1e-3 / 299792458.0  # Convert mm/c to microseconds
                 elif attr == 'PID':
                     # PID should be integer
                     values = event_np[:, column_map[attr]].astype(np.int32)
