@@ -107,85 +107,6 @@ class EFlowTrack(nn.Module):
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
-    @staticmethod
-    def _ecal_cms_resolution(energy, eta):
-        """
-        CMS ECAL energy resolution formula.
-        From delphes_card_CMS_5_0.tcl
-        """
-        abs_eta = torch.abs(eta)
-        
-        # Barrel: |eta| <= 1.5
-        barrel_mask = abs_eta <= 1.5
-        barrel_res = (1.0 + 0.64 * (eta**2)) * torch.sqrt(
-            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
-        )
-        
-        # Endcap: 1.5 < |eta| <= 2.5
-        endcap_mask = (abs_eta > 1.5) & (abs_eta <= 2.5)
-        endcap_res = (2.16 + 5.6 * (abs_eta - 2.0)**2) * torch.sqrt(
-            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
-        )
-        
-        # HF: 2.5 < |eta| <= 5.0
-        hf_mask = (abs_eta > 2.5) & (abs_eta <= 5.0)
-        hf_res = torch.sqrt(energy**2 * (0.107**2) + energy * (2.08**2))
-        
-        resolution = torch.zeros_like(energy)
-        resolution = torch.where(barrel_mask, barrel_res, resolution)
-        resolution = torch.where(endcap_mask, endcap_res, resolution)
-        resolution = torch.where(hf_mask, hf_res, resolution)
-        
-        return resolution
-    
-    @staticmethod
-    def _hcal_cms_resolution(energy, eta):
-        """
-        CMS HCAL energy resolution formula (placeholder).
-        """
-        # Simple parametrization for HCAL
-        return torch.sqrt(energy**2 * 0.1**2 + energy * 0.5**2 + 1.0**2)
-    
-    @staticmethod
-    def log_normal_sample(mean, sigma):
-        """
-        Sample from log-normal distribution to ensure positive energies.
-        Same as used in MomentumSmearing module.
-        """
-        # Avoid log(0) issues
-        valid_mask = mean > 0.0
-        
-        result = torch.zeros_like(mean)
-        
-        if valid_mask.any():
-            mean_valid = mean[valid_mask]
-            sigma_valid = sigma[valid_mask]
-            
-            b = torch.sqrt(torch.log(1.0 + (sigma_valid**2) / (mean_valid**2)))
-            a = torch.log(mean_valid) - 0.5 * b**2
-            
-            result[valid_mask] = torch.exp(a + b * torch.randn_like(a))
-        
-        return result
-    
-    def get_energy_fraction(self, pid):
-        """
-        Get energy fraction for a given PDG ID.
-        """
-        abs_pid = torch.abs(pid).long()
-        
-        # Create output tensor
-        fractions = torch.ones_like(pid, dtype=torch.float64)
-        
-        # Apply fractions based on PDG ID
-        for pdg_id, fraction in self.energy_fractions.items():
-            if pdg_id == 0:  # default
-                continue
-            mask = abs_pid == abs(pdg_id)
-            fractions[mask] = fraction
-        
-        return fractions
-    
     def forward(self, genevent_tensors):
         """
         Apply EFlowTrack to generate calorimeter towers and energy flow objects.
@@ -212,7 +133,7 @@ class EFlowTrack(nn.Module):
             all_eflow_tracks.append(eflow_tracks)
         
         return all_eflow_tracks
-    
+
     def _process_event(self, event_tensor):
         """
         Process a single event to create towers and energy flow objects.
@@ -430,3 +351,83 @@ class EFlowTrack(nn.Module):
                 eflow_tracks = non_depositing_tracks
         
         return eflow_tracks
+ 
+    @staticmethod
+    def _ecal_cms_resolution(energy, eta):
+        """
+        CMS ECAL energy resolution formula.
+        From delphes_card_CMS_5_0.tcl
+        """
+        abs_eta = torch.abs(eta)
+        
+        # Barrel: |eta| <= 1.5
+        barrel_mask = abs_eta <= 1.5
+        barrel_res = (1.0 + 0.64 * (eta**2)) * torch.sqrt(
+            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
+        )
+        
+        # Endcap: 1.5 < |eta| <= 2.5
+        endcap_mask = (abs_eta > 1.5) & (abs_eta <= 2.5)
+        endcap_res = (2.16 + 5.6 * (abs_eta - 2.0)**2) * torch.sqrt(
+            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
+        )
+        
+        # HF: 2.5 < |eta| <= 5.0
+        hf_mask = (abs_eta > 2.5) & (abs_eta <= 5.0)
+        hf_res = torch.sqrt(energy**2 * (0.107**2) + energy * (2.08**2))
+        
+        resolution = torch.zeros_like(energy)
+        resolution = torch.where(barrel_mask, barrel_res, resolution)
+        resolution = torch.where(endcap_mask, endcap_res, resolution)
+        resolution = torch.where(hf_mask, hf_res, resolution)
+        
+        return resolution
+    
+    @staticmethod
+    def _hcal_cms_resolution(energy, eta):
+        """
+        CMS HCAL energy resolution formula (placeholder).
+        """
+        # Simple parametrization for HCAL
+        return torch.sqrt(energy**2 * 0.1**2 + energy * 0.5**2 + 1.0**2)
+    
+    @staticmethod
+    def log_normal_sample(mean, sigma):
+        """
+        Sample from log-normal distribution to ensure positive energies.
+        Same as used in MomentumSmearing module.
+        """
+        # Avoid log(0) issues
+        valid_mask = mean > 0.0
+        
+        result = torch.zeros_like(mean)
+        
+        if valid_mask.any():
+            mean_valid = mean[valid_mask]
+            sigma_valid = sigma[valid_mask]
+            
+            b = torch.sqrt(torch.log(1.0 + (sigma_valid**2) / (mean_valid**2)))
+            a = torch.log(mean_valid) - 0.5 * b**2
+            
+            result[valid_mask] = torch.exp(a + b * torch.randn_like(a))
+        
+        return result
+    
+    def get_energy_fraction(self, pid):
+        """
+        Get energy fraction for a given PDG ID.
+        """
+        abs_pid = torch.abs(pid).long()
+        
+        # Create output tensor
+        fractions = torch.ones_like(pid, dtype=torch.float64)
+        
+        # Apply fractions based on PDG ID
+        for pdg_id, fraction in self.energy_fractions.items():
+            if pdg_id == 0:  # default
+                continue
+            mask = abs_pid == abs(pdg_id)
+            fractions[mask] = fraction
+        
+        return fractions
+    

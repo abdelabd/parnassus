@@ -71,6 +71,58 @@ class Efficiency(nn.Module):
         else:
             raise ValueError(f"Unknown efficiency formula: {efficiency_formula}")
     
+
+    def forward(self, particles):
+        """
+        Apply efficiency filter to particles using mask-based filtering.
+        
+        Args:
+            particles: tensor of shape (N, 15), (N, 16), (B, N, 15), or (B, N, 16)
+                column 0: PID (Particle ID)
+                column 1: Status
+                column 2: Charge
+                column 3: E (Energy)
+                columns 4-6: Px, Py, Pz (3-momentum)
+                column 7: PT (transverse momentum, pre-computed)
+                column 8: Eta (pseudorapidity, pre-computed)
+                column 9: Phi (azimuthal angle, pre-computed)
+                column 10: T (time)
+                columns 11-13: X, Y, Z (position)
+                column 15: etaOuter (pseudorapidity at outer position)
+                column 16: phiOuter (azimuthal angle at outer position)
+                columns 17->23: masks
+
+        Returns:
+            filtered_particles: tensor with mask in column 15
+                               Single event: (N, 16) with mask
+                               Batched: (B, N, 16) with updated mask
+        """
+    
+        # We want to compute effiency vector based on particles that satisfy:
+            # 1. real particles (IS_NOT_PAD == 1)
+            # 2. particles that passed propagation (PASS_PROP == 1)
+            # 3. particles of the desired type
+
+        pid_mask = self.pdg_filter_func(particles)
+        mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * pid_mask.float()
+
+        # Extract pre-computed kinematics from Delphes (columns 7-8)
+        mask_where = torch.where(mask > 0.5)[0]
+        pt = particles[mask_where, CMAP["PT"]]   # PT (transverse momentum)
+        eta_outer = particles[mask_where, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)
+
+        # Compute efficiency for each particle
+        efficiency = self.efficiency_func(pt, eta_outer)
+        
+        # Apply efficiency stochastically
+        passed = torch.rand_like(efficiency) < efficiency
+        
+        # Only real particles (mask==1) can pass efficiency
+        passed_full = particles[:, CMAP["PASS_EFF"]].clone().bool().to(particles.device)
+        passed_full[mask_where] = passed
+        particles[:, CMAP["PASS_EFF"]] = passed_full.double()
+        
+        return particles
     @staticmethod
     def _charged_hadron_cms_efficiency(pt, eta_outer):
         """
@@ -245,58 +297,6 @@ class Efficiency(nn.Module):
         pid_mask = ~is_charged
         
         return pid_mask
-    
-    def forward(self, particles):
-        """
-        Apply efficiency filter to particles using mask-based filtering.
-        
-        Args:
-            particles: tensor of shape (N, 15), (N, 16), (B, N, 15), or (B, N, 16)
-                column 0: PID (Particle ID)
-                column 1: Status
-                column 2: Charge
-                column 3: E (Energy)
-                columns 4-6: Px, Py, Pz (3-momentum)
-                column 7: PT (transverse momentum, pre-computed)
-                column 8: Eta (pseudorapidity, pre-computed)
-                column 9: Phi (azimuthal angle, pre-computed)
-                column 10: T (time)
-                columns 11-13: X, Y, Z (position)
-                column 15: etaOuter (pseudorapidity at outer position)
-                column 16: phiOuter (azimuthal angle at outer position)
-                columns 17->23: masks
-
-        Returns:
-            filtered_particles: tensor with mask in column 15
-                               Single event: (N, 16) with mask
-                               Batched: (B, N, 16) with updated mask
-        """
-    
-        # We want to compute effiency vector based on particles that satisfy:
-            # 1. real particles (IS_NOT_PAD == 1)
-            # 2. particles that passed propagation (PASS_PROP == 1)
-            # 3. particles of the desired type
-
-        pid_mask = self.pdg_filter_func(particles)
-        mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * pid_mask.float()
-
-        # Extract pre-computed kinematics from Delphes (columns 7-8)
-        mask_where = torch.where(mask > 0.5)[0]
-        pt = particles[mask_where, CMAP["PT"]]   # PT (transverse momentum)
-        eta_outer = particles[mask_where, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)
-
-        # Compute efficiency for each particle
-        efficiency = self.efficiency_func(pt, eta_outer)
-        
-        # Apply efficiency stochastically
-        passed = torch.rand_like(efficiency) < efficiency
-        
-        # Only real particles (mask==1) can pass efficiency
-        passed_full = particles[:, CMAP["PASS_EFF"]].clone().bool().to(particles.device)
-        passed_full[mask_where] = passed
-        particles[:, CMAP["PASS_EFF"]] = passed_full.double()
-        
-        return particles
     
     def get_efficiency_map(self, pt_range=(0, 100), eta_range=(-3, 3), 
                           n_pts=100, n_etas=100):
