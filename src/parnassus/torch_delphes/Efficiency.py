@@ -107,13 +107,8 @@ class Efficiency(nn.Module):
             # 2. particles that passed propagation (PASS_PROP == 1)
             # 3. particles of the desired type
 
-        pid_mask = self.pdg_filter_func(particles)
-        mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * pid_mask.float()
-
-        # Extract pre-computed kinematics from Delphes (columns 7-8)
-        mask_where = torch.where(mask > 0.5)[0]
-        pt = particles[mask_where, CMAP["PT"]]   # PT (transverse momentum)
-        eta_outer = particles[mask_where, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)
+        pt = particles[:, CMAP["PT"]]   # PT (transverse momentum)
+        eta_outer = particles[:, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)
 
         # Compute efficiency for each particle
         efficiency = self.efficiency_func(pt, eta_outer)
@@ -122,11 +117,9 @@ class Efficiency(nn.Module):
         passed = torch.rand_like(efficiency) < efficiency
         
         # Only real particles (mask==1) can pass efficiency
-        passed_full = particles[:, CMAP["PASS_EFF"]].clone().bool().to(particles.device)
-        passed_full[mask_where] = passed
-        particles[:, CMAP["PASS_EFF"]] = passed_full.double()
+        particles_out = particles[passed]
         
-        return particles
+        return particles_out
     
     @staticmethod
     def _charged_hadron_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:

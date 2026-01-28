@@ -131,9 +131,10 @@ def process_particle_propagator(
     return genevent_tensors_propagated, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors
 
 def process_efficiency_pipeline(
-    genevent_tensors: torch.Tensor, 
-    batch_size: int = 100
-) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    ch_tensors: List[torch.Tensor],
+    el_tensors: List[torch.Tensor],
+    mu_tensors: List[torch.Tensor],
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
     Apply tracking efficiency to all three particle types using batched processing.
     
@@ -147,8 +148,6 @@ def process_efficiency_pipeline(
         Tuple of (ch_filtered, el_filtered, mu_filtered)
         Each is a list of tensors (one per event)
     """
-
-    n_event, n_part, n_dim = genevent_tensors.shape
     
     # Initialize efficiency modules
     ch_eff_module = Efficiency(
@@ -164,40 +163,22 @@ def process_efficiency_pipeline(
         device=DEVICE
     )
 
-    genevent_tensors_eff = []
-    # Collect charged_hadron, electron, muon tensors after propagation (for intermediate testing and validation)
+    # Collect charged_hadron, electron, muon tensors after Efficiency
     ch_tensors_eff = []
     el_tensors_eff = []
     mu_tensors_eff = []
+
     # Process in batches
-    for batch_start in tqdm(range(0, n_event, batch_size)):
-        batch_end = min(batch_start + batch_size, n_event)
+    for ch_tensor_in, el_tensor_in, mu_tensor_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
+        ch_tensor_out = ch_eff_module(ch_tensor_in.to(DEVICE))
+        el_tensor_out = el_eff_module(el_tensor_in.to(DEVICE))
+        mu_tensor_out = mu_eff_module(mu_tensor_in.to(DEVICE))
 
-        # Flatten to (B*N, 15)
-        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
-        batch_size = batch_events.shape[0]
+        ch_tensors_eff.append(ch_tensor_out.to(torch.float32).cpu())
+        el_tensors_eff.append(el_tensor_out.to(torch.float32).cpu())
+        mu_tensors_eff.append(mu_tensor_out.to(torch.float32).cpu())
 
-        # Send through all 3 efficiency modules (batched)
-        particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
-        particles = ch_eff_module(particles)
-        particles = el_eff_module(particles)
-        particles = mu_eff_module(particles)
-
-        genevent_tensors_eff.append(particles.reshape(batch_size, n_part, n_dim).cpu())
-
-        mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * particles[:, CMAP["PASS_EFF"]]
-        charged_hadron_pid_mask = mask * pdg_filters.charged_hadron_filter(particles).float()
-        electron_pid_mask = mask * pdg_filters.electron_filter(particles).float()
-        muon_pid_mask = mask * pdg_filters.muon_filter(particles).float()
-
-        ch_tensors_eff.append(particles[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
-        el_tensors_eff.append(particles[electron_pid_mask > 0.5].to(torch.float32).cpu())
-        mu_tensors_eff.append(particles[muon_pid_mask > 0.5].to(torch.float32).cpu())
-
-    # Stack all event tensors into a single tensor
-    genevent_tensors_eff = torch.cat(genevent_tensors_eff, dim=0)
-
-    return genevent_tensors_eff, ch_tensors_eff, el_tensors_eff, mu_tensors_eff
+    return ch_tensors_eff, el_tensors_eff, mu_tensors_eff
 
 def process_smearing_pipeline(
     genevent_tensors: torch.Tensor, 
@@ -1073,6 +1054,9 @@ def main(
     print(f"\nInput:  {input_file}")
     print(f"Batch size: {batch_size}")
     print(f"Device: {DEVICE}")
+
+    # Set up dict for ROOT branches
+    branches_torch_root = {}
     
     # ========================================================================
     # STEP 1: Load HepMC and convert to tensors
@@ -1098,6 +1082,13 @@ def main(
     print("="*80)
 
     genevent_tensors, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
+    branches_torch_root.update({
+        'ParticleBeforeProp': tensor_to_root_dict(pbp_tensors, 'ParticleBeforeProp'),
+        'ParticleAfterProp': tensor_to_root_dict(pap_tensors, 'ParticleAfterProp'),
+        'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
+        'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
+        'Muon': tensor_to_root_dict(mu_tensors, 'Muon'),
+    })
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
     print(f"  Total ParticleAfterProp: {sum(t.shape[0] for t in pap_tensors)}")
@@ -1110,9 +1101,14 @@ def main(
     print("STEP 3: Applying Efficiency modules (batched)")
     print("="*80)
 
-    genevent_tensors, ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
-        genevent_tensors, batch_size=batch_size
+    ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
+        ch_tensors, el_tensors, mu_tensors
     )
+    branches_torch_root.update({
+        'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
+        'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
+        'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
+    })
 
     print("\n✓ Efficiency applied")
 
@@ -1127,6 +1123,11 @@ def main(
     genevent_tensors, ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
         genevent_tensors, batch_size=batch_size
     )
+    branches_torch_root.update({
+        'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
+        'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
+        'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared'),
+    })
     
     print("\n✓ MomentumSmearing applied")
 
@@ -1141,6 +1142,9 @@ def main(
     genevent_tensors, track_merged = process_merger_pipeline(
         genevent_tensors, batch_size=batch_size
     )
+    branches_torch_root.update({
+        'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks'),
+    })
     
     print("\n✓ TrackMerger applied")
     
@@ -1155,7 +1159,11 @@ def main(
     genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
         genevent_tensors, batch_size=batch_size
     )
-    
+    branches_torch_root.update({
+        'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
+        'ECal_EFlowTrack': tensor_to_root_dict(eflow_tracks, 'ECal_EFlowTrack'),
+        'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
+    })
     print("\n✓ ECal applied")
     
     toc_torch = time.time()
@@ -1167,24 +1175,7 @@ def main(
     # ========================================================================
 
     print(f"Writing {output_file}...")
-    branches_v3_2 = {
-        'ParticleBeforeProp': tensor_to_root_dict(pbp_tensors, 'ParticleBeforeProp'),
-        'ParticleAfterProp': tensor_to_root_dict(pap_tensors, 'ParticleAfterProp'),
-        'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
-        'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
-        'Muon': tensor_to_root_dict(mu_tensors, 'Muon'),
-        'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
-        'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
-        'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
-        'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
-        'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
-        'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared'),
-        'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks'),
-        'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
-        'ECal_EFlowTrack': tensor_to_root_dict(eflow_tracks, 'ECal_EFlowTrack'),
-        'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
-    }
-    write_root_file(output_file, branches_v3_2)
+    write_root_file(output_file, branches_torch_root)
 
     # ========================================================================
     # STEP 8: Print summary
