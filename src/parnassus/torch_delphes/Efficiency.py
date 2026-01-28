@@ -5,6 +5,7 @@ Implements the ChargedHadronTrackingEfficiency from delphes_card_CMS.tcl
 as a differentiable PyTorch module.
 """
 
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -12,6 +13,8 @@ from typing import Callable, Union, Tuple, Optional
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes import pdg_filters
+
+#TODO: Update docstrings
 
 class Efficiency(nn.Module):
     """
