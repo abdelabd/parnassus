@@ -46,7 +46,6 @@ class Tower(nn.Module):
         smear_tower_center: bool = True,
         energy_fractions: Optional[Dict[int, float]] = None,
         max_towers_per_event: int = 500,
-        device: str = 'cpu'
     ) -> None:
         """
         Args:
@@ -59,10 +58,8 @@ class Tower(nn.Module):
             smear_tower_center: If True, dither tower center position
             energy_fractions: Dict mapping PDG IDs to energy fractions (default: essentials)
             max_towers_per_event: Maximum number of towers per event for padding
-            device: torch device
         """
         super().__init__()
-        self.device = device
         self.energy_min = energy_min
         self.energy_sig_min = energy_sig_min
         self.is_ecal = is_ecal
@@ -70,8 +67,10 @@ class Tower(nn.Module):
         self.max_towers_per_event = max_towers_per_event
         
         # Store bin edges as tensors
-        self.eta_bins = torch.tensor(eta_bins, dtype=torch.float64, device=device)
-        self.phi_bins = torch.tensor(phi_bins, dtype=torch.float64, device=device)
+        self.eta_bins = torch.tensor(eta_bins, dtype=torch.float64)
+        self.phi_bins = torch.tensor(phi_bins, dtype=torch.float64)
+
+        self.first_in = False
         
         # Energy fractions: default essentials (e/gamma/pi0=1.0, muons/neutrinos=0.0, hadrons=0.3)
         if energy_fractions is None:
@@ -123,8 +122,15 @@ class Tower(nn.Module):
             genevent_tensors_out: (N_events, N_particles + N_towers, D+3) 
             outputs: Dict with 'ecalTowers', 'eflowTracks', 'eflowPhotons' lists
         """
-        genevent_tensors = genevent_tensors.to(self.device)
-        n_events, n_particles, n_dim = genevent_tensors.shape
+
+        if not self.first_in:
+            # Move bin edges to the same device as input tensors
+            device = genevent_tensors.device
+            self.eta_bins = self.eta_bins.to(device)
+            self.phi_bins = self.phi_bins.to(device)
+            self.first_in = True
+
+        n_events, _, _ = genevent_tensors.shape
         
         # Initialize output lists
         all_towers = []
@@ -209,15 +215,15 @@ class Tower(nn.Module):
         n_towers = len(unique_tower_ids)
         
         # Aggregate energy per tower using scatter_add
-        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        
+        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+
         # Map tower_ids to indices
         tower_id_to_idx = {tid.item(): idx for idx, tid in enumerate(unique_tower_ids)}
         particle_tower_idx = torch.tensor(
             [tower_id_to_idx[tid.item()] for tid in tower_ids],
-            dtype=torch.long, device=self.device
+            dtype=torch.long, device=event_tensor.device
         )
         
         # Accumulate energy and time
@@ -245,10 +251,10 @@ class Tower(nn.Module):
         
         # Optionally smear tower centers
         if self.smear_tower_center:
-            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
+            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
                         (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
                         self.eta_bins[tower_eta_bins]
-            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
+            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
                         (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
                         self.phi_bins[tower_phi_bins] # SUSPECT
         else:
@@ -287,7 +293,7 @@ class Tower(nn.Module):
         if len(towers_list) > 0:
             towers = torch.cat(towers_list, dim=0)
         else:
-            towers = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
+            towers = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=event_tensor.device)
         
         return towers
    
@@ -302,7 +308,7 @@ class Tower(nn.Module):
         """
         Create a tower object as a particle-like tensor.
         """
-        tower = torch.zeros(1, n_features, dtype=torch.float64, device=self.device)
+        tower = torch.zeros(1, n_features, dtype=torch.float64, device=eta.device)
         
         # Set tower properties
         tower[0, CMAP["PID"]] = 22 if self.is_ecal else 0  # Photon for ECAL, neutral for HCAL
@@ -357,7 +363,7 @@ class Tower(nn.Module):
         # Initialize output tensor
         genevent_tensors_out = torch.zeros(
             (n_events, max_size, n_dim_out),
-            dtype=torch.float64, device=self.device
+            dtype=torch.float64, device=genevent_tensors.device
         )
         
         # Copy original particle data (first n_particles entries per event)

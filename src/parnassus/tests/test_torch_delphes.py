@@ -78,7 +78,6 @@ def process_particle_propagator(
         radius=1.29,        # CMS tracker radius in meters
         half_length=3.0,    # CMS tracker half-length in meters  
         bz=3.8,             # Magnetic field in Tesla
-        device=DEVICE
     ).to(DEVICE)
     
     print(f"\nParticlePropagator (batch_size={batch_size})...")
@@ -152,15 +151,12 @@ def process_efficiency_pipeline(
     # Initialize efficiency modules
     ch_eff_module = Efficiency(
         efficiency_formula='charged_hadron_cms',
-        device=DEVICE
     ).to(DEVICE)
     el_eff_module = Efficiency(
         efficiency_formula='electron_cms',
-        device=DEVICE
     ).to(DEVICE)
     mu_eff_module = Efficiency(
         efficiency_formula='muon_cms',
-        device=DEVICE
     ).to(DEVICE)
 
     # Collect charged_hadron, electron, muon tensors after Efficiency
@@ -202,17 +198,14 @@ def process_smearing_pipeline(
     # Initialize smearing modules
     ch_smear_module = MomentumSmearing(
         resolution_formula='charged_hadron_cms',
-        device=DEVICE
     ).to(DEVICE)
     
     el_smear_module = MomentumSmearing(
         resolution_formula='electron_cms',
-        device=DEVICE
     ).to(DEVICE)
     
     mu_smear_module = MomentumSmearing(
         resolution_formula='muon_cms',
-        device=DEVICE
     ).to(DEVICE)
 
     ch_tensors_smeared = []
@@ -251,7 +244,6 @@ def process_merger_pipeline(
     # Initialize TrackMerger module
     merger = Merger(
         particle_types=['charged_hadron', 'electron', 'muon'],
-        device=DEVICE
     ).to(DEVICE)
     
     print(f"\nTrackMerger (batch_size={batch_size})...")
@@ -367,7 +359,6 @@ def process_ecal_pipeline(
         smear_tower_center=True,
         energy_fractions=energy_fractions,
         max_towers_per_event=500,
-        device=DEVICE
     ).to(DEVICE)
     tower_module = SimpleCalorimeter.Tower(
         eta_bins=eta_bins,
@@ -379,7 +370,6 @@ def process_ecal_pipeline(
         smear_tower_center=True,
         energy_fractions=energy_fractions,
         max_towers_per_event=500,
-        device=DEVICE
     ).to(DEVICE)
     eflowphoton_module = SimpleCalorimeter.EFlowPhoton(
         eta_bins=eta_bins,
@@ -391,7 +381,6 @@ def process_ecal_pipeline(
         smear_tower_center=True,
         energy_fractions=energy_fractions,
         max_towers_per_event=500,
-        device=DEVICE
     ).to(DEVICE)
     
     print(f"\nECal (batch_size={batch_size})...")

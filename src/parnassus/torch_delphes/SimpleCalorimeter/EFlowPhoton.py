@@ -46,7 +46,6 @@ class EFlowPhoton(nn.Module):
         smear_tower_center: bool = True,
         energy_fractions: Optional[Dict[int, float]] = None,
         max_towers_per_event: int = 500,
-        device: str = 'cpu'
     ) -> None:
         """
         Args:
@@ -59,10 +58,8 @@ class EFlowPhoton(nn.Module):
             smear_tower_center: If True, dither tower center position
             energy_fractions: Dict mapping PDG IDs to energy fractions (default: essentials)
             max_towers_per_event: Maximum number of towers per event for padding
-            device: torch device
         """
         super().__init__()
-        self.device = device
         self.energy_min = energy_min
         self.energy_sig_min = energy_sig_min
         self.is_ecal = is_ecal
@@ -70,8 +67,9 @@ class EFlowPhoton(nn.Module):
         self.max_towers_per_event = max_towers_per_event
         
         # Store bin edges as tensors
-        self.eta_bins = torch.tensor(eta_bins, dtype=torch.float64, device=device)
-        self.phi_bins = torch.tensor(phi_bins, dtype=torch.float64, device=device)
+        self.eta_bins = torch.tensor(eta_bins, dtype=torch.float64)
+        self.phi_bins = torch.tensor(phi_bins, dtype=torch.float64)
+        self.first_in = False
         
         # Energy fractions: default essentials (e/gamma/pi0=1.0, muons/neutrinos=0.0, hadrons=0.3)
         if energy_fractions is None:
@@ -123,8 +121,13 @@ class EFlowPhoton(nn.Module):
             genevent_tensors_out: (N_events, N_particles + N_towers, D+3) 
             outputs: Dict with 'ecalTowers', 'eflowTracks', 'eflowPhotons' lists
         """
-        genevent_tensors = genevent_tensors.to(self.device)
-        n_events, n_particles, n_dim = genevent_tensors.shape
+        if not self.first_in:
+            device = genevent_tensors.device
+            self.eta_bins = self.eta_bins.to(device)
+            self.phi_bins = self.phi_bins.to(device)
+            self.first_in = True
+
+        n_events, _, _ = genevent_tensors.shape
         
         # Initialize output lists
         all_eflow_photons = []
@@ -226,15 +229,15 @@ class EFlowPhoton(nn.Module):
         n_towers = len(unique_tower_ids)
         
         # Aggregate energy per tower using scatter_add
-        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=self.device)
-        
+        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+
         # Map tower_ids to indices
         tower_id_to_idx = {tid.item(): idx for idx, tid in enumerate(unique_tower_ids)}
         particle_tower_idx = torch.tensor(
             [tower_id_to_idx[tid.item()] for tid in tower_ids],
-            dtype=torch.long, device=self.device
+            dtype=torch.long, device=event_tensor.device
         )
         
         # Accumulate energy and time
@@ -262,10 +265,10 @@ class EFlowPhoton(nn.Module):
         
         # Optionally smear tower centers
         if self.smear_tower_center:
-            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
+            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
                         (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
                         self.eta_bins[tower_eta_bins]
-            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=self.device) * \
+            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
                         (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
                         self.phi_bins[tower_phi_bins] # SUSPECT
         else:
@@ -297,7 +300,7 @@ class EFlowPhoton(nn.Module):
                 tower_tracks_mask = track_tower_ids == tid
                 tower_tracks = tracks[tower_tracks_mask]
             else:
-                tower_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
+                tower_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=event_tensor.device)
             
             # Compute total track energy and track resolution
             if tower_tracks.shape[0] > 0:
@@ -316,13 +319,11 @@ class EFlowPhoton(nn.Module):
                 total_track_sigma = 0.0
             
             # Compute neutral energy
-            neutral_energy = max(tower_energy - total_track_energy, 0.0)
+            neutral_energy = torch.tensor([max(tower_energy - total_track_energy, 0.0)], device=event_tensor.device)
             
             # Compute neutral significance
             if total_track_sigma**2 + tower_sigma_val**2 > 0:
-                neutral_sigma = neutral_energy / torch.sqrt(
-                    torch.tensor(total_track_sigma**2 + tower_sigma_val**2, device=self.device)
-                )
+                neutral_sigma = neutral_energy / torch.sqrt( total_track_sigma**2 + tower_sigma_val**2) 
             else:
                 neutral_sigma = 0.0
             
@@ -338,7 +339,7 @@ class EFlowPhoton(nn.Module):
         if len(eflow_photons_list) > 0:
             eflow_photons = torch.cat(eflow_photons_list, dim=0)
         else:
-            eflow_photons = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=self.device)
+            eflow_photons = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=event_tensor.device)
         
         return eflow_photons
      
@@ -372,7 +373,7 @@ class EFlowPhoton(nn.Module):
         """
         Create a tower object as a particle-like tensor.
         """
-        tower = torch.zeros(1, n_features, dtype=torch.float64, device=self.device)
+        tower = torch.zeros(1, n_features, dtype=torch.float64, device=eta.device)
         
         # Set tower properties
         tower[0, CMAP["PID"]] = 22 if self.is_ecal else 0  # Photon for ECAL, neutral for HCAL

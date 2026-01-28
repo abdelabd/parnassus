@@ -41,16 +41,13 @@ class Merger(nn.Module):
     def __init__(
         self, 
         particle_types: List[str] = ['charged_hadron', 'electron', 'muon'],
-        device: str = 'cpu'
     ) -> None:
         """
         Args:
             particle_types: List of particle types to include in merger
                            Options: 'charged_hadron', 'electron', 'muon', 'neutral'
-            device: torch device ('cpu' or 'cuda')
         """
         super().__init__()
-        self.device = device
         self.particle_types = particle_types
         
         # Map particle types to their PDG filter functions
@@ -73,8 +70,6 @@ class Merger(nn.Module):
             genevent_tensors: tensor of shape (N_events, N_particles, D+1)
                 with new PASS_MERGER mask column appended
         """
-        # Move to device
-        genevent_tensors = genevent_tensors.to(self.device)
         
         # Extract dimensions
         n_events, n_particles, n_dim = genevent_tensors.shape
@@ -87,7 +82,7 @@ class Merger(nn.Module):
         )
         
         # Apply PID filters to select particle types for this merger
-        combined_pid_mask = torch.zeros(n_events, n_particles, device=self.device)
+        combined_pid_mask = torch.zeros(n_events, n_particles).to(genevent_tensors.device)
         
         for particle_type in self.particle_types:
             if particle_type in self.pdg_filters:
@@ -125,7 +120,6 @@ class Merger(nn.Module):
                 - scalar_sum_e: scalar sum of energy
                 - n_tracks: number of particles in merged output
         """
-        genevent_tensors = genevent_tensors.to(self.device)
         n_events = genevent_tensors.shape[0]
         
         stats = []
@@ -250,7 +244,6 @@ if __name__ == "__main__":
     
     merger = Merger(
         particle_types=['charged_hadron', 'electron', 'muon'],
-        device='cpu'
     )
     
     # Apply merger

@@ -46,16 +46,13 @@ class MomentumSmearing(nn.Module):
     def __init__(
         self, 
         resolution_formula: Union[str, Callable] = 'charged_hadron_cms',
-        device: str = 'cpu'
     ) -> None:
         """
         Args:
             resolution_formula: Name of predefined formula or custom callable
             deterministic: If True, no smearing (for testing)
-            device: torch device ('cpu' or 'cuda')
         """
         super().__init__()
-        self.device = device
         
         # Load resolution formula
         if resolution_formula == 'charged_hadron_cms':
@@ -247,9 +244,9 @@ class MomentumSmearing(nn.Module):
             eta_grid: Eta values (n_pts, n_etas)
             resolution_map: Resolution values (n_pts, n_etas)
         """
-        pt_vals = torch.linspace(pt_range[0], pt_range[1], n_pts, device=self.device)
-        eta_vals = torch.linspace(eta_range[0], eta_range[1], n_etas, device=self.device)
-        
+        pt_vals = torch.linspace(pt_range[0], pt_range[1], n_pts, device='cpu')
+        eta_vals = torch.linspace(eta_range[0], eta_range[1], n_etas, device='cpu')
+
         pt_grid, eta_grid = torch.meshgrid(pt_vals, eta_vals, indexing='ij')
         
         resolution_map = self.resolution_func(pt_grid, eta_grid)

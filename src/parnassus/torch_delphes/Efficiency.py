@@ -48,15 +48,12 @@ class Efficiency(nn.Module):
     def __init__(
         self, 
         efficiency_formula: Union[str, Callable] = 'charged_hadron_cms',
-        device: str = 'cpu'
     ) -> None:
         """
         Args:
             efficiency_formula: Name of predefined formula or custom callable
-            device: torch device ('cpu' or 'cuda')
         """
         super().__init__()
-        self.device = device
         self.efficiency_formula = efficiency_formula
         
         # Load efficiency formula
@@ -235,9 +232,9 @@ class Efficiency(nn.Module):
         Returns:
             pt_grid, eta_grid, efficiency_map
         """
-        pt_vals = torch.linspace(pt_range[0], pt_range[1], n_pts, device=self.device)
-        eta_vals = torch.linspace(eta_range[0], eta_range[1], n_etas, device=self.device)
-        
+        pt_vals = torch.linspace(pt_range[0], pt_range[1], n_pts, device='cpu')
+        eta_vals = torch.linspace(eta_range[0], eta_range[1], n_etas, device='cpu')
+
         pt_grid, eta_grid = torch.meshgrid(pt_vals, eta_vals, indexing='ij')
         
         efficiency_map = self.efficiency_func(pt_grid.flatten(), eta_grid.flatten())
@@ -300,7 +297,6 @@ if __name__ == "__main__": # TODO: Update to use EtaOuter and PhiOuter
         # Create efficiency module
         eff_module = Efficiency(
             efficiency_formula=formula_name,
-            device='cpu'
         )
         
         # Apply efficiency
