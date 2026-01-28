@@ -60,7 +60,6 @@ class ParticlePropagator(nn.Module):
         bz: float = 3.8,                # Magnetic field in Tesla
         radius_max: Optional[float] = None,       # Max radius for initial position check
         half_length_max: Optional[float] = None,  # Max half-length for initial position check
-        device: str = 'cpu'
     ) -> None:
         """
         Args:
@@ -69,7 +68,6 @@ class ParticlePropagator(nn.Module):
             bz: Magnetic field strength in Tesla (default: 3.8T for CMS)
             radius_max: Maximum radius for particle origin (default: same as radius)
             half_length_max: Maximum half-length for particle origin (default: same as half_length)
-            device: torch device ('cpu' or 'cuda')
         """
         super().__init__()
         self.radius = radius
@@ -78,7 +76,6 @@ class ParticlePropagator(nn.Module):
         self.bz = torch.tensor(bz, dtype=torch.float64)
         self.radius_max = radius_max if radius_max is not None else radius
         self.half_length_max = half_length_max if half_length_max is not None else half_length
-        self.device = device
         
         # Physical constant
         self.c_light = 2.99792458e8  # Speed of light in m/s
@@ -502,7 +499,6 @@ if __name__ == "__main__":
         radius=1.29,        # CMS tracker radius
         half_length=3.0,    # CMS tracker half-length
         bz=3.8,            # CMS magnetic field
-        device='cpu'
     )
     
     # Propagate particles
