@@ -169,21 +169,22 @@ def process_efficiency_pipeline(
     mu_tensors_eff = []
 
     # Process in batches
-    for ch_tensor_in, el_tensor_in, mu_tensor_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
-        ch_tensor_out = ch_eff_module(ch_tensor_in.to(DEVICE))
-        el_tensor_out = el_eff_module(el_tensor_in.to(DEVICE))
-        mu_tensor_out = mu_eff_module(mu_tensor_in.to(DEVICE))
+    for ch_batch_in, el_batch_in, mu_batch_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
+        ch_batch_out = ch_eff_module(ch_batch_in.to(DEVICE))
+        el_batch_out = el_eff_module(el_batch_in.to(DEVICE))
+        mu_batch_out = mu_eff_module(mu_batch_in.to(DEVICE))
 
-        ch_tensors_eff.append(ch_tensor_out.to(torch.float32).cpu())
-        el_tensors_eff.append(el_tensor_out.to(torch.float32).cpu())
-        mu_tensors_eff.append(mu_tensor_out.to(torch.float32).cpu())
+        ch_tensors_eff.append(ch_batch_out.to(torch.float32).cpu())
+        el_tensors_eff.append(el_batch_out.to(torch.float32).cpu())
+        mu_tensors_eff.append(mu_batch_out.to(torch.float32).cpu())
 
     return ch_tensors_eff, el_tensors_eff, mu_tensors_eff
 
 def process_smearing_pipeline(
-    genevent_tensors: torch.Tensor, 
-    batch_size: int = 100
-) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    ch_tensors: List[torch.Tensor],
+    el_tensors: List[torch.Tensor],
+    mu_tensors: List[torch.Tensor],
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
     Apply momentum smearing to all three particle types using batched processing.
     
@@ -197,8 +198,6 @@ def process_smearing_pipeline(
         Tuple of (ch_smeared, el_smeared, mu_smeared)
         Each is a list of tensors (one per event)
     """
-
-    n_event, n_part, n_dim = genevent_tensors.shape
     
     # Initialize smearing modules
     ch_smear_module = MomentumSmearing(
@@ -216,39 +215,20 @@ def process_smearing_pipeline(
         device=DEVICE
     )
 
-    genevent_tensors_smeared = []
     ch_tensors_smeared = []
     el_tensors_smeared = []
     mu_tensors_smeared = []
-    for batch_start in tqdm(range(0, n_event, batch_size)):
-        batch_end = min(batch_start + batch_size, n_event)
+    # Process in batches
+    for ch_batch_in, el_batch_in, mu_batch_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
+        ch_batch_out = ch_smear_module(ch_batch_in.to(DEVICE))
+        el_batch_out = el_smear_module(el_batch_in.to(DEVICE))
+        mu_batch_out = mu_smear_module(mu_batch_in.to(DEVICE))
 
-        # Flatten to (B*N, 15)
-        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
-        batch_size = batch_events.shape[0]
+        ch_tensors_smeared.append(ch_batch_out.to(torch.float32).cpu())
+        el_tensors_smeared.append(el_batch_out.to(torch.float32).cpu())
+        mu_tensors_smeared.append(mu_batch_out.to(torch.float32).cpu())
 
-        # Send through all 3 smearing modules (batched)
-        particles = batch_events.reshape(-1, n_dim) # Flatten to (B*N, 15)
-        particles = ch_smear_module(particles)
-        particles = el_smear_module(particles)
-        particles = mu_smear_module(particles)
-        n_dim_new = particles.shape[1]
-
-        genevent_tensors_smeared.append(particles.reshape(batch_size, n_part, n_dim_new).cpu())
-
-        mask = particles[:, CMAP["IS_NOT_PAD"]] * particles[:, CMAP["PASS_PROP"]] * particles[:, CMAP["PASS_EFF"]]
-        charged_hadron_pid_mask = mask * pdg_filters.charged_hadron_filter(particles).float()
-        electron_pid_mask = mask * pdg_filters.electron_filter(particles).float()
-        muon_pid_mask = mask * pdg_filters.muon_filter(particles).float()
-        
-        ch_tensors_smeared.append(particles[charged_hadron_pid_mask > 0.5].to(torch.float32).cpu())
-        el_tensors_smeared.append(particles[electron_pid_mask > 0.5].to(torch.float32).cpu())
-        mu_tensors_smeared.append(particles[muon_pid_mask > 0.5].to(torch.float32).cpu())
-
-    # Stack all event tensors into a single tensor
-    genevent_tensors_smeared = torch.cat(genevent_tensors_smeared, dim=0)
-
-    return genevent_tensors_smeared, ch_tensors_smeared, el_tensors_smeared, mu_tensors_smeared
+    return ch_tensors_smeared, el_tensors_smeared, mu_tensors_smeared
 
 def process_merger_pipeline(
     genevent_tensors: torch.Tensor, 
@@ -1120,8 +1100,8 @@ def main(
     print("STEP 4: Applying MomentumSmearing modules (batched)")
     print("="*80)
 
-    genevent_tensors, ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
-        genevent_tensors, batch_size=batch_size
+    ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
+        ch_filtered, el_filtered, mu_filtered
     )
     branches_torch_root.update({
         'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
