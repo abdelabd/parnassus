@@ -12,6 +12,8 @@ from typing import Callable, Union, Tuple
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes.stochastic_utils import log_normal_sample
 
+#TODO: Update docstrings
+
 class MomentumSmearing(nn.Module):
     """
     PyTorch implementation of Delphes MomentumSmearing module.

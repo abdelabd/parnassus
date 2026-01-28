@@ -224,9 +224,10 @@ def process_smearing_pipeline(
     return ch_tensors_smeared, el_tensors_smeared, mu_tensors_smeared
 
 def process_merger_pipeline(
-    genevent_tensors: torch.Tensor, 
-    batch_size: int = 100
-) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    ch_tensors: List[torch.Tensor],
+    el_tensors: List[torch.Tensor],
+    mu_tensors: List[torch.Tensor],
+) -> List[torch.Tensor]:
     """
     Apply TrackMerger to combine charged hadrons, electrons, and muons.
     
@@ -239,50 +240,17 @@ def process_merger_pipeline(
         track_tensors: List of track tensors (for validation)
     """
     
-    n_event, n_part, n_dim = genevent_tensors.shape
-    
     # Initialize TrackMerger module
-    merger = Merger(
-        particle_types=['charged_hadron', 'electron', 'muon'],
-    ).to(DEVICE)
+    merger = Merger().to(DEVICE)
     
-    print(f"\nTrackMerger (batch_size={batch_size})...")
-    print(f"genevent_tensors.shape: {genevent_tensors.shape}")
     
-    genevent_tensors_merged = []
-    track_tensors = []  # For validation
-    
+    track_tensors = []
     # Process in batches
-    for batch_start in tqdm(range(0, n_event, batch_size)):
-        batch_end = min(batch_start + batch_size, n_event)
-        
-        # Extract batch
-        batch_events = genevent_tensors[batch_start:batch_end]
-        batch_size_actual = batch_events.shape[0]
-        
-        # Apply merger (operates on batched input directly)
-        batch_merged = merger(batch_events)
-        
-        genevent_tensors_merged.append(batch_merged.cpu())
-        
-        # Extract valid tracks for this batch (for validation)
-        # Flatten batch to (B*N, D)
-        particles = batch_merged.reshape(-1, n_dim)
-        
-        # Mask for particles that passed merger
-        track_mask = (
-            particles[:, CMAP["IS_NOT_PAD"]] *
-            particles[:, CMAP["PASS_PROP"]] *
-            particles[:, CMAP["PASS_EFF"]] *
-            particles[:, CMAP["PASS_MERGER"]]
-        )
-        
-        track_tensors.append(particles[track_mask > 0.5].to(torch.float32))
+    for ch_batch_in, el_batch_in, mu_batch_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
+        tracks_batch_out = merger([ch_batch_in, el_batch_in, mu_batch_in])
+        track_tensors.append(tracks_batch_out.to(torch.float32))
     
-    # Stack all event tensors into a single tensor
-    genevent_tensors_merged = torch.cat(genevent_tensors_merged, dim=0)
-    
-    return genevent_tensors_merged, track_tensors
+    return track_tensors
 
 def process_ecal_pipeline(
     genevent_tensors: torch.Tensor, 
@@ -1108,11 +1076,11 @@ def main(
     print("STEP 5: Applying TrackMerger (batched)")
     print("="*80)
 
-    genevent_tensors, track_merged = process_merger_pipeline(
-        genevent_tensors, batch_size=batch_size
+    merged_tracks = process_merger_pipeline(
+        ch_smeared, el_smeared, mu_smeared
     )
     branches_torch_root.update({
-        'MergedTracks': tensor_to_root_dict([i.cpu() for i in track_merged], 'MergedTracks'),
+        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks'),
     })
     
     print("\n✓ TrackMerger applied")

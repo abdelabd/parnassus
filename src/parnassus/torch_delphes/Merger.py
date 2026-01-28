@@ -17,11 +17,12 @@ import numpy as np
 from typing import List
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
-from parnassus.torch_delphes import pdg_filters
 
+#TODO: Update docstrings
 
 class Merger(nn.Module):
     """
+    TODO: Update docstring
     PyTorch implementation of Delphes Merger module.
     
     This module:
@@ -38,69 +39,29 @@ class Merger(nn.Module):
     Output shape: (N_events, N_particles, D) with filled-in PASS_MERGER column
     """
     
-    def __init__(
-        self, 
-        particle_types: List[str] = ['charged_hadron', 'electron', 'muon'],
-    ) -> None:
+    def __init__(self) -> None:
         """
         Args:
             particle_types: List of particle types to include in merger
                            Options: 'charged_hadron', 'electron', 'muon', 'neutral'
         """
         super().__init__()
-        self.particle_types = particle_types
-        
-        # Map particle types to their PDG filter functions
-        self.pdg_filters = {
-            'charged_hadron': pdg_filters.charged_hadron_filter,
-            'electron': pdg_filters.electron_filter,
-            'muon': pdg_filters.muon_filter,
-            'neutral': pdg_filters.neutral_filter
-        }
-    
-    def forward(self, genevent_tensors: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, different_particle_type_tensors: List[torch.Tensor],) -> torch.Tensor:
         """
+        TODO: Update docstring
         Apply merger to create unified output with PASS_MERGER mask.
         
         Args:
-            genevent_tensors: tensor of shape (N_events, N_particles, D)
-                Must have columns: IS_NOT_PAD, PASS_PROP, PASS_EFF
+            different_particle_type_tensors: List of tensors for each particle type
+                Each tensor shape: (N_events, N_particles_type, N_FEATURES)
                 
         Returns:
-            genevent_tensors: tensor of shape (N_events, N_particles, D+1)
-                with new PASS_MERGER mask column appended
+            track_tensors: tensor of shape (N_events, N_particles, D)
         """
-        
-        # Extract dimensions
-        n_events, n_particles, n_dim = genevent_tensors.shape
-        
-        # Get existing masks - particles that passed all previous stages
-        valid_mask = (
-            genevent_tensors[:, :, CMAP["IS_NOT_PAD"]] *
-            genevent_tensors[:, :, CMAP["PASS_PROP"]] *
-            genevent_tensors[:, :, CMAP["PASS_EFF"]]
-        )
-        
-        # Apply PID filters to select particle types for this merger
-        combined_pid_mask = torch.zeros(n_events, n_particles).to(genevent_tensors.device)
-        
-        for particle_type in self.particle_types:
-            if particle_type in self.pdg_filters:
-                # Apply PDG filter for this particle type
-                # Note: PDG filters expect (N, D) or (B, N, D) shaped input
-                pid_mask = self.pdg_filters[particle_type](genevent_tensors)
-                combined_pid_mask = combined_pid_mask + pid_mask
-        
-        # Clamp to 0-1 range (in case particle matches multiple filters)
-        combined_pid_mask = combined_pid_mask.clamp(max=1.0)
-        
-        # Create PASS_MERGER mask: valid particles that match PID filter
-        pass_merger_mask = valid_mask * combined_pid_mask
-        
-        # Fill in on PASS_MERGER column
-        genevent_tensors[:, :, CMAP["PASS_MERGER"]] = pass_merger_mask
 
-        return genevent_tensors
+        track_tensors = torch.cat(different_particle_type_tensors, dim=0)
+        return track_tensors
     
     def compute_aggregate_stats(self, genevent_tensors: torch.Tensor) -> torch.Tensor:
         """

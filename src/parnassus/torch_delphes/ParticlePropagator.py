@@ -18,6 +18,7 @@ from typing import Tuple, Optional
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes import pdg_filters
 
+#TODO: Update docstrings
 
 class ParticlePropagator(nn.Module):
     """
