@@ -79,12 +79,12 @@ def process_particle_propagator(
         half_length=3.0,    # CMS tracker half-length in meters  
         bz=3.8,             # Magnetic field in Tesla
         device=DEVICE
-    )
+    ).to(DEVICE)
     
     print(f"\nParticlePropagator (batch_size={batch_size})...")
     print(f"genevent_tensors.shape: {genevent_tensors.shape}")
 
-    genevent_tensors_propagated = torch.zeros(genevent_tensors.shape, dtype=genevent_tensors.dtype)
+    genevent_tensors_propagated = torch.zeros(genevent_tensors.shape, dtype=genevent_tensors.dtype).to(DEVICE)
     # Collect particle_after_prop, charged_hadron, electron, muon tensors after propagation (for intermediate testing and validation)
     
     pbp_tensors = [] # pbp = particles_before_prop
@@ -97,7 +97,7 @@ def process_particle_propagator(
         batch_end = min(batch_start + batch_size, n_event)
 
         # Flatten to (B*N, N_FEATURES)
-        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
+        batch_events = genevent_tensors[batch_start:batch_end]
         batch_size_actual = batch_events.shape[0]
         
         # Propagate particles (batched)
@@ -106,18 +106,18 @@ def process_particle_propagator(
         particles_after_prop_batch, _, charged_hadrons_batch, electrons_batch, muons_batch = propagator(particles)
 
         # Update genevnt_tensors
-        genevent_tensors_propagated[batch_start:batch_end] = particles_after_prop_batch.reshape(batch_size_actual, n_part, n_dim).cpu()
+        genevent_tensors_propagated[batch_start:batch_end] = particles_after_prop_batch.reshape(batch_size_actual, n_part, n_dim)
         
         # For debugging: Collect ParticleBeforeProp, ParticleAfterProp, ChargedHadron, Electron, and Muon tensors after propagation
         mask = particles_after_prop_batch[:, CMAP["IS_NOT_PAD"]] * particles_after_prop_batch[:, CMAP["PASS_PROP"]]
         
         # ParticleBeforeProp
         pbp_mask = particles_before_prop_batch[:, CMAP["IS_NOT_PAD"]].float()
-        pbp_tensors.append(particles_before_prop_batch[pbp_mask > 0.5].clone().to(torch.float32).cpu())
+        pbp_tensors.append(particles_before_prop_batch[pbp_mask > 0.5].clone().to(torch.float32))
 
         # ParticleAfterProp
         pap_mask = particles_after_prop_batch[:, CMAP["IS_NOT_PAD"]].float() * particles_after_prop_batch[:, CMAP["PASS_PROP"]].float()
-        pap_tensors.append(particles_after_prop_batch[pap_mask > 0.5].to(torch.float32).cpu())
+        pap_tensors.append(particles_after_prop_batch[pap_mask > 0.5].to(torch.float32))
 
         # ChargedHadron
         ch_tensors.append(charged_hadrons_batch)
@@ -153,15 +153,15 @@ def process_efficiency_pipeline(
     ch_eff_module = Efficiency(
         efficiency_formula='charged_hadron_cms',
         device=DEVICE
-    )
+    ).to(DEVICE)
     el_eff_module = Efficiency(
         efficiency_formula='electron_cms',
         device=DEVICE
-    )
+    ).to(DEVICE)
     mu_eff_module = Efficiency(
         efficiency_formula='muon_cms',
         device=DEVICE
-    )
+    ).to(DEVICE)
 
     # Collect charged_hadron, electron, muon tensors after Efficiency
     ch_tensors_eff = []
@@ -170,13 +170,13 @@ def process_efficiency_pipeline(
 
     # Process in batches
     for ch_batch_in, el_batch_in, mu_batch_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
-        ch_batch_out = ch_eff_module(ch_batch_in.to(DEVICE))
-        el_batch_out = el_eff_module(el_batch_in.to(DEVICE))
-        mu_batch_out = mu_eff_module(mu_batch_in.to(DEVICE))
+        ch_batch_out = ch_eff_module(ch_batch_in)
+        el_batch_out = el_eff_module(el_batch_in)
+        mu_batch_out = mu_eff_module(mu_batch_in)
 
-        ch_tensors_eff.append(ch_batch_out.to(torch.float32).cpu())
-        el_tensors_eff.append(el_batch_out.to(torch.float32).cpu())
-        mu_tensors_eff.append(mu_batch_out.to(torch.float32).cpu())
+        ch_tensors_eff.append(ch_batch_out.to(torch.float32))
+        el_tensors_eff.append(el_batch_out.to(torch.float32))
+        mu_tensors_eff.append(mu_batch_out.to(torch.float32))
 
     return ch_tensors_eff, el_tensors_eff, mu_tensors_eff
 
@@ -203,30 +203,30 @@ def process_smearing_pipeline(
     ch_smear_module = MomentumSmearing(
         resolution_formula='charged_hadron_cms',
         device=DEVICE
-    )
+    ).to(DEVICE)
     
     el_smear_module = MomentumSmearing(
         resolution_formula='electron_cms',
         device=DEVICE
-    )
+    ).to(DEVICE)
     
     mu_smear_module = MomentumSmearing(
         resolution_formula='muon_cms',
         device=DEVICE
-    )
+    ).to(DEVICE)
 
     ch_tensors_smeared = []
     el_tensors_smeared = []
     mu_tensors_smeared = []
     # Process in batches
     for ch_batch_in, el_batch_in, mu_batch_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
-        ch_batch_out = ch_smear_module(ch_batch_in.to(DEVICE))
-        el_batch_out = el_smear_module(el_batch_in.to(DEVICE))
-        mu_batch_out = mu_smear_module(mu_batch_in.to(DEVICE))
+        ch_batch_out = ch_smear_module(ch_batch_in)
+        el_batch_out = el_smear_module(el_batch_in)
+        mu_batch_out = mu_smear_module(mu_batch_in)
 
-        ch_tensors_smeared.append(ch_batch_out.to(torch.float32).cpu())
-        el_tensors_smeared.append(el_batch_out.to(torch.float32).cpu())
-        mu_tensors_smeared.append(mu_batch_out.to(torch.float32).cpu())
+        ch_tensors_smeared.append(ch_batch_out.to(torch.float32))
+        el_tensors_smeared.append(el_batch_out.to(torch.float32))
+        mu_tensors_smeared.append(mu_batch_out.to(torch.float32))
 
     return ch_tensors_smeared, el_tensors_smeared, mu_tensors_smeared
 
@@ -252,7 +252,7 @@ def process_merger_pipeline(
     merger = Merger(
         particle_types=['charged_hadron', 'electron', 'muon'],
         device=DEVICE
-    )
+    ).to(DEVICE)
     
     print(f"\nTrackMerger (batch_size={batch_size})...")
     print(f"genevent_tensors.shape: {genevent_tensors.shape}")
@@ -265,7 +265,7 @@ def process_merger_pipeline(
         batch_end = min(batch_start + batch_size, n_event)
         
         # Extract batch
-        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
+        batch_events = genevent_tensors[batch_start:batch_end]
         batch_size_actual = batch_events.shape[0]
         
         # Apply merger (operates on batched input directly)
@@ -285,7 +285,7 @@ def process_merger_pipeline(
             particles[:, CMAP["PASS_MERGER"]]
         )
         
-        track_tensors.append(particles[track_mask > 0.5].to(torch.float32).cpu())
+        track_tensors.append(particles[track_mask > 0.5].to(torch.float32))
     
     # Stack all event tensors into a single tensor
     genevent_tensors_merged = torch.cat(genevent_tensors_merged, dim=0)
@@ -368,7 +368,7 @@ def process_ecal_pipeline(
         energy_fractions=energy_fractions,
         max_towers_per_event=500,
         device=DEVICE
-    )
+    ).to(DEVICE)
     tower_module = SimpleCalorimeter.Tower(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
@@ -380,7 +380,7 @@ def process_ecal_pipeline(
         energy_fractions=energy_fractions,
         max_towers_per_event=500,
         device=DEVICE
-    )
+    ).to(DEVICE)
     eflowphoton_module = SimpleCalorimeter.EFlowPhoton(
         eta_bins=eta_bins,
         phi_bins=phi_bins,
@@ -392,7 +392,7 @@ def process_ecal_pipeline(
         energy_fractions=energy_fractions,
         max_towers_per_event=500,
         device=DEVICE
-    )
+    ).to(DEVICE)
     
     print(f"\nECal (batch_size={batch_size})...")
     print(f"genevent_tensors.shape: {genevent_tensors.shape}")
@@ -415,20 +415,20 @@ def process_ecal_pipeline(
 
         # 1. EFlowTracks
         batch_eflow_tracks = eflowtrack_module(batch_events)
-        batch_tracks = torch.cat(batch_eflow_tracks, dim=0).cpu() if batch_eflow_tracks else torch.empty(0, 5)
+        batch_tracks = torch.cat(batch_eflow_tracks, dim=0) if batch_eflow_tracks else torch.empty(0, 5)
         all_eflow_tracks.append(batch_tracks.to(torch.float32))
         
         # 2. EFlowPhotons
         batch_photons = eflowphoton_module(batch_events)
-        batch_photons = torch.cat(batch_photons, dim=0).cpu() if batch_photons else torch.empty(0, 5)
+        batch_photons = torch.cat(batch_photons, dim=0) if batch_photons else torch.empty(0, 5)
         all_eflow_photons.append(batch_photons.to(torch.float32))
 
         # 3. Towers
         batch_ecal, batch_towers = tower_module(batch_events)
-        batch_towers = torch.cat(batch_towers, dim=0).cpu() if batch_towers else torch.empty(0, 5)
+        batch_towers = torch.cat(batch_towers, dim=0) if batch_towers else torch.empty(0, 5)
         all_ecal_towers.append(batch_towers.to(torch.float32))
 
-        genevent_tensors_ecal.append(batch_ecal.cpu())
+        genevent_tensors_ecal.append(batch_ecal)
         
     # Stack all event tensors into a single tensor
     genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
@@ -1045,7 +1045,7 @@ def main(
     print(f"STEP 1: Loading HepMC file and converting to tensors: {input_file}")
     print("="*80)
     
-    genevent_tensors = hepmc_to_tensor(input_file, max_events)
+    genevent_tensors = hepmc_to_tensor(input_file, max_events).to(DEVICE)
     n_events = len(genevent_tensors)
     print(f"Loaded {n_events} events from HepMC")
     print(f"  Total stable particles: {sum(t.shape[0] for t in genevent_tensors)}")
@@ -1063,11 +1063,11 @@ def main(
 
     genevent_tensors, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
     branches_torch_root.update({
-        'ParticleBeforeProp': tensor_to_root_dict(pbp_tensors, 'ParticleBeforeProp'),
-        'ParticleAfterProp': tensor_to_root_dict(pap_tensors, 'ParticleAfterProp'),
-        'ChargedHadron': tensor_to_root_dict(ch_tensors, 'ChargedHadron'),
-        'Electron': tensor_to_root_dict(el_tensors, 'Electron'),
-        'Muon': tensor_to_root_dict(mu_tensors, 'Muon'),
+        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp'),
+        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp'),
+        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron'),
+        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron'),
+        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon'),
     })
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
@@ -1085,9 +1085,9 @@ def main(
         ch_tensors, el_tensors, mu_tensors
     )
     branches_torch_root.update({
-        'ChargedHadronEfficiency': tensor_to_root_dict(ch_filtered, 'ChargedHadronEfficiency'),
-        'ElectronEfficiency': tensor_to_root_dict(el_filtered, 'ElectronEfficiency'),
-        'MuonEfficiency': tensor_to_root_dict(mu_filtered, 'MuonEfficiency'),
+        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency'),
+        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency'),
+        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency'),
     })
 
     print("\n✓ Efficiency applied")
@@ -1104,9 +1104,9 @@ def main(
         ch_filtered, el_filtered, mu_filtered
     )
     branches_torch_root.update({
-        'ChargedHadronSmeared': tensor_to_root_dict(ch_smeared, 'ChargedHadronSmeared'),
-        'ElectronSmeared': tensor_to_root_dict(el_smeared, 'ElectronSmeared'),
-        'MuonSmeared': tensor_to_root_dict(mu_smeared, 'MuonSmeared'),
+        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared'),
+        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared'),
+        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared'),
     })
     
     print("\n✓ MomentumSmearing applied")
@@ -1123,7 +1123,7 @@ def main(
         genevent_tensors, batch_size=batch_size
     )
     branches_torch_root.update({
-        'MergedTracks': tensor_to_root_dict(track_merged, 'MergedTracks'),
+        'MergedTracks': tensor_to_root_dict([i.cpu() for i in track_merged], 'MergedTracks'),
     })
     
     print("\n✓ TrackMerger applied")
@@ -1140,9 +1140,9 @@ def main(
         genevent_tensors, batch_size=batch_size
     )
     branches_torch_root.update({
-        'ECalTower': tensor_to_root_dict(ecal_towers, 'ECalTower'),
-        'ECal_EFlowTrack': tensor_to_root_dict(eflow_tracks, 'ECal_EFlowTrack'),
-        'EFlowPhoton': tensor_to_root_dict(eflow_photons, 'EFlowPhoton')
+        'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower'),
+        'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in eflow_tracks], 'ECal_EFlowTrack'),
+        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton')
     })
     print("\n✓ ECal applied")
     
