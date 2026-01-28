@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Callable, Union, Tuple
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes.stochastic_utils import log_normal_sample
+from parnassus.torch_delphes.SimpleCalorimeter.calorimeter_resolution import ecal_cms_resolution, hcal_cms_resolution
 
 
 class EFlowPhoton(nn.Module):
@@ -103,9 +104,9 @@ class EFlowPhoton(nn.Module):
         
         # Load resolution formula
         if resolution_formula == 'ecal_cms':
-            self.resolution_fn = self._ecal_cms_resolution
+            self.resolution_fn = ecal_cms_resolution
         elif resolution_formula == 'hcal_cms':
-            self.resolution_fn = self._hcal_cms_resolution
+            self.resolution_fn = hcal_cms_resolution
         elif callable(resolution_formula):
             self.resolution_fn = resolution_formula
         else:
@@ -341,45 +342,6 @@ class EFlowPhoton(nn.Module):
         
         return eflow_photons
      
-    @staticmethod
-    def _ecal_cms_resolution(energy: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
-        """
-        CMS ECAL energy resolution formula.
-        From delphes_card_CMS_5_0.tcl
-        """
-        abs_eta = torch.abs(eta)
-        
-        # Barrel: |eta| <= 1.5
-        barrel_mask = abs_eta <= 1.5
-        barrel_res = (1.0 + 0.64 * (eta**2)) * torch.sqrt(
-            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
-        )
-        
-        # Endcap: 1.5 < |eta| <= 2.5
-        endcap_mask = (abs_eta > 1.5) & (abs_eta <= 2.5)
-        endcap_res = (2.16 + 5.6 * (abs_eta - 2.0)**2) * torch.sqrt(
-            energy**2 * (0.008**2) + energy * (0.11**2) + (0.40**2)
-        )
-        
-        # HF: 2.5 < |eta| <= 5.0
-        hf_mask = (abs_eta > 2.5) & (abs_eta <= 5.0)
-        hf_res = torch.sqrt(energy**2 * (0.107**2) + energy * (2.08**2))
-        
-        resolution = torch.zeros_like(energy)
-        resolution = torch.where(barrel_mask, barrel_res, resolution)
-        resolution = torch.where(endcap_mask, endcap_res, resolution)
-        resolution = torch.where(hf_mask, hf_res, resolution)
-        
-        return resolution
-    
-    @staticmethod
-    def _hcal_cms_resolution(energy: torch.Tensor, eta: torch.Tensor) -> torch.Tensor:
-        """
-        CMS HCAL energy resolution formula (placeholder).
-        """
-        # Simple parametrization for HCAL
-        return torch.sqrt(energy**2 * 0.1**2 + energy * 0.5**2 + 1.0**2)
-    
     def get_energy_fraction(self, pid: int) -> float:
         """
         Get energy fraction for a given PDG ID.
