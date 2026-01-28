@@ -59,11 +59,11 @@ class MomentumSmearing(nn.Module):
         
         # Load resolution formula
         if resolution_formula == 'charged_hadron_cms':
-            self.resolution_func = self._charged_hadron_cms_resolution
+            self.resolution_func = self._charged_hadron_cms_momentum_resolution
         elif resolution_formula == 'electron_cms':
-            self.resolution_func = self._electron_cms_resolution
+            self.resolution_func = self._electron_cms_momentum_resolution
         elif resolution_formula == 'muon_cms':
-            self.resolution_func = self._muon_cms_resolution
+            self.resolution_func = self._muon_cms_momentum_resolution
         elif callable(resolution_formula):
             self.resolution_func = resolution_formula
         else:
@@ -159,7 +159,7 @@ class MomentumSmearing(nn.Module):
         return smeared
     
     @staticmethod
-    def _charged_hadron_cms_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
+    def _charged_hadron_cms_momentum_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
         CMS charged hadron momentum resolution formula.
         Based on arXiv:1405.6569
@@ -197,7 +197,7 @@ class MomentumSmearing(nn.Module):
         return res
     
     @staticmethod
-    def _electron_cms_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
+    def _electron_cms_momentum_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
         CMS electron momentum resolution formula.
         Based on arXiv:1502.02701
@@ -230,7 +230,7 @@ class MomentumSmearing(nn.Module):
         return res
     
     @staticmethod
-    def _muon_cms_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
+    def _muon_cms_momentum_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """
         CMS muon momentum resolution formula.
         Based on arXiv:1306.2016
