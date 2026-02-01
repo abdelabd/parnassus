@@ -27,16 +27,14 @@ class Merger(nn.Module):
     
     This module:
     1. Filters particles based on PID (which particle types to include)
-    2. Creates a PASS_MERGER mask column (AND of previous masks + PID filter)
-    3. Optionally computes aggregate statistics per event
     
     For TrackMerger, this combines charged hadrons, electrons, and muons
     that have passed propagation, efficiency, and momentum smearing.
     
     Input shape: (N_events, N_particles, N_FEATURES)
-        Must contain IS_NOT_PAD, PASS_PROP, PASS_EFF mask columns
+        Must contain IS_NOT_PAD, PASS_PROP mask columns
     
-    Output shape: (N_events, N_particles, D) with filled-in PASS_MERGER column
+    Output shape: (N_events, N_particles, D)
     """
     
     def __init__(self) -> None:
@@ -50,7 +48,7 @@ class Merger(nn.Module):
     def forward(self, different_particle_type_tensors: List[torch.Tensor],) -> torch.Tensor:
         """
         TODO: Update docstring
-        Apply merger to create unified output with PASS_MERGER mask.
+        Apply merger to create unified output
         
         Args:
             different_particle_type_tensors: List of tensors for each particle type
@@ -63,68 +61,6 @@ class Merger(nn.Module):
         track_tensors = torch.cat(different_particle_type_tensors, dim=0)
         return track_tensors
     
-    def compute_aggregate_stats(self, genevent_tensors: torch.Tensor) -> torch.Tensor:
-        """
-        Compute per-event aggregate statistics for particles that pass merger.
-        
-        This matches the C++ Delphes Merger outputs:
-        - MomentumOutputArray: vector sum of 4-momenta
-        - EnergyOutputArray: scalar sums of PT and E
-        
-        Args:
-            genevent_tensors: tensor with PASS_MERGER column
-            
-        Returns:
-            List of dicts, one per event, containing:
-                - sum_px, sum_py, sum_pz, sum_e: vector sum of 4-momentum
-                - sum_pt: scalar sum of transverse momentum
-                - scalar_sum_e: scalar sum of energy
-                - n_tracks: number of particles in merged output
-        """
-        n_events = genevent_tensors.shape[0]
-        
-        stats = []
-        
-        for event_idx in range(n_events):
-            # Get mask for this event
-            merger_mask = genevent_tensors[event_idx, :, CMAP["PASS_MERGER"]] > 0.5
-            
-            # Extract particles that passed merger
-            event_particles = genevent_tensors[event_idx]
-            
-            if merger_mask.sum() > 0:
-                # Get momentum components
-                px = event_particles[merger_mask, CMAP["PX"]]
-                py = event_particles[merger_mask, CMAP["PY"]]
-                pz = event_particles[merger_mask, CMAP["PZ"]]
-                e = event_particles[merger_mask, CMAP["E"]]
-                pt = event_particles[merger_mask, CMAP["PT"]]
-                
-                # Compute sums
-                event_stats = {
-                    'sum_px': px.sum().item(),
-                    'sum_py': py.sum().item(),
-                    'sum_pz': pz.sum().item(),
-                    'sum_e': e.sum().item(),
-                    'sum_pt': pt.sum().item(),
-                    'n_tracks': merger_mask.sum().item()
-                }
-            else:
-                # Empty event
-                event_stats = {
-                    'sum_px': 0.0,
-                    'sum_py': 0.0,
-                    'sum_pz': 0.0,
-                    'sum_e': 0.0,
-                    'sum_pt': 0.0,
-                    'n_tracks': 0
-                }
-            
-            stats.append(event_stats)
-        
-        return stats
-
-
 # Example usage and testing
 if __name__ == "__main__":
     print("Testing Delphes Merger PyTorch Module\n")
@@ -136,7 +72,7 @@ if __name__ == "__main__":
     # Create example events with multiple particle types
     n_events = 5
     n_particles = 20
-    n_dim = 18  # After Efficiency module (includes IS_NOT_PAD, PASS_PROP, PASS_EFF)
+    n_dim = 18  # After Efficiency module (includes IS_NOT_PAD, PASS_PROP)
     
     genevent_tensors = torch.zeros((n_events, n_particles, n_dim), dtype=torch.float64)
     
@@ -181,7 +117,6 @@ if __name__ == "__main__":
             # Set masks (all particles passed previous stages)
             genevent_tensors[event_idx, i, CMAP["IS_NOT_PAD"]] = 1.0
             genevent_tensors[event_idx, i, CMAP["PASS_PROP"]] = 1.0
-            genevent_tensors[event_idx, i, CMAP["PASS_EFF"]] = 1.0
     
     print(f"Input shape: {genevent_tensors.shape}")
     print(f"Number of events: {n_events}")
@@ -211,53 +146,4 @@ if __name__ == "__main__":
     genevent_tensors_merged = merger(genevent_tensors)
     
     print(f"\nOutput shape: {genevent_tensors_merged.shape}")
-    print(f"New dimension added: PASS_MERGER at column {CMAP['PASS_MERGER']}")
-    
-    # Count particles after merger
-    print("\nParticles after merger (tracks only):")
-    for event_idx in range(n_events):
-        merger_mask = genevent_tensors_merged[event_idx, :, CMAP["PASS_MERGER"]] > 0.5
-        pids = genevent_tensors_merged[event_idx, merger_mask, CMAP["PID"]]
-        n_ch = (torch.abs(pids) == 211).sum().item()
-        n_el = (torch.abs(pids) == 11).sum().item()
-        n_mu = (torch.abs(pids) == 13).sum().item()
-        n_total = merger_mask.sum().item()
-        print(f"  Event {event_idx}: Total tracks={n_total} (CH={n_ch}, El={n_el}, Mu={n_mu})")
-    
-    # Compute aggregate statistics
-    print("\n" + "="*70)
-    print("Computing aggregate statistics")
-    print("="*70)
-    
-    stats = merger.compute_aggregate_stats(genevent_tensors_merged)
-    
-    for event_idx, event_stats in enumerate(stats):
-        print(f"\nEvent {event_idx}:")
-        print(f"  N tracks: {event_stats['n_tracks']}")
-        print(f"  Sum PT: {event_stats['sum_pt']:.2f} GeV")
-        print(f"  Sum E: {event_stats['sum_e']:.2f} GeV")
-        print(f"  Sum 4-momentum: ({event_stats['sum_px']:.2f}, "
-              f"{event_stats['sum_py']:.2f}, {event_stats['sum_pz']:.2f}, "
-              f"{event_stats['sum_e']:.2f})")
-    
-    # Verify photons are excluded
-    print("\n" + "="*70)
-    print("Verification: Photons should be excluded from tracks")
-    print("="*70)
-    
-    for event_idx in range(n_events):
-        valid_mask = genevent_tensors[event_idx, :, CMAP["IS_NOT_PAD"]] > 0.5
-        merger_mask = genevent_tensors_merged[event_idx, :, CMAP["PASS_MERGER"]] > 0.5
-        
-        # Check if any photons passed merger
-        pids_merged = genevent_tensors_merged[event_idx, merger_mask, CMAP["PID"]]
-        n_photons_merged = (pids_merged == 22).sum().item()
-        
-        if n_photons_merged == 0:
-            print(f"  Event {event_idx}: ✓ No photons in merged tracks")
-        else:
-            print(f"  Event {event_idx}: ✗ WARNING: {n_photons_merged} photons in merged tracks!")
-    
-    print("\n" + "="*70)
-    print("✓ Merger test completed successfully!")
-    print("="*70)
+
