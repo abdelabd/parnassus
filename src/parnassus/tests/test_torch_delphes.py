@@ -236,7 +236,7 @@ def process_merger_pipeline(
         batch_size: Number of events to process in each batch
         
     Returns:
-        genevent_tensors: Tensor of shape (N_events, N_particles, D+1) with PASS_MERGER column
+        genevent_tensors: Tensor of shape (N_events, N_particles, D)
         track_tensors: List of track tensors (for validation)
     """
     

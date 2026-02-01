@@ -27,7 +27,7 @@ class Tower(nn.Module):
     - Creating energy flow objects by comparing track vs calorimeter energy
     
     Input: genevent_tensors with shape (N_events, N_particles, D)
-           Must have masks: IS_NOT_PAD, PASS_PROP, PASS_MERGER
+           Must have masks: IS_NOT_PAD, PASS_PROP
     
     Output: genevent_tensors with shape (N_events, N_particles + N_towers, D+3)
             New masks: PASS_ECAL_TOWER, PASS_EFLOW_TRACK, PASS_EFLOW_PHOTON
