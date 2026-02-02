@@ -110,7 +110,7 @@ class EFlowPhoton(nn.Module):
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
-    def forward(self, genevent_tensors: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, pap_tensors: torch.Tensor, merged_track_tensors: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Apply EFlowPhoton to generate calorimeter towers and energy flow objects.
         
@@ -122,28 +122,28 @@ class EFlowPhoton(nn.Module):
             outputs: Dict with 'ecalTowers', 'eflowTracks', 'eflowPhotons' lists
         """
         if not self.first_in:
-            device = genevent_tensors.device
+            device = pap_tensors.device
             self.eta_bins = self.eta_bins.to(device)
             self.phi_bins = self.phi_bins.to(device)
             self.first_in = True
+            
+        event_numbers = set(pap_tensors[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist())
+        event_numbers_tracks = set(merged_track_tensors[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist())
+        assert event_numbers == event_numbers_tracks, "Event numbers in pap_tensors and merged_track_tensors do not match."
 
-        n_events, _, _ = genevent_tensors.shape
-        
         # Initialize output lists
         all_eflow_photons = []
         
         # Process each event independently (towers are event-specific)
-        for event_idx in range(n_events):
-            event_tensor = genevent_tensors[event_idx]  # (N_particles, D)
-            
-            # Process this event
-            eflow_photons = self._process_event(event_tensor)
-            
-            all_eflow_photons.append(eflow_photons)
-        
+        for event_num in event_numbers:
+            particles_event = pap_tensors[pap_tensors[:, CMAP["EVENT_NUMBER"]] == event_num]
+            tracks_event = merged_track_tensors[merged_track_tensors[:, CMAP["EVENT_NUMBER"]] == event_num]
+            eflow_photons_event = self._process_event(particles_event, tracks_event)
+            all_eflow_photons.append(eflow_photons_event)
+
         return all_eflow_photons
 
-    def _process_event(self, event_tensor: torch.Tensor) -> List[torch.Tensor]:
+    def _process_event(self, particles: torch.Tensor, all_tracks: torch.Tensor) -> List[torch.Tensor]:
         """
         Process a single event to create towers and energy flow objects.
         
@@ -153,21 +153,7 @@ class EFlowPhoton(nn.Module):
         Returns:
             eflow_photons: (N_eflow_photons, D) tensor of eflow photon objects
         """
-        # Extract valid particles (propagated) and tracks (merged)
-        valid_particles_mask = (
-            event_tensor[:, CMAP["IS_NOT_PAD"]] * 
-            event_tensor[:, CMAP["PASS_PROP"]]
-        ).bool()
-        
-        valid_tracks_mask = (
-            event_tensor[:, CMAP["IS_NOT_PAD"]] *
-            event_tensor[:, CMAP["PASS_PROP"]] 
-        ).bool()
-        
-        # Get particle and track subsets
-        particles = event_tensor[valid_particles_mask]  # All particles after propagation
-        all_tracks = event_tensor[valid_tracks_mask]  # Tracks (charged particles that passed all filters)
-        
+
         # Split tracks into depositing (pions, kaons, protons) and non-depositing (muons)
         # This matches C++ logic (lines 364-378) where tracks with zero energy fraction
         # are passed directly to eflow output without entering tower processing
@@ -228,15 +214,15 @@ class EFlowPhoton(nn.Module):
         n_towers = len(unique_tower_ids)
         
         # Aggregate energy per tower using scatter_add
-        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
-        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
-        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
 
         # Map tower_ids to indices
         tower_id_to_idx = {tid.item(): idx for idx, tid in enumerate(unique_tower_ids)}
         particle_tower_idx = torch.tensor(
             [tower_id_to_idx[tid.item()] for tid in tower_ids],
-            dtype=torch.long, device=event_tensor.device
+            dtype=torch.long, device=particles.device
         )
         
         # Accumulate energy and time
@@ -264,10 +250,10 @@ class EFlowPhoton(nn.Module):
         
         # Optionally smear tower centers
         if self.smear_tower_center:
-            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
+            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
                         (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
                         self.eta_bins[tower_eta_bins]
-            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
+            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
                         (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
                         self.phi_bins[tower_phi_bins] # SUSPECT
         else:
@@ -299,7 +285,7 @@ class EFlowPhoton(nn.Module):
                 tower_tracks_mask = track_tower_ids == tid
                 tower_tracks = tracks[tower_tracks_mask]
             else:
-                tower_tracks = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=event_tensor.device)
+                tower_tracks = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
             
             # Compute total track energy and track resolution
             if tower_tracks.shape[0] > 0:
@@ -318,7 +304,7 @@ class EFlowPhoton(nn.Module):
                 total_track_sigma = 0.0
             
             # Compute neutral energy
-            neutral_energy = torch.tensor([max(tower_energy - total_track_energy, 0.0)], device=event_tensor.device)
+            neutral_energy = torch.tensor([max(tower_energy - total_track_energy, 0.0)], device=particles.device)
             
             # Compute neutral significance
             if total_track_sigma**2 + tower_sigma_val**2 > 0:
@@ -331,14 +317,14 @@ class EFlowPhoton(nn.Module):
                 neutral_tower = self._create_tower_object(
                     tower_eta[tower_idx], tower_phi[tower_idx],
                     neutral_energy, tower_times[tower_idx],
-                    event_tensor.shape[1]
+                    particles.shape[1]
                 ) # SUSPECT
                 eflow_photons_list.append(neutral_tower)
             
         if len(eflow_photons_list) > 0:
             eflow_photons = torch.cat(eflow_photons_list, dim=0)
         else:
-            eflow_photons = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=event_tensor.device)
+            eflow_photons = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
         
         return eflow_photons
      

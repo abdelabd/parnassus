@@ -367,14 +367,14 @@ def process_ecal_pipeline(
     for batch_particles_propagated, batch_merged_tracks in tqdm(zip(pap_tensors, merged_tracks), total=len(pap_tensors)):
         
         # 1. EFlowTracks
-        batch_eflow_tracks = eflowtrack_module(batch_particles_propagated, batch_merged_tracks)
-        batch_tracks = torch.cat(batch_eflow_tracks, dim=0) if batch_eflow_tracks else torch.empty(0, 5)
-        all_eflow_tracks.append(batch_tracks.to(torch.float32))
+        batch_eflow_tracks = eflowtrack_module(batch_particles_propagated.clone(), batch_merged_tracks.clone())
+        batch_eflow_tracks = torch.cat(batch_eflow_tracks, dim=0) if batch_eflow_tracks else torch.empty(0, 5)
+        all_eflow_tracks.append(batch_eflow_tracks.to(torch.float32))
         
         # # 2. EFlowPhotons
-        # batch_photons = eflowphoton_module(batch_events)
-        # batch_photons = torch.cat(batch_photons, dim=0) if batch_photons else torch.empty(0, 5)
-        # all_eflow_photons.append(batch_photons.to(torch.float32))
+        batch_eflow_photons = eflowphoton_module(batch_particles_propagated.clone(), batch_merged_tracks.clone())
+        batch_eflow_photons = torch.cat(batch_eflow_photons, dim=0) if batch_eflow_photons else torch.empty(0, 5)
+        all_eflow_photons.append(batch_eflow_photons.to(torch.float32))
 
         # # 3. Towers
         # batch_ecal, batch_towers = tower_module(batch_events)
@@ -392,7 +392,7 @@ def process_ecal_pipeline(
     # print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
     
     # return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
-    return None, None, all_eflow_tracks, None
+    return None, None, all_eflow_tracks, all_eflow_photons
 
 
 
@@ -1090,14 +1090,14 @@ def main(
     print("\n" + "="*80)
     print("STEP 6: Applying ECal (SimpleCalorimeter) (batched)")
     print("="*80)
-    
-    _, _, eflow_tracks, _ = process_ecal_pipeline(
+
+    _, _, eflow_tracks, eflow_photons = process_ecal_pipeline(
         pap_tensors, merged_tracks, batch_size=batch_size
     )
     branches_torch_root.update({
         # 'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower'),
         'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in eflow_tracks], 'ECal_EFlowTrack'),
-        # 'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton')
+        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton')
     })
     print("\n✓ ECal applied")
     

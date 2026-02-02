@@ -110,7 +110,7 @@ class EFlowTrack(nn.Module):
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
-    def forward(self, pap_tensors: torch.Tensor, merged_track_tensors) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, pap_tensors: torch.Tensor, merged_track_tensors: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Apply EFlowTrack to generate calorimeter towers and energy flow objects.
         
@@ -126,6 +126,7 @@ class EFlowTrack(nn.Module):
             self.eta_bins = self.eta_bins.to(device)
             self.phi_bins = self.phi_bins.to(device)
             self.first_in = True
+            
         event_numbers = set(pap_tensors[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist())
         event_numbers_tracks = set(merged_track_tensors[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist())
         assert event_numbers == event_numbers_tracks, "Event numbers in pap_tensors and merged_track_tensors do not match."
