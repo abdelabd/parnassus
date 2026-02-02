@@ -111,12 +111,12 @@ class Tower(nn.Module):
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
     
-    def forward(self, genevent_tensors: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, pap_tensors: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Apply Tower to generate calorimeter towers and energy flow objects.
         
         Args:
-            genevent_tensors: (N_events, N_particles, D) tensor with masks
+            pap_tensors: (N_events, N_particles, D) tensor with masks
             
         Returns:
             genevent_tensors_out: (N_events, N_particles + N_towers, D+3) 
@@ -125,49 +125,34 @@ class Tower(nn.Module):
 
         if not self.first_in:
             # Move bin edges to the same device as input tensors
-            device = genevent_tensors.device
+            device = pap_tensors.device
             self.eta_bins = self.eta_bins.to(device)
             self.phi_bins = self.phi_bins.to(device)
             self.first_in = True
 
-        n_events, _, _ = genevent_tensors.shape
+        event_numbers = set(pap_tensors[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist())
         
         # Initialize output lists
         all_towers = []
+
         # Process each event independently (towers are event-specific)
-        for event_idx in range(n_events):
-            event_tensor = genevent_tensors[event_idx]  # (N_particles, D)
-            
-            # Process this event
-            towers = self._process_event(event_tensor)
-            all_towers.append(towers)
-        
-        # Now we need to append towers to genevent_tensors and add masks
-        # Pad towers to max_towers_per_event and concatenate
-        genevent_tensors_out = self._append_towers_to_events(
-            genevent_tensors, all_towers
-        )
-        
-        return genevent_tensors_out, all_towers
+        for event_num in event_numbers:
+            particles_event = pap_tensors[pap_tensors[:, CMAP["EVENT_NUMBER"]] == event_num]
+            towers_event = self._process_event(particles_event)
+            all_towers.append(towers_event)
+
+        return all_towers
   
-    def _process_event(self, event_tensor: torch.Tensor) -> List[torch.Tensor]:
+    def _process_event(self, particles: torch.Tensor) -> List[torch.Tensor]:
         """
         Process a single event to create towers and energy flow objects.
         
         Args:
-            event_tensor: (N_particles, D) tensor for one event
+            particles: (N_particles, D) tensor for one event
             
         Returns:
             towers: (N_towers, D) tensor of tower objects
         """
-        # Extract valid particles (propagated) and tracks (merged)
-        valid_particles_mask = (
-            event_tensor[:, CMAP["IS_NOT_PAD"]] * 
-            event_tensor[:, CMAP["PASS_PROP"]]
-        ).bool()
-        
-        # Get particle and track subsets
-        particles = event_tensor[valid_particles_mask]  # All particles after propagation
         
         # Bin particles into towers 
         particle_eta = particles[:, CMAP["ETA_OUTER"]]
@@ -215,15 +200,15 @@ class Tower(nn.Module):
         n_towers = len(unique_tower_ids)
         
         # Aggregate energy per tower using scatter_add
-        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
-        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
-        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=event_tensor.device)
+        tower_energies = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_times = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_time_weights = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
 
         # Map tower_ids to indices
         tower_id_to_idx = {tid.item(): idx for idx, tid in enumerate(unique_tower_ids)}
         particle_tower_idx = torch.tensor(
             [tower_id_to_idx[tid.item()] for tid in tower_ids],
-            dtype=torch.long, device=event_tensor.device
+            dtype=torch.long, device=particles.device
         )
         
         # Accumulate energy and time
@@ -251,10 +236,10 @@ class Tower(nn.Module):
         
         # Optionally smear tower centers
         if self.smear_tower_center:
-            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
+            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
                         (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
                         self.eta_bins[tower_eta_bins]
-            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=event_tensor.device) * \
+            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
                         (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
                         self.phi_bins[tower_phi_bins] # SUSPECT
         else:
@@ -285,7 +270,7 @@ class Tower(nn.Module):
                 tower_obj = self._create_tower_object(
                     tower_eta[tower_idx], tower_phi[tower_idx],
                     tower_energy, tower_times[tower_idx],
-                    event_tensor.shape[1]
+                    particles.shape[1]
                 )
                 towers_list.append(tower_obj)       
         
@@ -293,7 +278,7 @@ class Tower(nn.Module):
         if len(towers_list) > 0:
             towers = torch.cat(towers_list, dim=0)
         else:
-            towers = torch.zeros((0, event_tensor.shape[1]), dtype=torch.float64, device=event_tensor.device)
+            towers = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
         
         return towers
    
@@ -343,65 +328,6 @@ class Tower(nn.Module):
         tower[0, CMAP["MASS"]] = 0.0
         
         return tower
-    
-    def _append_towers_to_events(
-        self, 
-        genevent_tensors: torch.Tensor, 
-        all_towers: List[List[torch.Tensor]]
-    ) -> torch.Tensor:
-        """
-        Append towers to genevent_tensors and add masks.
-        
-        Pad to (N_particles + max_towers_per_event) per event.
-        """
-        n_events, n_particles, n_dim = genevent_tensors.shape
-        
-        # New dimension includes 3 new mask columns
-        n_dim_out = n_dim + 3
-        max_size = n_particles + self.max_towers_per_event
-        
-        # Initialize output tensor
-        genevent_tensors_out = torch.zeros(
-            (n_events, max_size, n_dim_out),
-            dtype=torch.float64, device=genevent_tensors.device
-        )
-        
-        # Copy original particle data (first n_particles entries per event)
-        genevent_tensors_out[:, :n_particles, :n_dim] = genevent_tensors
-        
-        # Process each event
-        for event_idx in range(n_events):
-            towers = all_towers[event_idx]
-            
-            n_towers = towers.shape[0]
-            
-            # Append towers after particles
-            if n_towers > 0:
-                tower_start = n_particles
-                tower_end = min(n_particles + n_towers, max_size)
-                actual_towers = tower_end - tower_start
-                
-                genevent_tensors_out[event_idx, tower_start:tower_end, :n_dim] = \
-                    towers[:actual_towers, :n_dim]
-                
-                # Set tower masks
-                genevent_tensors_out[event_idx, tower_start:tower_end, CMAP["IS_NOT_PAD"]] = 1.0
-                genevent_tensors_out[event_idx, tower_start:tower_end, CMAP["PASS_ECAL_TOWER"]] = 1.0
-            
-            # TODO: Mark eflow tracks
-            # if eflow_tracks.shape[0] > 0:
-                # Find matching particles in original tensor and mark them
-                # For simplicity, we'll create a new mask based on particle IDs
-                # (This is a simplified approach; production code might need particle tracking)
-                pass
-            
-            # TODO: Mark eflow photons  
-            # if eflow_photons.shape[0] > 0:
-                # These are actually the towers that had neutral excess
-                # TODO: Already marked above with PASS_ECAL_TOWER
-                # pass
-        
-        return genevent_tensors_out
 
     def get_energy_fraction(self, pid: int) -> float:
         """
