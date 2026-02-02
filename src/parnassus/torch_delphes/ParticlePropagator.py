@@ -426,8 +426,9 @@ class ParticlePropagator(nn.Module):
         
         particles[valid_indices, CMAP["PX"]] = px_d[valid]  # Px (at closest approach)
         particles[valid_indices, CMAP["PY"]] = py_d[valid]  # Py (at closest approach)
+        particles[valid_indices, CMAP["PHI"]] = phid[valid]  # Phi (at closest approach) - MUST update to match Px/Py
         particles[valid_indices, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
-        particles[valid_indices, CMAP["PHI_OUTER"]] = phid[valid]  # Phi (at closest approach)
+        particles[valid_indices, CMAP["PHI_OUTER"]] = phid[valid]  # PhiOuter (at closest approach)
         particles[valid_indices, CMAP["X"]] = x_t[valid] * 1.0e3  # X (m to mm) - final position
         particles[valid_indices, CMAP["Y"]] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
         particles[valid_indices, CMAP["Z"]] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
