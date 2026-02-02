@@ -376,13 +376,10 @@ class ParticlePropagator(nn.Module):
         # Time of closest approach
         td = (phi_0 + torch.atan2(x_center, y_center)) / omega
         
-        # Remove modulo pi ambiguities
+        # Remove modulo pi ambiguities using modulo arithmetic (matching C++ while loop)
         pio = torch.abs(torch.pi / omega)
-        td = torch.where(
-            torch.abs(td) > 0.5 * pio,
-            td - torch.sign(td) * pio,
-            td
-        )
+        # Wrap td to range [-0.5*pio, 0.5*pio]
+        td = ((td + 0.5 * pio) % pio) - 0.5 * pio
         
         t_r = td + torch.abs(alpha / omega)
         
