@@ -37,12 +37,13 @@ Z = 13         # Z position
 MASS = 14      # Mass (not stored in Track, will be computed/set based on PID)
 ETA_OUTER = 15 # Pseudorapidity at point of intersection with detector (position)
 PHI_OUTER = 16 # Azimuthal angle at closest-approach to z-axis (position)
+EVENT_NUMBER = 17
 
-IS_NOT_PAD = 17  # Column index for initial validity mask (1=real, 0=padded)
-PASS_PROP = 18
-PASS_ECAL_TOWER = 19  # Column index for ECal tower mask
-PASS_EFLOW_TRACK = 20  # Column index for energy flow track mask
-PASS_EFLOW_PHOTON = 21  # Column index for energy flow photon mask
+IS_NOT_PAD = 18  # Column index for initial validity mask (1=real, 0=padded)
+PASS_PROP = 19
+PASS_ECAL_TOWER = 20  # Column index for ECal tower mask
+PASS_EFLOW_TRACK = 21  # Column index for energy flow track mask
+PASS_EFLOW_PHOTON = 22  # Column index for energy flow photon mask
 
 COLUMN_MAP = {
     "PID": PID,
@@ -62,6 +63,7 @@ COLUMN_MAP = {
     "MASS": MASS,
     "ETA_OUTER": ETA_OUTER,
     "PHI_OUTER": PHI_OUTER,
+    "EVENT_NUMBER": EVENT_NUMBER,
     "IS_NOT_PAD": IS_NOT_PAD,
     "PASS_PROP": PASS_PROP,
     "PASS_ECAL_TOWER": PASS_ECAL_TOWER,
@@ -301,6 +303,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 break
             
             # Get all stable particles (status == 1)
+            event_number = event.event_number
             stable_particles = [p for p in event.particles if p.status == 1]
             
             n_particles = len(stable_particles)
@@ -359,6 +362,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 particles[i, MASS] = mass
                 # ETA_OUTER - will be computed by ParticlePropagator  
                 # PHI_outer - will be computed by ParticlePropagator
+                particles[i, EVENT_NUMBER] = event_number
             
             # Convert to torch tensor
             event_tensors.append(torch.from_numpy(particles).to(torch.float64))

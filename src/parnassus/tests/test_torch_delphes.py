@@ -108,7 +108,6 @@ def process_particle_propagator(
         genevent_tensors_propagated[batch_start:batch_end] = particles_after_prop_batch.reshape(batch_size_actual, n_part, n_dim)
         
         # For debugging: Collect ParticleBeforeProp, ParticleAfterProp, ChargedHadron, Electron, and Muon tensors after propagation
-        mask = particles_after_prop_batch[:, CMAP["IS_NOT_PAD"]] * particles_after_prop_batch[:, CMAP["PASS_PROP"]]
         
         # ParticleBeforeProp
         pbp_mask = particles_before_prop_batch[:, CMAP["IS_NOT_PAD"]].float()
@@ -253,7 +252,8 @@ def process_merger_pipeline(
     return track_tensors
 
 def process_ecal_pipeline(
-    genevent_tensors: torch.Tensor, 
+    pap_tensors: List[torch.Tensor],
+    merged_tracks: List[torch.Tensor],
     batch_size: int = 100
 ) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
@@ -270,7 +270,9 @@ def process_ecal_pipeline(
         eflow_photons: List of eflow photon tensors per event (for validation)
     """
     
-    n_event, n_part, n_dim = genevent_tensors.shape
+    all_event_number = torch.cat([i[:, CMAP["EVENT_NUMBER"]] for i in pap_tensors], dim=0)
+    event_numbers = set(all_event_number.cpu().numpy().tolist())
+    n_event = len(event_numbers)
     
     # Create eta and phi bins from CMS card
     # Barrel: |eta| < 1.5, 0.02 x 0.02 resolution
@@ -352,7 +354,7 @@ def process_ecal_pipeline(
     ).to(DEVICE)
     
     print(f"\nECal (batch_size={batch_size})...")
-    print(f"genevent_tensors.shape: {genevent_tensors.shape}")
+    print(f"pap_tensors[0].shape: {pap_tensors[0].shape}, merged_tracks[0].shape: {merged_tracks[0].shape}")
     print(f"Number of eta bins: {len(eta_bins)}")
     print(f"Number of phi bins: {len(phi_bins)}")
     
@@ -362,40 +364,36 @@ def process_ecal_pipeline(
     all_eflow_photons = []
     
     # Process in batches
-    for batch_start in tqdm(range(0, n_event, batch_size)):
-        batch_end = min(batch_start + batch_size, n_event)
+    for batch_particles_propagated, batch_merged_tracks in tqdm(zip(pap_tensors, merged_tracks), total=len(pap_tensors)):
         
-        # Extract batch
-        batch_events = genevent_tensors[batch_start:batch_end].to(DEVICE)
-        
-        # Apply ECal
-
         # 1. EFlowTracks
-        batch_eflow_tracks = eflowtrack_module(batch_events)
+        batch_eflow_tracks = eflowtrack_module(batch_particles_propagated, batch_merged_tracks)
         batch_tracks = torch.cat(batch_eflow_tracks, dim=0) if batch_eflow_tracks else torch.empty(0, 5)
         all_eflow_tracks.append(batch_tracks.to(torch.float32))
         
-        # 2. EFlowPhotons
-        batch_photons = eflowphoton_module(batch_events)
-        batch_photons = torch.cat(batch_photons, dim=0) if batch_photons else torch.empty(0, 5)
-        all_eflow_photons.append(batch_photons.to(torch.float32))
+        # # 2. EFlowPhotons
+        # batch_photons = eflowphoton_module(batch_events)
+        # batch_photons = torch.cat(batch_photons, dim=0) if batch_photons else torch.empty(0, 5)
+        # all_eflow_photons.append(batch_photons.to(torch.float32))
 
-        # 3. Towers
-        batch_ecal, batch_towers = tower_module(batch_events)
-        batch_towers = torch.cat(batch_towers, dim=0) if batch_towers else torch.empty(0, 5)
-        all_ecal_towers.append(batch_towers.to(torch.float32))
+        # # 3. Towers
+        # batch_ecal, batch_towers = tower_module(batch_events)
+        # batch_towers = torch.cat(batch_towers, dim=0) if batch_towers else torch.empty(0, 5)
+        # all_ecal_towers.append(batch_towers.to(torch.float32))
 
-        genevent_tensors_ecal.append(batch_ecal)
+        # genevent_tensors_ecal.append(batch_ecal)
         
-    # Stack all event tensors into a single tensor
-    genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
+    # # Stack all event tensors into a single tensor
+    # genevent_tensors_ecal = torch.cat(genevent_tensors_ecal, dim=0)
     
-    print(f"\nECal output shape: {genevent_tensors_ecal.shape}")
-    print(f"Total towers: {sum(t.shape[0] for t in all_ecal_towers)}")
-    print(f"Total eflow tracks: {sum(t.shape[0] for t in all_eflow_tracks)}")
-    print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
+    # print(f"\nECal output shape: {genevent_tensors_ecal.shape}")
+    # print(f"Total towers: {sum(t.shape[0] for t in all_ecal_towers)}")
+    # print(f"Total eflow tracks: {sum(t.shape[0] for t in all_eflow_tracks)}")
+    # print(f"Total eflow photons: {sum(t.shape[0] for t in all_eflow_photons)}")
     
-    return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
+    # return genevent_tensors_ecal, all_ecal_towers, all_eflow_tracks, all_eflow_photons
+    return None, None, all_eflow_tracks, None
+
 
 
 def validate_against_benchmark(
@@ -848,118 +846,118 @@ def validate_against_benchmark(
             print(f"  ℹ No PID field - skipping PID-specific plots (normal for Tower objects)")
     
         ### 4. Tower energies at eta=phi=0 for ECalTower and EFlowPhoton
-        if branch_name in ["ECalTower", "EFlowPhoton"]:
-            print(f"\n\nPlotting tower energies at eta=phi=0")
+        # if branch_name in ["ECalTower", "EFlowPhoton"]:
+        #     print(f"\n\nPlotting tower energies at eta=phi=0")
 
-            # Extract data
-            key_eta = f"{branch_name}/{branch_name}.Eta"
-            key_phi = f"{branch_name}/{branch_name}.Phi"
-            key_E = f"{branch_name}/{branch_name}.E"
-            eta_max = 0.1
-            phi_max = 0.1
+        #     # Extract data
+        #     key_eta = f"{branch_name}/{branch_name}.Eta"
+        #     key_phi = f"{branch_name}/{branch_name}.Phi"
+        #     key_E = f"{branch_name}/{branch_name}.E"
+        #     eta_max = 0.1
+        #     phi_max = 0.1
             
-            # Select towers
-            torch_abs_eta = ak.to_numpy(abs(ak.flatten(torch_tree[key_eta].array())))
-            torch_abs_phi = ak.to_numpy(abs(ak.flatten(torch_tree[key_phi].array())))
-            torch_E = ak.to_numpy(ak.flatten(torch_tree[key_E].array()))
-            torch_mask_eta = torch_abs_eta < eta_max
-            torch_mask_phi = torch_abs_phi < phi_max
-            torch_mask_eta_phi = torch_mask_eta & torch_mask_phi
-            torch_E_sel_eta = torch_E[torch_mask_eta]
-            torch_E_sel_phi = torch_E[torch_mask_phi]
-            torch_E_sel_eta_phi = torch_E[torch_mask_eta_phi]
-            print(f"torch_E.shape: {torch_E.shape}")
-            print(f"torch_E_sel_eta.shape: {torch_E_sel_eta.shape}")
-            print(f"torch_E_sel_phi.shape: {torch_E_sel_phi.shape}")
-            print(f"torch_E_sel_eta_phi.shape: {torch_E_sel_eta_phi.shape}")
-            print(f"min(torch_E_sel_eta): {np.min(torch_E_sel_eta)}, max(torch_E_sel_eta): {np.max(torch_E_sel_eta)}")
-            print(f"min(torch_E_sel_phi): {np.min(torch_E_sel_phi)}, max(torch_E_sel_phi): {np.max(torch_E_sel_phi)}")
-            print(f"min(torch_E_sel_eta_phi): {np.min(torch_E_sel_eta_phi)}, max(torch_E_sel_eta_phi): {np.max(torch_E_sel_eta_phi)}")
+        #     # Select towers
+        #     torch_abs_eta = ak.to_numpy(abs(ak.flatten(torch_tree[key_eta].array())))
+        #     torch_abs_phi = ak.to_numpy(abs(ak.flatten(torch_tree[key_phi].array())))
+        #     torch_E = ak.to_numpy(ak.flatten(torch_tree[key_E].array()))
+        #     torch_mask_eta = torch_abs_eta < eta_max
+        #     torch_mask_phi = torch_abs_phi < phi_max
+        #     torch_mask_eta_phi = torch_mask_eta & torch_mask_phi
+        #     torch_E_sel_eta = torch_E[torch_mask_eta]
+        #     torch_E_sel_phi = torch_E[torch_mask_phi]
+        #     torch_E_sel_eta_phi = torch_E[torch_mask_eta_phi]
+        #     print(f"torch_E.shape: {torch_E.shape}")
+        #     print(f"torch_E_sel_eta.shape: {torch_E_sel_eta.shape}")
+        #     print(f"torch_E_sel_phi.shape: {torch_E_sel_phi.shape}")
+        #     print(f"torch_E_sel_eta_phi.shape: {torch_E_sel_eta_phi.shape}")
+        #     print(f"min(torch_E_sel_eta): {np.min(torch_E_sel_eta)}, max(torch_E_sel_eta): {np.max(torch_E_sel_eta)}")
+        #     print(f"min(torch_E_sel_phi): {np.min(torch_E_sel_phi)}, max(torch_E_sel_phi): {np.max(torch_E_sel_phi)}")
+        #     print(f"min(torch_E_sel_eta_phi): {np.min(torch_E_sel_eta_phi)}, max(torch_E_sel_eta_phi): {np.max(torch_E_sel_eta_phi)}")
 
 
-            benchmark_abs_eta = ak.to_numpy(abs(ak.flatten(benchmark_tree[key_eta].array())))
-            benchmark_abs_phi = ak.to_numpy(abs(ak.flatten(benchmark_tree[key_phi].array())))
-            benchmark_E = ak.to_numpy(ak.flatten(benchmark_tree[key_E].array()))
-            benchmark_mask_eta = benchmark_abs_eta < eta_max
-            benchmark_mask_phi = benchmark_abs_phi < phi_max
-            benchmark_mask_eta_phi = benchmark_mask_eta & benchmark_mask_phi
-            benchmark_E_sel_eta = benchmark_E[benchmark_mask_eta]
-            benchmark_E_sel_phi = benchmark_E[benchmark_mask_phi]
-            benchmark_E_sel_eta_phi = benchmark_E[benchmark_mask_eta_phi]
-            print(f"\nbenchmark_E.shape: {benchmark_E.shape}")
-            print(f"benchmark_E_sel_eta.shape: {benchmark_E_sel_eta.shape}")
-            print(f"benchmark_E_sel_phi.shape: {benchmark_E_sel_phi.shape}")
-            print(f"benchmark_E_sel_eta_phi.shape: {benchmark_E_sel_eta_phi.shape}")
-            print(f"min(benchmark_E_sel_eta): {np.min(benchmark_E_sel_eta)}, max(benchmark_E_sel_eta): {np.max(benchmark_E_sel_eta)}")
-            print(f"min(benchmark_E_sel_phi): {np.min(benchmark_E_sel_phi)}, max(benchmark_E_sel_phi): {np.max(benchmark_E_sel_phi)}")
+        #     benchmark_abs_eta = ak.to_numpy(abs(ak.flatten(benchmark_tree[key_eta].array())))
+        #     benchmark_abs_phi = ak.to_numpy(abs(ak.flatten(benchmark_tree[key_phi].array())))
+        #     benchmark_E = ak.to_numpy(ak.flatten(benchmark_tree[key_E].array()))
+        #     benchmark_mask_eta = benchmark_abs_eta < eta_max
+        #     benchmark_mask_phi = benchmark_abs_phi < phi_max
+        #     benchmark_mask_eta_phi = benchmark_mask_eta & benchmark_mask_phi
+        #     benchmark_E_sel_eta = benchmark_E[benchmark_mask_eta]
+        #     benchmark_E_sel_phi = benchmark_E[benchmark_mask_phi]
+        #     benchmark_E_sel_eta_phi = benchmark_E[benchmark_mask_eta_phi]
+        #     print(f"\nbenchmark_E.shape: {benchmark_E.shape}")
+        #     print(f"benchmark_E_sel_eta.shape: {benchmark_E_sel_eta.shape}")
+        #     print(f"benchmark_E_sel_phi.shape: {benchmark_E_sel_phi.shape}")
+        #     print(f"benchmark_E_sel_eta_phi.shape: {benchmark_E_sel_eta_phi.shape}")
+        #     print(f"min(benchmark_E_sel_eta): {np.min(benchmark_E_sel_eta)}, max(benchmark_E_sel_eta): {np.max(benchmark_E_sel_eta)}")
+        #     print(f"min(benchmark_E_sel_phi): {np.min(benchmark_E_sel_phi)}, max(benchmark_E_sel_phi): {np.max(benchmark_E_sel_phi)}")
 
-            try:
-                print(f"min(benchmark_E_sel_eta_phi): {np.min(benchmark_E_sel_eta_phi)}, max(benchmark_E_sel_eta_phi): {np.max(benchmark_E_sel_eta_phi)}")
-            except ValueError:
-                print("No entries found for benchmark_E_sel_eta_phi")
+        #     try:
+        #         print(f"min(benchmark_E_sel_eta_phi): {np.min(benchmark_E_sel_eta_phi)}, max(benchmark_E_sel_eta_phi): {np.max(benchmark_E_sel_eta_phi)}")
+        #     except ValueError:
+        #         print("No entries found for benchmark_E_sel_eta_phi")
 
-            for sel in "eta", "phi", "eta_phi":
-                if sel == "eta":
-                    torch_E_selected = torch_E_sel_eta
-                    benchmark_E_selected = benchmark_E_sel_eta
-                    print_statement = f"\nSelection: |eta| < {eta_max}"
-                    title_str = f"|eta| < {eta_max}"
-                    fig_name = f"energy_eta{eta_max}.png"
-                elif sel == "phi":
-                    torch_E_selected = torch_E_sel_phi
-                    benchmark_E_selected = benchmark_E_sel_phi
-                    print_statement = f"\nSelection: |phi| < {phi_max}"
-                    title_str = f"|phi| < {phi_max}"
-                    fig_name = f"energy_phi{phi_max}.png"
-                else:  # eta_phi
-                    torch_E_selected = torch_E_sel_eta_phi
-                    benchmark_E_selected = benchmark_E_sel_eta_phi
-                    print_statement = f"\nSelection: |eta| < {eta_max}, |phi| < {phi_max}"
-                    title_str = f"|eta| < {eta_max}, |phi| < {phi_max}"
-                    fig_name = f"energy_eta{eta_max}_phi{phi_max}.png"
+        #     for sel in "eta", "phi", "eta_phi":
+        #         if sel == "eta":
+        #             torch_E_selected = torch_E_sel_eta
+        #             benchmark_E_selected = benchmark_E_sel_eta
+        #             print_statement = f"\nSelection: |eta| < {eta_max}"
+        #             title_str = f"|eta| < {eta_max}"
+        #             fig_name = f"energy_eta{eta_max}.png"
+        #         elif sel == "phi":
+        #             torch_E_selected = torch_E_sel_phi
+        #             benchmark_E_selected = benchmark_E_sel_phi
+        #             print_statement = f"\nSelection: |phi| < {phi_max}"
+        #             title_str = f"|phi| < {phi_max}"
+        #             fig_name = f"energy_phi{phi_max}.png"
+        #         else:  # eta_phi
+        #             torch_E_selected = torch_E_sel_eta_phi
+        #             benchmark_E_selected = benchmark_E_sel_eta_phi
+        #             print_statement = f"\nSelection: |eta| < {eta_max}, |phi| < {phi_max}"
+        #             title_str = f"|eta| < {eta_max}, |phi| < {phi_max}"
+        #             fig_name = f"energy_eta{eta_max}_phi{phi_max}.png"
 
-                print(print_statement)
-                print(f"  TorchDelphes: {len(torch_E_selected)} towers")
-                print(f"  C++ Delphes: {len(benchmark_E_selected)} towers")
-                fig = plt.figure(figsize=(10, 8))
-                gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.05)
-                ax_hist = fig.add_subplot(gs[0])
-                ax_ratio = fig.add_subplot(gs[1], sharex=ax_hist)
+        #         print(print_statement)
+        #         print(f"  TorchDelphes: {len(torch_E_selected)} towers")
+        #         print(f"  C++ Delphes: {len(benchmark_E_selected)} towers")
+        #         fig = plt.figure(figsize=(10, 8))
+        #         gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.05)
+        #         ax_hist = fig.add_subplot(gs[0])
+        #         ax_ratio = fig.add_subplot(gs[1], sharex=ax_hist)
                 
-                # Plot histogram of selected tower energies
-                try:
-                    if np.min(benchmark_E_selected) < np.min(torch_E_selected):
-                        benchmark_counts, bin_edges, _ = ax_hist.hist(benchmark_E_selected, bins=50, histtype='stepfilled', alpha=0.5, color='orange',
-                                linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
-                        torch_counts, _, _ = ax_hist.hist(torch_E_selected, bins=bin_edges, histtype='step', color='blue',
-                                linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
-                    else:
-                        torch_counts, bin_edges, _ = ax_hist.hist(torch_E_selected, bins=50, histtype='step', color='blue',
-                                linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
-                        benchmark_counts, _, _ = ax_hist.hist(benchmark_E_selected, bins=bin_edges, histtype='stepfilled', alpha=0.5, color='orange',
-                                linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
-                    print(f"benchmark_counts.shape: {benchmark_counts.shape}, torch_counts.shape: {torch_counts.shape}")
+        #         # Plot histogram of selected tower energies
+        #         try:
+        #             if np.min(benchmark_E_selected) < np.min(torch_E_selected):
+        #                 benchmark_counts, bin_edges, _ = ax_hist.hist(benchmark_E_selected, bins=50, histtype='stepfilled', alpha=0.5, color='orange',
+        #                         linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
+        #                 torch_counts, _, _ = ax_hist.hist(torch_E_selected, bins=bin_edges, histtype='step', color='blue',
+        #                         linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
+        #             else:
+        #                 torch_counts, bin_edges, _ = ax_hist.hist(torch_E_selected, bins=50, histtype='step', color='blue',
+        #                         linewidth=2, label=f'Parnassus.TorchDelphes; {len(torch_E_selected)} towers', density=False)
+        #                 benchmark_counts, _, _ = ax_hist.hist(benchmark_E_selected, bins=bin_edges, histtype='stepfilled', alpha=0.5, color='orange',
+        #                         linewidth=2, label=f'C++ Delphes; {len(benchmark_E_selected)} towers', density=False)
+        #             print(f"benchmark_counts.shape: {benchmark_counts.shape}, torch_counts.shape: {torch_counts.shape}")
 
-                    ax_hist.set_xticks(ticks=[], labels=[])
-                    ax_hist.set_title(f'{branch_name}: Tower Energies at {title_str}', fontsize=14, fontweight='bold')
-                    ax_hist.set_ylabel('Counts', fontsize=12)
-                    ax_hist.legend(fontsize=11)
-                    ax_hist.grid(True, alpha=0.3)
+        #             ax_hist.set_xticks(ticks=[], labels=[])
+        #             ax_hist.set_title(f'{branch_name}: Tower Energies at {title_str}', fontsize=14, fontweight='bold')
+        #             ax_hist.set_ylabel('Counts', fontsize=12)
+        #             ax_hist.legend(fontsize=11)
+        #             ax_hist.grid(True, alpha=0.3)
 
-                    # Compute ratio
-                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                    ratio = torch_counts/benchmark_counts
-                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
-                    ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
-                    ax_ratio.set_xlabel('Tower Energy', fontsize=12)
-                    ax_ratio.set_ylabel('Torch / C++', fontsize=10)
-                    ax_ratio.grid(True, alpha=0.3)
+        #             # Compute ratio
+        #             bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        #             ratio = torch_counts/benchmark_counts
+        #             ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+        #             ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
+        #             ax_ratio.set_xlabel('Tower Energy', fontsize=12)
+        #             ax_ratio.set_ylabel('Torch / C++', fontsize=10)
+        #             ax_ratio.grid(True, alpha=0.3)
 
-                    fig.savefig("{}/{}_{}".format(branch_dir, branch_name, fig_name), dpi=150)
-                    print("\n\n")
-                except ValueError:
-                    print(f"  ✗ Error plotting tower energies at {title_str}: not enough events pass selection")
-                    continue
+        #             fig.savefig("{}/{}_{}".format(branch_dir, branch_name, fig_name), dpi=150)
+        #             print("\n\n")
+        #         except ValueError:
+        #             print(f"  ✗ Error plotting tower energies at {title_str}: not enough events pass selection")
+        #             continue
             
     print(f"\n{'='*70}")
     print(f"✓ Validation complete! Plots saved to {output_dir}")
@@ -1093,13 +1091,13 @@ def main(
     print("STEP 6: Applying ECal (SimpleCalorimeter) (batched)")
     print("="*80)
     
-    genevent_tensors, ecal_towers, eflow_tracks, eflow_photons = process_ecal_pipeline(
-        genevent_tensors, batch_size=batch_size
+    _, _, eflow_tracks, _ = process_ecal_pipeline(
+        pap_tensors, merged_tracks, batch_size=batch_size
     )
     branches_torch_root.update({
-        'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower'),
+        # 'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower'),
         'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in eflow_tracks], 'ECal_EFlowTrack'),
-        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton')
+        # 'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton')
     })
     print("\n✓ ECal applied")
     
@@ -1138,9 +1136,9 @@ def main(
 
     
     print(f"\nECal:")
-    print(f"  Towers:        {sum(t.shape[0] for t in ecal_towers)}")
+    # print(f"  Towers:        {sum(t.shape[0] for t in ecal_towers)}")
     print(f"  EFlow Tracks:  {sum(t.shape[0] for t in eflow_tracks)}")
-    print(f"  EFlow Photons: {sum(t.shape[0] for t in eflow_photons)}")
+    # print(f"  EFlow Photons: {sum(t.shape[0] for t in eflow_photons)}")
     
     print("\n" + "="*80)
     print("✓ ALL PROCESSING COMPLETE!")

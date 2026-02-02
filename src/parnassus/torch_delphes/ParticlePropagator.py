@@ -188,30 +188,31 @@ class ParticlePropagator(nn.Module):
         particles[:, CMAP["PASS_PROP"]] = mask.float()
 
         # Collect the 4 branches/outputs
-        # NOTE: We purposely/manually leave their positions unchanged (i.e. leave it as production vertex)
-        #       This is for consistency with C++ logic in order to help debugging
-        # TODO: Remove this after debugging. Unnecessary and memory-intensive.
+        # NOTE: Since we will use both the particles object and the specific branch objects, we instantiate the branches as clones
         charged_hadron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.charged_hadron_filter(particles)
-        charged_hadrons = particles[charged_hadron_pid_mask > 0.5].to(torch.float32)
+        charged_hadrons = particles[charged_hadron_pid_mask > 0.5].to(torch.float32).clone()
         charged_hadrons_before_prop = particles_before_prop[charged_hadron_pid_mask > 0.5].to(torch.float32)
 
         electron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.electron_filter(particles)
-        electrons = particles[electron_pid_mask > 0.5].to(torch.float32)
+        electrons = particles[electron_pid_mask > 0.5].to(torch.float32).clone()
         electrons_before_prop = particles_before_prop[electron_pid_mask > 0.5].to(torch.float32)
 
         muon_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.muon_filter(particles)
-        muons = particles[muon_pid_mask > 0.5].to(torch.float32)
+        muons = particles[muon_pid_mask > 0.5].to(torch.float32).clone()
         muons_before_prop = particles_before_prop[muon_pid_mask > 0.5].to(torch.float32)
 
         neutral_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.neutral_filter(particles)
-        neutrals = particles[neutral_pid_mask > 0.5].to(torch.float32)
+        neutrals = particles[neutral_pid_mask > 0.5].to(torch.float32).clone()
         neutrals_before_prop = particles_before_prop[neutral_pid_mask > 0.5].to(torch.float32)
 
+        # NOTE: We purposely/manually leave their positions unchanged (i.e. leave it as production vertex)
+        #       This is for consistency with C++ logic in order to help debugging
+        # TODO: Remove this after debugging. Unnecessary and memory-intensive.
         for var in ["X", "Y", "Z", "T"]:
-            charged_hadrons[:, CMAP[var]] = charged_hadrons_before_prop[:, CMAP[var]]
-            electrons[:, CMAP[var]] = electrons_before_prop[:, CMAP[var]]
-            muons[:, CMAP[var]] = muons_before_prop[:, CMAP[var]]
-            neutrals[:, CMAP[var]] = neutrals_before_prop[:, CMAP[var]]
+            charged_hadrons[:, CMAP[var]] = charged_hadrons_before_prop[:, CMAP[var]].clone()
+            electrons[:, CMAP[var]] = electrons_before_prop[:, CMAP[var]].clone()
+            muons[:, CMAP[var]] = muons_before_prop[:, CMAP[var]].clone()
+            neutrals[:, CMAP[var]] = neutrals_before_prop[:, CMAP[var]].clone()
 
         return particles, neutrals, charged_hadrons, electrons, muons
     
