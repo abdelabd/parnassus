@@ -157,16 +157,13 @@ class EFlowPhoton(nn.Module):
         # Split tracks into depositing (pions, kaons, protons) and non-depositing (muons)
         # This matches C++ logic (lines 364-378) where tracks with zero energy fraction
         # are passed directly to eflow output without entering tower processing
-        if all_tracks.shape[0] > 0:
-            track_pids = all_tracks[:, CMAP["PID"]]
-            track_energy_fractions = self.get_energy_fraction(track_pids)
+        track_pids = all_tracks[:, CMAP["PID"]]
+        track_energy_fractions = self.get_energy_fraction(track_pids)
+        
+        # Depositing tracks: energy_fraction > 1e-9 (enter tower processing)
+        depositing_mask = track_energy_fractions > 1.0e-9
+        tracks = all_tracks[depositing_mask]
             
-            # Depositing tracks: energy_fraction > 1e-9 (enter tower processing)
-            depositing_mask = track_energy_fractions > 1.0e-9
-            tracks = all_tracks[depositing_mask]
-            
-        else:
-            tracks = all_tracks
         
         # Bin particles into towers
         particle_eta = particles[:, CMAP["ETA_OUTER"]]
@@ -249,16 +246,12 @@ class EFlowPhoton(nn.Module):
         tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1]) # SUSPECT
         
         # Optionally smear tower centers
-        if self.smear_tower_center:
-            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
-                        (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
-                        self.eta_bins[tower_eta_bins]
-            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
-                        (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
-                        self.phi_bins[tower_phi_bins] # SUSPECT
-        else:
-            tower_eta = tower_eta_center
-            tower_phi = tower_phi_center # SUSPECT
+        tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
+                    (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
+                    self.eta_bins[tower_eta_bins]
+        tower_phi = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
+                    (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
+                    self.phi_bins[tower_phi_bins] # SUSPECT
         
         # Apply energy smearing
         tower_sigma = self.resolution_fn(tower_energies, tower_eta)
@@ -275,17 +268,14 @@ class EFlowPhoton(nn.Module):
             tower_sigma_val = tower_sigma[tower_idx]
             
             # Find tracks in this tower
-            if tracks.shape[0] > 0:
-                track_eta = tracks[:, CMAP["ETA_OUTER"]]
-                track_phi = tracks[:, CMAP["PHI_OUTER"]]
-                track_eta_bin = torch.searchsorted(self.eta_bins, track_eta, right=False) - 1
-                track_phi_bin = torch.searchsorted(self.phi_bins, track_phi, right=False) - 1
-                track_tower_ids = track_eta_bin * n_phi_bins + track_phi_bin
-                
-                tower_tracks_mask = track_tower_ids == tid
-                tower_tracks = tracks[tower_tracks_mask]
-            else:
-                tower_tracks = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
+            track_eta = tracks[:, CMAP["ETA_OUTER"]]
+            track_phi = tracks[:, CMAP["PHI_OUTER"]]
+            track_eta_bin = torch.searchsorted(self.eta_bins, track_eta, right=False) - 1
+            track_phi_bin = torch.searchsorted(self.phi_bins, track_phi, right=False) - 1
+            track_tower_ids = track_eta_bin * n_phi_bins + track_phi_bin
+            
+            tower_tracks_mask = track_tower_ids == tid
+            tower_tracks = tracks[tower_tracks_mask]
             
             # Compute total track energy and track resolution
             if tower_tracks.shape[0] > 0:
@@ -307,10 +297,7 @@ class EFlowPhoton(nn.Module):
             neutral_energy = torch.tensor([max(tower_energy - total_track_energy, 0.0)], device=particles.device)
             
             # Compute neutral significance
-            if total_track_sigma**2 + tower_sigma_val**2 > 0:
-                neutral_sigma = neutral_energy / torch.sqrt( total_track_sigma**2 + tower_sigma_val**2) 
-            else:
-                neutral_sigma = 0.0
+            neutral_sigma = neutral_energy / torch.sqrt( total_track_sigma**2 + tower_sigma_val**2) 
             
             # Energy flow logic for creating eflow objects
             if neutral_energy > self.energy_min and neutral_sigma > self.energy_sig_min: # SUSPECT
@@ -321,10 +308,7 @@ class EFlowPhoton(nn.Module):
                 ) # SUSPECT
                 eflow_photons_list.append(neutral_tower)
             
-        if len(eflow_photons_list) > 0:
-            eflow_photons = torch.cat(eflow_photons_list, dim=0)
-        else:
-            eflow_photons = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
+        eflow_photons = torch.cat(eflow_photons_list, dim=0)
         
         return eflow_photons
      

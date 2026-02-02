@@ -234,17 +234,14 @@ class Tower(nn.Module):
         tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
         tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1]) # SUSPECT
         
-        # Optionally smear tower centers
-        if self.smear_tower_center:
-            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
-                        (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
-                        self.eta_bins[tower_eta_bins]
-            tower_phi = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
-                        (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
-                        self.phi_bins[tower_phi_bins] # SUSPECT
-        else:
-            tower_eta = tower_eta_center
-            tower_phi = tower_phi_center # SUSPECT
+        # Optionally smear tower centers (TODO: Make optional)
+        tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
+                    (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
+                    self.eta_bins[tower_eta_bins]
+        tower_phi = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
+                    (self.phi_bins[tower_phi_bins + 1] - self.phi_bins[tower_phi_bins]) + \
+                    self.phi_bins[tower_phi_bins] # SUSPECT
+
         
         # Apply energy smearing
         tower_sigma = self.resolution_fn(tower_energies, tower_eta)
@@ -275,10 +272,7 @@ class Tower(nn.Module):
                 towers_list.append(tower_obj)       
         
         # Concatenate results
-        if len(towers_list) > 0:
-            towers = torch.cat(towers_list, dim=0)
-        else:
-            towers = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
+        towers = torch.cat(towers_list, dim=0)
         
         return towers
    

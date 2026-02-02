@@ -126,7 +126,7 @@ class EFlowTrack(nn.Module):
             self.eta_bins = self.eta_bins.to(device)
             self.phi_bins = self.phi_bins.to(device)
             self.first_in = True
-            
+
         event_numbers = set(pap_tensors[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist())
         event_numbers_tracks = set(merged_track_tensors[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist())
         assert event_numbers == event_numbers_tracks, "Event numbers in pap_tensors and merged_track_tensors do not match."
@@ -157,19 +157,15 @@ class EFlowTrack(nn.Module):
         # Split tracks into depositing (pions, kaons, protons) and non-depositing (muons)
         # This matches C++ logic (lines 364-378) where tracks with zero energy fraction
         # are passed directly to eflow output without entering tower processing
-        if all_tracks.shape[0] > 0:
-            track_pids = all_tracks[:, CMAP["PID"]]
-            track_energy_fractions = self.get_energy_fraction(track_pids)
-            
-            # Depositing tracks: energy_fraction > 1e-9 (enter tower processing)
-            depositing_mask = track_energy_fractions > 1.0e-9
-            tracks = all_tracks[depositing_mask]
-            
-            # Non-depositing tracks: energy_fraction <= 1e-9 (bypass towers, go to eflow)
-            non_depositing_tracks = all_tracks[~depositing_mask]
-        else:
-            tracks = all_tracks
-            non_depositing_tracks = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
+        track_pids = all_tracks[:, CMAP["PID"]]
+        track_energy_fractions = self.get_energy_fraction(track_pids)
+        
+        # Depositing tracks: energy_fraction > 1e-9 (enter tower processing)
+        depositing_mask = track_energy_fractions > 1.0e-9
+        tracks = all_tracks[depositing_mask]
+        
+        # Non-depositing tracks: energy_fraction <= 1e-9 (bypass towers, go to eflow)
+        non_depositing_tracks = all_tracks[~depositing_mask]
         
         # Bin particles into towers
         particle_eta = particles[:, CMAP["ETA_OUTER"]]
@@ -232,14 +228,11 @@ class EFlowTrack(nn.Module):
         # Tower center positions
         tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
         
-        # Optionally smear tower centers
-        if self.smear_tower_center:
-            tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
-                        (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
-                        self.eta_bins[tower_eta_bins]
+        # Smear tower centers (TODO: Make optional)
+        tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
+                    (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
+                    self.eta_bins[tower_eta_bins]
 
-        else:
-            tower_eta = tower_eta_center
         
         # Apply energy smearing
         tower_sigma = self.resolution_fn(tower_energies, tower_eta)
@@ -257,17 +250,14 @@ class EFlowTrack(nn.Module):
             tower_sigma_val = tower_sigma[tower_idx]
             
             # Find tracks in this tower
-            if tracks.shape[0] > 0:
-                track_eta = tracks[:, CMAP["ETA_OUTER"]]
-                track_phi = tracks[:, CMAP["PHI_OUTER"]]
-                track_eta_bin = torch.searchsorted(self.eta_bins, track_eta, right=False) - 1
-                track_phi_bin = torch.searchsorted(self.phi_bins, track_phi, right=False) - 1
-                track_tower_ids = track_eta_bin * n_phi_bins + track_phi_bin
-                
-                tower_tracks_mask = track_tower_ids == tid
-                tower_tracks = tracks[tower_tracks_mask]
-            else:
-                tower_tracks = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
+            track_eta = tracks[:, CMAP["ETA_OUTER"]]
+            track_phi = tracks[:, CMAP["PHI_OUTER"]]
+            track_eta_bin = torch.searchsorted(self.eta_bins, track_eta, right=False) - 1
+            track_phi_bin = torch.searchsorted(self.phi_bins, track_phi, right=False) - 1
+            track_tower_ids = track_eta_bin * n_phi_bins + track_phi_bin
+            
+            tower_tracks_mask = track_tower_ids == tid
+            tower_tracks = tracks[tower_tracks_mask]
             
             # Compute total track energy and track resolution
             if tower_tracks.shape[0] > 0:
@@ -289,10 +279,7 @@ class EFlowTrack(nn.Module):
             neutral_energy = torch.tensor([max(tower_energy - total_track_energy, 0.0)], device=particles.device)
             
             # Compute neutral significance
-            if total_track_sigma**2 + tower_sigma_val**2 > 0:
-                neutral_sigma = neutral_energy / torch.sqrt( total_track_sigma**2 + tower_sigma_val**2) 
-            else:
-                neutral_sigma = 0.0
+            neutral_sigma = neutral_energy / torch.sqrt( total_track_sigma**2 + tower_sigma_val**2) 
             
             # Apply significance threshold to tower energy (C++ line 436)
             # if(energy < fEnergyMin || energy < fEnergySignificanceMin * sigma) energy = 0.0;
@@ -311,13 +298,9 @@ class EFlowTrack(nn.Module):
                 # Rescale tracks to match best energy estimate
                 weight_track = 1.0 / total_track_sigma**2 if total_track_sigma > 0 else 0.0
                 weight_calo = 1.0 / tower_sigma_val**2 if tower_sigma_val > 0 else 0.0
-                
-                if weight_track + weight_calo > 0:
-                    best_energy = (weight_track * total_track_energy + weight_calo * tower_energy) / \
-                                  (weight_track + weight_calo)
-                    rescale_factor = best_energy / total_track_energy
-                else:
-                    rescale_factor = 1.0
+                best_energy = (weight_track * total_track_energy + weight_calo * tower_energy) / \
+                                (weight_track + weight_calo)
+                rescale_factor = best_energy / total_track_energy
                 
                 # Rescale and add tracks as eflow tracks
                 for track in tower_tracks:
@@ -329,19 +312,13 @@ class EFlowTrack(nn.Module):
                     rescaled_track[CMAP["PZ"]] *= rescale_factor
                     eflow_tracks_list.append(rescaled_track.unsqueeze(0))
         
-        if len(eflow_tracks_list) > 0:
-            eflow_tracks = torch.cat(eflow_tracks_list, dim=0)
-        else:
-            eflow_tracks = torch.zeros((0, particles.shape[1]), dtype=torch.float64, device=particles.device)
-        
+        eflow_tracks = torch.cat(eflow_tracks_list, dim=0)
+
         # Add non-depositing tracks (muons) that bypassed tower processing
         # These tracks go directly to eflow output (C++ line 377)
         if non_depositing_tracks.shape[0] > 0:
-            if eflow_tracks.shape[0] > 0:
-                eflow_tracks = torch.cat([eflow_tracks, non_depositing_tracks], dim=0)
-            else:
-                eflow_tracks = non_depositing_tracks
-        
+            eflow_tracks = torch.cat([eflow_tracks, non_depositing_tracks], dim=0)
+
         return eflow_tracks
  
     def get_energy_fraction(self, pid: int) -> float:
