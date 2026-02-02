@@ -488,4 +488,3 @@ def get_mass_from_pdg(pdg_id: int) -> float:
     
     # Default mass for unknown particles (use pion mass as reasonable default)
     return PION_MASS
-

@@ -269,7 +269,7 @@ class Tower(nn.Module):
                     tower_energy, tower_times[tower_idx],
                     particles.shape[1]
                 )
-                towers_list.append(tower_obj)       
+                towers_list.append(tower_obj)
         
         # Concatenate results
         towers = torch.cat(towers_list, dim=0)
@@ -334,10 +334,9 @@ class Tower(nn.Module):
         
         # Apply fractions based on PDG ID
         for pdg_id, fraction in self.energy_fractions.items():
-            if pdg_id == 0:  # default
+            if pdg_id == 0:  # default # TODO: Ditch if-statement
                 continue
             mask = abs_pid == abs(pdg_id)
             fractions[mask] = fraction
         
         return fractions
-     

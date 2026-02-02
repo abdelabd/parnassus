@@ -286,7 +286,6 @@ class EFlowTrack(nn.Module):
             if tower_energy < self.energy_min or tower_energy < self.energy_sig_min * tower_sigma_val:
                 tower_energy = 0.0  # Zero the tower energy like C++ does
             
-            
             # Energy flow logic for creating eflow objects
             if neutral_energy > self.energy_min and neutral_sigma > self.energy_sig_min:
                 # Pass tracks through unchanged (they coexist with neutral energy)
@@ -332,10 +331,9 @@ class EFlowTrack(nn.Module):
         
         # Apply fractions based on PDG ID
         for pdg_id, fraction in self.energy_fractions.items():
-            if pdg_id == 0:  # default
+            if pdg_id == 0:  # default #TODO: Ditch if-statement
                 continue
             mask = abs_pid == abs(pdg_id)
             fractions[mask] = fraction
         
         return fractions
-    

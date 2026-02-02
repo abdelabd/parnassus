@@ -323,7 +323,7 @@ class EFlowPhoton(nn.Module):
         
         # Apply fractions based on PDG ID
         for pdg_id, fraction in self.energy_fractions.items():
-            if pdg_id == 0:  # default
+            if pdg_id == 0:  # default # TODO: Ditch if-statement
                 continue
             mask = abs_pid == abs(pdg_id)
             fractions[mask] = fraction
@@ -377,4 +377,3 @@ class EFlowPhoton(nn.Module):
         tower[0, CMAP["MASS"]] = 0.0
         
         return tower
-    
