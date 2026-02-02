@@ -406,6 +406,11 @@ class ParticlePropagator(nn.Module):
         # IMPORTANT: Momentum is updated at closest approach (phid), NOT at final position (phi_t)
         # This matches C++ Delphes behavior (line 295-296 in ParticlePropagator.cc)
         phid = phi_0 - omega * td
+        
+        # Normalize phi to [-pi, pi] to match ROOT's TLorentzVector::SetPtEtaPhiE() behavior
+        # This is critical for phi values near ±pi boundaries
+        phid = torch.atan2(torch.sin(phid), torch.cos(phid))
+        
         xd = x_center - r * torch.sin(phid)
         yd = y_center + r * torch.cos(phid)
         zd = z_c + vz * td
