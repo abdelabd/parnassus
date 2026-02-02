@@ -555,8 +555,7 @@ def validate_against_benchmark(
                     )
                 
                 # Debug: print histogram statistics
-                # if debug and (branch_name in {"ECal_EFlowTrack", "ECalTower", "EFlowPhoton"}) and var != 'PID':
-                if debug and (branch_name in {"ChargedHadron", "Electron", "Muon"}) and var != 'PID':
+                if debug and var != 'PID':
                     print(f"\n{branch_name}.{var} bins:")
                     print(f"  Bin edges: {bin_edges}, len(bin_edges)={len(bin_edges)}")
                     print(f"  C++ counts: {benchmark_counts}")
@@ -566,12 +565,6 @@ def validate_against_benchmark(
                     print(f"  Ratio (Torch/C++): {np.sum(torch_counts) / np.sum(benchmark_counts):.4f}")
                     
                     # Compute and print ratio statistics
-                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                    ratio = np.divide(
-                        torch_counts, benchmark_counts, 
-                        out=np.ones_like(torch_counts), 
-                        where=benchmark_counts > 0
-                    )
                     valid_ratio = ratio[benchmark_counts > 0]
                     if len(valid_ratio) > 0:
                         print(f"  Ratio mean: {np.mean(valid_ratio):.4f}")
@@ -796,11 +789,11 @@ def validate_against_benchmark(
                     # Plot histograms
                     benchmark_counts, bin_edges, _ = ax_hist.hist(
                         benchmark_np, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
-                        linewidth=2, label='C++ Delphes', density=False
+                        linewidth=2, label=f'C++ Delphes, {len(benchmark_np)} particles', density=False
                     )
                     torch_counts, _, _ = ax_hist.hist(
                         torch_np, bins=bins, histtype='step', color='blue', 
-                        linewidth=2, label='Parnassus.TorchDelphes', density=False
+                        linewidth=2, label=f'Parnassus.TorchDelphes, {len(torch_np)} particles', density=False
                     )
                     
                     ax_hist.set_ylabel('Counts', fontsize=11)
@@ -824,7 +817,24 @@ def validate_against_benchmark(
                     ax_ratio.set_ylabel('Torch/C++', fontsize=9)
                     ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])
                     ax_ratio.grid(True, alpha=0.3)
+
+                    if debug and var != 'PID':
+                        print(f"\n{branch_name}.{var}, PID={pid_int} bins:")
+                        print(f"  Bin edges: {bin_edges}, len(bin_edges)={len(bin_edges)}")
+                        print(f"  C++ counts: {benchmark_counts}")
+                        print(f"  TorchDelphes counts: {torch_counts}")
+                        print(f"  Total C++ counts: {np.sum(benchmark_counts):.0f}")
+                        print(f"  Total TorchDelphes counts: {np.sum(torch_counts):.0f}")
+                        print(f"  Ratio (Torch/C++): {np.sum(torch_counts) / np.sum(benchmark_counts):.4f}")
                         
+                        # Compute and print ratio statistics
+                        valid_ratio = ratio[benchmark_counts > 0]
+                        if len(valid_ratio) > 0:
+                            print(f"  Ratio mean: {np.mean(valid_ratio):.4f}")
+                            print(f"  Ratio std: {np.std(valid_ratio):.4f}")
+                            print(f"  Ratio min: {np.min(valid_ratio):.4f}")
+                            print(f"  Ratio max: {np.max(valid_ratio):.4f}")
+                            
                 
                 # Add overall title with PID
                 fig.suptitle(f'{branch_name} (PID={pid_int})', fontsize=16, fontweight='bold', y=0.98)
