@@ -407,18 +407,19 @@ class ParticlePropagator(nn.Module):
         # This matches C++ Delphes behavior (line 295-296 in ParticlePropagator.cc)
         phid = phi_0 - omega * td
         
-        # Normalize phi to [-pi, pi] to match ROOT's TLorentzVector::SetPtEtaPhiE() behavior
-        # This is critical for phi values near ±pi boundaries
-        phid = torch.atan2(torch.sin(phid), torch.cos(phid))
-        
         xd = x_center - r * torch.sin(phid)
         yd = y_center + r * torch.cos(phid)
         zd = z_c + vz * td
         
         # Update momentum direction at CLOSEST APPROACH (not final position)
+        # Use the raw phid angle to compute Px, Py (matching C++ behavior)
         px_d = pt_c * torch.cos(phid)
         py_d = pt_c * torch.sin(phid)
         # pz unchanged
+        
+        # Compute the final phi angle from Px and Py to ensure perfect consistency
+        # This matches what ROOT's SetPtEtaPhiE does internally and handles ±pi wrapping correctly
+        phi_final = torch.atan2(py_d, px_d)
         
         # Compute position-based eta at final position (EtaOuter)
         r_t_xy = torch.sqrt(x_t[valid]**2 + y_t[valid]**2)
@@ -431,9 +432,9 @@ class ParticlePropagator(nn.Module):
         
         particles[valid_indices, CMAP["PX"]] = px_d[valid]  # Px (at closest approach)
         particles[valid_indices, CMAP["PY"]] = py_d[valid]  # Py (at closest approach)
-        particles[valid_indices, CMAP["PHI"]] = phid[valid]  # Phi (at closest approach) - MUST update to match Px/Py
+        particles[valid_indices, CMAP["PHI"]] = phi_final[valid]  # Phi = atan2(Py, Px) for perfect consistency
         particles[valid_indices, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
-        particles[valid_indices, CMAP["PHI_OUTER"]] = phid[valid]  # PhiOuter (at closest approach)
+        particles[valid_indices, CMAP["PHI_OUTER"]] = phi_final[valid]  # PhiOuter (same as momentum phi)
         particles[valid_indices, CMAP["X"]] = x_t[valid] * 1.0e3  # X (m to mm) - final position
         particles[valid_indices, CMAP["Y"]] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
         particles[valid_indices, CMAP["Z"]] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
