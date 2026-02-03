@@ -263,6 +263,12 @@ class EFlowPhoton(nn.Module):
             tower_energy = tower_energies_smeared[tower_idx]
             tower_sigma_val = tower_sigma[tower_idx]
             
+            # Apply significance threshold to TOTAL tower energy FIRST (C++ line 436-437)
+            # if(energy < fEnergyMin || energy < fEnergySignificanceMin * sigma) energy = 0.0;
+            # This filters out low-significance towers before any energy flow logic
+            if tower_energy < self.energy_min or tower_energy < self.energy_sig_min * tower_sigma_val:
+                continue  # Skip this tower entirely
+            
             # Find tracks in this tower
             track_eta = tracks[:, CMAP["ETA_OUTER"]]
             track_phi = tracks[:, CMAP["PHI_OUTER"]]
