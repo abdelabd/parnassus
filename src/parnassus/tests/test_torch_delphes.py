@@ -269,11 +269,7 @@ def process_ecal_pipeline(
         eflow_tracks: List of eflow track tensors per event (for validation)
         eflow_photons: List of eflow photon tensors per event (for validation)
     """
-    
-    all_event_number = torch.cat([i[:, CMAP["EVENT_NUMBER"]] for i in pap_tensors], dim=0)
-    event_numbers = set(all_event_number.cpu().numpy().tolist())
-    n_event = len(event_numbers)
-    
+        
     # Create eta and phi bins from CMS card
     # Barrel: |eta| < 1.5, 0.02 x 0.02 resolution
     eta_bins_barrel = [i * 0.0174 for i in range(-85, 87)]  # -1.479 to 1.496
