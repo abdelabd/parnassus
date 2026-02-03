@@ -253,19 +253,19 @@ class Tower(nn.Module):
             tower_energy = tower_energies_smeared[tower_idx]
             tower_sigma_val = tower_sigma[tower_idx]
             
-            # Apply significance threshold to tower energy (C++ line 436)
+            # Apply significance threshold to tower energy (C++ line 436-437)
             # if(energy < fEnergyMin || energy < fEnergySignificanceMin * sigma) energy = 0.0;
+            # Skip this tower entirely if it doesn't pass the threshold
             if tower_energy < self.energy_min or tower_energy < self.energy_sig_min * tower_sigma_val:
-                tower_energy = 0.0  # Zero the tower energy like C++ does
+                continue  # Don't create tower object for low-significance towers
             
-            # Create tower object for ECalTower output if energy > 0
-            if tower_energy > 0.0: # DEF SUSPECT
-                tower_obj = self._create_tower_object(
-                    tower_eta[tower_idx], tower_phi[tower_idx],
-                    tower_energy, tower_times[tower_idx],
-                    particles.shape[1]
-                )
-                towers_list.append(tower_obj)
+            # Create tower object for ECalTower output (C++ line 468)
+            tower_obj = self._create_tower_object(
+                tower_eta[tower_idx], tower_phi[tower_idx],
+                tower_energy, tower_times[tower_idx],
+                particles.shape[1]
+            )
+            towers_list.append(tower_obj)
         
         # Concatenate results
         towers = torch.cat(towers_list, dim=0)
