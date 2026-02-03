@@ -225,9 +225,6 @@ class EFlowTrack(nn.Module):
         # Get tower eta/phi from bin indices
         tower_eta_bins = unique_tower_ids // n_phi_bins
         
-        # Tower center positions
-        tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
-        
         # Smear tower centers (TODO: Make optional)
         tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
                     (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \

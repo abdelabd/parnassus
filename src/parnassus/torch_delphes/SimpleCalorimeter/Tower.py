@@ -230,10 +230,6 @@ class Tower(nn.Module):
         tower_eta_bins = unique_tower_ids // n_phi_bins
         tower_phi_bins = unique_tower_ids % n_phi_bins # SUSPECT
         
-        # Tower center positions
-        tower_eta_center = 0.5 * (self.eta_bins[tower_eta_bins] + self.eta_bins[tower_eta_bins + 1])
-        tower_phi_center = 0.5 * (self.phi_bins[tower_phi_bins] + self.phi_bins[tower_phi_bins + 1]) # SUSPECT
-        
         # Optionally smear tower centers (TODO: Make optional)
         tower_eta = torch.rand(n_towers, dtype=torch.float64, device=particles.device) * \
                     (self.eta_bins[tower_eta_bins + 1] - self.eta_bins[tower_eta_bins]) + \
