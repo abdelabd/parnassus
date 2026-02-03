@@ -849,6 +849,9 @@ def validate_against_benchmark(
     
     # Run eta region diagnostic for tower branches
     diagnose_eta_region_counts(torch_output_file, benchmark_file, output_dir)
+    
+    # Run tower duplication and energy threshold diagnostic
+    diagnose_tower_duplication_and_thresholds(torch_output_file, benchmark_file, output_dir)
 
 
 def diagnose_eta_region_counts(
@@ -1085,6 +1088,295 @@ def diagnose_eta_region_counts(
             print(f"    ✓ HF phi diagnostic plot saved: {plot_file}")
         else:
             print(f"    No HF objects in either dataset")
+    
+    print(f"\n{'='*70}")
+    print("DIAGNOSTIC COMPLETE")
+    print(f"{'='*70}")
+
+
+def diagnose_tower_duplication_and_thresholds(
+    torch_output_file: str,
+    benchmark_file: str,
+    output_dir: str,
+) -> None:
+    """
+    Diagnostic function to check for tower duplication and energy threshold issues.
+    
+    This checks:
+    1. Whether towers are being duplicated (same eta/phi appearing multiple times)
+    2. Whether energy thresholds are being applied correctly
+    
+    Args:
+        torch_output_file: Path to PyTorch output ROOT file
+        benchmark_file: Path to benchmark ROOT file from C++ Delphes
+        output_dir: Directory to save diagnostic plots
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\n{'='*70}")
+    print("DIAGNOSTIC: Tower Duplication & Energy Threshold Analysis")
+    print(f"{'='*70}")
+    
+    torch_root = uproot.open(torch_output_file)
+    torch_tree = torch_root["Delphes"]
+    
+    benchmark_root = uproot.open(benchmark_file)
+    benchmark_tree = benchmark_root["Delphes"]
+    
+    # Tower branches to analyze
+    tower_branches = ['ECalTower', 'EFlowPhoton']
+    
+    # Energy thresholds from CMS card
+    energy_min = 0.5  # GeV
+    energy_sig_min = 2.0
+    
+    for branch_name in tower_branches:
+        print(f"\n{'='*50}")
+        print(f"--- {branch_name} ---")
+        print(f"{'='*50}")
+        
+        # Load data
+        torch_eta_key = f"{branch_name}/{branch_name}.Eta"
+        torch_phi_key = f"{branch_name}/{branch_name}.Phi"
+        torch_e_key = f"{branch_name}/{branch_name}.E"
+        torch_et_key = f"{branch_name}/{branch_name}.ET"
+        
+        benchmark_eta_key = f"{branch_name}/{branch_name}.Eta"
+        benchmark_phi_key = f"{branch_name}/{branch_name}.Phi"
+        benchmark_e_key = f"{branch_name}/{branch_name}.E"
+        benchmark_et_key = f"{branch_name}/{branch_name}.ET"
+        
+        keys_exist = all(k in torch_tree.keys() for k in [torch_eta_key, torch_phi_key, torch_e_key])
+        keys_exist &= all(k in benchmark_tree.keys() for k in [benchmark_eta_key, benchmark_phi_key, benchmark_e_key])
+        
+        if not keys_exist:
+            print(f"  ⚠ Required keys not found, skipping...")
+            continue
+        
+        # Load per-event data (not flattened)
+        torch_eta_events = torch_tree[torch_eta_key].array()
+        torch_phi_events = torch_tree[torch_phi_key].array()
+        torch_e_events = torch_tree[torch_e_key].array()
+        
+        benchmark_eta_events = benchmark_tree[benchmark_eta_key].array()
+        benchmark_phi_events = benchmark_tree[benchmark_phi_key].array()
+        benchmark_e_events = benchmark_tree[benchmark_e_key].array()
+        
+        # Flatten for overall statistics
+        torch_eta = np.asarray(ak.flatten(torch_eta_events))
+        torch_phi = np.asarray(ak.flatten(torch_phi_events))
+        torch_e = np.asarray(ak.flatten(torch_e_events))
+        
+        benchmark_eta = np.asarray(ak.flatten(benchmark_eta_events))
+        benchmark_phi = np.asarray(ak.flatten(benchmark_phi_events))
+        benchmark_e = np.asarray(ak.flatten(benchmark_e_events))
+        
+        # ==================== DIAGNOSTIC 1: Tower Duplication ====================
+        print(f"\n  [1] TOWER DUPLICATION CHECK")
+        print(f"  " + "-"*45)
+        
+        # Check for duplicate (eta, phi) pairs within events
+        # Round eta/phi to reasonable precision to catch near-duplicates
+        eta_precision = 3  # decimal places
+        phi_precision = 3
+        
+        # Per-event analysis
+        n_events = len(torch_eta_events)
+        print(f"\n\n\n n_events: {n_events} \n\n\n")
+        torch_duplicates_per_event = []
+        benchmark_duplicates_per_event = []
+        
+        torch_towers_per_event = []
+        benchmark_towers_per_event = []
+        
+        for i in range(min(n_events, len(benchmark_eta_events))):
+            # TorchDelphes
+            if len(torch_eta_events[i]) > 0:
+                torch_eta_evt = np.round(np.asarray(torch_eta_events[i]), eta_precision)
+                torch_phi_evt = np.round(np.asarray(torch_phi_events[i]), phi_precision)
+                torch_pairs = list(zip(torch_eta_evt, torch_phi_evt))
+                torch_unique = len(set(torch_pairs))
+                torch_total = len(torch_pairs)
+                torch_duplicates_per_event.append(torch_total - torch_unique)
+                torch_towers_per_event.append(torch_total)
+            else:
+                torch_duplicates_per_event.append(0)
+                torch_towers_per_event.append(0)
+            
+            # C++ Delphes
+            if len(benchmark_eta_events[i]) > 0:
+                bench_eta_evt = np.round(np.asarray(benchmark_eta_events[i]), eta_precision)
+                bench_phi_evt = np.round(np.asarray(benchmark_phi_events[i]), phi_precision)
+                bench_pairs = list(zip(bench_eta_evt, bench_phi_evt))
+                bench_unique = len(set(bench_pairs))
+                bench_total = len(bench_pairs)
+                benchmark_duplicates_per_event.append(bench_total - bench_unique)
+                benchmark_towers_per_event.append(bench_total)
+            else:
+                benchmark_duplicates_per_event.append(0)
+                benchmark_towers_per_event.append(0)
+        
+        torch_total_duplicates = sum(torch_duplicates_per_event)
+        benchmark_total_duplicates = sum(benchmark_duplicates_per_event)
+        
+        print(f"  Checking for duplicate (eta, phi) pairs within events...")
+        print(f"  (Rounded to {eta_precision} decimal places)")
+        print(f"")
+        print(f"  TorchDelphes:")
+        print(f"    Total towers:      {sum(torch_towers_per_event)}")
+        print(f"    Duplicate pairs:   {torch_total_duplicates}")
+        print(f"    Events with dups:  {sum(1 for d in torch_duplicates_per_event if d > 0)}")
+        if torch_total_duplicates > 0:
+            print(f"    Max dups/event:    {max(torch_duplicates_per_event)}")
+        print(f"")
+        print(f"  C++ Delphes:")
+        print(f"    Total towers:      {sum(benchmark_towers_per_event)}")
+        print(f"    Duplicate pairs:   {benchmark_total_duplicates}")
+        print(f"    Events with dups:  {sum(1 for d in benchmark_duplicates_per_event if d > 0)}")
+        if benchmark_total_duplicates > 0:
+            print(f"    Max dups/event:    {max(benchmark_duplicates_per_event)}")
+        
+        # Plot towers per event comparison
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        max_towers = max(max(torch_towers_per_event), max(benchmark_towers_per_event)) + 1
+        bins = np.arange(0, max_towers + 1, max(1, max_towers // 50))
+        
+        ax.hist(benchmark_towers_per_event, bins=bins, histtype='stepfilled', color='orange', 
+                alpha=0.5, label=f'C++ Delphes (mean={np.mean(benchmark_towers_per_event):.1f})')
+        ax.hist(torch_towers_per_event, bins=bins, histtype='step', color='blue', 
+                linewidth=2, label=f'TorchDelphes (mean={np.mean(torch_towers_per_event):.1f})')
+        
+        ax.set_xlabel('Towers per event', fontsize=12)
+        ax.set_ylabel('Number of events', fontsize=12)
+        ax.set_title(f'{branch_name}: Towers per Event Distribution', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        plot_file = output_dir / f"{branch_name}_towers_per_event.png"
+        plt.tight_layout()
+        plt.savefig(plot_file, dpi=150)
+        plt.close()
+        print(f"\n  ✓ Towers per event plot saved: {plot_file}")
+        
+        # ==================== DIAGNOSTIC 2: Energy Threshold ====================
+        print(f"\n  [2] ENERGY THRESHOLD CHECK")
+        print(f"  " + "-"*45)
+        print(f"  Expected thresholds: E > {energy_min} GeV, E > {energy_sig_min} * sigma")
+        print(f"")
+        
+        # Check minimum energies
+        torch_e_min = np.min(torch_e) if len(torch_e) > 0 else 0
+        benchmark_e_min = np.min(benchmark_e) if len(benchmark_e) > 0 else 0
+        
+        print(f"  Minimum energy in output:")
+        print(f"    TorchDelphes: {torch_e_min:.4f} GeV")
+        print(f"    C++ Delphes:  {benchmark_e_min:.4f} GeV")
+        
+        # Check how many towers are near the threshold
+        torch_near_threshold = np.sum((torch_e >= energy_min) & (torch_e < energy_min * 1.5))
+        benchmark_near_threshold = np.sum((benchmark_e >= energy_min) & (benchmark_e < energy_min * 1.5))
+        
+        print(f"")
+        print(f"  Towers near threshold ({energy_min} - {energy_min*1.5} GeV):")
+        print(f"    TorchDelphes: {torch_near_threshold} ({100*torch_near_threshold/len(torch_e):.1f}%)")
+        print(f"    C++ Delphes:  {benchmark_near_threshold} ({100*benchmark_near_threshold/len(benchmark_e):.1f}%)")
+        
+        # Check towers below threshold (should be 0 if threshold is applied correctly)
+        torch_below_threshold = np.sum(torch_e < energy_min)
+        benchmark_below_threshold = np.sum(benchmark_e < energy_min)
+        
+        print(f"")
+        print(f"  Towers BELOW threshold (E < {energy_min} GeV) - should be 0:")
+        print(f"    TorchDelphes: {torch_below_threshold}")
+        print(f"    C++ Delphes:  {benchmark_below_threshold}")
+        
+        if torch_below_threshold > 0:
+            print(f"    ⚠ WARNING: TorchDelphes has {torch_below_threshold} towers below E threshold!")
+            print(f"       Min E = {torch_e_min:.6f} GeV")
+        
+        # Plot energy distribution near threshold
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.05})
+        ax_hist, ax_ratio = axes
+        
+        # Focus on low energy region
+        e_bins = np.linspace(0, 5, 101)  # 0-5 GeV in 0.05 GeV bins
+        
+        benchmark_counts, bin_edges, _ = ax_hist.hist(
+            benchmark_e, bins=e_bins, histtype='stepfilled', color='orange', 
+            alpha=0.5, linewidth=2, label=f'C++ Delphes: {len(benchmark_e)} total'
+        )
+        torch_counts, _, _ = ax_hist.hist(
+            torch_e, bins=e_bins, histtype='step', color='blue', 
+            linewidth=2, label=f'TorchDelphes: {len(torch_e)} total'
+        )
+        
+        # Mark the energy threshold
+        ax_hist.axvline(x=energy_min, color='red', linestyle='--', linewidth=2, label=f'E_min = {energy_min} GeV')
+        
+        ax_hist.set_ylabel('Counts', fontsize=12)
+        ax_hist.set_title(f'{branch_name}: Energy Distribution (Low E Region)', fontsize=14, fontweight='bold')
+        ax_hist.legend(fontsize=11)
+        ax_hist.grid(True, alpha=0.3)
+        ax_hist.tick_params(labelbottom=False)
+        ax_hist.set_xlim([0, 5])
+        
+        # Ratio plot
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        ratio = np.divide(torch_counts, benchmark_counts, out=np.ones_like(torch_counts), where=benchmark_counts > 0)
+        
+        ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+        ax_ratio.axvline(x=energy_min, color='red', linestyle='--', linewidth=2)
+        ax_ratio.plot(bin_centers, ratio, 'b-', linewidth=2)
+        
+        ax_ratio.set_xlabel('Energy (GeV)', fontsize=12)
+        ax_ratio.set_ylabel('Torch / C++', fontsize=10)
+        ax_ratio.set_ylim([0, 5])
+        ax_ratio.set_xlim([0, 5])
+        ax_ratio.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plot_file = output_dir / f"{branch_name}_energy_threshold_diagnostic.png"
+        plt.savefig(plot_file, dpi=150)
+        plt.close()
+        print(f"\n  ✓ Energy threshold plot saved: {plot_file}")
+        
+        # ==================== DIAGNOSTIC 3: Per-Event Ratio ====================
+        print(f"\n  [3] PER-EVENT TOWER COUNT RATIO")
+        print(f"  " + "-"*45)
+        
+        # Calculate ratio of towers per event
+        ratios = []
+        for t, b in zip(torch_towers_per_event, benchmark_towers_per_event):
+            if b > 0:
+                ratios.append(t / b)
+        
+        if ratios:
+            print(f"  Tower count ratio (Torch/C++) per event:")
+            print(f"    Mean:   {np.mean(ratios):.3f}")
+            print(f"    Median: {np.median(ratios):.3f}")
+            print(f"    Std:    {np.std(ratios):.3f}")
+            print(f"    Min:    {np.min(ratios):.3f}")
+            print(f"    Max:    {np.max(ratios):.3f}")
+            
+            # Plot histogram of per-event ratios
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.hist(ratios, bins=50, histtype='stepfilled', color='blue', alpha=0.7)
+            ax.axvline(x=1.0, color='red', linestyle='--', linewidth=2, label='Ratio = 1.0')
+            ax.axvline(x=np.mean(ratios), color='green', linestyle='-', linewidth=2, label=f'Mean = {np.mean(ratios):.2f}')
+            
+            ax.set_xlabel('Tower count ratio (TorchDelphes / C++)', fontsize=12)
+            ax.set_ylabel('Number of events', fontsize=12)
+            ax.set_title(f'{branch_name}: Per-Event Tower Count Ratio', fontsize=14, fontweight='bold')
+            ax.legend(fontsize=11)
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plot_file = output_dir / f"{branch_name}_per_event_ratio.png"
+            plt.savefig(plot_file, dpi=150)
+            plt.close()
+            print(f"\n  ✓ Per-event ratio plot saved: {plot_file}")
     
     print(f"\n{'='*70}")
     print("DIAGNOSTIC COMPLETE")
