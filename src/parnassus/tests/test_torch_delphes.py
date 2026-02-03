@@ -419,18 +419,18 @@ def validate_against_benchmark(
     
     # Branches to validate (branch_name, variable_list)
     branches = [
-        ('ParticleBeforeProp', track_kinematic_vars),
-        ('ParticleAfterProp', track_kinematic_vars),
-        ('ChargedHadron', track_kinematic_vars),
-        ('Electron', track_kinematic_vars),
-        ('Muon', track_kinematic_vars),
-        ('ChargedHadronEfficiency', track_kinematic_vars),
-        ('ElectronEfficiency', track_kinematic_vars),
-        ('MuonEfficiency', track_kinematic_vars),
-        ('ChargedHadronSmeared', track_kinematic_vars),
-        ('ElectronSmeared', track_kinematic_vars),
-        ('MuonSmeared', track_kinematic_vars),
-        ('MergedTracks', track_kinematic_vars),
+        # ('ParticleBeforeProp', track_kinematic_vars),
+        # ('ParticleAfterProp', track_kinematic_vars),
+        # ('ChargedHadron', track_kinematic_vars),
+        # ('Electron', track_kinematic_vars),
+        # ('Muon', track_kinematic_vars),
+        # ('ChargedHadronEfficiency', track_kinematic_vars),
+        # ('ElectronEfficiency', track_kinematic_vars),
+        # ('MuonEfficiency', track_kinematic_vars),
+        # ('ChargedHadronSmeared', track_kinematic_vars),
+        # ('ElectronSmeared', track_kinematic_vars),
+        # ('MuonSmeared', track_kinematic_vars),
+        # ('MergedTracks', track_kinematic_vars),
         ('ECalTower', tower_kinematic_vars),
         ('ECal_EFlowTrack', track_kinematic_vars),
         ('EFlowPhoton', tower_kinematic_vars)
@@ -845,6 +845,249 @@ def validate_against_benchmark(
             
     print(f"\n{'='*70}")
     print(f"✓ Validation complete! Plots saved to {output_dir}")
+    print(f"{'='*70}")
+    
+    # Run eta region diagnostic for tower branches
+    diagnose_eta_region_counts(torch_output_file, benchmark_file, output_dir)
+
+
+def diagnose_eta_region_counts(
+    torch_output_file: str,
+    benchmark_file: str,
+    output_dir: str,
+) -> None:
+    """
+    Diagnostic function to analyze counts by eta region.
+    
+    This helps identify if count discrepancies are concentrated in specific
+    eta regions (e.g., HF region |eta| > 3 which has different phi binning in C++).
+    
+    Args:
+        torch_output_file: Path to PyTorch output ROOT file
+        benchmark_file: Path to benchmark ROOT file from C++ Delphes
+        output_dir: Directory to save diagnostic plots
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\n{'='*70}")
+    print("DIAGNOSTIC: Eta Region Analysis for Tower Branches")
+    print(f"{'='*70}")
+    
+    torch_root = uproot.open(torch_output_file)
+    torch_tree = torch_root["Delphes"]
+    
+    benchmark_root = uproot.open(benchmark_file)
+    benchmark_tree = benchmark_root["Delphes"]
+    
+    # Eta region definitions
+    eta_regions = [
+        ("Barrel", 0.0, 1.5),
+        ("Endcap", 1.5, 3.0),
+        ("HF", 3.0, 5.0),
+    ]
+    
+    # Tower branches to analyze
+    tower_branches = ['ECalTower', 'EFlowPhoton']
+    
+    for branch_name in tower_branches:
+        print(f"\n--- {branch_name} ---")
+        
+        # Load eta data
+        torch_eta_key = f"{branch_name}/{branch_name}.Eta"
+        benchmark_eta_key = f"{branch_name}/{branch_name}.Eta"
+        
+        if torch_eta_key not in torch_tree.keys():
+            print(f"  ⚠ {branch_name} not found in PyTorch output, skipping...")
+            continue
+        if benchmark_eta_key not in benchmark_tree.keys():
+            print(f"  ⚠ {branch_name} not found in C++ output, skipping...")
+            continue
+        
+        torch_eta = np.asarray(ak.flatten(torch_tree[torch_eta_key].array()))
+        benchmark_eta = np.asarray(ak.flatten(benchmark_tree[benchmark_eta_key].array()))
+        
+        print(f"\n  Total counts:")
+        print(f"    TorchDelphes: {len(torch_eta)}")
+        print(f"    C++ Delphes:  {len(benchmark_eta)}")
+        print(f"    Ratio:        {len(torch_eta) / len(benchmark_eta):.4f}")
+        
+        print(f"\n  Counts by eta region:")
+        print(f"  {'Region':<12} {'|eta| range':<15} {'TorchDelphes':<15} {'C++ Delphes':<15} {'Ratio':<10} {'Excess':<10}")
+        print(f"  {'-'*77}")
+        
+        total_excess = 0
+        region_data = []
+        
+        for region_name, eta_min, eta_max in eta_regions:
+            torch_mask = (np.abs(torch_eta) >= eta_min) & (np.abs(torch_eta) < eta_max)
+            benchmark_mask = (np.abs(benchmark_eta) >= eta_min) & (np.abs(benchmark_eta) < eta_max)
+            
+            torch_count = np.sum(torch_mask)
+            benchmark_count = np.sum(benchmark_mask)
+            
+            if benchmark_count > 0:
+                ratio = torch_count / benchmark_count
+                excess = torch_count - benchmark_count
+            else:
+                ratio = float('inf') if torch_count > 0 else 1.0
+                excess = torch_count
+            
+            total_excess += excess
+            region_data.append((region_name, eta_min, eta_max, torch_count, benchmark_count, ratio, excess))
+            
+            print(f"  {region_name:<12} [{eta_min:.1f}, {eta_max:.1f}){' ':<7} {torch_count:<15} {benchmark_count:<15} {ratio:<10.4f} {excess:<+10}")
+        
+        print(f"  {'-'*77}")
+        print(f"  {'TOTAL':<12} {'':<15} {len(torch_eta):<15} {len(benchmark_eta):<15} {len(torch_eta)/len(benchmark_eta):<10.4f} {total_excess:<+10}")
+        
+        # Calculate percentage of excess in each region
+        if total_excess != 0:
+            print(f"\n  Excess distribution by region:")
+            for region_name, eta_min, eta_max, torch_count, benchmark_count, ratio, excess in region_data:
+                if excess != 0:
+                    pct = (excess / total_excess) * 100
+                    print(f"    {region_name}: {pct:+.1f}% of total excess ({excess:+d} objects)")
+        
+        # Create diagnostic plot: counts vs |eta| with region boundaries
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.05})
+        ax_hist, ax_ratio = axes
+        
+        # Fine eta bins to see the distribution
+        eta_bins = np.linspace(0, 5, 51)
+        
+        benchmark_counts, bin_edges, _ = ax_hist.hist(
+            np.abs(benchmark_eta), bins=eta_bins, histtype='stepfilled', color='orange', 
+            alpha=0.5, linewidth=2, label=f'C++ Delphes: {len(benchmark_eta)} total'
+        )
+        torch_counts, _, _ = ax_hist.hist(
+            np.abs(torch_eta), bins=eta_bins, histtype='step', color='blue', 
+            linewidth=2, label=f'TorchDelphes: {len(torch_eta)} total'
+        )
+        
+        # Add vertical lines for region boundaries
+        for region_name, eta_min, eta_max in eta_regions:
+            if eta_min > 0:
+                ax_hist.axvline(x=eta_min, color='red', linestyle='--', alpha=0.7, linewidth=1.5)
+                ax_ratio.axvline(x=eta_min, color='red', linestyle='--', alpha=0.7, linewidth=1.5)
+        
+        # Add region labels
+        for region_name, eta_min, eta_max in eta_regions:
+            mid_eta = (eta_min + eta_max) / 2
+            ax_hist.text(mid_eta, ax_hist.get_ylim()[1] * 0.9, region_name, 
+                        ha='center', fontsize=10, fontweight='bold', color='red')
+        
+        ax_hist.set_ylabel('Counts', fontsize=12)
+        ax_hist.set_title(f'{branch_name}: Counts by |η| Region', fontsize=14, fontweight='bold')
+        ax_hist.legend(fontsize=11)
+        ax_hist.grid(True, alpha=0.3)
+        ax_hist.tick_params(labelbottom=False)
+        
+        # Ratio plot
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        ratio = np.divide(torch_counts, benchmark_counts, out=np.ones_like(torch_counts), where=benchmark_counts > 0)
+        
+        ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+        ax_ratio.plot(bin_centers, ratio, 'b-', linewidth=2)
+        ax_ratio.fill_between(bin_centers, 1.0, ratio, where=(ratio > 1.0), color='blue', alpha=0.3)
+        ax_ratio.fill_between(bin_centers, ratio, 1.0, where=(ratio < 1.0), color='red', alpha=0.3)
+        
+        ax_ratio.set_xlabel('|η|', fontsize=12)
+        ax_ratio.set_ylabel('Torch / C++', fontsize=10)
+        ax_ratio.set_ylim([0.5, 2.0])
+        ax_ratio.grid(True, alpha=0.3)
+        
+        # Add region boundaries to ratio plot
+        for region_name, eta_min, eta_max in eta_regions:
+            if eta_min > 0:
+                ax_ratio.axvline(x=eta_min, color='red', linestyle='--', alpha=0.7, linewidth=1.5)
+        
+        plt.tight_layout()
+        plot_file = output_dir / f"{branch_name}_eta_region_diagnostic.png"
+        plt.savefig(plot_file, dpi=150)
+        plt.close()
+        print(f"\n  ✓ Diagnostic plot saved: {plot_file}")
+        
+        # Additional diagnostic: phi distribution in HF region
+        print(f"\n  --- Phi distribution in HF region (|η| > 3) ---")
+        
+        torch_hf_mask = np.abs(torch_eta) >= 3.0
+        benchmark_hf_mask = np.abs(benchmark_eta) >= 3.0
+        
+        # Load phi data
+        torch_phi_key = f"{branch_name}/{branch_name}.Phi"
+        benchmark_phi_key = f"{branch_name}/{branch_name}.Phi"
+        
+        torch_phi = np.asarray(ak.flatten(torch_tree[torch_phi_key].array()))
+        benchmark_phi = np.asarray(ak.flatten(benchmark_tree[benchmark_phi_key].array()))
+        
+        torch_phi_hf = torch_phi[torch_hf_mask]
+        benchmark_phi_hf = benchmark_phi[benchmark_hf_mask]
+        
+        if len(torch_phi_hf) > 0 or len(benchmark_phi_hf) > 0:
+            print(f"    TorchDelphes HF objects: {len(torch_phi_hf)}")
+            print(f"    C++ Delphes HF objects:  {len(benchmark_phi_hf)}")
+            
+            # Create phi distribution plot for HF region
+            fig, axes = plt.subplots(2, 1, figsize=(12, 6), gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.05})
+            ax_hist, ax_ratio = axes
+            
+            phi_bins = np.linspace(-np.pi, np.pi, 73)  # 5-degree bins
+            
+            if len(benchmark_phi_hf) > 0:
+                benchmark_counts, bin_edges, _ = ax_hist.hist(
+                    benchmark_phi_hf, bins=phi_bins, histtype='stepfilled', color='orange', 
+                    alpha=0.5, linewidth=2, label=f'C++ Delphes: {len(benchmark_phi_hf)}'
+                )
+            else:
+                benchmark_counts = np.zeros(len(phi_bins) - 1)
+                bin_edges = phi_bins
+                
+            if len(torch_phi_hf) > 0:
+                torch_counts, _, _ = ax_hist.hist(
+                    torch_phi_hf, bins=phi_bins, histtype='step', color='blue', 
+                    linewidth=2, label=f'TorchDelphes: {len(torch_phi_hf)}'
+                )
+            else:
+                torch_counts = np.zeros(len(phi_bins) - 1)
+            
+            # Add vertical lines for C++ HF phi bin edges (10-degree = π/18 bins)
+            cpp_phi_bins = [i * np.pi / 18.0 for i in range(-18, 19)]
+            for phi_edge in cpp_phi_bins:
+                ax_hist.axvline(x=phi_edge, color='green', linestyle=':', alpha=0.5, linewidth=1)
+            
+            ax_hist.set_ylabel('Counts', fontsize=12)
+            ax_hist.set_title(f'{branch_name}: Phi distribution in HF region (|η| > 3)\nGreen lines = C++ HF phi bin edges (10°)', fontsize=12, fontweight='bold')
+            ax_hist.legend(fontsize=11)
+            ax_hist.grid(True, alpha=0.3)
+            ax_hist.tick_params(labelbottom=False)
+            
+            # Ratio plot
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+            ratio = np.divide(torch_counts, benchmark_counts, out=np.ones_like(torch_counts), where=benchmark_counts > 0)
+            
+            ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+            ax_ratio.plot(bin_centers, ratio, 'b-', linewidth=2)
+            
+            ax_ratio.set_xlabel('φ', fontsize=12)
+            ax_ratio.set_ylabel('Torch / C++', fontsize=10)
+            ax_ratio.set_ylim([0.0, max(3.0, max(ratio) * 1.1)])
+            ax_ratio.grid(True, alpha=0.3)
+            
+            # Add C++ phi bin edges to ratio plot
+            for phi_edge in cpp_phi_bins:
+                ax_ratio.axvline(x=phi_edge, color='green', linestyle=':', alpha=0.5, linewidth=1)
+            
+            plt.tight_layout()
+            plot_file = output_dir / f"{branch_name}_phi_HF_diagnostic.png"
+            plt.savefig(plot_file, dpi=150)
+            plt.close()
+            print(f"    ✓ HF phi diagnostic plot saved: {plot_file}")
+        else:
+            print(f"    No HF objects in either dataset")
+    
+    print(f"\n{'='*70}")
+    print("DIAGNOSTIC COMPLETE")
     print(f"{'='*70}")
 
 
