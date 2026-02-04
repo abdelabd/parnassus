@@ -419,18 +419,18 @@ def validate_against_benchmark(
     
     # Branches to validate (branch_name, variable_list)
     branches = [
-        # ('ParticleBeforeProp', track_kinematic_vars),
-        # ('ParticleAfterProp', track_kinematic_vars),
-        # ('ChargedHadron', track_kinematic_vars),
-        # ('Electron', track_kinematic_vars),
-        # ('Muon', track_kinematic_vars),
-        # ('ChargedHadronEfficiency', track_kinematic_vars),
-        # ('ElectronEfficiency', track_kinematic_vars),
-        # ('MuonEfficiency', track_kinematic_vars),
-        # ('ChargedHadronSmeared', track_kinematic_vars),
-        # ('ElectronSmeared', track_kinematic_vars),
-        # ('MuonSmeared', track_kinematic_vars),
-        # ('MergedTracks', track_kinematic_vars),
+        ('ParticleBeforeProp', track_kinematic_vars),
+        ('ParticleAfterProp', track_kinematic_vars),
+        ('ChargedHadron', track_kinematic_vars),
+        ('Electron', track_kinematic_vars),
+        ('Muon', track_kinematic_vars),
+        ('ChargedHadronEfficiency', track_kinematic_vars),
+        ('ElectronEfficiency', track_kinematic_vars),
+        ('MuonEfficiency', track_kinematic_vars),
+        ('ChargedHadronSmeared', track_kinematic_vars),
+        ('ElectronSmeared', track_kinematic_vars),
+        ('MuonSmeared', track_kinematic_vars),
+        ('MergedTracks', track_kinematic_vars),
         ('ECalTower', tower_kinematic_vars),
         ('ECal_EFlowTrack', track_kinematic_vars),
         ('EFlowPhoton', tower_kinematic_vars)
@@ -1436,12 +1436,18 @@ def main(
     print("="*80)
 
     genevent_tensors, pbp_tensors, pap_tensors, ch_tensors, el_tensors, mu_tensors = process_particle_propagator(genevent_tensors, batch_size=batch_size)
+    
+    # Extract expected event numbers from pap_tensors (most complete set of particles)
+    # This ensures all branches have the same number of events
+    all_pap = torch.cat([t for t in pap_tensors if t.shape[0] > 0], dim=0)
+    expected_event_nums = sorted(set(all_pap[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist()))
+    
     branches_torch_root.update({
-        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp'),
-        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp'),
-        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron'),
-        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron'),
-        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon'),
+        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
+        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
+        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
+        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
+        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
     })
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
@@ -1459,9 +1465,9 @@ def main(
         ch_tensors, el_tensors, mu_tensors
     )
     branches_torch_root.update({
-        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency'),
-        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency'),
-        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency'),
+        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
+        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
+        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
     })
 
     print("\n✓ Efficiency applied")
@@ -1478,9 +1484,9 @@ def main(
         ch_filtered, el_filtered, mu_filtered
     )
     branches_torch_root.update({
-        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared'),
-        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared'),
-        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared'),
+        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
+        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
+        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
     })
     
     print("\n✓ MomentumSmearing applied")
@@ -1497,7 +1503,7 @@ def main(
         ch_smeared, el_smeared, mu_smeared
     )
     branches_torch_root.update({
-        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks'),
+        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
     })
     
     print("\n✓ TrackMerger applied")
@@ -1514,9 +1520,9 @@ def main(
         pap_tensors, merged_tracks, batch_size=batch_size
     )
     branches_torch_root.update({
-        'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower'),
-        'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in eflow_tracks], 'ECal_EFlowTrack'),
-        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton')
+        'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower', expected_event_nums),
+        'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in eflow_tracks], 'ECal_EFlowTrack', expected_event_nums),
+        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton', expected_event_nums)
     })
     print("\n✓ ECal applied")
     

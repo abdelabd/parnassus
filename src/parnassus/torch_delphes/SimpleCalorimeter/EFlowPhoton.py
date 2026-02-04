@@ -138,12 +138,12 @@ class EFlowPhoton(nn.Module):
         for event_num in event_numbers:
             particles_event = pap_tensors[pap_tensors[:, CMAP["EVENT_NUMBER"]] == event_num]
             tracks_event = merged_track_tensors[merged_track_tensors[:, CMAP["EVENT_NUMBER"]] == event_num]
-            eflow_photons_event = self._process_event(particles_event, tracks_event)
+            eflow_photons_event = self._process_event(particles_event, tracks_event, event_num)
             all_eflow_photons.append(eflow_photons_event)
 
         return all_eflow_photons
 
-    def _process_event(self, particles: torch.Tensor, all_tracks: torch.Tensor) -> List[torch.Tensor]:
+    def _process_event(self, particles: torch.Tensor, all_tracks: torch.Tensor, event_num: int) -> List[torch.Tensor]:
         """
         Process a single event to create towers and energy flow objects.
         
@@ -311,6 +311,8 @@ class EFlowPhoton(nn.Module):
                 eflow_photons_list.append(neutral_tower)
             
         eflow_photons = torch.cat(eflow_photons_list, dim=0)
+
+        eflow_photons[:, CMAP["EVENT_NUMBER"]] = event_num
         
         return eflow_photons
      
