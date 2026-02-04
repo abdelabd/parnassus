@@ -147,15 +147,18 @@ def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor
     return padded_events
 
 
-def tensor_to_root_dict(event_tensors: List[torch.Tensor], branch_name: str) -> Dict[str, ak.Array]:
+def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str, 
+                        expected_event_numbers: List[float] = None) -> Dict[str, ak.Array]:
     """
     Convert list of event tensors to ROOT-compatible dictionary of awkward arrays.
     
     This creates the structure needed for writing to ROOT files with uproot.
     
     Args:
-        event_tensors: List of tensors, one per event, each of shape (n_particles, 15)
+        batch_tensors: List of tensors, one per batch, each of shape (n_particles, N_FEATURES)
         branch_name: Name for the branch (e.g., "ChargedHadronEfficiency")
+        expected_event_numbers: List of all expected event numbers. If provided, ensures
+                               all events are represented (with empty arrays for missing events).
         
     Returns:
         Dictionary with keys like "BranchName/BranchName.Attribute" → awkward array
@@ -198,12 +201,35 @@ def tensor_to_root_dict(event_tensors: List[torch.Tensor], branch_name: str) -> 
     # Build dictionary
     root_dict = {}
     
+    # First, collect all particles grouped by event number
+    # Concatenate all batches into a single tensor
+    if len(batch_tensors) == 0 or all(b.shape[0] == 0 for b in batch_tensors):
+        # No particles at all - create empty arrays for all expected events
+        all_particles = None
+        all_event_numbers = set()
+    else:
+        all_particles = torch.cat([b for b in batch_tensors if b.shape[0] > 0], dim=0)
+        all_event_numbers = set(torch.unique(all_particles[:, EVENT_NUMBER]).cpu().numpy().tolist())
+    
+    # Determine which event numbers to iterate over
+    if expected_event_numbers is not None:
+        event_nums_to_process = sorted(expected_event_numbers)
+    else:
+        event_nums_to_process = sorted(all_event_numbers)
+    
     # TODO: Fix manual computations
     for attr in attributes:
         # Extract values for all events
         attr_values = []
         
-        for event_tensor in event_tensors:
+        for event_num in event_nums_to_process:
+            if all_particles is None or event_num not in all_event_numbers:
+                # Empty event - no particles of this type
+                attr_values.append(np.array([], dtype=np.float64))
+                continue
+            
+            event_tensor = all_particles[all_particles[:, EVENT_NUMBER] == event_num]
+        
             if event_tensor.shape[0] == 0:
                 # Empty event
                 attr_values.append(np.array([], dtype=np.float64))

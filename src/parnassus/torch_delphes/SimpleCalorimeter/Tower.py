@@ -138,12 +138,12 @@ class Tower(nn.Module):
         # Process each event independently (towers are event-specific)
         for event_num in event_numbers:
             particles_event = pap_tensors[pap_tensors[:, CMAP["EVENT_NUMBER"]] == event_num]
-            towers_event = self._process_event(particles_event)
+            towers_event = self._process_event(particles_event, event_num)
             all_towers.append(towers_event)
 
         return all_towers
   
-    def _process_event(self, particles: torch.Tensor) -> List[torch.Tensor]:
+    def _process_event(self, particles: torch.Tensor, event_num: int) -> List[torch.Tensor]:
         """
         Process a single event to create towers and energy flow objects.
         
@@ -269,6 +269,8 @@ class Tower(nn.Module):
         
         # Concatenate results
         towers = torch.cat(towers_list, dim=0)
+
+        towers[:, CMAP["EVENT_NUMBER"]] = event_num
         
         return towers
    
