@@ -319,8 +319,14 @@ def process_ecal_pipeline(
     
     particle_fractions_list = []
     track_fractions_list = []
+    particle_eta_bins_list = []
+    particle_phi_bins_list = []
+    particle_valid_list = []
+    track_eta_bins_list = []
+    track_phi_bins_list = []
+    track_valid_list = []
     
-    print("\nSimpleCalorimeter Step 1: Computing energy fractions...")
+    print("\nSimpleCalorimeter: Computing energy fractions and binning...")
     for batch_particles, batch_tracks in zip(pap_tensors, merged_tracks):
         event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]]).cpu().numpy()
 
@@ -331,144 +337,262 @@ def process_ecal_pipeline(
             particles = batch_particles[event_mask_particles]
             tracks = batch_tracks[event_mask_tracks]
             
-            # Compute fractions
-            particle_fracs, track_fracs = calo(particles, tracks)
+            # Run forward pass
+            result = calo(particles, tracks)
             
-            particle_fractions_list.append(particle_fracs.cpu())
-            track_fractions_list.append(track_fracs.cpu())
+            # Collect Step 1 results (energy fractions)
+            particle_fractions_list.append(result['particle_energy_fractions'].cpu())
+            track_fractions_list.append(result['track_energy_fractions'].cpu())
+            
+            # Collect Step 2 results (binning)
+            particle_eta_bins_list.append(result['particle_eta_bin'].cpu())
+            particle_phi_bins_list.append(result['particle_phi_bin'].cpu())
+            particle_valid_list.append(result['particle_valid'].cpu())
+            track_eta_bins_list.append(result['track_eta_bin'].cpu())
+            track_phi_bins_list.append(result['track_phi_bin'].cpu())
+            track_valid_list.append(result['track_valid'].cpu())
     
-    return particle_fractions_list, track_fractions_list
-
+    return {
+        'particle_fractions': particle_fractions_list,
+        'track_fractions': track_fractions_list,
+        'particle_eta_bins': particle_eta_bins_list,
+        'particle_phi_bins': particle_phi_bins_list,
+        'particle_valid': particle_valid_list,
+        'track_eta_bins': track_eta_bins_list,
+        'track_phi_bins': track_phi_bins_list,
+        'track_valid': track_valid_list,
+    }
 
 def validate_simple_cal(
-    particle_fractions: List[torch.Tensor],
-    track_fractions: List[torch.Tensor],
-    cpp_debug_file: str,
+    ecal_results: Dict,
+    cpp_fractions_file: str,
+    cpp_towerhits_file: str,
     output_dir: str,
 ) -> None:
     """
-    Validate SimpleCalorimeter Step 1 (energy fractions) against C++ Delphes debug output.
+    Validate SimpleCalorimeter Steps 1 & 2 against C++ Delphes debug output.
     
     Args:
-        particle_fractions: List of (N_particles,) tensors from TorchDelphes
-        track_fractions: List of (N_tracks,) tensors from TorchDelphes  
-        cpp_debug_file: Path to CSV file from C++ Delphes (energy_fractions.csv)
+        ecal_results: Dict with keys from process_ecal()
+        cpp_fractions_file: Path to CSV file from C++ Delphes (simplecalo_debug_fractions.csv)
+        cpp_towerhits_file: Path to CSV file from C++ Delphes (simplecalo_debug_towerhits.csv)
         output_dir: Directory to save validation plots
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # ========== Step 1: Energy Fractions ==========
     print(f"\n{'='*70}")
     print("Validating SimpleCalorimeter Step 1: Energy Fractions")
     print(f"{'='*70}")
     
+    particle_fractions = ecal_results['particle_fractions']
+    track_fractions = ecal_results['track_fractions']
+    
     # Load C++ debug output
-    if not Path(cpp_debug_file).exists():
-        print(f"  ⚠ C++ debug file not found: {cpp_debug_file}")
+    if not Path(cpp_fractions_file).exists():
+        print(f"  ⚠ C++ debug file not found: {cpp_fractions_file}")
         print("  Run C++ Delphes with modified SimpleCalorimeter.cc to generate this file.")
-        return
-    
-    cpp_df = pd.read_csv(cpp_debug_file)
-    print(f"  Loaded {len(cpp_df)} entries from C++ debug file")
-    
-    # Separate particle and track fractions
-    cpp_particle_df = cpp_df[cpp_df['type'] == 'particle']
-    cpp_track_df = cpp_df[cpp_df['type'] == 'track']
-    
-    # Flatten TorchDelphes fractions
-    torch_particle_fracs = torch.cat(particle_fractions).numpy()
-    torch_track_fracs = torch.cat(track_fractions).numpy()
-    
-    cpp_particle_fracs = cpp_particle_df['fraction'].values
-    cpp_track_fracs = cpp_track_df['fraction'].values
-    
-    print(f"  TorchDelphes particles: {len(torch_particle_fracs)}")
-    print(f"  C++ Delphes particles:  {len(cpp_particle_fracs)}")
-    print(f"  TorchDelphes tracks:    {len(torch_track_fracs)}")
-    print(f"  C++ Delphes tracks:     {len(cpp_track_fracs)}")
-    
-    # Check if counts match
-    if len(torch_particle_fracs) != len(cpp_particle_fracs):
-        print(f"  ⚠ Particle count mismatch! TorchDelphes has {len(torch_particle_fracs)}, C++ has {len(cpp_particle_fracs)}")
-    if len(torch_track_fracs) != len(cpp_track_fracs):
-        print(f"  ⚠ Track count mismatch! TorchDelphes has {len(torch_track_fracs)}, C++ has {len(cpp_track_fracs)}")
-    
-    # Create comparison plots
-    for frac_type, torch_fracs, cpp_fracs in [
-        ('Particle', torch_particle_fracs, cpp_particle_fracs),
-        ('Track', torch_track_fracs, cpp_track_fracs),
-    ]:
-        # Create figure with histogram comparison
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    else:
+        cpp_df = pd.read_csv(cpp_fractions_file)
+        print(f"  Loaded {len(cpp_df)} entries from C++ debug file")
         
-        # Left: Overlaid histograms
-        ax = axes[0]
-        bins = np.linspace(-0.1, 1.1, 25)
+        # Separate particle and track fractions
+        cpp_particle_df = cpp_df[cpp_df['type'] == 'particle']
+        cpp_track_df = cpp_df[cpp_df['type'] == 'track']
         
-        ax.hist(cpp_fracs, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
-                linewidth=2, label='C++ Delphes')
-        ax.hist(torch_fracs, bins=bins, histtype='step', color='blue',
-                linewidth=2, label='Parnassus.TorchDelphes')
+        # Flatten TorchDelphes fractions
+        torch_particle_fracs = torch.cat(particle_fractions).numpy()
+        torch_track_fracs = torch.cat(track_fractions).numpy()
         
-        ax.set_xlabel('Energy Fraction', fontsize=12)
-        ax.set_ylabel('Counts', fontsize=12)
-        ax.set_title(f'SimpleCalorimeter Step 1: {frac_type} Energy Fractions', fontsize=14)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
+        cpp_particle_fracs = cpp_particle_df['fraction'].values
+        cpp_track_fracs = cpp_track_df['fraction'].values
         
-        # Add statistics
-        stats_text = f'TorchDelphes: {len(torch_fracs)} {frac_type.lower()}s\nC++ Delphes: {len(cpp_fracs)} {frac_type.lower()}s'
-        ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
-                fontsize=10, verticalalignment='top', horizontalalignment='right',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        print(f"  TorchDelphes particles: {len(torch_particle_fracs)}")
+        print(f"  C++ Delphes particles:  {len(cpp_particle_fracs)}")
+        print(f"  TorchDelphes tracks:    {len(torch_track_fracs)}")
+        print(f"  C++ Delphes tracks:     {len(cpp_track_fracs)}")
         
-        # Right: Per-fraction value comparison (bar chart)
-        ax2 = axes[1]
-        unique_fracs = sorted(set(cpp_fracs) | set(torch_fracs))
+        # Check if counts match
+        if len(torch_particle_fracs) != len(cpp_particle_fracs):
+            print(f"  ⚠ Particle count mismatch! TorchDelphes has {len(torch_particle_fracs)}, C++ has {len(cpp_particle_fracs)}")
+        if len(torch_track_fracs) != len(cpp_track_fracs):
+            print(f"  ⚠ Track count mismatch! TorchDelphes has {len(torch_track_fracs)}, C++ has {len(cpp_track_fracs)}")
         
-        cpp_counts = [np.sum(cpp_fracs == f) for f in unique_fracs]
-        torch_counts = [np.sum(torch_fracs == f) for f in unique_fracs]
+        # Create comparison plots
+        for frac_type, torch_fracs, cpp_fracs in [
+            ('Particle', torch_particle_fracs, cpp_particle_fracs),
+            ('Track', torch_track_fracs, cpp_track_fracs),
+        ]:
+            # Create figure with histogram comparison
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            
+            # Left: Overlaid histograms
+            ax = axes[0]
+            bins = np.linspace(-0.1, 1.1, 25)
+            
+            ax.hist(cpp_fracs, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    linewidth=2, label='C++ Delphes')
+            ax.hist(torch_fracs, bins=bins, histtype='step', color='blue',
+                    linewidth=2, label='Parnassus.TorchDelphes')
+            
+            ax.set_xlabel('Energy Fraction', fontsize=12)
+            ax.set_ylabel('Counts', fontsize=12)
+            ax.set_title(f'SimpleCalorimeter Step 1: {frac_type} Energy Fractions', fontsize=14)
+            ax.legend(fontsize=11)
+            ax.grid(True, alpha=0.3)
+            
+            # Add statistics
+            stats_text = f'TorchDelphes: {len(torch_fracs)} {frac_type.lower()}s\nC++ Delphes: {len(cpp_fracs)} {frac_type.lower()}s'
+            ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
+                    fontsize=10, verticalalignment='top', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            # Right: Per-fraction value comparison (bar chart)
+            ax2 = axes[1]
+            unique_fracs = sorted(set(cpp_fracs) | set(torch_fracs))
+            
+            cpp_counts = [np.sum(cpp_fracs == f) for f in unique_fracs]
+            torch_counts = [np.sum(torch_fracs == f) for f in unique_fracs]
+            
+            x = np.arange(len(unique_fracs))
+            width = 0.35
+            
+            ax2.bar(x - width/2, cpp_counts, width, label='C++ Delphes', color='orange', alpha=0.7)
+            ax2.bar(x + width/2, torch_counts, width, label='Parnassus.TorchDelphes', color='blue', alpha=0.7)
+            
+            ax2.set_xlabel('Energy Fraction Value', fontsize=12)
+            ax2.set_ylabel('Counts', fontsize=12)
+            ax2.set_title(f'{frac_type} Fractions by Value', fontsize=14)
+            ax2.set_xticks(x)
+            ax2.set_xticklabels([f'{f:.2f}' for f in unique_fracs])
+            ax2.legend(fontsize=11)
+            ax2.grid(True, alpha=0.3, axis='y')
+            
+            plt.tight_layout()
+            plot_file = output_dir / f"{frac_type.lower()}_fractions.png"
+            plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"  ✓ Saved {plot_file}")
         
-        x = np.arange(len(unique_fracs))
-        width = 0.35
+        # Check exact match (if counts are equal)
+        if len(torch_particle_fracs) == len(cpp_particle_fracs):
+            particle_match = np.allclose(torch_particle_fracs, cpp_particle_fracs, rtol=1e-9)
+            print(f"  Particle fractions exact match: {'✓ YES' if particle_match else '✗ NO'}")
         
-        ax2.bar(x - width/2, cpp_counts, width, label='C++ Delphes', color='orange', alpha=0.7)
-        ax2.bar(x + width/2, torch_counts, width, label='Parnassus.TorchDelphes', color='blue', alpha=0.7)
+        if len(torch_track_fracs) == len(cpp_track_fracs):
+            track_match = np.allclose(torch_track_fracs, cpp_track_fracs, rtol=1e-9)
+            print(f"  Track fractions exact match: {'✓ YES' if track_match else '✗ NO'}")
         
-        ax2.set_xlabel('Energy Fraction Value', fontsize=12)
-        ax2.set_ylabel('Counts', fontsize=12)
-        ax2.set_title(f'{frac_type} Fractions by Value', fontsize=14)
-        ax2.set_xticks(x)
-        ax2.set_xticklabels([f'{f:.2f}' for f in unique_fracs])
-        ax2.legend(fontsize=11)
-        ax2.grid(True, alpha=0.3, axis='y')
-        
-        plt.tight_layout()
-        plot_file = output_dir / f"{frac_type.lower()}_fractions.png"
-        plt.savefig(plot_file, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"  ✓ Saved {plot_file}")
+        print(f"  ✓ Step 1 validation complete.")
     
-    # Check exact match (if counts are equal)
-    if len(torch_particle_fracs) == len(cpp_particle_fracs):
-        particle_match = np.allclose(torch_particle_fracs, cpp_particle_fracs, rtol=1e-9)
-        print(f"  Particle fractions exact match: {'✓ YES' if particle_match else '✗ NO'}")
-        if not particle_match:
-            diffs = np.where(~np.isclose(torch_particle_fracs, cpp_particle_fracs, rtol=1e-9))[0]
-            print(f"    First 5 mismatches at indices: {diffs[:5]}")
-            for idx in diffs[:5]:
-                print(f"      idx={idx}: Torch={torch_particle_fracs[idx]:.6f}, C++={cpp_particle_fracs[idx]:.6f}")
+    # ========== Step 2: Binning (Tower Hits) ==========
+    print(f"\n{'='*70}")
+    print("Validating SimpleCalorimeter Step 2: Binning (Tower Hits)")
+    print(f"{'='*70}")
     
-    if len(torch_track_fracs) == len(cpp_track_fracs):
-        track_match = np.allclose(torch_track_fracs, cpp_track_fracs, rtol=1e-9)
-        print(f"  Track fractions exact match: {'✓ YES' if track_match else '✗ NO'}")
-        if not track_match:
-            diffs = np.where(~np.isclose(torch_track_fracs, cpp_track_fracs, rtol=1e-9))[0]
-            print(f"    First 5 mismatches at indices: {diffs[:5]}")
-            for idx in diffs[:5]:
-                print(f"      idx={idx}: Torch={torch_track_fracs[idx]:.6f}, C++={cpp_track_fracs[idx]:.6f}")
+    if not Path(cpp_towerhits_file).exists():
+        print(f"  ⚠ C++ debug file not found: {cpp_towerhits_file}")
+        print("  Run C++ Delphes with modified SimpleCalorimeter.cc to generate this file.")
+    else:
+        cpp_hits_df = pd.read_csv(cpp_towerhits_file)
+        print(f"  Loaded {len(cpp_hits_df)} tower hits from C++ debug file")
+        
+        # Separate particle and track hits
+        cpp_particle_hits = cpp_hits_df[cpp_hits_df['type'] == 'particle']
+        cpp_track_hits = cpp_hits_df[cpp_hits_df['type'] == 'track']
+        
+        # Get TorchDelphes valid particles/tracks (those that passed binning filter)
+        particle_valid = torch.cat(ecal_results['particle_valid'])
+        track_valid = torch.cat(ecal_results['track_valid'])
+        particle_eta_bins = torch.cat(ecal_results['particle_eta_bins'])
+        particle_phi_bins = torch.cat(ecal_results['particle_phi_bins'])
+        track_eta_bins = torch.cat(ecal_results['track_eta_bins'])
+        track_phi_bins = torch.cat(ecal_results['track_phi_bins'])
+        
+        # Count valid particles/tracks
+        torch_valid_particles = particle_valid.sum().item()
+        torch_valid_tracks = track_valid.sum().item()
+        cpp_valid_particles = len(cpp_particle_hits)
+        cpp_valid_tracks = len(cpp_track_hits)
+        
+        print(f"  TorchDelphes valid particles: {torch_valid_particles}")
+        print(f"  C++ Delphes valid particles:  {cpp_valid_particles}")
+        print(f"  TorchDelphes valid tracks:    {torch_valid_tracks}")
+        print(f"  C++ Delphes valid tracks:     {cpp_valid_tracks}")
+        
+        # Check if counts match
+        if torch_valid_particles != cpp_valid_particles:
+            print(f"  ⚠ Valid particle count mismatch!")
+        else:
+            print(f"  ✓ Valid particle counts match")
+            
+        if torch_valid_tracks != cpp_valid_tracks:
+            print(f"  ⚠ Valid track count mismatch!")
+        else:
+            print(f"  ✓ Valid track counts match")
+        
+        # Compare eta/phi bin distributions for valid hits
+        for hit_type, valid_mask, eta_bins, phi_bins, cpp_hits in [
+            ('Particle', particle_valid, particle_eta_bins, particle_phi_bins, cpp_particle_hits),
+            ('Track', track_valid, track_eta_bins, track_phi_bins, cpp_track_hits),
+        ]:
+            torch_eta = eta_bins[valid_mask].numpy()
+            torch_phi = phi_bins[valid_mask].numpy()
+            cpp_eta = cpp_hits['eta_bin'].values
+            cpp_phi = cpp_hits['phi_bin'].values
+            
+            # Create comparison plots
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            
+            # Left: Eta bin histogram
+            ax = axes[0]
+            if len(torch_eta) > 0 and len(cpp_eta) > 0:
+                all_eta = np.concatenate([torch_eta, cpp_eta])
+                bins = np.arange(all_eta.min() - 0.5, all_eta.max() + 1.5, 1)
+            else:
+                bins = 50
+            
+            ax.hist(cpp_eta, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    linewidth=2, label='C++ Delphes')
+            ax.hist(torch_eta, bins=bins, histtype='step', color='blue',
+                    linewidth=2, label='Parnassus.TorchDelphes')
+            
+            ax.set_xlabel('Eta Bin Index', fontsize=12)
+            ax.set_ylabel('Counts', fontsize=12)
+            ax.set_title(f'SimpleCalorimeter Step 2: {hit_type} Eta Bins', fontsize=14)
+            ax.legend(fontsize=11)
+            ax.grid(True, alpha=0.3)
+            
+            # Right: Phi bin histogram
+            ax2 = axes[1]
+            if len(torch_phi) > 0 and len(cpp_phi) > 0:
+                all_phi = np.concatenate([torch_phi, cpp_phi])
+                bins = np.arange(all_phi.min() - 0.5, all_phi.max() + 1.5, 1)
+            else:
+                bins = 50
+            
+            ax2.hist(cpp_phi, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    linewidth=2, label='C++ Delphes')
+            ax2.hist(torch_phi, bins=bins, histtype='step', color='blue',
+                    linewidth=2, label='Parnassus.TorchDelphes')
+            
+            ax2.set_xlabel('Phi Bin Index', fontsize=12)
+            ax2.set_ylabel('Counts', fontsize=12)
+            ax2.set_title(f'SimpleCalorimeter Step 2: {hit_type} Phi Bins', fontsize=14)
+            ax2.legend(fontsize=11)
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plot_file = output_dir / f"{hit_type.lower()}_bins.png"
+            plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"  ✓ Saved {plot_file}")
+        
+        print(f"  ✓ Step 2 validation complete.")
     
-    print(f"\n  ✓ Step 1 validation complete. Plots saved to {output_dir}")
+    print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
+
 
 def validate_against_benchmark(
     torch_output_file: str, 
@@ -505,18 +629,18 @@ def validate_against_benchmark(
     
     # Branches to validate (branch_name, variable_list)
     branches = [
-        ('ParticleBeforeProp', track_kinematic_vars),
-        ('ParticleAfterProp', track_kinematic_vars),
-        ('ChargedHadron', track_kinematic_vars),
-        ('Electron', track_kinematic_vars),
-        ('Muon', track_kinematic_vars),
-        ('ChargedHadronEfficiency', track_kinematic_vars),
-        ('ElectronEfficiency', track_kinematic_vars),
-        ('MuonEfficiency', track_kinematic_vars),
-        ('ChargedHadronSmeared', track_kinematic_vars),
-        ('ElectronSmeared', track_kinematic_vars),
-        ('MuonSmeared', track_kinematic_vars),
-        ('MergedTracks', track_kinematic_vars),
+        # ('ParticleBeforeProp', track_kinematic_vars),
+        # ('ParticleAfterProp', track_kinematic_vars),
+        # ('ChargedHadron', track_kinematic_vars),
+        # ('Electron', track_kinematic_vars),
+        # ('Muon', track_kinematic_vars),
+        # ('ChargedHadronEfficiency', track_kinematic_vars),
+        # ('ElectronEfficiency', track_kinematic_vars),
+        # ('MuonEfficiency', track_kinematic_vars),
+        # ('ChargedHadronSmeared', track_kinematic_vars),
+        # ('ElectronSmeared', track_kinematic_vars),
+        # ('MuonSmeared', track_kinematic_vars),
+        # ('MergedTracks', track_kinematic_vars),
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -1060,23 +1184,24 @@ def main(
     # ========================================================================
     
     print("\n" + "="*80)
-    print("STEP 6: Applying SimpleCalorimeter Step 1 (Energy Fractions)")
+    print("STEP 6: Applying SimpleCalorimeter (Steps 1 & 2)")
     print("="*80)
     
-    particle_fractions, track_fractions = process_ecal_pipeline(
+    ecal_results = process_ecal_pipeline(
         pap_tensors, merged_tracks
     )
     
-    print("\n✓ SimpleCalorimeter Step 1 complete")
+    print("\n✓ SimpleCalorimeter Steps 1 & 2 complete")
     
     # Validate intermediate outputs against C++
     script_dir = Path(__file__).parent
-    cpp_debug_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions.csv"
+    cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions.csv"
+    cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits.csv"
     validation_dir = script_dir / "torch_delphes_validation" / "SimpleCalorimeter"
     validate_simple_cal(
-        particle_fractions, 
-        track_fractions, 
-        str(cpp_debug_file),
+        ecal_results, 
+        str(cpp_fractions_file),
+        str(cpp_towerhits_file),
         str(validation_dir)
     )
     
