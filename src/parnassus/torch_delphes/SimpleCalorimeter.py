@@ -96,9 +96,42 @@ class SimpleCalorimeter(nn.Module):
 
 
         ######## 2. Bin tracks into Towers ########
+        # Get track positions (eta, phi from Position, not Momentum)
+        track_eta = tracks[:, CMAP["ETA_OUTER"]]  # Position-based eta
+        track_phi = tracks[:, CMAP["PHI_OUTER"]]  # Position-based phi
+        
+        # Find eta bin for each track using searchsorted (equivalent to C++ lower_bound)
+        # searchsorted returns index where value would be inserted to maintain sorted order
+        # This gives us bin index in range [0, len(eta_bins)]
+        track_eta_bin = torch.searchsorted(self.eta_bins, track_eta)
+        track_phi_bin = torch.searchsorted(self.phi_bins, track_phi)
+        
+        # Filter tracks that fall outside valid bin range
+        # Valid bins are [1, len(bins)-1] (not at begin or end)
+        track_valid_eta = (track_eta_bin > 0) & (track_eta_bin < len(self.eta_bins))
+        track_valid_phi = (track_phi_bin > 0) & (track_phi_bin < len(self.phi_bins))
+        track_valid = track_valid_eta & track_valid_phi
+        
+        # Also filter tracks with zero energy fraction
+        track_valid = track_valid & (track_energy_fractions > 1e-9)
 
 
         ######## 3. Bin particles into Towers ########
+        # Get particle positions (eta, phi from Position, not Momentum)
+        particle_eta = particles[:, CMAP["ETA_OUTER"]]  # Position-based eta
+        particle_phi = particles[:, CMAP["PHI_OUTER"]]  # Position-based phi
+        
+        # Find eta/phi bin for each particle
+        particle_eta_bin = torch.searchsorted(self.eta_bins, particle_eta)
+        particle_phi_bin = torch.searchsorted(self.phi_bins, particle_phi)
+        
+        # Filter particles that fall outside valid bin range
+        particle_valid_eta = (particle_eta_bin > 0) & (particle_eta_bin < len(self.eta_bins))
+        particle_valid_phi = (particle_phi_bin > 0) & (particle_phi_bin < len(self.phi_bins))
+        particle_valid = particle_valid_eta & particle_valid_phi
+        
+        # Also filter particles with zero energy fraction
+        particle_valid = particle_valid & (particle_energy_fractions > 1e-9)
 
 
         ######## 4. Aggregate Energies per Tower ########
@@ -115,7 +148,18 @@ class SimpleCalorimeter(nn.Module):
 
         ######## 8. Identify Neutral Excess and Create eflow objects ########
 
-        return particle_energy_fractions, track_energy_fractions
+        # Return intermediate results for validation
+        # TODO: Update return signature once full pipeline is implemented
+        return {
+            'particle_energy_fractions': particle_energy_fractions,
+            'track_energy_fractions': track_energy_fractions,
+            'particle_eta_bin': particle_eta_bin,
+            'particle_phi_bin': particle_phi_bin,
+            'particle_valid': particle_valid,
+            'track_eta_bin': track_eta_bin,
+            'track_phi_bin': track_phi_bin,
+            'track_valid': track_valid,
+        }
 
         
     def _setup_fraction_lookup(self) -> None:
@@ -155,7 +199,7 @@ class SimpleCalorimeter(nn.Module):
         
         return fractions
     
-    
+
     @staticmethod
     def _ecal_cms_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
         """
