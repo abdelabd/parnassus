@@ -226,6 +226,38 @@ class SimpleCalorimeter(nn.Module):
 
 
         ######## 5. Compute Tower Centers ########
+        # C++:
+        #   fTowerEta = 0.5 * (fEtaBins[etaBin - 1] + fEtaBins[etaBin]);
+        #   fTowerPhi = 0.5 * ((*phiBins)[phiBin - 1] + (*phiBins)[phiBin]);
+        #   fTowerEdges[0] = fEtaBins[etaBin - 1];  // eta_lo
+        #   fTowerEdges[1] = fEtaBins[etaBin];       // eta_hi
+        #   fTowerEdges[2] = (*phiBins)[phiBin - 1]; // phi_lo
+        #   fTowerEdges[3] = (*phiBins)[phiBin];     // phi_hi
+        
+        # Compute tower eta centers and edges
+        # tower_eta_bin is in range [1, n_eta_bins-1] for valid towers
+        tower_eta_lo = self.eta_bins[tower_eta_bin - 1]
+        tower_eta_hi = self.eta_bins[tower_eta_bin]
+        tower_eta = 0.5 * (tower_eta_lo + tower_eta_hi)
+        
+        # Compute tower phi centers and edges (variable per eta bin)
+        # Need to loop over eta bins since phi bins differ
+        tower_phi = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_phi_lo = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_phi_hi = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        
+        for eb in range(1, len(self.eta_bins)):
+            mask = (tower_eta_bin == eb)
+            if not mask.any():
+                continue
+            
+            phi_bins_eb = self.phi_bins_per_eta[eb].to(particles.device)
+            pb = tower_phi_bin[mask]
+            
+            # phi_lo = phi_bins[phiBin - 1], phi_hi = phi_bins[phiBin]
+            tower_phi_lo[mask] = phi_bins_eb[pb - 1]
+            tower_phi_hi[mask] = phi_bins_eb[pb]
+            tower_phi[mask] = 0.5 * (phi_bins_eb[pb - 1] + phi_bins_eb[pb])
 
 
         ######## 6. Apply Resolution Smearing ########
@@ -255,6 +287,13 @@ class SimpleCalorimeter(nn.Module):
             'tower_energy': tower_energy,           # Sum of particle energies × fractions
             'tower_track_energy': tower_track_energy,  # Sum of track energies × fractions
             'max_phi_bins': max_phi_bins,
+            # Tower center and edge outputs
+            'tower_eta': tower_eta,
+            'tower_phi': tower_phi,
+            'tower_eta_lo': tower_eta_lo,
+            'tower_eta_hi': tower_eta_hi,
+            'tower_phi_lo': tower_phi_lo,
+            'tower_phi_hi': tower_phi_hi,
         }
 
     def _compute_phi_bins(self, 

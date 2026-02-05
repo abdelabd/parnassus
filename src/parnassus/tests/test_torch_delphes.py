@@ -405,6 +405,13 @@ def process_ecal_pipeline(
                 'tower_energy': result['tower_energy'].cpu(),
                 'tower_track_energy': result['tower_track_energy'].cpu(),
                 'max_phi_bins': result['max_phi_bins'],
+                # Step 5: Tower centers and edges
+                'tower_eta': result['tower_eta'].cpu(),
+                'tower_phi': result['tower_phi'].cpu(),
+                'tower_eta_lo': result['tower_eta_lo'].cpu(),
+                'tower_eta_hi': result['tower_eta_hi'].cpu(),
+                'tower_phi_lo': result['tower_phi_lo'].cpu(),
+                'tower_phi_hi': result['tower_phi_hi'].cpu(),
             })
     
     return {
@@ -909,6 +916,162 @@ def validate_simple_cal(
                 break
         
         print(f"  ✓ Step 4 validation complete.")
+    
+    # ============ Step 5: Validate Tower Centers ============
+    # Compare tower_eta, tower_phi, and tower edges against C++ debug output
+    print(f"\n  Step 5: Validating Tower Centers...")
+    
+    # Collect all torch tower positions for comparison
+    torch_tower_eta = np.concatenate([r['tower_eta'].numpy() for r in tower_results])
+    torch_tower_phi = np.concatenate([r['tower_phi'].numpy() for r in tower_results])
+    torch_eta_lo = np.concatenate([r['tower_eta_lo'].numpy() for r in tower_results])
+    torch_eta_hi = np.concatenate([r['tower_eta_hi'].numpy() for r in tower_results])
+    torch_phi_lo = np.concatenate([r['tower_phi_lo'].numpy() for r in tower_results])
+    torch_phi_hi = np.concatenate([r['tower_phi_hi'].numpy() for r in tower_results])
+    
+    # C++ tower positions from the tower energy file
+    cpp_tower_eta = cpp_towers_df['tower_eta'].values
+    cpp_tower_phi = cpp_towers_df['tower_phi'].values
+    cpp_eta_lo = cpp_towers_df['eta_lo'].values
+    cpp_eta_hi = cpp_towers_df['eta_hi'].values
+    cpp_phi_lo = cpp_towers_df['phi_lo'].values
+    cpp_phi_hi = cpp_towers_df['phi_hi'].values
+    
+    # Create comparison plots with ratio subplots
+    fig = plt.figure(figsize=(16, 12))
+    
+    # ===== Tower eta comparison with ratio =====
+    ax_eta_main = fig.add_axes([0.05, 0.72, 0.28, 0.22])
+    ax_eta_ratio = fig.add_axes([0.05, 0.58, 0.28, 0.10])
+    
+    eta_bins = np.linspace(-5, 5, 100)
+    cpp_eta_counts, _ = np.histogram(cpp_tower_eta, bins=eta_bins)
+    torch_eta_counts, _ = np.histogram(torch_tower_eta, bins=eta_bins)
+    
+    ax_eta_main.hist(cpp_tower_eta, bins=eta_bins, histtype='stepfilled', color='orange', alpha=0.5,
+            label=f'C++ Delphes ({len(cpp_tower_eta)})')
+    ax_eta_main.hist(torch_tower_eta, bins=eta_bins, histtype='step', color='blue', linewidth=2,
+            label=f'TorchDelphes ({len(torch_tower_eta)})')
+    ax_eta_main.set_ylabel('Counts', fontsize=12)
+    ax_eta_main.set_title('Tower Eta Distribution', fontsize=14)
+    ax_eta_main.legend(fontsize=9)
+    ax_eta_main.grid(True, alpha=0.3)
+    ax_eta_main.set_xticklabels([])
+    
+    # Ratio subplot
+    eta_bin_centers = 0.5 * (eta_bins[:-1] + eta_bins[1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        eta_ratio = np.where(cpp_eta_counts > 0, torch_eta_counts / cpp_eta_counts, np.nan)
+    valid_eta_ratio = ~np.isnan(eta_ratio)
+    ax_eta_ratio.scatter(eta_bin_centers[valid_eta_ratio], eta_ratio[valid_eta_ratio], s=10, c='purple', alpha=0.7)
+    ax_eta_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+    ax_eta_ratio.set_xlabel('Tower Eta', fontsize=12)
+    ax_eta_ratio.set_ylabel('Torch/C++', fontsize=10)
+    ax_eta_ratio.set_ylim(0.5, 1.5)
+    ax_eta_ratio.grid(True, alpha=0.3)
+    
+    # ===== Tower phi comparison with ratio =====
+    ax_phi_main = fig.add_axes([0.38, 0.72, 0.28, 0.22])
+    ax_phi_ratio = fig.add_axes([0.38, 0.58, 0.28, 0.10])
+    
+    phi_bins = np.linspace(-np.pi, np.pi, 100)
+    cpp_phi_counts, _ = np.histogram(cpp_tower_phi, bins=phi_bins)
+    torch_phi_counts, _ = np.histogram(torch_tower_phi, bins=phi_bins)
+    
+    ax_phi_main.hist(cpp_tower_phi, bins=phi_bins, histtype='stepfilled', color='orange', alpha=0.5,
+            label=f'C++ Delphes')
+    ax_phi_main.hist(torch_tower_phi, bins=phi_bins, histtype='step', color='blue', linewidth=2,
+            label=f'TorchDelphes')
+    ax_phi_main.set_ylabel('Counts', fontsize=12)
+    ax_phi_main.set_title('Tower Phi Distribution', fontsize=14)
+    ax_phi_main.legend(fontsize=9)
+    ax_phi_main.grid(True, alpha=0.3)
+    ax_phi_main.set_xticklabels([])
+    
+    # Ratio subplot
+    phi_bin_centers = 0.5 * (phi_bins[:-1] + phi_bins[1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        phi_ratio = np.where(cpp_phi_counts > 0, torch_phi_counts / cpp_phi_counts, np.nan)
+    valid_phi_ratio = ~np.isnan(phi_ratio)
+    ax_phi_ratio.scatter(phi_bin_centers[valid_phi_ratio], phi_ratio[valid_phi_ratio], s=10, c='purple', alpha=0.7)
+    ax_phi_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+    ax_phi_ratio.set_xlabel('Tower Phi', fontsize=12)
+    ax_phi_ratio.set_ylabel('Torch/C++', fontsize=10)
+    ax_phi_ratio.set_ylim(0.5, 1.5)
+    ax_phi_ratio.grid(True, alpha=0.3)
+    
+    # ===== 2D eta-phi scatter (sample to avoid too many points) =====
+    ax_2d = fig.add_axes([0.71, 0.58, 0.26, 0.36])
+    n_sample = min(5000, len(cpp_tower_eta), len(torch_tower_eta))
+    cpp_idx = np.random.choice(len(cpp_tower_eta), n_sample, replace=False) if len(cpp_tower_eta) > n_sample else np.arange(len(cpp_tower_eta))
+    torch_idx = np.random.choice(len(torch_tower_eta), n_sample, replace=False) if len(torch_tower_eta) > n_sample else np.arange(len(torch_tower_eta))
+    ax_2d.scatter(cpp_tower_eta[cpp_idx], cpp_tower_phi[cpp_idx], s=5, alpha=0.3, c='orange', label='C++')
+    ax_2d.scatter(torch_tower_eta[torch_idx], torch_tower_phi[torch_idx], s=5, alpha=0.3, c='blue', label='Torch')
+    ax_2d.set_xlabel('Tower Eta', fontsize=12)
+    ax_2d.set_ylabel('Tower Phi', fontsize=12)
+    ax_2d.set_title('Tower Eta-Phi Distribution', fontsize=14)
+    ax_2d.legend(fontsize=9)
+    ax_2d.grid(True, alpha=0.3)
+    
+    # ===== Eta comparison scatter (sorted values) =====
+    ax_eta_scatter = fig.add_axes([0.05, 0.08, 0.26, 0.38])
+    torch_eta_sorted = np.sort(torch_tower_eta)
+    cpp_eta_sorted = np.sort(cpp_tower_eta)
+    min_len = min(len(torch_eta_sorted), len(cpp_eta_sorted))
+    ax_eta_scatter.scatter(cpp_eta_sorted[:min_len], torch_eta_sorted[:min_len], s=5, alpha=0.5, c='purple')
+    ax_eta_scatter.plot([-5, 5], [-5, 5], 'r--', linewidth=2, label='y=x')
+    ax_eta_scatter.set_xlabel('C++ Tower Eta (sorted)', fontsize=12)
+    ax_eta_scatter.set_ylabel('TorchDelphes Tower Eta (sorted)', fontsize=12)
+    ax_eta_scatter.set_title('Tower Eta Comparison', fontsize=14)
+    ax_eta_scatter.legend(fontsize=9)
+    ax_eta_scatter.grid(True, alpha=0.3)
+    ax_eta_scatter.set_aspect('equal', adjustable='box')
+    
+    # ===== Phi comparison scatter (sorted values) =====
+    ax_phi_scatter = fig.add_axes([0.38, 0.08, 0.26, 0.38])
+    torch_phi_sorted = np.sort(torch_tower_phi)
+    cpp_phi_sorted = np.sort(cpp_tower_phi)
+    min_len = min(len(torch_phi_sorted), len(cpp_phi_sorted))
+    ax_phi_scatter.scatter(cpp_phi_sorted[:min_len], torch_phi_sorted[:min_len], s=5, alpha=0.5, c='purple')
+    ax_phi_scatter.plot([-np.pi, np.pi], [-np.pi, np.pi], 'r--', linewidth=2, label='y=x')
+    ax_phi_scatter.set_xlabel('C++ Tower Phi (sorted)', fontsize=12)
+    ax_phi_scatter.set_ylabel('TorchDelphes Tower Phi (sorted)', fontsize=12)
+    ax_phi_scatter.set_title('Tower Phi Comparison', fontsize=14)
+    ax_phi_scatter.legend(fontsize=9)
+    ax_phi_scatter.grid(True, alpha=0.3)
+    ax_phi_scatter.set_aspect('equal', adjustable='box')
+    
+    # ===== Unique tower center positions summary =====
+    ax_summary = fig.add_axes([0.71, 0.08, 0.26, 0.38])
+    torch_unique_centers = set(zip(np.round(torch_tower_eta, 4), np.round(torch_tower_phi, 4)))
+    cpp_unique_centers = set(zip(np.round(cpp_tower_eta, 4), np.round(cpp_tower_phi, 4)))
+    common = torch_unique_centers & cpp_unique_centers
+    torch_only = torch_unique_centers - cpp_unique_centers
+    cpp_only = cpp_unique_centers - torch_unique_centers
+    
+    ax_summary.text(0.5, 0.8, f'Unique tower positions:', transform=ax_summary.transAxes, fontsize=12, ha='center', fontweight='bold')
+    ax_summary.text(0.5, 0.65, f'C++ Delphes: {len(cpp_unique_centers)}', transform=ax_summary.transAxes, fontsize=11, ha='center', color='orange')
+    ax_summary.text(0.5, 0.52, f'TorchDelphes: {len(torch_unique_centers)}', transform=ax_summary.transAxes, fontsize=11, ha='center', color='blue')
+    ax_summary.text(0.5, 0.39, f'Common: {len(common)}', transform=ax_summary.transAxes, fontsize=11, ha='center', color='green')
+    ax_summary.text(0.5, 0.26, f'C++ only: {len(cpp_only)}', transform=ax_summary.transAxes, fontsize=11, ha='center', color='red')
+    ax_summary.text(0.5, 0.13, f'Torch only: {len(torch_only)}', transform=ax_summary.transAxes, fontsize=11, ha='center', color='purple')
+    ax_summary.set_xlim(0, 1)
+    ax_summary.set_ylim(0, 1)
+    ax_summary.axis('off')
+    ax_summary.set_title('Tower Position Summary', fontsize=14)
+    plot_file = output_dir / "tower_centers.png"
+    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Saved {plot_file}")
+    
+    # Print statistics
+    print(f"\n  Tower Center Statistics:")
+    print(f"    TorchDelphes: eta range=[{torch_tower_eta.min():.4f}, {torch_tower_eta.max():.4f}], "
+          f"phi range=[{torch_tower_phi.min():.4f}, {torch_tower_phi.max():.4f}]")
+    print(f"    C++ Delphes:  eta range=[{cpp_tower_eta.min():.4f}, {cpp_tower_eta.max():.4f}], "
+          f"phi range=[{cpp_tower_phi.min():.4f}, {cpp_tower_phi.max():.4f}]")
+    
+    print(f"  ✓ Step 5 validation complete.")
     
     print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
 
