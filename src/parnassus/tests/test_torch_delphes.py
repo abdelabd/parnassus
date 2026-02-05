@@ -289,27 +289,58 @@ def process_ecal_pipeline(
         3122: 0.3,     # Lambda
     }
     
-    # Create eta and phi bins from CMS card
-    # Barrel: |eta| < 1.5, 0.02 x 0.02 resolution
-    eta_bins_barrel = [i * 0.0174 for i in range(-85, 87)]  # -1.479 to 1.496
+    # Create eta and phi bins from CMS card (delphes_card_CMS_5_0.tcl)
+    # The card builds a map: eta_value -> set of phi bins
+    # We need to replicate this exactly
     
-    # Endcap: 1.5 < |eta| < 3.0, 0.02 x 0.02 resolution
-    eta_bins_endcap_neg = [-2.958 + i * 0.0174 for i in range(1, 85)]  # -2.941 to 1.479
-    eta_bins_endcap_pos = [1.4964 + i * 0.0174 for i in range(1, 85)]  # 1.514 to 2.958
+    # Fine phi bins for barrel and endcap (361 bins, -pi to pi in 1 degree steps)
+    phi_bins_fine = [i * np.pi / 180.0 for i in range(-180, 181)]
     
-    # HF: 3.0 < |eta| < 5.0
-    eta_bins_hf = [-5, -4.7, -4.525, -4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.958,
-                   3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525, 4.7, 5]
+    # Coarse phi bins for HF (37 bins, -pi to pi in 10 degree steps)
+    phi_bins_coarse = [i * np.pi / 18.0 for i in range(-18, 19)]
     
-    # Combine all eta bins (sorted)
-    eta_bins = sorted(set(eta_bins_hf + eta_bins_endcap_neg + eta_bins_barrel + eta_bins_endcap_pos))
+    # Build the eta bins and corresponding phi bins exactly as C++ Delphes does
+    # The C++ code uses a map<double, set<double>> which gets sorted by eta
+    # Then converts to parallel vectors: fEtaBins and fPhiBins[etaBin]
     
-    # Phi bins: uniform from -pi to pi (same for all eta bins; TODO: Make this variable for HF region)
-    phi_bins = [i * np.pi / 180.0 for i in range(-180, 181)]
+    eta_phi_map = {}  # eta -> set of phi bin edges
+    
+    # Barrel: 0.02 unit in eta from -85*0.0174 to 86*0.0174
+    for i in range(-85, 87):
+        eta = i * 0.0174
+        if eta not in eta_phi_map:
+            eta_phi_map[eta] = set()
+        eta_phi_map[eta].update(phi_bins_fine)
+    
+    # Endcap negative: -2.958 + i*0.0174 for i in 1..84
+    for i in range(1, 85):
+        eta = -2.958 + i * 0.0174
+        if eta not in eta_phi_map:
+            eta_phi_map[eta] = set()
+        eta_phi_map[eta].update(phi_bins_fine)
+    
+    # Endcap positive: 1.4964 + i*0.0174 for i in 1..84
+    for i in range(1, 85):
+        eta = 1.4964 + i * 0.0174
+        if eta not in eta_phi_map:
+            eta_phi_map[eta] = set()
+        eta_phi_map[eta].update(phi_bins_fine)
+    
+    # HF: specific eta values with coarse phi binning
+    hf_etas = [-5, -4.7, -4.525, -4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.958,
+               3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525, 4.7, 5]
+    for eta in hf_etas:
+        if eta not in eta_phi_map:
+            eta_phi_map[eta] = set()
+        eta_phi_map[eta].update(phi_bins_coarse)
+    
+    # Convert to sorted lists (matching C++ behavior)
+    eta_bins = sorted(eta_phi_map.keys())
+    phi_bins_per_eta = [sorted(eta_phi_map[eta]) for eta in eta_bins]
 
     calo = SimpleCalorimeter(
         eta_bins=eta_bins,
-        phi_bins=phi_bins,
+        phi_bins=phi_bins_per_eta,
         energy_min=0.5,
         energy_sig_min=2.0,
         energy_fractions=energy_fractions,
@@ -325,6 +356,19 @@ def process_ecal_pipeline(
     track_eta_bins_list = []
     track_phi_bins_list = []
     track_valid_list = []
+    
+    # Debug: Check track ETA_OUTER/PHI_OUTER values before processing
+    print("\nDEBUG: Checking track ETA_OUTER/PHI_OUTER values...")
+    all_tracks = torch.cat(merged_tracks, dim=0)
+    track_eta_outer = all_tracks[:, CMAP["ETA_OUTER"]]
+    track_phi_outer = all_tracks[:, CMAP["PHI_OUTER"]]
+    print(f"  Total tracks: {len(all_tracks)}")
+    print(f"  Track ETA_OUTER range: [{track_eta_outer.min().item():.4f}, {track_eta_outer.max().item():.4f}]")
+    print(f"  Track PHI_OUTER range: [{track_phi_outer.min().item():.4f}, {track_phi_outer.max().item():.4f}]")
+    print(f"  Tracks with ETA_OUTER == 0: {(track_eta_outer == 0).sum().item()}")
+    print(f"  Tracks with PHI_OUTER == 0: {(track_phi_outer == 0).sum().item()}")
+    print(f"  Tracks with |ETA_OUTER| < 5.0: {(track_eta_outer.abs() < 5.0).sum().item()}")
+    print(f"  Tracks with |ETA_OUTER| < 3.0: {(track_eta_outer.abs() < 3.0).sum().item()}")
     
     print("\nSimpleCalorimeter: Computing energy fractions and binning...")
     for batch_particles, batch_tracks in zip(pap_tensors, merged_tracks):
@@ -520,6 +564,14 @@ def validate_simple_cal(
         print(f"  C++ Delphes valid particles:  {cpp_valid_particles}")
         print(f"  TorchDelphes valid tracks:    {torch_valid_tracks}")
         print(f"  C++ Delphes valid tracks:     {cpp_valid_tracks}")
+        
+        # Debug: Print track eta/phi bin ranges and distributions
+        print(f"\n  DEBUG Track binning:")
+        print(f"    Track eta_bin range: [{track_eta_bins.min().item():.0f}, {track_eta_bins.max().item():.0f}]")
+        print(f"    Track phi_bin range: [{track_phi_bins.min().item():.0f}, {track_phi_bins.max().item():.0f}]")
+        print(f"    Total tracks: {len(track_valid)}")
+        print(f"    Tracks with valid eta bin: {((track_eta_bins > 0) & (track_eta_bins < 260)).sum().item()}")
+        print(f"    Tracks with valid phi bin: {((track_phi_bins > 0) & (track_phi_bins < 361)).sum().item()}")
         
         # Check if counts match
         if torch_valid_particles != cpp_valid_particles:
