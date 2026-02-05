@@ -417,6 +417,16 @@ def process_ecal_pipeline(
                 'tower_energy_smeared': result['tower_energy_smeared'].cpu(),
                 'sigma_after': result['sigma_after'].cpu(),
                 'tower_energy_final': result['tower_energy_final'].cpu(),
+                # Step 7: Track sigma per tower
+                'tower_track_sigma': result['tower_track_sigma'].cpu(),
+                'track_momentum_resolution': result['track_momentum_resolution'].cpu(),
+                'track_tower_eta': result['track_tower_eta'].cpu(),
+                'track_calo_sigma': result['track_calo_sigma'].cpu(),
+                'track_energy_guess': result['track_energy_guess'].cpu(),
+                'track_sigma_sq': result['track_sigma_sq'].cpu(),
+                'track_sigma_valid': result['track_sigma_valid'].cpu(),
+                'track_compact_idx': result['track_compact_idx'].cpu(),
+                'track_energy': result['track_energy'].cpu(),
             })
     
     return {
@@ -436,6 +446,9 @@ def validate_simple_cal(
     cpp_fractions_file: str,
     cpp_towerhits_file: str,
     cpp_towerenergy_file: str,
+    cpp_smearing_file: str,
+    cpp_pertrack_file: str,
+    cpp_tracksigma_file: str,
     output_dir: str,
 ) -> None:
     """
@@ -1083,8 +1096,7 @@ def validate_simple_cal(
     print(f"\n  Step 6: Validating Resolution Smearing...")
     
     # Load C++ smearing debug output
-    cpp_smearing_file = Path(cpp_towerhits_file).parent / "smearing_100.csv"
-    if not cpp_smearing_file.exists():
+    if not Path(cpp_smearing_file).exists():
         print(f"  ⚠ C++ smearing debug file not found: {cpp_smearing_file}")
         print(f"  ⚠ Skipping Step 6 validation. Please recompile and re-run C++ Delphes.")
         print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
@@ -1299,6 +1311,299 @@ Ratios (Torch/C++):
     print(f"    Torch: {torch_n_smeared} → {torch_n_final} towers ({torch_n_zeroed} zeroed)")
     
     print(f"  ✓ Step 6 validation complete.")
+    
+    # ============ Step 7: Validate Track Sigma per Tower ============
+    # Compare per-track sigma contributions against C++ debug output
+    print(f"\n  Step 7: Validating Track Sigma per Tower...")
+    
+    # Load C++ per-track sigma debug output
+    cpp_pertrack_file = Path(cpp_pertrack_file)
+    if not Path(cpp_pertrack_file).exists():
+        print(f"  ⚠ C++ per-track debug file not found: {cpp_pertrack_file}")
+        print(f"  ⚠ Skipping Step 7 validation. Please recompile and re-run C++ Delphes.")
+        print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
+        return
+    
+    cpp_pertrack_df = pd.read_csv(cpp_pertrack_file)
+    print(f"  Loaded {len(cpp_pertrack_df)} C++ per-track records from {cpp_pertrack_file}")
+    
+    # Collect TorchDelphes track sigma results
+    # We need to gather per-track data from results
+    torch_track_energy = []
+    torch_track_resolution = []
+    torch_track_tower_eta = []
+    torch_track_calo_sigma = []
+    torch_track_energy_guess = []
+    torch_track_sigma_sq = []
+    
+    for r in tower_results:
+        track_sigma_valid = r['track_sigma_valid'].numpy()
+        if track_sigma_valid.any():
+            torch_track_energy.append(r['track_energy'][track_sigma_valid].numpy())
+            torch_track_resolution.append(r['track_momentum_resolution'][track_sigma_valid].numpy())
+            torch_track_tower_eta.append(r['track_tower_eta'][track_sigma_valid].numpy())
+            torch_track_calo_sigma.append(r['track_calo_sigma'][track_sigma_valid].numpy())
+            torch_track_energy_guess.append(r['track_energy_guess'][track_sigma_valid].numpy())
+            torch_track_sigma_sq.append(r['track_sigma_sq'][track_sigma_valid].numpy())
+    
+    if len(torch_track_energy) > 0:
+        torch_track_energy = np.concatenate(torch_track_energy)
+        torch_track_resolution = np.concatenate(torch_track_resolution)
+        torch_track_tower_eta = np.concatenate(torch_track_tower_eta)
+        torch_track_calo_sigma = np.concatenate(torch_track_calo_sigma)
+        torch_track_energy_guess = np.concatenate(torch_track_energy_guess)
+        torch_track_sigma_sq = np.concatenate(torch_track_sigma_sq)
+    else:
+        torch_track_energy = np.array([])
+        torch_track_resolution = np.array([])
+        torch_track_tower_eta = np.array([])
+        torch_track_calo_sigma = np.array([])
+        torch_track_energy_guess = np.array([])
+        torch_track_sigma_sq = np.array([])
+    
+    # C++ per-track data
+    cpp_track_energy = cpp_pertrack_df['track_energy'].values
+    cpp_track_resolution = cpp_pertrack_df['track_resolution'].values
+    cpp_track_tower_eta = cpp_pertrack_df['tower_eta'].values
+    cpp_track_calo_sigma = cpp_pertrack_df['calo_sigma'].values
+    cpp_track_energy_guess = cpp_pertrack_df['energy_guess'].values
+    cpp_track_sigma_sq = cpp_pertrack_df['sigma_sq_contrib'].values
+    
+    print(f"\n  Per-Track Sigma Statistics:")
+    print(f"    TorchDelphes: {len(torch_track_energy)} valid tracks")
+    print(f"    C++ Delphes:  {len(cpp_track_energy)} valid tracks")
+    
+    # Create validation plots
+    fig = plt.figure(figsize=(20, 16))
+    
+    # ===== Row 1: Track energy and resolution comparison =====
+    # Plot 1: Track energy distribution
+    ax1 = fig.add_subplot(4, 2, 1)
+    bins = np.linspace(0, min(cpp_track_energy.max(), 200), 50)
+    cpp_hist, bin_edges = np.histogram(cpp_track_energy, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_energy, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    ax1.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
+    ax1.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax1.set_xlabel('Track Energy [GeV]')
+    ax1.set_ylabel('Count')
+    ax1.set_title('Track Energy Distribution')
+    ax1.legend()
+    ax1.set_yscale('log')
+    
+    # Plot 2: Track momentum resolution distribution
+    ax2 = fig.add_subplot(4, 2, 2)
+    bins = np.linspace(0, 0.1, 50)
+    cpp_hist, bin_edges = np.histogram(cpp_track_resolution, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_resolution, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    ax2.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
+    ax2.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax2.set_xlabel('Track Resolution (σ/pT)')
+    ax2.set_ylabel('Count')
+    ax2.set_title('Track Momentum Resolution Distribution')
+    ax2.legend()
+    
+    # ===== Row 2: Calo sigma and tower eta =====
+    # Plot 3: Calorimeter sigma with ratio
+    ax3 = fig.add_subplot(4, 2, 3)
+    ax3_ratio = ax3.inset_axes([0, -0.35, 1, 0.3])
+    bins = np.linspace(0, min(cpp_track_calo_sigma.max(), 20), 50)
+    cpp_hist, bin_edges = np.histogram(cpp_track_calo_sigma, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_calo_sigma, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    ax3.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
+    ax3.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax3.set_xlabel('Calorimeter Sigma [GeV]')
+    ax3.set_ylabel('Count')
+    ax3.set_title('Calorimeter Resolution at Tower η')
+    ax3.legend()
+    ax3.set_yscale('log')
+    # Ratio
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
+    ax3_ratio.step(bin_centers, ratio, where='mid', color='black')
+    ax3_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
+    ax3_ratio.set_ylim(0.5, 1.5)
+    ax3_ratio.set_xlabel('Calorimeter Sigma [GeV]')
+    ax3_ratio.set_ylabel('Ratio')
+    
+    # Plot 4: Tower eta for tracks
+    ax4 = fig.add_subplot(4, 2, 4)
+    bins = np.linspace(-5, 5, 50)
+    cpp_hist, bin_edges = np.histogram(cpp_track_tower_eta, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_tower_eta, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    ax4.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
+    ax4.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax4.set_xlabel('Tower η')
+    ax4.set_ylabel('Count')
+    ax4.set_title('Tower η for Valid Tracks')
+    ax4.legend()
+    
+    # ===== Row 3: Energy guess comparison =====
+    # Plot 5: Energy guess distribution with ratio
+    ax5 = fig.add_subplot(4, 2, 5)
+    ax5_ratio = ax5.inset_axes([0, -0.35, 1, 0.3])
+    bins = np.linspace(0, min(cpp_track_energy_guess.max(), 200), 50)
+    cpp_hist, bin_edges = np.histogram(cpp_track_energy_guess, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_energy_guess, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    ax5.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
+    ax5.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax5.set_xlabel('Energy Guess [GeV]')
+    ax5.set_ylabel('Count')
+    ax5.set_title('Track Energy Guess (based on resolution comparison)')
+    ax5.legend()
+    ax5.set_yscale('log')
+    # Ratio
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
+    ax5_ratio.step(bin_centers, ratio, where='mid', color='black')
+    ax5_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
+    ax5_ratio.set_ylim(0.5, 1.5)
+    ax5_ratio.set_xlabel('Energy Guess [GeV]')
+    ax5_ratio.set_ylabel('Ratio')
+    
+    # Plot 6: Sigma^2 contribution per track with ratio
+    ax6 = fig.add_subplot(4, 2, 6)
+    ax6_ratio = ax6.inset_axes([0, -0.35, 1, 0.3])
+    bins = np.logspace(-2, 4, 50)
+    cpp_hist, bin_edges = np.histogram(cpp_track_sigma_sq, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_sigma_sq, bins=bins)
+    bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])  # geometric mean for log bins
+    ax6.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
+    ax6.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax6.set_xlabel('σ² Contribution')
+    ax6.set_ylabel('Count')
+    ax6.set_title('Per-Track Sigma² Contribution')
+    ax6.legend()
+    ax6.set_xscale('log')
+    ax6.set_yscale('log')
+    # Ratio
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
+    ax6_ratio.step(bin_centers, ratio, where='mid', color='black')
+    ax6_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
+    ax6_ratio.set_ylim(0.5, 1.5)
+    ax6_ratio.set_xscale('log')
+    ax6_ratio.set_xlabel('σ² Contribution')
+    ax6_ratio.set_ylabel('Ratio')
+    
+    # ===== Row 4: Tower-level track sigma =====
+    # Aggregate tower track sigma
+    torch_tower_track_sigma = np.concatenate([r['tower_track_sigma'].numpy() for r in tower_results])
+    
+    # Load C++ tower-level track sigma debug output
+    has_cpp_tracksigma = Path(cpp_tracksigma_file).exists()
+    if has_cpp_tracksigma:
+        cpp_tracksigma_df = pd.read_csv(cpp_tracksigma_file)
+        cpp_tower_track_sigma = cpp_tracksigma_df['track_sigma'].values
+        cpp_tower_track_energy_agg = cpp_tracksigma_df['track_energy'].values
+        print(f"  Loaded {len(cpp_tracksigma_df)} C++ tower-level track sigma records")
+    else:
+        print(f"  ⚠ C++ tower-level track sigma file not found: {cpp_tracksigma_file}")
+        cpp_tower_track_sigma = np.array([])
+    
+    # Plot 7: Tower track sigma distribution with ratio
+    ax7 = fig.add_subplot(4, 2, 7)
+    ax7_ratio = ax7.inset_axes([0, -0.35, 1, 0.3])
+    
+    bins = np.logspace(-2, 3, 50)
+    torch_hist, bin_edges = np.histogram(torch_tower_track_sigma[torch_tower_track_sigma > 0], bins=bins)
+    bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
+    
+    if has_cpp_tracksigma and len(cpp_tower_track_sigma) > 0:
+        cpp_hist, _ = np.histogram(cpp_tower_track_sigma[cpp_tower_track_sigma > 0], bins=bins)
+        ax7.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
+        ax7.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+        # Ratio
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
+        ax7_ratio.step(bin_centers, ratio, where='mid', color='black')
+        ax7_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
+        ax7_ratio.set_ylim(0.5, 1.5)
+    else:
+        ax7.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+        ax7_ratio.text(0.5, 0.5, 'No C++ tower-level data', 
+                       ha='center', va='center', transform=ax7_ratio.transAxes)
+    
+    ax7.set_xlabel('Tower Track Sigma [GeV]')
+    ax7.set_ylabel('Count')
+    ax7.set_title('Tower Track Sigma (√Σσ²)')
+    ax7.legend()
+    ax7.set_xscale('log')
+    ax7.set_yscale('log')
+    ax7_ratio.set_xlim(bins[0], bins[-1])
+    ax7_ratio.set_xscale('log')
+    ax7_ratio.set_xlabel('Tower Track Sigma [GeV]')
+    ax7_ratio.set_ylabel('Ratio')
+    
+    # Plot 8: Statistics text
+    ax8 = fig.add_subplot(4, 2, 8)
+    ax8.axis('off')
+    
+    # Compute statistics
+    torch_n_tracks = len(torch_track_energy)
+    cpp_n_tracks = len(cpp_track_energy)
+    
+    # How many use weighted vs full energy?
+    cpp_use_weighted = np.sum(cpp_track_calo_sigma / cpp_track_energy < cpp_track_resolution)
+    torch_use_weighted = np.sum(torch_track_calo_sigma / (torch_track_energy + 1e-30) < torch_track_resolution)
+    
+    # Tower-level stats
+    torch_n_towers_with_tracks = np.sum(torch_tower_track_sigma > 0)
+    torch_mean_tower_sigma = torch_tower_track_sigma[torch_tower_track_sigma > 0].mean() if torch_n_towers_with_tracks > 0 else 0
+    
+    if has_cpp_tracksigma and len(cpp_tower_track_sigma) > 0:
+        cpp_n_towers_with_tracks = np.sum(cpp_tower_track_sigma > 0)
+        cpp_mean_tower_sigma = cpp_tower_track_sigma[cpp_tower_track_sigma > 0].mean() if cpp_n_towers_with_tracks > 0 else 0
+        tower_sigma_text = f"""
+Tower-level Track Sigma:
+  Towers with tracks:
+    C++: {cpp_n_towers_with_tracks}, Torch: {torch_n_towers_with_tracks}
+  Mean tower track sigma:
+    C++: {cpp_mean_tower_sigma:.4f}, Torch: {torch_mean_tower_sigma:.4f}"""
+    else:
+        tower_sigma_text = f"""
+Tower-level Track Sigma:
+  Towers with tracks: {torch_n_towers_with_tracks}
+  Mean tower track sigma: {torch_mean_tower_sigma:.4f}
+  (No C++ data for comparison)"""
+    
+    stats_text = f"""Track Sigma Statistics (Step 7)
+    
+Tracks with valid sigma:
+  C++: {cpp_n_tracks}
+  Torch: {torch_n_tracks}
+  
+Energy Guess Selection:
+  Using weighted E (calo σ/E < track res):
+    C++: {cpp_use_weighted} ({100*cpp_use_weighted/cpp_n_tracks:.1f}%)
+    Torch: {torch_use_weighted} ({100*torch_use_weighted/torch_n_tracks:.1f}%)
+  Using full E:
+    C++: {cpp_n_tracks - cpp_use_weighted} ({100*(cpp_n_tracks-cpp_use_weighted)/cpp_n_tracks:.1f}%)
+    Torch: {torch_n_tracks - torch_use_weighted} ({100*(torch_n_tracks-torch_use_weighted)/torch_n_tracks:.1f}%)
+
+Mean per-track values:
+  Track Energy: C++={cpp_track_energy.mean():.2f}, Torch={torch_track_energy.mean():.2f}
+  Calo Sigma: C++={cpp_track_calo_sigma.mean():.4f}, Torch={torch_track_calo_sigma.mean():.4f}
+  Energy Guess: C++={cpp_track_energy_guess.mean():.2f}, Torch={torch_track_energy_guess.mean():.2f}
+  σ² Contrib: C++={cpp_track_sigma_sq.mean():.2f}, Torch={torch_track_sigma_sq.mean():.2f}
+{tower_sigma_text}
+"""
+    ax8.text(0.05, 0.95, stats_text, transform=ax8.transAxes, fontsize=10,
+             verticalalignment='top', fontfamily='monospace')
+    
+    plt.tight_layout()
+    plt.subplots_adjust(hspace=0.5)
+    
+    plot_file = output_dir / "track_sigma.png"
+    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Saved {plot_file}")
+    
+    print(f"  ✓ Step 7 validation complete.")
     
     print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
 
@@ -1908,10 +2213,16 @@ def main(
         cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_100.csv"
         cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_100.csv"
         cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_100.csv"
+        cpp_smearing_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "smearing_100.csv"
+        cpp_pertrack_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "pertrack_100.csv"
+        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "track_sigma_100.csv"
     elif len(expected_event_nums) == 1000:
-        cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_1000.csv"
-        cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_1000.csv"
-        cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_1000.csv"
+        cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_1k.csv"
+        cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_1k.csv"
+        cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_1k.csv"
+        cpp_smearing_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "smearing_1k.csv"
+        cpp_pertrack_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "pertrack_1k.csv"
+        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "track_sigma_1k.csv"
     else: raise FileNotFoundError("expected_event_nums must be 100 or 1000 for validation")
     validation_dir = script_dir / "torch_delphes_validation" / "SimpleCalorimeter"
     validate_simple_cal(
@@ -1919,6 +2230,9 @@ def main(
         str(cpp_fractions_file),
         str(cpp_towerhits_file),
         str(cpp_towerenergy_file),
+        str(cpp_smearing_file),
+        str(cpp_pertrack_file),
+        str(cpp_tracksigma_file),
         str(validation_dir)
     )
     

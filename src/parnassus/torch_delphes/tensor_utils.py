@@ -44,6 +44,7 @@ PASS_PROP = 19
 PASS_ECAL_TOWER = 20  # Column index for ECal tower mask
 PASS_EFLOW_TRACK = 21  # Column index for energy flow track mask
 PASS_EFLOW_PHOTON = 22  # Column index for energy flow photon mask
+TRACK_RESOLUTION = 23  # Track momentum resolution (set by MomentumSmearing module)
 
 COLUMN_MAP = {
     "PID": PID,
@@ -68,7 +69,8 @@ COLUMN_MAP = {
     "PASS_PROP": PASS_PROP,
     "PASS_ECAL_TOWER": PASS_ECAL_TOWER,
     "PASS_EFLOW_TRACK": PASS_EFLOW_TRACK,
-    "PASS_EFLOW_PHOTON": PASS_EFLOW_PHOTON
+    "PASS_EFLOW_PHOTON": PASS_EFLOW_PHOTON,
+    "TRACK_RESOLUTION": TRACK_RESOLUTION
 }
 
 # Number of features per particle

@@ -107,6 +107,9 @@ class MomentumSmearing(nn.Module):
         resolution = self.resolution_func(pt, eta_outer)
         resolution = torch.clamp(resolution, max=1.0)
         
+        # Store the track resolution for use in SimpleCalorimeter
+        particles[:, CMAP["TRACK_RESOLUTION"]] = resolution
+        
         # Apply smearing using log-normal distribution
         smeared_pt = log_normal_sample(pt, resolution)
         
