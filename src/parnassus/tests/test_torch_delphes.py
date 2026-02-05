@@ -356,6 +356,7 @@ def process_ecal_pipeline(
     track_eta_bins_list = []
     track_phi_bins_list = []
     track_valid_list = []
+    tower_results_list = []
     
     # Debug: Check track ETA_OUTER/PHI_OUTER values before processing
     print("\nDEBUG: Checking track ETA_OUTER/PHI_OUTER values...")
@@ -395,6 +396,16 @@ def process_ecal_pipeline(
             track_eta_bins_list.append(result['track_eta_bin'].cpu())
             track_phi_bins_list.append(result['track_phi_bin'].cpu())
             track_valid_list.append(result['track_valid'].cpu())
+            
+            # Collect Step 4 results (tower aggregation)
+            tower_results_list.append({
+                'n_towers': result['n_towers'],
+                'tower_eta_bin': result['tower_eta_bin'].cpu(),
+                'tower_phi_bin': result['tower_phi_bin'].cpu(),
+                'tower_energy': result['tower_energy'].cpu(),
+                'tower_track_energy': result['tower_track_energy'].cpu(),
+                'max_phi_bins': result['max_phi_bins'],
+            })
     
     return {
         'particle_fractions': particle_fractions_list,
@@ -405,16 +416,18 @@ def process_ecal_pipeline(
         'track_eta_bins': track_eta_bins_list,
         'track_phi_bins': track_phi_bins_list,
         'track_valid': track_valid_list,
+        'tower_results': tower_results_list,
     }
 
 def validate_simple_cal(
     ecal_results: Dict,
     cpp_fractions_file: str,
     cpp_towerhits_file: str,
+    cpp_towerenergy_file: str,
     output_dir: str,
 ) -> None:
     """
-    Validate SimpleCalorimeter Steps 1 & 2 against C++ Delphes debug output.
+    Validate SimpleCalorimeter Steps 1, 2, & 4 against C++ Delphes debug output.
     
     Args:
         ecal_results: Dict with keys from process_ecal()
@@ -692,6 +705,171 @@ def validate_simple_cal(
             print(f"       TorchDelphes total counts: {len(torch_phi)}")
         
         print(f"  ✓ Step 2 validation complete.")
+    
+    # ========== Step 4: Tower Energy Aggregation ==========
+    print(f"\n{'='*70}")
+    print("Validating SimpleCalorimeter Step 4: Tower Energy Aggregation")
+    print(f"{'='*70}")
+    
+    if not Path(cpp_towerenergy_file).exists():
+        print(f"  ⚠ C++ debug file not found: {cpp_towerenergy_file}")
+        print("  Run C++ Delphes with modified SimpleCalorimeter.cc to generate this file.")
+    else:
+        cpp_towers_df = pd.read_csv(cpp_towerenergy_file)
+        print(f"  Loaded {len(cpp_towers_df)} towers from C++ debug file")
+        
+        # Get TorchDelphes tower results
+        tower_results = ecal_results['tower_results']
+        
+        # Aggregate all events - for comparison, we need to match towers by (eta, phi)
+        # C++ outputs tower_eta, tower_phi (center coordinates)
+        # We'll compare by event and validate aggregate statistics
+        
+        # Aggregate statistics across all events
+        total_torch_towers = sum(r['n_towers'] for r in tower_results)
+        total_cpp_towers = len(cpp_towers_df)
+        
+        print(f"  TorchDelphes total towers: {total_torch_towers}")
+        print(f"  C++ Delphes total towers:  {total_cpp_towers}")
+        
+        if total_torch_towers != total_cpp_towers:
+            print(f"  ⚠ Tower count mismatch!")
+        else:
+            print(f"  ✓ Tower counts match")
+        
+        # Aggregate all tower energies
+        torch_tower_energies = torch.cat([r['tower_energy'] for r in tower_results]).numpy()
+        torch_track_energies = torch.cat([r['tower_track_energy'] for r in tower_results]).numpy()
+        cpp_tower_energies = cpp_towers_df['tower_energy'].values
+        cpp_track_energies = cpp_towers_df['track_energy'].values
+        
+        print(f"\n  Tower Energy Statistics:")
+        print(f"    TorchDelphes: sum={torch_tower_energies.sum():.2f}, mean={torch_tower_energies.mean():.4f}, max={torch_tower_energies.max():.4f}")
+        print(f"    C++ Delphes:  sum={cpp_tower_energies.sum():.2f}, mean={cpp_tower_energies.mean():.4f}, max={cpp_tower_energies.max():.4f}")
+        
+        print(f"\n  Track Energy Statistics:")
+        print(f"    TorchDelphes: sum={torch_track_energies.sum():.2f}, mean={torch_track_energies.mean():.4f}, max={torch_track_energies.max():.4f}")
+        print(f"    C++ Delphes:  sum={cpp_track_energies.sum():.2f}, mean={cpp_track_energies.mean():.4f}, max={cpp_track_energies.max():.4f}")
+        
+        # Create comparison plots
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # Top left: Tower energy distribution
+        ax = axes[0, 0]
+        # Use log-spaced bins for energy
+        e_min = max(min(torch_tower_energies.min(), cpp_tower_energies.min()), 1e-6)
+        e_max = max(torch_tower_energies.max(), cpp_tower_energies.max())
+        energy_bins = np.logspace(np.log10(e_min), np.log10(e_max * 1.1), 50)
+        
+        ax.hist(cpp_tower_energies, bins=energy_bins, histtype='stepfilled', color='orange', alpha=0.5,
+                label=f'C++ Delphes ({len(cpp_tower_energies)} towers)')
+        ax.hist(torch_tower_energies, bins=energy_bins, histtype='step', color='blue', linewidth=2,
+                label=f'Parnassus.TorchDelphes ({len(torch_tower_energies)} towers)')
+        ax.set_xlabel('Tower Energy (GeV)', fontsize=12)
+        ax.set_ylabel('Counts', fontsize=12)
+        ax.set_xscale('log')
+        ax.set_title('SimpleCalorimeter Step 4: Tower Energy (fTowerEnergy)', fontsize=14)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        # Top right: Track energy distribution  
+        ax = axes[0, 1]
+        # Handle case where track energies may be all zero
+        nonzero_torch_track = torch_track_energies[torch_track_energies > 0]
+        nonzero_cpp_track = cpp_track_energies[cpp_track_energies > 0]
+        
+        if len(nonzero_torch_track) > 0 or len(nonzero_cpp_track) > 0:
+            t_min = max(min(nonzero_torch_track.min() if len(nonzero_torch_track) > 0 else 1e-6,
+                           nonzero_cpp_track.min() if len(nonzero_cpp_track) > 0 else 1e-6), 1e-6)
+            t_max = max(nonzero_torch_track.max() if len(nonzero_torch_track) > 0 else 1,
+                       nonzero_cpp_track.max() if len(nonzero_cpp_track) > 0 else 1)
+            track_bins = np.logspace(np.log10(t_min), np.log10(t_max * 1.1), 50)
+            
+            ax.hist(nonzero_cpp_track, bins=track_bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    label=f'C++ Delphes ({len(nonzero_cpp_track)} non-zero)')
+            ax.hist(nonzero_torch_track, bins=track_bins, histtype='step', color='blue', linewidth=2,
+                    label=f'Parnassus.TorchDelphes ({len(nonzero_torch_track)} non-zero)')
+            ax.set_xscale('log')
+        else:
+            ax.text(0.5, 0.5, 'No non-zero track energies', transform=ax.transAxes,
+                   ha='center', va='center', fontsize=14)
+        
+        ax.set_xlabel('Track Energy in Tower (GeV)', fontsize=12)
+        ax.set_ylabel('Counts', fontsize=12)
+        ax.set_title('SimpleCalorimeter Step 4: Track Energy (fTrackEnergy)', fontsize=14)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        # Bottom left: Scatter plot comparing tower energies (sorted)
+        ax = axes[1, 0]
+        # Sort both arrays and compare
+        torch_sorted = np.sort(torch_tower_energies)[::-1]
+        cpp_sorted = np.sort(cpp_tower_energies)[::-1]
+        
+        # Pad shorter array with zeros for comparison
+        max_len = max(len(torch_sorted), len(cpp_sorted))
+        torch_padded = np.pad(torch_sorted, (0, max_len - len(torch_sorted)))
+        cpp_padded = np.pad(cpp_sorted, (0, max_len - len(cpp_sorted)))
+        
+        ax.scatter(cpp_padded, torch_padded, alpha=0.5, s=10, c='purple')
+        
+        # Add y=x line
+        max_val = max(cpp_padded.max(), torch_padded.max())
+        ax.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x')
+        
+        ax.set_xlabel('C++ Tower Energy (sorted)', fontsize=12)
+        ax.set_ylabel('TorchDelphes Tower Energy (sorted)', fontsize=12)
+        ax.set_title('Tower Energy Comparison (Sorted)', fontsize=14)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect('equal', adjustable='box')
+        
+        # Bottom right: Number of towers per event
+        ax = axes[1, 1]
+        torch_towers_per_event = [r['n_towers'] for r in tower_results]
+        cpp_events = cpp_towers_df['event'].unique()
+        cpp_towers_per_event = [len(cpp_towers_df[cpp_towers_df['event'] == e]) for e in cpp_events]
+        
+        x = np.arange(len(torch_towers_per_event))
+        width = 0.35
+        
+        ax.bar(x - width/2, cpp_towers_per_event[:len(x)], width, label='C++ Delphes', color='orange', alpha=0.7)
+        ax.bar(x + width/2, torch_towers_per_event, width, label='Parnassus.TorchDelphes', color='blue', alpha=0.7)
+        
+        ax.set_xlabel('Event', fontsize=12)
+        ax.set_ylabel('Number of Towers', fontsize=12)
+        ax.set_title('Towers per Event', fontsize=14)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plot_file = output_dir / "tower_energies.png"
+        plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ Saved {plot_file}")
+        
+        # Per-event detailed comparison
+        print(f"\n  Per-event tower comparison:")
+        for event_idx, (torch_res, cpp_event) in enumerate(zip(tower_results, cpp_events)):
+            cpp_event_df = cpp_towers_df[cpp_towers_df['event'] == cpp_event]
+            
+            torch_n = torch_res['n_towers']
+            cpp_n = len(cpp_event_df)
+            torch_sum_e = torch_res['tower_energy'].sum().item()
+            cpp_sum_e = cpp_event_df['tower_energy'].sum()
+            torch_sum_t = torch_res['tower_track_energy'].sum().item()
+            cpp_sum_t = cpp_event_df['track_energy'].sum()
+            
+            match_str = "✓" if torch_n == cpp_n else "✗"
+            print(f"    Event {event_idx}: {match_str} towers: Torch={torch_n}, C++={cpp_n} | "
+                  f"E_tower: Torch={torch_sum_e:.2f}, C++={cpp_sum_e:.2f} | "
+                  f"E_track: Torch={torch_sum_t:.2f}, C++={cpp_sum_t:.2f}")
+            
+            if event_idx >= 9:  # Limit output
+                print(f"    ... (showing first 10 events)")
+                break
+        
+        print(f"  ✓ Step 4 validation complete.")
     
     print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
 
@@ -1293,17 +1471,19 @@ def main(
         pap_tensors, merged_tracks
     )
     
-    print("\n✓ SimpleCalorimeter Steps 1 & 2 complete")
+    print("\n✓ SimpleCalorimeter Steps 1, 2, & 4 complete")
     
     # Validate intermediate outputs against C++
     script_dir = Path(__file__).parent
     cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions.csv"
     cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits.csv"
+    cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy.csv"
     validation_dir = script_dir / "torch_delphes_validation" / "SimpleCalorimeter"
     validate_simple_cal(
         ecal_results, 
         str(cpp_fractions_file),
         str(cpp_towerhits_file),
+        str(cpp_towerenergy_file),
         str(validation_dir)
     )
     
