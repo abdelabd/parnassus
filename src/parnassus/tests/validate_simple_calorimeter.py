@@ -883,8 +883,10 @@ def validate_simple_cal_step_6(
     cpp_pertrack_file: str,
     cpp_tracksigma_file: str,
     output_dir: str,
+    debug: bool = False,
 ) -> None:
-# Compare per-track sigma contributions against C++ debug output
+    
+    # Compare per-track sigma contributions against C++ debug output
     print(f"\n  Step 7: Validating Track Sigma per Tower...")
     
     # Load C++ per-track sigma debug output
@@ -952,8 +954,8 @@ def validate_simple_cal_step_6(
     ax1 = fig.add_subplot(4, 2, 1)
     ax1_ratio = ax1.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(0, min(cpp_track_energy.max(), 200), 50)
-    ax1.hist(cpp_track_energy, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_energy)} tracks', alpha=0.6, color='orange')
-    ax1.hist(torch_track_energy, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_energy)} tracks', alpha=0.9, color='blue', linewidth=1.5)
+    _cpp_track_energy_counts, _track_energy_bins, _ = ax1.hist(cpp_track_energy, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_energy)} tracks', alpha=0.6, color='orange')
+    _torch_track_energy_counts, _, _ = ax1.hist(torch_track_energy, bins=_track_energy_bins, histtype='step', label=f'TorchDelphes; {len(torch_track_energy)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax1.set_xlabel('Track Energy [GeV]')
     ax1.set_ylabel('Count')
     ax1.set_title('Track Energy Distribution')
@@ -975,8 +977,8 @@ def validate_simple_cal_step_6(
     ax2 = fig.add_subplot(4, 2, 2)
     ax2_ratio = ax2.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(0, 0.1, 50)
-    ax2.hist(cpp_track_resolution, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_resolution)} tracks', alpha=0.6, color='orange')
-    ax2.hist(torch_track_resolution, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_resolution)} tracks', alpha=0.9, color='blue', linewidth=1.5)
+    _cpp_track_res_counts, _track_res_bins, _ = ax2.hist(cpp_track_resolution, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_resolution)} tracks', alpha=0.6, color='orange')
+    _torch_track_res_counts, _, _ = ax2.hist(torch_track_resolution, bins=_track_res_bins, histtype='step', label=f'TorchDelphes; {len(torch_track_resolution)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax2.set_xlabel('Track Resolution (σ/pT)')
     ax2.set_ylabel('Count')
     ax2.set_title('Track Momentum Resolution Distribution')
@@ -998,8 +1000,8 @@ def validate_simple_cal_step_6(
     ax3 = fig.add_subplot(4, 2, 3)
     ax3_ratio = ax3.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(0, min(cpp_track_calo_sigma.max(), 20), 50)
-    ax3.hist(cpp_track_calo_sigma, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_calo_sigma)} tracks', alpha=0.6, color='orange')
-    ax3.hist(torch_track_calo_sigma, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_calo_sigma)} tracks', alpha=0.9, color='blue', linewidth=1.5)
+    _cpp_cal_sigma_counts, _cal_sigma_bins, _ = ax3.hist(cpp_track_calo_sigma, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_calo_sigma)} tracks', alpha=0.6, color='orange')
+    _torch_cal_sigma_counts, _, _ = ax3.hist(torch_track_calo_sigma, bins=_cal_sigma_bins, histtype='step', label=f'TorchDelphes; {len(torch_track_calo_sigma)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax3.set_xlabel('Calorimeter Sigma [GeV]')
     ax3.set_ylabel('Count')
     ax3.set_title('Calorimeter Resolution at Tower η')
@@ -1021,8 +1023,8 @@ def validate_simple_cal_step_6(
     ax4 = fig.add_subplot(4, 2, 4)
     ax4_ratio = ax4.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(-5, 5, 50)
-    ax4.hist(cpp_track_tower_eta, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_tower_eta)} tracks', alpha=0.6, color='orange')
-    ax4.hist(torch_track_tower_eta, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_tower_eta)} tracks', alpha=0.9, color='blue', linewidth=1.5)
+    _cpp_tower_eta_counts, _tower_eta_bins, _ = ax4.hist(cpp_track_tower_eta, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_tower_eta)} tracks', alpha=0.6, color='orange')
+    _torch_tower_eta_counts, _, _ = ax4.hist(torch_track_tower_eta, bins=_tower_eta_bins, histtype='step', label=f'TorchDelphes; {len(torch_track_tower_eta)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax4.set_xlabel('Tower η')
     ax4.set_ylabel('Count')
     ax4.set_title('Tower η for Valid Tracks')
@@ -1044,8 +1046,8 @@ def validate_simple_cal_step_6(
     ax5 = fig.add_subplot(4, 2, 5)
     ax5_ratio = ax5.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(0, min(cpp_track_energy_guess.max(), 200), 50)
-    ax5.hist(cpp_track_energy_guess, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_energy_guess)} tracks', alpha=0.6, color='orange')
-    ax5.hist(torch_track_energy_guess, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_energy_guess)} tracks', alpha=0.9, color='blue', linewidth=1.5)
+    _cpp_track_e_guess_counts, _e_guess_bins, _ = ax5.hist(cpp_track_energy_guess, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_energy_guess)} tracks', alpha=0.6, color='orange')
+    _torch_track_e_guess_counts, _, _ = ax5.hist(torch_track_energy_guess, bins=_e_guess_bins, histtype='step', label=f'TorchDelphes; {len(torch_track_energy_guess)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax5.set_xlabel('Energy Guess [GeV]')
     ax5.set_ylabel('Count')
     ax5.set_title('Track Energy Guess (based on resolution comparison)')
@@ -1067,8 +1069,8 @@ def validate_simple_cal_step_6(
     ax6 = fig.add_subplot(4, 2, 6)
     ax6_ratio = ax6.inset_axes([0, -0.35, 1, 0.3])
     bins = np.logspace(-2, 4, 50)
-    ax6.hist(cpp_track_sigma_sq, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_sigma_sq)} tracks', alpha=0.6, color='orange')
-    ax6.hist(torch_track_sigma_sq, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_sigma_sq)} tracks', alpha=0.9, color='blue', linewidth=1.5)
+    _cpp_track_sigma_sq_counts, _sigma_sq_bins, _ = ax6.hist(cpp_track_sigma_sq, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_sigma_sq)} tracks', alpha=0.6, color='orange')
+    _torch_track_sigma_sq_counts, _, _ = ax6.hist(torch_track_sigma_sq, bins=_sigma_sq_bins, histtype='step', label=f'TorchDelphes; {len(torch_track_sigma_sq)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax6.set_xlabel('σ² Contribution')
     ax6.set_ylabel('Count')
     ax6.set_title('Per-Track Sigma² Contribution')
@@ -1112,8 +1114,8 @@ def validate_simple_cal_step_6(
     
     if has_cpp_tracksigma and len(cpp_tower_track_sigma) > 0:
         cpp_data = cpp_tower_track_sigma[cpp_tower_track_sigma > 0]
-        ax7.hist(cpp_data, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_data)} tracks', alpha=0.6, color='orange')
-        ax7.hist(torch_data, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_data)} tracks', alpha=0.9, color='blue', linewidth=1.5)
+        _cpp_tracksigma_counts, _tracksigma_bins, _ = ax7.hist(cpp_data, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_data)} tracks', alpha=0.6, color='orange')
+        _torch_tracksigma_counts, _, _ = ax7.hist(torch_data, bins=_tracksigma_bins, histtype='step', label=f'TorchDelphes; {len(torch_data)} tracks', alpha=0.9, color='blue', linewidth=1.5)
         # Ratio
         cpp_hist, bin_edges = np.histogram(cpp_data, bins=bins)
         torch_hist, _ = np.histogram(torch_data, bins=bins)
@@ -1207,6 +1209,50 @@ Mean per-track values:
     
     print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
 
+    if debug:
+        debug_dict = {
+            "Track Energy":{
+                "Bins": _track_energy_bins,
+                "C++ Counts": _cpp_track_energy_counts,
+                "Torch Counts": _torch_track_energy_counts,
+            },
+            "Track Momentum Resolution":{
+                "Bins": _track_res_bins,
+                "C++ Counts": _cpp_track_res_counts,
+                "Torch Counts": _torch_track_res_counts,
+            },
+            "Calorimeter Resolution at Tower η":{
+                "Bins": _cal_sigma_bins,
+                "C++ Counts": _cpp_cal_sigma_counts,
+                "Torch Counts": _torch_cal_sigma_counts,
+            },
+            "Tower η for Valid Tracks":{
+                "Bins": _tower_eta_bins,
+                "C++ Counts": _cpp_tower_eta_counts,
+                "Torch Counts": _torch_tower_eta_counts,
+            },
+            "Track Energy Guess":{
+                "Bins": _e_guess_bins,
+                "C++ Counts": _cpp_track_e_guess_counts,
+                "Torch Counts": _torch_track_e_guess_counts,
+            },
+            "Per-Track Sigma² Contribution":{
+                "Bins": _sigma_sq_bins,
+                "C++ Counts": _cpp_track_sigma_sq_counts,
+                "Torch Counts": _torch_track_sigma_sq_counts,
+            },
+            "Tower Track Sigma":{
+                "Bins": _tracksigma_bins,
+                "C++ Counts": _cpp_tracksigma_counts,
+                "Torch Counts": _torch_tracksigma_counts,
+            },
+        }
+        print(f"\n\nDEBUG: SimpleCalorimeter Step 7 detailed histogram data:")
+        for k,v in debug_dict.items():
+            print(f"\n  {k}:")
+            for subk, subv in v.items():
+                print(f"    {subk}: {subv}")
+
 def validate_simple_cal(
     ecal_results: Dict,
     cpp_fractions_file: str,
@@ -1271,6 +1317,7 @@ def validate_simple_cal(
         cpp_pertrack_file,
         cpp_tracksigma_file,
         output_dir,
+        debug = debug,
     )
 
     # ============ Step 7 validated in test_torch_delphes.py::main(); uses ROOT branches ============
