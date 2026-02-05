@@ -156,14 +156,18 @@ class SimpleCalorimeter(nn.Module):
         # C++: if(fTrackFractions[number] > 1.0E-9) { fTrackEnergy += energy; ... }
         track_has_fraction = track_energy_fractions > 1e-9
         
-        # Find unique towers from valid particles
+        # Find unique towers from valid particles AND valid tracks
+        # NOTE: In C++, particles are filtered by fraction BEFORE creating tower hits,
+        #       but tracks are NOT filtered by fraction for tower creation.
+        #       Tracks create tower hits regardless of fraction; the fraction check
+        #       only affects whether they contribute to fTrackEnergy.
         valid_particle_tower_idx = torch.where(
             particle_valid, 
             particle_tower_idx, 
             torch.full_like(particle_tower_idx, -1)
         )
         valid_track_tower_idx = torch.where(
-            track_valid & track_has_fraction,
+            track_valid,  # NOT filtered by fraction for tower creation
             track_tower_idx,
             torch.full_like(track_tower_idx, -1)
         )
@@ -171,7 +175,7 @@ class SimpleCalorimeter(nn.Module):
         # Combine all valid tower indices to find unique towers
         all_tower_idx = torch.cat([
             valid_particle_tower_idx[particle_valid],
-            valid_track_tower_idx[track_valid & track_has_fraction]
+            valid_track_tower_idx[track_valid]  # NOT filtered by fraction
         ])
         unique_tower_idx = torch.unique(all_tower_idx[all_tower_idx >= 0])
         n_towers = len(unique_tower_idx)
