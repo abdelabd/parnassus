@@ -489,10 +489,10 @@ def validate_simple_cal(
             bins = np.linspace(-0.1, 1.1, 25)
             
             ax.hist(cpp_fracs, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
-                    linewidth=2, label='C++ Delphes')
+                    linewidth=2, label='C++ Delphes', density=False)
             ax.hist(torch_fracs, bins=bins, histtype='step', color='blue',
-                    linewidth=2, label='Parnassus.TorchDelphes')
-            
+                    linewidth=2, label='Parnassus.TorchDelphes', density=False)
+
             ax.set_xlabel('Energy Fraction', fontsize=12)
             ax.set_ylabel('Counts', fontsize=12)
             ax.set_title(f'SimpleCalorimeter Step 1: {frac_type} Energy Fractions', fontsize=14)
@@ -623,10 +623,10 @@ def validate_simple_cal(
             
             cpp_eta_counts, eta_bin_edges, _ = ax_eta.hist(
                 cpp_eta, bins=eta_bin_edges, histtype='stepfilled', color='orange', alpha=0.5,
-                linewidth=2, label=f'C++ Delphes: {len(cpp_eta)} hits')
+                linewidth=2, label=f'C++ Delphes: {len(cpp_eta)} hits', density=False)
             torch_eta_counts, _, _ = ax_eta.hist(
                 torch_eta, bins=eta_bin_edges, histtype='step', color='blue',
-                linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_eta)} hits')
+                linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_eta)} hits', density=False)
 
             ax_eta.set_ylabel('Counts', fontsize=12)
             ax_eta.set_title(f'SimpleCalorimeter Step 2: {hit_type} Eta Bins', fontsize=14)
@@ -660,10 +660,10 @@ def validate_simple_cal(
 
             cpp_phi_counts, phi_bin_edges, _ = ax_phi.hist(
                 cpp_phi, bins=phi_bin_edges, histtype='stepfilled', color='orange', alpha=0.5,
-                linewidth=2, label=f'C++ Delphes: {len(cpp_phi)} hits')
+                linewidth=2, label=f'C++ Delphes: {len(cpp_phi)} hits', density=False)
             torch_phi_counts, _, _ = ax_phi.hist(
                 torch_phi, bins=phi_bin_edges, histtype='step', color='blue',
-                linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_phi)} hits')
+                linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_phi)} hits', density=False)
 
             ax_phi.set_ylabel('Counts', fontsize=12)
             ax_phi.set_title(f'SimpleCalorimeter Step 2: {hit_type} Phi Bins', fontsize=14)
@@ -690,19 +690,6 @@ def validate_simple_cal(
             plt.savefig(plot_file, dpi=150, bbox_inches='tight')
             plt.close()
             print(f"  ✓ Saved {plot_file}")
-
-            
-            print(f"\n\n\n   hit_type={hit_type}, comparing bin counts:")
-            print(f"\n     Eta bins: {eta_bin_edges}")
-            print(f"       C++ counts: {[int(i) for i in cpp_eta_counts]}")
-            print(f"       C++ total counts: {len(cpp_eta)}")
-            print(f"       TorchDelphes counts: {[int(i) for i in torch_eta_counts]}")
-            print(f"       TorchDelphes total counts: {len(torch_eta)}")
-            print(f"\n     Phi bins: {phi_bin_edges}")
-            print(f"       C++ counts: {[int(i) for i in cpp_phi_counts]}")
-            print(f"       C++ total counts: {len(cpp_phi)}")
-            print(f"       TorchDelphes counts: {[int(i) for i in torch_phi_counts]}")
-            print(f"       TorchDelphes total counts: {len(torch_phi)}")
         
         print(f"  ✓ Step 2 validation complete.")
     
@@ -762,9 +749,9 @@ def validate_simple_cal(
         energy_bins = np.logspace(np.log10(e_min), np.log10(e_max * 1.1), 50)
         
         ax.hist(cpp_tower_energies, bins=energy_bins, histtype='stepfilled', color='orange', alpha=0.5,
-                label=f'C++ Delphes ({len(cpp_tower_energies)} towers)')
+                label=f'C++ Delphes ({len(cpp_tower_energies)} towers)', density=False)
         ax.hist(torch_tower_energies, bins=energy_bins, histtype='step', color='blue', linewidth=2,
-                label=f'Parnassus.TorchDelphes ({len(torch_tower_energies)} towers)')
+                label=f'Parnassus.TorchDelphes ({len(torch_tower_energies)} towers)', density=False)
         ax.set_xlabel('Tower Energy (GeV)', fontsize=12)
         ax.set_ylabel('Counts', fontsize=12)
         ax.set_xscale('log')
@@ -786,9 +773,9 @@ def validate_simple_cal(
             track_bins = np.logspace(np.log10(t_min), np.log10(t_max * 1.1), 50)
             
             ax.hist(nonzero_cpp_track, bins=track_bins, histtype='stepfilled', color='orange', alpha=0.5,
-                    label=f'C++ Delphes ({len(nonzero_cpp_track)} non-zero)')
+                    label=f'C++ Delphes ({len(nonzero_cpp_track)} non-zero)', density=False)
             ax.hist(nonzero_torch_track, bins=track_bins, histtype='step', color='blue', linewidth=2,
-                    label=f'Parnassus.TorchDelphes ({len(nonzero_torch_track)} non-zero)')
+                    label=f'Parnassus.TorchDelphes ({len(nonzero_torch_track)} non-zero)', density=False)
             ax.set_xscale('log')
         else:
             ax.text(0.5, 0.5, 'No non-zero track energies', transform=ax.transAxes,
@@ -1475,9 +1462,15 @@ def main(
     
     # Validate intermediate outputs against C++
     script_dir = Path(__file__).parent
-    cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions.csv"
-    cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits.csv"
-    cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy.csv"
+    if len(expected_event_nums) == 100:
+        cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_100.csv"
+        cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_100.csv"
+        cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_100.csv"
+    elif len(expected_event_nums) == 1000:
+        cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_1000.csv"
+        cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_1000.csv"
+        cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_1000.csv"
+    else: raise FileNotFoundError("expected_event_nums must be 100 or 1000 for validation")
     validation_dir = script_dir / "torch_delphes_validation" / "SimpleCalorimeter"
     validate_simple_cal(
         ecal_results, 
