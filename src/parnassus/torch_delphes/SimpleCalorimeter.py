@@ -351,10 +351,176 @@ class SimpleCalorimeter(nn.Module):
 
 
         ######## 8. Identify Neutral Excess and Create eflow objects ########
+        # C++:
+        #   neutralEnergy = max((energy - fTrackEnergy), 0.0);
+        #   neutralSigma = neutralEnergy / TMath::Sqrt(fTrackSigma * fTrackSigma + sigma * sigma);
+        #   
+        #   if(neutralEnergy > fEnergyMin && neutralSigma > fEnergySignificanceMin) {
+        #       // Create EFlowTower with neutralEnergy
+        #       // Clone tracks to EFlowTrack unchanged
+        #   } else if(fTrackEnergy > 0.0) {
+        #       // Rescale tracks based on weighted average of calo and track measurements
+        #       weightTrack = 1 / (fTrackSigma^2)
+        #       weightCalo = 1 / (sigma^2)
+        #       bestEnergyEstimate = (weightTrack * fTrackEnergy + weightCalo * energy) / (weightTrack + weightCalo)
+        #       rescaleFactor = bestEnergyEstimate / fTrackEnergy
+        #       // Clone tracks to EFlowTrack with rescaled pT
+        #   }
+        
+        # Use final (thresholded) tower energy and sigma_after for this computation
+        energy = tower_energy_final  # After smearing and thresholds
+        sigma = sigma_after
+        
+        # Compute neutral energy per tower
+        neutral_energy = torch.clamp(energy - tower_track_energy, min=0.0)
+        
+        # Compute neutral sigma per tower
+        # neutralSigma = neutralEnergy / sqrt(trackSigma² + sigma²)
+        denominator = torch.sqrt(tower_track_sigma**2 + sigma**2)
+        neutral_sigma = torch.where(
+            denominator > 0,
+            neutral_energy / denominator,
+            torch.zeros_like(neutral_energy)
+        )
+        
+        # Case A: Neutral excess is significant
+        # Condition: neutralEnergy > EnergyMin AND neutralSigma > EnergySignificanceMin
+        significant_neutral = (neutral_energy > self.energy_min) & (neutral_sigma > self.energy_sig_min)
+        
+        # Case B: Neutral excess is NOT significant but has track energy
+        # Condition: NOT significant_neutral AND tower_track_energy > 0
+        rescale_tracks = (~significant_neutral) & (tower_track_energy > 0)
+        
+        # Compute rescale factor for Case B towers
+        # weightTrack = 1 / (trackSigma^2), weightCalo = 1 / (sigma^2)
+        # bestEnergyEstimate = (weightTrack * trackEnergy + weightCalo * energy) / (weightTrack + weightCalo)
+        weight_track = torch.where(
+            tower_track_sigma > 0,
+            1.0 / (tower_track_sigma**2),
+            torch.zeros_like(tower_track_sigma)
+        )
+        weight_calo = torch.where(
+            sigma > 0,
+            1.0 / (sigma**2),
+            torch.zeros_like(sigma)
+        )
+        
+        total_weight = weight_track + weight_calo
+        best_energy_estimate = torch.where(
+            total_weight > 0,
+            (weight_track * tower_track_energy + weight_calo * energy) / total_weight,
+            tower_track_energy  # Fallback to track energy if no weights
+        )
+        
+        rescale_factor = torch.where(
+            tower_track_energy > 0,
+            best_energy_estimate / tower_track_energy,
+            torch.ones_like(tower_track_energy)
+        )
+        
+        # ===== Create Tower output =====
+        # Towers with energy > 0 after thresholds
+        tower_has_energy = tower_energy_final > 0
+        
+        # Tower output tensor: [PT, Eta, Phi, E, Eem, Ehad, T, Edges...]
+        # For ECal: Eem = energy, Ehad = 0
+        tower_pt = tower_energy_final / torch.cosh(tower_eta)
+        
+        # Build tower output (towers with energy > 0)
+        n_valid_towers = tower_has_energy.sum().item()
+        
+        # ===== Create EFlowTower output (neutral excess) =====
+        # Only for towers with significant neutral excess
+        n_eflow_towers = significant_neutral.sum().item()
+        
+        eflow_tower_energy = neutral_energy[significant_neutral]
+        eflow_tower_eta = tower_eta[significant_neutral]
+        eflow_tower_phi = tower_phi[significant_neutral]
+        eflow_tower_pt = eflow_tower_energy / torch.cosh(eflow_tower_eta)
+        
+        # ===== Create EFlowTrack output =====
+        # Tracks are output in two cases:
+        # 1. Significant neutral: clone track unchanged
+        # 2. Rescale: apply rescale factor to track momentum
+        
+        # For each track, determine which case applies based on its tower
+        # track_compact_idx maps tracks to tower indices
+        
+        # Get the tower status for each track
+        # Only tracks with valid sigma (track_sigma_valid) are in towers
+        track_in_significant_tower = torch.zeros(n_tracks, dtype=torch.bool, device=tracks.device)
+        track_in_rescale_tower = torch.zeros(n_tracks, dtype=torch.bool, device=tracks.device)
+        track_rescale_factor = torch.ones(n_tracks, dtype=torch.float64, device=tracks.device)
+        
+        # Map tower properties to tracks
+        for i in range(n_towers):
+            tower_mask = (track_compact_idx == i) & track_sigma_valid
+            if tower_mask.any():
+                if significant_neutral[i]:
+                    track_in_significant_tower[tower_mask] = True
+                elif rescale_tracks[i]:
+                    track_in_rescale_tower[tower_mask] = True
+                    track_rescale_factor[tower_mask] = rescale_factor[i]
+        
+        # Tracks that become EFlowTracks: either in significant tower OR in rescale tower
+        track_is_eflow = track_in_significant_tower | track_in_rescale_tower
+        
+        # Also include tracks with fraction < 1e-9 (they go directly to EFlowTrack in C++)
+        # These are tracks that are valid but don't contribute to tower energy
+        track_no_fraction = track_valid & (~track_has_fraction)
+        track_is_eflow = track_is_eflow | track_no_fraction
+        
+        # Create EFlowTrack tensor
+        # Clone the track and apply rescale factor if applicable
+        eflow_tracks = tracks.clone()
+        
+        # Apply rescale factor to tracks in rescale towers
+        # PT is rescaled, then PX, PY, PZ, E are recomputed
+        original_pt = eflow_tracks[:, CMAP["PT"]]
+        rescaled_pt = original_pt * track_rescale_factor
+        
+        # Only apply to tracks in rescale towers
+        eflow_tracks[:, CMAP["PT"]] = torch.where(
+            track_in_rescale_tower,
+            rescaled_pt,
+            original_pt
+        )
+        
+        # Recompute PX, PY from rescaled PT
+        eta = eflow_tracks[:, CMAP["ETA"]]
+        phi = eflow_tracks[:, CMAP["PHI"]]
+        mass = eflow_tracks[:, CMAP["MASS"]]
+        
+        eflow_tracks[:, CMAP["PX"]] = torch.where(
+            track_in_rescale_tower,
+            rescaled_pt * torch.cos(phi),
+            eflow_tracks[:, CMAP["PX"]]
+        )
+        eflow_tracks[:, CMAP["PY"]] = torch.where(
+            track_in_rescale_tower,
+            rescaled_pt * torch.sin(phi),
+            eflow_tracks[:, CMAP["PY"]]
+        )
+        eflow_tracks[:, CMAP["PZ"]] = torch.where(
+            track_in_rescale_tower,
+            rescaled_pt * torch.sinh(eta),
+            eflow_tracks[:, CMAP["PZ"]]
+        )
+        
+        # Recompute E from P and mass
+        p_sq = eflow_tracks[:, CMAP["PX"]]**2 + eflow_tracks[:, CMAP["PY"]]**2 + eflow_tracks[:, CMAP["PZ"]]**2
+        eflow_tracks[:, CMAP["E"]] = torch.where(
+            track_in_rescale_tower,
+            torch.sqrt(p_sq + mass**2),
+            eflow_tracks[:, CMAP["E"]]
+        )
+        
+        # Filter to only EFlow tracks
+        eflow_track_output = eflow_tracks[track_is_eflow]
 
-        # Return intermediate results for validation
-        # TODO: Update return signature once full pipeline is implemented
+        # Return results
         return {
+            # Steps 1-3: Fractions and binning
             'particle_energy_fractions': particle_energy_fractions,
             'track_energy_fractions': track_energy_fractions,
             'particle_eta_bin': particle_eta_bin,
@@ -363,27 +529,27 @@ class SimpleCalorimeter(nn.Module):
             'track_eta_bin': track_eta_bin,
             'track_phi_bin': track_phi_bin,
             'track_valid': track_valid,
-            # Tower aggregation outputs
+            # Step 4: Tower aggregation
             'n_towers': n_towers,
             'unique_tower_idx': unique_tower_idx,
             'tower_eta_bin': tower_eta_bin,
             'tower_phi_bin': tower_phi_bin,
-            'tower_energy': tower_energy,           # Sum of particle energies × fractions (before smearing)
-            'tower_track_energy': tower_track_energy,  # Sum of track energies × fractions
+            'tower_energy': tower_energy,
+            'tower_track_energy': tower_track_energy,
             'max_phi_bins': max_phi_bins,
-            # Tower center and edge outputs
+            # Step 5: Tower centers and edges
             'tower_eta': tower_eta,
             'tower_phi': tower_phi,
             'tower_eta_lo': tower_eta_lo,
             'tower_eta_hi': tower_eta_hi,
             'tower_phi_lo': tower_phi_lo,
             'tower_phi_hi': tower_phi_hi,
-            # Resolution smearing outputs
+            # Step 6: Resolution smearing
             'sigma_before': sigma_before,
             'tower_energy_smeared': tower_energy_smeared,
             'sigma_after': sigma_after,
-            'tower_energy_final': tower_energy_final,  # After thresholds applied
-            # Track sigma outputs
+            'tower_energy_final': tower_energy_final,
+            # Step 7: Track sigma
             'tower_track_sigma': tower_track_sigma,
             'track_momentum_resolution': track_momentum_resolution,
             'track_tower_eta': track_tower_eta,
@@ -392,7 +558,34 @@ class SimpleCalorimeter(nn.Module):
             'track_sigma_sq': track_sigma_sq,
             'track_sigma_valid': track_sigma_valid,
             'track_compact_idx': track_compact_idx,
-            'track_energy': track_energy,  # Raw track energies for validation
+            'track_energy': track_energy,
+            # Step 8: EFlow outputs
+            'neutral_energy': neutral_energy,
+            'neutral_sigma': neutral_sigma,
+            'significant_neutral': significant_neutral,
+            'rescale_tracks': rescale_tracks,
+            'rescale_factor': rescale_factor,
+            # Final outputs
+            'tower_output': {
+                'energy': tower_energy_final[tower_has_energy],
+                'eta': tower_eta[tower_has_energy],
+                'phi': tower_phi[tower_has_energy],
+                'pt': tower_pt[tower_has_energy],
+                'eta_lo': tower_eta_lo[tower_has_energy],
+                'eta_hi': tower_eta_hi[tower_has_energy],
+                'phi_lo': tower_phi_lo[tower_has_energy],
+                'phi_hi': tower_phi_hi[tower_has_energy],
+            },
+            'eflow_tower_output': {
+                'energy': eflow_tower_energy,
+                'eta': eflow_tower_eta,
+                'phi': eflow_tower_phi,
+                'pt': eflow_tower_pt,
+            },
+            'eflow_track_output': eflow_track_output,
+            'n_valid_towers': n_valid_towers,
+            'n_eflow_towers': n_eflow_towers,
+            'n_eflow_tracks': eflow_track_output.shape[0],
         }
 
     def _compute_phi_bins(self, 
