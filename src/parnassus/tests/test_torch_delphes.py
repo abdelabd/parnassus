@@ -632,7 +632,7 @@ def validate_simple_cal(
             ax_eta_ratio.plot(eta_bin_centers, eta_ratio, color='blue', linewidth=2)
             ax_eta_ratio.set_xlabel('Eta Bin Index', fontsize=12)
             ax_eta_ratio.set_ylabel('Ratio', fontsize=10)
-            ax_eta_ratio.set_ylim([0.8, 1.2])
+            ax_eta_ratio.set_ylim([0.9*min(eta_ratio), 1.1*max(eta_ratio)])
             ax_eta_ratio.grid(True, alpha=0.3)
             
             # === Right column: Phi bins ===
@@ -669,7 +669,7 @@ def validate_simple_cal(
             ax_phi_ratio.plot(phi_bin_centers, phi_ratio, color='blue', linewidth=2)
             ax_phi_ratio.set_xlabel('Phi Bin Index', fontsize=12)
             ax_phi_ratio.set_ylabel('Ratio', fontsize=10)
-            ax_phi_ratio.set_ylim([0.8, 1.2])
+            ax_phi_ratio.set_ylim([0.9*min(phi_ratio), 1.1*max(phi_ratio)])
             ax_phi_ratio.grid(True, alpha=0.3)
             
             plt.tight_layout()
