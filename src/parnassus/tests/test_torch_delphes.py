@@ -553,11 +553,11 @@ def validate_simple_cal(
             else:
                 bins = 50
             
-            ax.hist(cpp_eta, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
-                    linewidth=2, label='C++ Delphes')
-            ax.hist(torch_eta, bins=bins, histtype='step', color='blue',
-                    linewidth=2, label='Parnassus.TorchDelphes')
-            
+            _cpp_eta_counts, _cpp_eta_bins, _ = ax.hist(cpp_eta, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    linewidth=2, label=f'C++ Delphes: {len(cpp_eta)} hits')
+            _torch_eta_counts, _torch_eta_bins, _ = ax.hist(torch_eta, bins=_cpp_eta_bins, histtype='step', color='blue',
+                    linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_eta)} hits')
+
             ax.set_xlabel('Eta Bin Index', fontsize=12)
             ax.set_ylabel('Counts', fontsize=12)
             ax.set_title(f'SimpleCalorimeter Step 2: {hit_type} Eta Bins', fontsize=14)
@@ -571,12 +571,12 @@ def validate_simple_cal(
                 bins = np.arange(all_phi.min() - 0.5, all_phi.max() + 1.5, 1)
             else:
                 bins = 50
-            
-            ax2.hist(cpp_phi, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
-                    linewidth=2, label='C++ Delphes')
-            ax2.hist(torch_phi, bins=bins, histtype='step', color='blue',
-                    linewidth=2, label='Parnassus.TorchDelphes')
-            
+
+            _cpp_phi_counts, _cpp_phi_bins, _ = ax2.hist(cpp_phi, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    linewidth=2, label=f'C++ Delphes: {len(cpp_phi)} hits')
+            _torch_phi_counts, _torch_phi_bins, _ = ax2.hist(torch_phi, bins=_cpp_phi_bins, histtype='step', color='blue',
+                    linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_phi)} hits')
+
             ax2.set_xlabel('Phi Bin Index', fontsize=12)
             ax2.set_ylabel('Counts', fontsize=12)
             ax2.set_title(f'SimpleCalorimeter Step 2: {hit_type} Phi Bins', fontsize=14)
@@ -588,6 +588,19 @@ def validate_simple_cal(
             plt.savefig(plot_file, dpi=150, bbox_inches='tight')
             plt.close()
             print(f"  ✓ Saved {plot_file}")
+
+            
+            print(f"\n\n\n   hit_type={hit_type}, comparing bin counts:")
+            print(f"\n     Eta bins: {_cpp_eta_bins}")
+            print(f"       C++ counts: { _cpp_eta_counts}")
+            print(f"       C++ total counts: {len(cpp_eta)}")
+            print(f"       TorchDelphes counts: { _torch_eta_counts}")
+            print(f"       TorchDelphes total counts: {len(torch_eta)}")
+            print(f"\n     Phi bins: {_cpp_phi_bins}")
+            print(f"       C++ counts: { _cpp_phi_counts }")
+            print(f"       C++ total counts: {len(cpp_phi)}")
+            print(f"       TorchDelphes counts: { _torch_phi_counts }")
+            print(f"       TorchDelphes total counts: {len(torch_phi)}")
         
         print(f"  ✓ Step 2 validation complete.")
     
