@@ -773,7 +773,7 @@ def validate_simple_cal(
         ax1_ratio.set_xscale('log')
         ax1_ratio.set_xlabel('Tower Energy (GeV)', fontsize=12)
         ax1_ratio.set_ylabel('Torch/C++', fontsize=10)
-        ax1_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+        ax1_ratio.set_ylim(0.9*min(ratio[~np.isnan(ratio)]), 1.1*max(ratio[~np.isnan(ratio)]))
         ax1_ratio.grid(True, alpha=0.3)
         
         # ===== Plot 2: Track energy distribution with ratio =====
