@@ -594,46 +594,83 @@ def validate_simple_cal(
             cpp_eta = cpp_hits['eta_bin'].values
             cpp_phi = cpp_hits['phi_bin'].values
             
-            # Create comparison plots
-            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            # Create figure with 2x2 grid: top row histograms, bottom row ratios
+            fig = plt.figure(figsize=(14, 8))
+            gs = fig.add_gridspec(2, 2, height_ratios=[3, 1], hspace=0.05, wspace=0.25)
             
-            # Left: Eta bin histogram
-            ax = axes[0]
+            # === Left column: Eta bins ===
+            ax_eta = fig.add_subplot(gs[0, 0])
+            ax_eta_ratio = fig.add_subplot(gs[1, 0], sharex=ax_eta)
+            
             if len(torch_eta) > 0 and len(cpp_eta) > 0:
                 all_eta = np.concatenate([torch_eta, cpp_eta])
-                bins = np.arange(all_eta.min() - 0.5, all_eta.max() + 1.5, 1)
+                eta_bin_edges = np.arange(all_eta.min() - 0.5, all_eta.max() + 1.5, 1)
             else:
-                bins = 50
+                eta_bin_edges = 50
             
-            _cpp_eta_counts, _cpp_eta_bins, _ = ax.hist(cpp_eta, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
-                    linewidth=2, label=f'C++ Delphes: {len(cpp_eta)} hits')
-            _torch_eta_counts, _torch_eta_bins, _ = ax.hist(torch_eta, bins=_cpp_eta_bins, histtype='step', color='blue',
-                    linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_eta)} hits')
+            cpp_eta_counts, eta_bin_edges, _ = ax_eta.hist(
+                cpp_eta, bins=eta_bin_edges, histtype='stepfilled', color='orange', alpha=0.5,
+                linewidth=2, label=f'C++ Delphes: {len(cpp_eta)} hits')
+            torch_eta_counts, _, _ = ax_eta.hist(
+                torch_eta, bins=eta_bin_edges, histtype='step', color='blue',
+                linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_eta)} hits')
 
-            ax.set_xlabel('Eta Bin Index', fontsize=12)
-            ax.set_ylabel('Counts', fontsize=12)
-            ax.set_title(f'SimpleCalorimeter Step 2: {hit_type} Eta Bins', fontsize=14)
-            ax.legend(fontsize=11)
-            ax.grid(True, alpha=0.3)
+            ax_eta.set_ylabel('Counts', fontsize=12)
+            ax_eta.set_title(f'SimpleCalorimeter Step 2: {hit_type} Eta Bins', fontsize=14)
+            ax_eta.legend(fontsize=11)
+            ax_eta.grid(True, alpha=0.3)
+            ax_eta.tick_params(labelbottom=False)
             
-            # Right: Phi bin histogram
-            ax2 = axes[1]
+            # Eta ratio plot
+            eta_bin_centers = (eta_bin_edges[:-1] + eta_bin_edges[1:]) / 2
+            eta_ratio = np.divide(
+                torch_eta_counts, cpp_eta_counts,
+                out=np.ones_like(torch_eta_counts),
+                where=cpp_eta_counts > 0
+            )
+            ax_eta_ratio.axhline(y=1.0, color='orange', linewidth=2)
+            ax_eta_ratio.plot(eta_bin_centers, eta_ratio, color='blue', linewidth=2)
+            ax_eta_ratio.set_xlabel('Eta Bin Index', fontsize=12)
+            ax_eta_ratio.set_ylabel('Ratio', fontsize=10)
+            ax_eta_ratio.set_ylim([0.8, 1.2])
+            ax_eta_ratio.grid(True, alpha=0.3)
+            
+            # === Right column: Phi bins ===
+            ax_phi = fig.add_subplot(gs[0, 1])
+            ax_phi_ratio = fig.add_subplot(gs[1, 1], sharex=ax_phi)
+            
             if len(torch_phi) > 0 and len(cpp_phi) > 0:
                 all_phi = np.concatenate([torch_phi, cpp_phi])
-                bins = np.arange(all_phi.min() - 0.5, all_phi.max() + 1.5, 1)
+                phi_bin_edges = np.arange(all_phi.min() - 0.5, all_phi.max() + 1.5, 1)
             else:
-                bins = 50
+                phi_bin_edges = 50
 
-            _cpp_phi_counts, _cpp_phi_bins, _ = ax2.hist(cpp_phi, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
-                    linewidth=2, label=f'C++ Delphes: {len(cpp_phi)} hits')
-            _torch_phi_counts, _torch_phi_bins, _ = ax2.hist(torch_phi, bins=_cpp_phi_bins, histtype='step', color='blue',
-                    linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_phi)} hits')
+            cpp_phi_counts, phi_bin_edges, _ = ax_phi.hist(
+                cpp_phi, bins=phi_bin_edges, histtype='stepfilled', color='orange', alpha=0.5,
+                linewidth=2, label=f'C++ Delphes: {len(cpp_phi)} hits')
+            torch_phi_counts, _, _ = ax_phi.hist(
+                torch_phi, bins=phi_bin_edges, histtype='step', color='blue',
+                linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_phi)} hits')
 
-            ax2.set_xlabel('Phi Bin Index', fontsize=12)
-            ax2.set_ylabel('Counts', fontsize=12)
-            ax2.set_title(f'SimpleCalorimeter Step 2: {hit_type} Phi Bins', fontsize=14)
-            ax2.legend(fontsize=11)
-            ax2.grid(True, alpha=0.3)
+            ax_phi.set_ylabel('Counts', fontsize=12)
+            ax_phi.set_title(f'SimpleCalorimeter Step 2: {hit_type} Phi Bins', fontsize=14)
+            ax_phi.legend(fontsize=11)
+            ax_phi.grid(True, alpha=0.3)
+            ax_phi.tick_params(labelbottom=False)
+            
+            # Phi ratio plot
+            phi_bin_centers = (phi_bin_edges[:-1] + phi_bin_edges[1:]) / 2
+            phi_ratio = np.divide(
+                torch_phi_counts, cpp_phi_counts,
+                out=np.ones_like(torch_phi_counts),
+                where=cpp_phi_counts > 0
+            )
+            ax_phi_ratio.axhline(y=1.0, color='orange', linewidth=2)
+            ax_phi_ratio.plot(phi_bin_centers, phi_ratio, color='blue', linewidth=2)
+            ax_phi_ratio.set_xlabel('Phi Bin Index', fontsize=12)
+            ax_phi_ratio.set_ylabel('Ratio', fontsize=10)
+            ax_phi_ratio.set_ylim([0.8, 1.2])
+            ax_phi_ratio.grid(True, alpha=0.3)
             
             plt.tight_layout()
             plot_file = output_dir / f"{hit_type.lower()}_bins.png"
@@ -643,15 +680,15 @@ def validate_simple_cal(
 
             
             print(f"\n\n\n   hit_type={hit_type}, comparing bin counts:")
-            print(f"\n     Eta bins: {_cpp_eta_bins}")
-            print(f"       C++ counts: { _cpp_eta_counts}")
+            print(f"\n     Eta bins: {eta_bin_edges}")
+            print(f"       C++ counts: {cpp_eta_counts}")
             print(f"       C++ total counts: {len(cpp_eta)}")
-            print(f"       TorchDelphes counts: { _torch_eta_counts}")
+            print(f"       TorchDelphes counts: {torch_eta_counts}")
             print(f"       TorchDelphes total counts: {len(torch_eta)}")
-            print(f"\n     Phi bins: {_cpp_phi_bins}")
-            print(f"       C++ counts: { _cpp_phi_counts }")
+            print(f"\n     Phi bins: {phi_bin_edges}")
+            print(f"       C++ counts: {cpp_phi_counts}")
             print(f"       C++ total counts: {len(cpp_phi)}")
-            print(f"       TorchDelphes counts: { _torch_phi_counts }")
+            print(f"       TorchDelphes counts: {torch_phi_counts}")
             print(f"       TorchDelphes total counts: {len(torch_phi)}")
         
         print(f"  ✓ Step 2 validation complete.")
