@@ -261,6 +261,28 @@ class SimpleCalorimeter(nn.Module):
 
 
         ######## 6. Apply Resolution Smearing ########
+        # C++:
+        #   sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, fTowerEnergy);
+        #   energy = LogNormal(fTowerEnergy, sigma);
+        #   sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, energy);  // recompute with smeared
+        #   if(energy < fEnergyMin || energy < fEnergySignificanceMin * sigma) energy = 0.0;
+        
+        # Compute sigma before smearing
+        sigma_before = self.resolution_func(tower_eta, tower_energy)
+        
+        # Apply LogNormal smearing
+        tower_energy_smeared = self._log_normal_smear(tower_energy, sigma_before)
+        
+        # Recompute sigma with smeared energy
+        sigma_after = self.resolution_func(tower_eta, tower_energy_smeared)
+        
+        # Apply energy thresholds
+        # Tower energy is zeroed if below minimum or below significance threshold
+        below_min = tower_energy_smeared < self.energy_min
+        below_sig = tower_energy_smeared < self.energy_sig_min * sigma_after
+        tower_energy_final = torch.where(below_min | below_sig, 
+                                         torch.zeros_like(tower_energy_smeared),
+                                         tower_energy_smeared)
 
 
         ######## 7. Compute track sigma per Tower ########
@@ -284,7 +306,7 @@ class SimpleCalorimeter(nn.Module):
             'unique_tower_idx': unique_tower_idx,
             'tower_eta_bin': tower_eta_bin,
             'tower_phi_bin': tower_phi_bin,
-            'tower_energy': tower_energy,           # Sum of particle energies × fractions
+            'tower_energy': tower_energy,           # Sum of particle energies × fractions (before smearing)
             'tower_track_energy': tower_track_energy,  # Sum of track energies × fractions
             'max_phi_bins': max_phi_bins,
             # Tower center and edge outputs
@@ -294,6 +316,11 @@ class SimpleCalorimeter(nn.Module):
             'tower_eta_hi': tower_eta_hi,
             'tower_phi_lo': tower_phi_lo,
             'tower_phi_hi': tower_phi_hi,
+            # Resolution smearing outputs
+            'sigma_before': sigma_before,
+            'tower_energy_smeared': tower_energy_smeared,
+            'sigma_after': sigma_after,
+            'tower_energy_final': tower_energy_final,  # After thresholds applied
         }
 
     def _compute_phi_bins(self, 
@@ -413,3 +440,47 @@ class SimpleCalorimeter(nn.Module):
                     torch.where(abs_eta <= 2.5, endcap_sigma, forward_sigma))
         
         return sigma
+
+    @staticmethod
+    def _log_normal_smear(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+        """
+        Apply log-normal smearing to energy values.
+        
+        C++ implementation:
+            if(mean > 0.0) {
+                b = sqrt(log((1.0 + (sigma * sigma) / (mean * mean))));
+                a = log(mean) - 0.5 * b * b;
+                return exp(a + b * gRandom->Gaus(0.0, 1.0));
+            } else {
+                return 0.0;
+            }
+        
+        Args:
+            mean: Tower energy (before smearing)
+            sigma: Resolution sigma
+            
+        Returns:
+            Smeared energy values
+        """
+        # For mean > 0, apply log-normal
+        # For mean <= 0, return 0
+        
+        # Avoid division by zero
+        safe_mean = torch.where(mean > 0, mean, torch.ones_like(mean))
+        
+        # b = sqrt(log(1 + sigma^2/mean^2))
+        b = torch.sqrt(torch.log(1.0 + (sigma * sigma) / (safe_mean * safe_mean)))
+        
+        # a = log(mean) - 0.5 * b^2
+        a = torch.log(safe_mean) - 0.5 * b * b
+        
+        # Sample from standard normal
+        z = torch.randn_like(mean)
+        
+        # exp(a + b * z)
+        smeared = torch.exp(a + b * z)
+        
+        # Zero out where mean <= 0
+        smeared = torch.where(mean > 0, smeared, torch.zeros_like(smeared))
+        
+        return smeared
