@@ -97,6 +97,7 @@ class SimpleCalorimeter(nn.Module):
 
 
         ######## 2. Bin particles into Towers ########
+        # C++: if(fraction < 1.0E-9) continue;  // particles with zero fraction are skipped
         # Get particle positions (eta, phi from Position, not Momentum)
         particle_eta = particles[:, CMAP["ETA_OUTER"]]  # Position-based eta
         particle_phi = particles[:, CMAP["PHI_OUTER"]]  # Position-based phi
@@ -105,24 +106,26 @@ class SimpleCalorimeter(nn.Module):
         particle_eta_bin = torch.searchsorted(self.eta_bins, particle_eta)
         
         # Find phi bin for each particle - variable per eta bin
-        # For each particle, we need to use the phi bins corresponding to its eta bin
-        particle_phi_bin, particle_valid = self._compute_phi_bins(
-            particle_phi, particle_eta_bin, particle_energy_fractions
-        )
+        particle_phi_bin, particle_valid = self._compute_phi_bins(particle_phi, particle_eta_bin)
+        
+        # Particles: filter by energy fraction (C++: if(fraction < 1.0E-9) continue)
+        particle_valid = particle_valid & (particle_energy_fractions > 1e-9)
 
 
         ######## 3. Bin tracks into Towers ########
-        # Get track positions (eta, phi from Position, not Momentum)
+        # C++: tracks are NOT filtered by fraction before binning
+        # Get track positions (eta from ETA_OUTER, phi computed from X,Y position)
+        # C++ uses track->Position.Eta() and track->Position.Phi()
+        # TLorentzVector::Phi() computes atan2(Y, X)
         track_eta = tracks[:, CMAP["ETA_OUTER"]]  # Position-based eta
-        track_phi = tracks[:, CMAP["PHI_OUTER"]]  # Position-based phi
+        track_phi = torch.atan2(tracks[:, CMAP["Y"]], tracks[:, CMAP["X"]])  # Position-based phi
         
         # Find eta bin for each track
         track_eta_bin = torch.searchsorted(self.eta_bins, track_eta)
         
         # Find phi bin for each track - variable per eta bin
-        track_phi_bin, track_valid = self._compute_phi_bins(
-            track_phi, track_eta_bin, track_energy_fractions
-        )
+        # Tracks: do NOT filter by energy fraction (C++ doesn't skip tracks with fraction < 1e-9)
+        track_phi_bin, track_valid = self._compute_phi_bins(track_phi, track_eta_bin)
 
 
         ######## 4. Aggregate Energies per Tower ########
@@ -155,7 +158,6 @@ class SimpleCalorimeter(nn.Module):
     def _compute_phi_bins(self, 
         phi: torch.Tensor,           # (N,) phi values
         eta_bin: torch.Tensor,       # (N,) eta bin indices
-        energy_fractions: torch.Tensor  # (N,) energy fractions
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute phi bin for each particle/track using variable phi binning per eta.
@@ -163,19 +165,21 @@ class SimpleCalorimeter(nn.Module):
         In C++ Delphes:
             phiBins = fPhiBins[etaBin];
             itPhiBin = lower_bound(phiBins->begin(), phiBins->end(), position.Phi());
+            if(itPhiBin == phiBins->begin() || itPhiBin == phiBins->end()) continue;
+            phiBin = distance(phiBins->begin(), itPhiBin);
         
         Returns:
             phi_bin: (N,) phi bin indices
-            valid: (N,) boolean mask for valid bins
+            valid: (N,) boolean mask for valid bins (eta and phi both in range)
         """
         n = len(phi)
         phi_bin = torch.zeros(n, dtype=torch.long, device=phi.device)
         valid = torch.zeros(n, dtype=torch.bool, device=phi.device)
         
-        # Filter by valid eta bin first
+        # Filter by valid eta bin first: [1, len(eta_bins) - 1]
         valid_eta = (eta_bin > 0) & (eta_bin < len(self.eta_bins))
         
-        # For each unique eta bin, compute phi bins for all particles in that eta bin
+        # For each eta bin, compute phi bins for all particles/tracks in that eta bin
         for eb in range(1, len(self.eta_bins)):
             mask = (eta_bin == eb) & valid_eta
             if not mask.any():
@@ -184,19 +188,17 @@ class SimpleCalorimeter(nn.Module):
             # Get phi bins for this eta bin
             phi_bins_eb = self.phi_bins_per_eta[eb].to(phi.device)
             
-            # Compute phi bin for particles in this eta bin
+            # Compute phi bin (equivalent to lower_bound + distance)
             phi_vals = phi[mask]
             pb = torch.searchsorted(phi_bins_eb, phi_vals)
             
-            # Check valid phi bin range [1, len(phi_bins_eb) - 1]
+            # Valid phi bin range: [1, len(phi_bins_eb) - 1]
+            # (not at begin or end, matching C++ continue conditions)
             valid_phi = (pb > 0) & (pb < len(phi_bins_eb))
             
             # Store results
             phi_bin[mask] = pb
             valid[mask] = valid_phi
-        
-        # Also require non-zero energy fraction
-        valid = valid & (energy_fractions > 1e-9)
         
         return phi_bin, valid
 
