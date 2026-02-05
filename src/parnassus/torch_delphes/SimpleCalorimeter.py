@@ -128,6 +128,97 @@ class SimpleCalorimeter(nn.Module):
 
 
         ######## 4. Aggregate Energies per Tower ########
+        # C++ Delphes:
+        #   - Sorts all hits by (etaBin, phiBin)
+        #   - For each tower (unique etaBin, phiBin):
+        #       fTowerEnergy += momentum.E() * fTowerFractions[number]  (particles)
+        #       fTrackEnergy += momentum.E() * fTrackFractions[number]  (tracks with fraction > 1e-9)
+        #   - Time weighting is also done but we handle that separately
+        
+        # Get energies
+        particle_energy = particles[:, CMAP["E"]]
+        track_energy = tracks[:, CMAP["E"]]
+        
+        # Compute weighted energies (energy × fraction)
+        particle_weighted_energy = particle_energy * particle_energy_fractions
+        track_weighted_energy = track_energy * track_energy_fractions
+        
+        # Create unique tower index from (eta_bin, phi_bin)
+        # Using max_phi_bins to create unique indices
+        max_phi_bins = max(len(pb) for pb in self.phi_bins_per_eta)
+        n_eta_bins = len(self.eta_bins)
+        
+        # Tower index = eta_bin * max_phi_bins + phi_bin
+        particle_tower_idx = particle_eta_bin * max_phi_bins + particle_phi_bin
+        track_tower_idx = track_eta_bin * max_phi_bins + track_phi_bin
+        
+        # For tracks, only those with fraction > 1e-9 contribute to fTrackEnergy
+        # C++: if(fTrackFractions[number] > 1.0E-9) { fTrackEnergy += energy; ... }
+        track_has_fraction = track_energy_fractions > 1e-9
+        
+        # Find unique towers from valid particles
+        valid_particle_tower_idx = torch.where(
+            particle_valid, 
+            particle_tower_idx, 
+            torch.full_like(particle_tower_idx, -1)
+        )
+        valid_track_tower_idx = torch.where(
+            track_valid & track_has_fraction,
+            track_tower_idx,
+            torch.full_like(track_tower_idx, -1)
+        )
+        
+        # Combine all valid tower indices to find unique towers
+        all_tower_idx = torch.cat([
+            valid_particle_tower_idx[particle_valid],
+            valid_track_tower_idx[track_valid & track_has_fraction]
+        ])
+        unique_tower_idx = torch.unique(all_tower_idx[all_tower_idx >= 0])
+        n_towers = len(unique_tower_idx)
+        
+        # Create mapping from global tower index to compact tower index [0, n_towers)
+        tower_idx_map = torch.full((n_eta_bins * max_phi_bins,), -1, 
+                                    dtype=torch.long, device=particles.device)
+        tower_idx_map[unique_tower_idx] = torch.arange(n_towers, device=particles.device)
+        
+        # Map particles and tracks to compact tower indices
+        # Clamp tower indices to valid range before lookup (invalid particles have valid=False anyway)
+        max_idx = n_eta_bins * max_phi_bins - 1
+        particle_tower_idx_clamped = particle_tower_idx.clamp(0, max_idx)
+        track_tower_idx_clamped = track_tower_idx.clamp(0, max_idx)
+        
+        particle_compact_idx = torch.where(
+            particle_valid,
+            tower_idx_map[particle_tower_idx_clamped],
+            torch.full_like(particle_tower_idx, -1)
+        )
+        track_compact_idx = torch.where(
+            track_valid & track_has_fraction,
+            tower_idx_map[track_tower_idx_clamped],
+            torch.full_like(track_tower_idx, -1)
+        )
+        
+        # Aggregate particle energies per tower using scatter_add
+        tower_energy = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        valid_particle_mask = particle_compact_idx >= 0
+        tower_energy.scatter_add_(
+            0,
+            particle_compact_idx[valid_particle_mask],
+            particle_weighted_energy[valid_particle_mask]
+        )
+        
+        # Aggregate track energies per tower
+        tower_track_energy = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        valid_track_mask = track_compact_idx >= 0
+        tower_track_energy.scatter_add_(
+            0,
+            track_compact_idx[valid_track_mask],
+            track_weighted_energy[valid_track_mask]
+        )
+        
+        # Extract eta_bin and phi_bin for each unique tower
+        tower_eta_bin = unique_tower_idx // max_phi_bins
+        tower_phi_bin = unique_tower_idx % max_phi_bins
 
 
         ######## 5. Compute Tower Centers ########
@@ -152,6 +243,14 @@ class SimpleCalorimeter(nn.Module):
             'track_eta_bin': track_eta_bin,
             'track_phi_bin': track_phi_bin,
             'track_valid': track_valid,
+            # Tower aggregation outputs
+            'n_towers': n_towers,
+            'unique_tower_idx': unique_tower_idx,
+            'tower_eta_bin': tower_eta_bin,
+            'tower_phi_bin': tower_phi_bin,
+            'tower_energy': tower_energy,           # Sum of particle energies × fractions
+            'tower_track_energy': tower_track_energy,  # Sum of track energies × fractions
+            'max_phi_bins': max_phi_bins,
         }
 
     def _compute_phi_bins(self, 
