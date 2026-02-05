@@ -114,11 +114,10 @@ class SimpleCalorimeter(nn.Module):
 
         ######## 3. Bin tracks into Towers ########
         # C++: tracks are NOT filtered by fraction before binning
-        # Get track positions (eta from ETA_OUTER, phi computed from X,Y position)
+        # Get track positions (eta and phi from outer position, set by ParticlePropagator)
         # C++ uses track->Position.Eta() and track->Position.Phi()
-        # TLorentzVector::Phi() computes atan2(Y, X)
         track_eta = tracks[:, CMAP["ETA_OUTER"]]  # Position-based eta
-        track_phi = torch.atan2(tracks[:, CMAP["Y"]], tracks[:, CMAP["X"]])  # Position-based phi
+        track_phi = tracks[:, CMAP["PHI_OUTER"]]  # Position-based phi
         
         # Find eta bin for each track
         track_eta_bin = torch.searchsorted(self.eta_bins, track_eta)
