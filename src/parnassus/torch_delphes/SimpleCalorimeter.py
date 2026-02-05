@@ -286,6 +286,68 @@ class SimpleCalorimeter(nn.Module):
 
 
         ######## 7. Compute track sigma per Tower ########
+        # C++:
+        #   sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, momentum.E());
+        #   if(sigma / momentum.E() < track->TrackResolution)
+        #       energyGuess = energy;  // energy = momentum.E() * fraction
+        #   else
+        #       energyGuess = momentum.E();
+        #   fTrackSigma += (track->TrackResolution * energyGuess) * (track->TrackResolution * energyGuess);
+        #   ...
+        #   fTrackSigma = TMath::Sqrt(fTrackSigma);  // in FinalizeTower
+        
+        # Get track resolution from MomentumSmearing (stored in TRACK_RESOLUTION column)
+        track_momentum_resolution = tracks[:, CMAP["TRACK_RESOLUTION"]]
+        n_tracks = tracks.shape[0]
+        
+        # For valid tracks, get the tower eta using the track's tower assignment
+        # Only tracks with fraction > 1e-9 contribute to fTrackSigma
+        track_tower_eta = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
+        track_calo_sigma = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
+        track_energy_guess = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
+        track_sigma_sq = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
+        
+        # Mask for tracks that contribute to track sigma (valid AND has fraction)
+        track_sigma_valid = track_valid & track_has_fraction
+        
+        # Get tower eta for each valid track from the tower mapping
+        for i in range(n_towers):
+            tower_mask = (track_compact_idx == i)
+            if tower_mask.any():
+                track_tower_eta[tower_mask] = tower_eta[i]
+        
+        # Compute calorimeter sigma at tower eta using track energy
+        # C++: sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, momentum.E())
+        track_calo_sigma[track_sigma_valid] = self.resolution_func(
+            track_tower_eta[track_sigma_valid],
+            track_energy[track_sigma_valid]
+        )
+        
+        # Determine energy_guess based on resolution comparison
+        # C++: if(sigma / momentum.E() < track->TrackResolution) energyGuess = energy; else energyGuess = momentum.E()
+        calo_relative_sigma = track_calo_sigma / (track_energy + 1e-30)  # Avoid div by zero
+        use_weighted_energy = calo_relative_sigma < track_momentum_resolution
+        
+        # energy_guess = fraction * track_energy if calo resolution better, else track_energy
+        track_energy_guess = torch.where(
+            use_weighted_energy & track_sigma_valid,
+            track_weighted_energy,  # energy = momentum.E() * fraction
+            torch.where(track_sigma_valid, track_energy, torch.zeros_like(track_energy))
+        )
+        
+        # Compute per-track sigma squared: (track_resolution * energy_guess)^2
+        track_sigma_sq = (track_momentum_resolution * track_energy_guess) ** 2
+        
+        # Aggregate track_sigma_sq per tower using scatter_add
+        tower_track_sigma_sq = torch.zeros(n_towers, dtype=torch.float64, device=tracks.device)
+        tower_track_sigma_sq.scatter_add_(
+            0,
+            track_compact_idx[track_sigma_valid],
+            track_sigma_sq[track_sigma_valid]
+        )
+        
+        # Final tower track sigma = sqrt(sum of squares)
+        tower_track_sigma = torch.sqrt(tower_track_sigma_sq)
 
 
         ######## 8. Identify Neutral Excess and Create eflow objects ########
@@ -321,6 +383,16 @@ class SimpleCalorimeter(nn.Module):
             'tower_energy_smeared': tower_energy_smeared,
             'sigma_after': sigma_after,
             'tower_energy_final': tower_energy_final,  # After thresholds applied
+            # Track sigma outputs
+            'tower_track_sigma': tower_track_sigma,
+            'track_momentum_resolution': track_momentum_resolution,
+            'track_tower_eta': track_tower_eta,
+            'track_calo_sigma': track_calo_sigma,
+            'track_energy_guess': track_energy_guess,
+            'track_sigma_sq': track_sigma_sq,
+            'track_sigma_valid': track_sigma_valid,
+            'track_compact_idx': track_compact_idx,
+            'track_energy': track_energy,  # Raw track energies for validation
         }
 
     def _compute_phi_bins(self, 
