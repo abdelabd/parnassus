@@ -6,6 +6,11 @@ import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 
+def get_ylim(ratio):
+    ratio = ratio[~np.isnan(ratio)]
+    ratio = ratio[~np.isinf(ratio)]
+    return [0.9*min(ratio), 1.1*max(ratio)]
+
 def validate_simple_cal_step_1(
     ecal_results: Dict,
     cpp_fractions_file: str,
@@ -222,7 +227,7 @@ def validate_simple_cal_step_2(
             ax_eta_ratio.plot(eta_bin_centers, eta_ratio, color='blue', linewidth=2)
             ax_eta_ratio.set_xlabel('Eta Bin Index', fontsize=12)
             ax_eta_ratio.set_ylabel('Torch/C++', fontsize=10)
-            ax_eta_ratio.set_ylim([0.9*min(eta_ratio), 1.1*max(eta_ratio)])
+            ax_eta_ratio.set_ylim(get_ylim(eta_ratio))
             ax_eta_ratio.grid(True, alpha=0.3)
             
             # === Right column: Phi bins ===
@@ -259,7 +264,7 @@ def validate_simple_cal_step_2(
             ax_phi_ratio.plot(phi_bin_centers, phi_ratio, color='blue', linewidth=2)
             ax_phi_ratio.set_xlabel('Phi Bin Index', fontsize=12)
             ax_phi_ratio.set_ylabel('Torch/C++', fontsize=10)
-            ax_phi_ratio.set_ylim([0.9*min(phi_ratio), 1.1*max(phi_ratio)])
+            ax_phi_ratio.set_ylim(get_ylim(phi_ratio))
             ax_phi_ratio.grid(True, alpha=0.3)
             
             plt.tight_layout()
@@ -354,7 +359,7 @@ def validate_simple_cal_step_3(
         ax1_ratio.set_xscale('log')
         ax1_ratio.set_xlabel('Tower Energy (GeV)', fontsize=12)
         ax1_ratio.set_ylabel('Torch/C++', fontsize=10)
-        ax1_ratio.set_ylim(0.9*min(ratio[~np.isnan(ratio)]), 1.1*max(ratio[~np.isnan(ratio)]))
+        ax1_ratio.set_ylim(get_ylim(ratio))
         ax1_ratio.grid(True, alpha=0.3)
         
         # ===== Plot 2: Track energy distribution with ratio =====
@@ -387,7 +392,7 @@ def validate_simple_cal_step_3(
             ax2_ratio.scatter(track_bin_centers, track_ratio, s=15, c='purple', alpha=0.7)
             ax2_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
             ax2_ratio.set_xscale('log')
-            ax2_ratio.set_ylim(0.9*min(track_ratio), 1.1*max(track_ratio))
+            ax2_ratio.set_ylim(get_ylim(track_ratio))
         else:
             ax2_main.text(0.5, 0.5, 'No non-zero track energies', transform=ax2_main.transAxes,
                    ha='center', va='center', fontsize=14)
@@ -454,7 +459,7 @@ def validate_simple_cal_step_3(
         ax4_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
         ax4_ratio.set_xlabel('Event', fontsize=12)
         ax4_ratio.set_ylabel('Torch/C++', fontsize=10)
-        ax4_ratio.set_ylim(0.9*min(towers_ratio), 1.1*max(towers_ratio))
+        ax4_ratio.set_ylim(get_ylim(towers_ratio))
         ax4_ratio.grid(True, alpha=0.3)
         
         # Add summary statistics
@@ -547,7 +552,7 @@ def validate_simple_cal_step_4(
     ax_eta_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
     ax_eta_ratio.set_xlabel('Tower Eta', fontsize=12)
     ax_eta_ratio.set_ylabel('Torch/C++', fontsize=10)
-    ax_eta_ratio.set_ylim(0.5, 1.5)
+    ax_eta_ratio.set_ylim(get_ylim(eta_ratio[valid_eta_ratio]))
     ax_eta_ratio.grid(True, alpha=0.3)
     
     # ===== Tower phi comparison with ratio =====
@@ -577,7 +582,7 @@ def validate_simple_cal_step_4(
     ax_phi_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
     ax_phi_ratio.set_xlabel('Tower Phi', fontsize=12)
     ax_phi_ratio.set_ylabel('Torch/C++', fontsize=10)
-    ax_phi_ratio.set_ylim(0.5, 1.5)
+    ax_phi_ratio.set_ylim(get_ylim(phi_ratio[valid_phi_ratio]))
     ax_phi_ratio.grid(True, alpha=0.3)
     
     # ===== 2D eta-phi scatter (sample to avoid too many points) =====
@@ -721,7 +726,7 @@ def validate_simple_cal_step_5(
     ax1_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
     ax1_ratio.set_xlabel('σ (GeV)', fontsize=12)
     ax1_ratio.set_ylabel('Torch/C++', fontsize=10)
-    ax1_ratio.set_ylim(0.5, 1.5)
+    ax1_ratio.set_ylim(get_ylim(sigma_ratio[valid_sigma_ratio]))
     ax1_ratio.grid(True, alpha=0.3)
     
     # Plot 2: Energy smeared comparison with ratio
@@ -761,7 +766,7 @@ def validate_simple_cal_step_5(
     ax2_ratio.set_xscale('log')
     ax2_ratio.set_xlabel('Energy (GeV)', fontsize=12)
     ax2_ratio.set_ylabel('Torch/C++', fontsize=10)
-    ax2_ratio.set_ylim(0.5, 1.5)
+    ax2_ratio.set_ylim(get_ylim(e_ratio[valid_e_ratio]))
     ax2_ratio.grid(True, alpha=0.3)
     
     # Plot 3: Energy final (after threshold) comparison with ratio
@@ -793,7 +798,7 @@ def validate_simple_cal_step_5(
     ax3_ratio.set_xscale('log')
     ax3_ratio.set_xlabel('Energy (GeV)', fontsize=12)
     ax3_ratio.set_ylabel('Torch/C++', fontsize=10)
-    ax3_ratio.set_ylim(0.5, 1.5)
+    ax3_ratio.set_ylim(get_ylim(f_ratio[valid_f_ratio]))
     ax3_ratio.grid(True, alpha=0.3)
     
     # ===== Row 2: Resolution and threshold comparison =====
@@ -969,7 +974,7 @@ def validate_simple_cal_step_6(
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax1_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax1_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax1_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax1_ratio.set_ylim(get_ylim(ratio))
     ax1_ratio.set_xlabel('Track Energy [GeV]')
     ax1_ratio.set_ylabel('Torch/C++')
     
@@ -991,7 +996,7 @@ def validate_simple_cal_step_6(
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax2_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax2_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax2_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax2_ratio.set_ylim(get_ylim(ratio))
     ax2_ratio.set_xlabel('Track Resolution (σ/pT)')
     ax2_ratio.set_ylabel('Torch/C++')
     
@@ -1015,7 +1020,7 @@ def validate_simple_cal_step_6(
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax3_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax3_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax3_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax3_ratio.set_ylim(get_ylim(ratio))
     ax3_ratio.set_xlabel('Calorimeter Sigma [GeV]')
     ax3_ratio.set_ylabel('Torch/C++')
     
@@ -1037,7 +1042,7 @@ def validate_simple_cal_step_6(
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax4_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax4_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax4_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax4_ratio.set_ylim(get_ylim(ratio))
     ax4_ratio.set_xlabel('Tower η')
     ax4_ratio.set_ylabel('Torch/C++')
     
@@ -1061,7 +1066,7 @@ def validate_simple_cal_step_6(
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax5_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax5_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax5_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax5_ratio.set_ylim(get_ylim(ratio))
     ax5_ratio.set_xlabel('Energy Guess [GeV]')
     ax5_ratio.set_ylabel('Torch/C++')
     
@@ -1085,7 +1090,7 @@ def validate_simple_cal_step_6(
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax6_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax6_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax6_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax6_ratio.set_ylim(get_ylim(ratio))
     ax6_ratio.set_xscale('log')
     ax6_ratio.set_xlabel('σ² Contribution')
     ax6_ratio.set_ylabel('Torch/C++')
@@ -1124,7 +1129,7 @@ def validate_simple_cal_step_6(
             ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
         ax7_ratio.step(bin_centers, ratio, where='mid', color='black')
         ax7_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-        ax7_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+        ax7_ratio.set_ylim(get_ylim(ratio))
     else:
         ax7.hist(torch_data, bins=bins, histtype='step', label='TorchDelphes', alpha=0.9, color='blue', linewidth=1.5)
         ax7_ratio.text(0.5, 0.5, 'No C++ tower-level data', 
