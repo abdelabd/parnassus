@@ -412,6 +412,11 @@ def process_ecal_pipeline(
                 'tower_eta_hi': result['tower_eta_hi'].cpu(),
                 'tower_phi_lo': result['tower_phi_lo'].cpu(),
                 'tower_phi_hi': result['tower_phi_hi'].cpu(),
+                # Step 6: Resolution smearing
+                'sigma_before': result['sigma_before'].cpu(),
+                'tower_energy_smeared': result['tower_energy_smeared'].cpu(),
+                'sigma_after': result['sigma_after'].cpu(),
+                'tower_energy_final': result['tower_energy_final'].cpu(),
             })
     
     return {
@@ -1072,6 +1077,228 @@ def validate_simple_cal(
           f"phi range=[{cpp_tower_phi.min():.4f}, {cpp_tower_phi.max():.4f}]")
     
     print(f"  ✓ Step 5 validation complete.")
+    
+    # ============ Step 6: Validate Resolution Smearing ============
+    # Compare against C++ debug output (using law of large numbers - distributions should match)
+    print(f"\n  Step 6: Validating Resolution Smearing...")
+    
+    # Load C++ smearing debug output
+    cpp_smearing_file = Path(cpp_towerhits_file).parent / "smearing_100.csv"
+    if not cpp_smearing_file.exists():
+        print(f"  ⚠ C++ smearing debug file not found: {cpp_smearing_file}")
+        print(f"  ⚠ Skipping Step 6 validation. Please recompile and re-run C++ Delphes.")
+        print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
+        return
+    
+    cpp_smearing_df = pd.read_csv(cpp_smearing_file)
+    print(f"  Loaded {len(cpp_smearing_df)} C++ smearing records from {cpp_smearing_file}")
+    
+    # Collect TorchDelphes smearing results
+    torch_energy_before = np.concatenate([r['tower_energy'].numpy() for r in tower_results])
+    torch_energy_smeared = np.concatenate([r['tower_energy_smeared'].numpy() for r in tower_results])
+    torch_energy_final = np.concatenate([r['tower_energy_final'].numpy() for r in tower_results])
+    torch_sigma_before = np.concatenate([r['sigma_before'].numpy() for r in tower_results])
+    torch_sigma_after = np.concatenate([r['sigma_after'].numpy() for r in tower_results])
+    torch_eta = np.concatenate([r['tower_eta'].numpy() for r in tower_results])
+    
+    # C++ smearing data
+    cpp_energy_before = cpp_smearing_df['energy_before'].values
+    cpp_sigma_before = cpp_smearing_df['sigma_before'].values
+    cpp_energy_smeared = cpp_smearing_df['energy_smeared'].values
+    cpp_sigma_after = cpp_smearing_df['sigma_after'].values
+    cpp_energy_final = cpp_smearing_df['energy_final'].values
+    cpp_eta = cpp_smearing_df['tower_eta'].values
+    
+    # Print summary statistics
+    print(f"\n  Smearing Statistics:")
+    print(f"    TorchDelphes: {len(torch_energy_before)} towers, C++: {len(cpp_energy_before)} towers")
+    
+    # Create validation plots
+    fig = plt.figure(figsize=(16, 12))
+    
+    # ===== Row 1: Energy before smearing (sigma) comparison =====
+    # Plot 1: Sigma before comparison with ratio
+    ax1_main = fig.add_axes([0.05, 0.72, 0.28, 0.22])
+    ax1_ratio = fig.add_axes([0.05, 0.58, 0.28, 0.10])
+    
+    sigma_bins = np.linspace(0, 5, 100)
+    cpp_sigma_counts, _ = np.histogram(cpp_sigma_before, bins=sigma_bins)
+    torch_sigma_counts, _ = np.histogram(torch_sigma_before, bins=sigma_bins)
+    
+    ax1_main.hist(cpp_sigma_before, bins=sigma_bins, histtype='stepfilled', color='orange', alpha=0.5,
+                  label=f'C++ Delphes ({len(cpp_sigma_before)})')
+    ax1_main.hist(torch_sigma_before, bins=sigma_bins, histtype='step', color='blue', linewidth=2,
+                  label=f'TorchDelphes ({len(torch_sigma_before)})')
+    ax1_main.set_ylabel('Counts', fontsize=12)
+    ax1_main.set_title('σ Before Smearing', fontsize=14)
+    ax1_main.legend(fontsize=9)
+    ax1_main.grid(True, alpha=0.3)
+    ax1_main.set_xticklabels([])
+    
+    sigma_bin_centers = 0.5 * (sigma_bins[:-1] + sigma_bins[1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sigma_ratio = np.where(cpp_sigma_counts > 0, torch_sigma_counts / cpp_sigma_counts, np.nan)
+    valid_sigma_ratio = ~np.isnan(sigma_ratio)
+    ax1_ratio.scatter(sigma_bin_centers[valid_sigma_ratio], sigma_ratio[valid_sigma_ratio], s=10, c='purple', alpha=0.7)
+    ax1_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+    ax1_ratio.set_xlabel('σ (GeV)', fontsize=12)
+    ax1_ratio.set_ylabel('Torch/C++', fontsize=10)
+    ax1_ratio.set_ylim(0.5, 1.5)
+    ax1_ratio.grid(True, alpha=0.3)
+    
+    # Plot 2: Energy smeared comparison with ratio
+    ax2_main = fig.add_axes([0.38, 0.72, 0.28, 0.22])
+    ax2_ratio = fig.add_axes([0.38, 0.58, 0.28, 0.10])
+    
+    # Filter non-zero
+    torch_smeared_nz = torch_energy_smeared[torch_energy_smeared > 0]
+    cpp_smeared_nz = cpp_energy_smeared[cpp_energy_smeared > 0]
+    
+    e_min = max(min(torch_smeared_nz.min() if len(torch_smeared_nz) > 0 else 1e-3,
+                   cpp_smeared_nz.min() if len(cpp_smeared_nz) > 0 else 1e-3), 1e-3)
+    e_max = max(torch_smeared_nz.max() if len(torch_smeared_nz) > 0 else 100,
+               cpp_smeared_nz.max() if len(cpp_smeared_nz) > 0 else 100)
+    energy_bins = np.logspace(np.log10(e_min), np.log10(e_max * 1.1), 50)
+    
+    cpp_e_counts, _ = np.histogram(cpp_smeared_nz, bins=energy_bins)
+    torch_e_counts, _ = np.histogram(torch_smeared_nz, bins=energy_bins)
+    
+    ax2_main.hist(cpp_smeared_nz, bins=energy_bins, histtype='stepfilled', color='orange', alpha=0.5,
+                  label=f'C++ ({len(cpp_smeared_nz)})')
+    ax2_main.hist(torch_smeared_nz, bins=energy_bins, histtype='step', color='blue', linewidth=2,
+                  label=f'Torch ({len(torch_smeared_nz)})')
+    ax2_main.set_xscale('log')
+    ax2_main.set_ylabel('Counts', fontsize=12)
+    ax2_main.set_title('Energy After Smearing', fontsize=14)
+    ax2_main.legend(fontsize=9)
+    ax2_main.grid(True, alpha=0.3)
+    ax2_main.set_xticklabels([])
+    
+    e_bin_centers = np.sqrt(energy_bins[:-1] * energy_bins[1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        e_ratio = np.where(cpp_e_counts > 0, torch_e_counts / cpp_e_counts, np.nan)
+    valid_e_ratio = ~np.isnan(e_ratio)
+    ax2_ratio.scatter(e_bin_centers[valid_e_ratio], e_ratio[valid_e_ratio], s=10, c='purple', alpha=0.7)
+    ax2_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+    ax2_ratio.set_xscale('log')
+    ax2_ratio.set_xlabel('Energy (GeV)', fontsize=12)
+    ax2_ratio.set_ylabel('Torch/C++', fontsize=10)
+    ax2_ratio.set_ylim(0.5, 1.5)
+    ax2_ratio.grid(True, alpha=0.3)
+    
+    # Plot 3: Energy final (after threshold) comparison with ratio
+    ax3_main = fig.add_axes([0.71, 0.72, 0.26, 0.22])
+    ax3_ratio = fig.add_axes([0.71, 0.58, 0.26, 0.10])
+    
+    torch_final_nz = torch_energy_final[torch_energy_final > 0]
+    cpp_final_nz = cpp_energy_final[cpp_energy_final > 0]
+    
+    cpp_f_counts, _ = np.histogram(cpp_final_nz, bins=energy_bins)
+    torch_f_counts, _ = np.histogram(torch_final_nz, bins=energy_bins)
+    
+    ax3_main.hist(cpp_final_nz, bins=energy_bins, histtype='stepfilled', color='orange', alpha=0.5,
+                  label=f'C++ ({len(cpp_final_nz)})')
+    ax3_main.hist(torch_final_nz, bins=energy_bins, histtype='step', color='blue', linewidth=2,
+                  label=f'Torch ({len(torch_final_nz)})')
+    ax3_main.set_xscale('log')
+    ax3_main.set_ylabel('Counts', fontsize=12)
+    ax3_main.set_title('Energy After Threshold', fontsize=14)
+    ax3_main.legend(fontsize=9)
+    ax3_main.grid(True, alpha=0.3)
+    ax3_main.set_xticklabels([])
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        f_ratio = np.where(cpp_f_counts > 0, torch_f_counts / cpp_f_counts, np.nan)
+    valid_f_ratio = ~np.isnan(f_ratio)
+    ax3_ratio.scatter(e_bin_centers[valid_f_ratio], f_ratio[valid_f_ratio], s=10, c='purple', alpha=0.7)
+    ax3_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+    ax3_ratio.set_xscale('log')
+    ax3_ratio.set_xlabel('Energy (GeV)', fontsize=12)
+    ax3_ratio.set_ylabel('Torch/C++', fontsize=10)
+    ax3_ratio.set_ylim(0.5, 1.5)
+    ax3_ratio.grid(True, alpha=0.3)
+    
+    # ===== Row 2: Resolution and threshold comparison =====
+    # Plot 4: Resolution (sigma/E) vs eta scatter
+    ax4 = fig.add_axes([0.05, 0.08, 0.28, 0.40])
+    
+    cpp_mask = cpp_energy_before > 0
+    torch_mask = torch_energy_before > 0
+    
+    cpp_resolution = cpp_sigma_before[cpp_mask] / cpp_energy_before[cpp_mask]
+    torch_resolution = torch_sigma_before[torch_mask] / torch_energy_before[torch_mask]
+    
+    ax4.scatter(cpp_eta[cpp_mask], cpp_resolution, s=3, alpha=0.2, c='orange', label='C++')
+    ax4.scatter(torch_eta[torch_mask], torch_resolution, s=3, alpha=0.2, c='blue', label='Torch')
+    ax4.set_xlabel('Tower Eta', fontsize=12)
+    ax4.set_ylabel('σ/E (Resolution)', fontsize=12)
+    ax4.set_title('Energy Resolution vs Eta', fontsize=14)
+    ax4.legend(fontsize=10)
+    ax4.grid(True, alpha=0.3)
+    ax4.set_ylim(0, 2)
+    
+    # Plot 5: Threshold effects comparison
+    ax5 = fig.add_axes([0.38, 0.08, 0.28, 0.40])
+    
+    cpp_n_smeared = np.sum(cpp_energy_smeared > 0)
+    cpp_n_final = np.sum(cpp_energy_final > 0)
+    cpp_n_zeroed = cpp_n_smeared - cpp_n_final
+    
+    torch_n_smeared = np.sum(torch_energy_smeared > 0)
+    torch_n_final = np.sum(torch_energy_final > 0)
+    torch_n_zeroed = torch_n_smeared - torch_n_final
+    
+    x = np.arange(3)
+    width = 0.35
+    
+    ax5.bar(x - width/2, [cpp_n_smeared, cpp_n_final, cpp_n_zeroed], width, 
+            label='C++ Delphes', color='orange', alpha=0.7)
+    ax5.bar(x + width/2, [torch_n_smeared, torch_n_final, torch_n_zeroed], width,
+            label='TorchDelphes', color='blue', alpha=0.7)
+    
+    ax5.set_xticks(x)
+    ax5.set_xticklabels(['After\nSmearing', 'After\nThreshold', 'Zeroed by\nThreshold'])
+    ax5.set_ylabel('Number of Towers', fontsize=12)
+    ax5.set_title('Threshold Effect Comparison', fontsize=14)
+    ax5.legend(fontsize=10)
+    ax5.grid(True, alpha=0.3, axis='y')
+    
+    # Plot 6: Summary statistics
+    ax6 = fig.add_axes([0.71, 0.08, 0.26, 0.40])
+    ax6.axis('off')
+    ax6.set_title('Smearing Summary', fontsize=14)
+    
+    summary_text = f"""
+C++ Delphes:
+  Towers total: {len(cpp_energy_before)}
+  σ_before: mean={cpp_sigma_before.mean():.3f}
+  E_smeared>0: {cpp_n_smeared} ({100*cpp_n_smeared/len(cpp_energy_before):.1f}%)
+  E_final>0: {cpp_n_final} ({100*cpp_n_final/len(cpp_energy_before):.1f}%)
+
+TorchDelphes:
+  Towers total: {len(torch_energy_before)}
+  σ_before: mean={torch_sigma_before.mean():.3f}
+  E_smeared>0: {torch_n_smeared} ({100*torch_n_smeared/len(torch_energy_before):.1f}%)
+  E_final>0: {torch_n_final} ({100*torch_n_final/len(torch_energy_before):.1f}%)
+
+Ratios (Torch/C++):
+  Total towers: {len(torch_energy_before)/len(cpp_energy_before):.3f}
+  σ mean: {torch_sigma_before.mean()/cpp_sigma_before.mean():.3f}
+  Final count: {torch_n_final/cpp_n_final:.3f}
+"""
+    ax6.text(0.05, 0.95, summary_text, transform=ax6.transAxes, fontsize=10,
+             verticalalignment='top', fontfamily='monospace')
+    
+    plot_file = output_dir / "resolution_smearing.png"
+    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Saved {plot_file}")
+    
+    print(f"\n  Threshold Statistics:")
+    print(f"    C++: {cpp_n_smeared} → {cpp_n_final} towers ({cpp_n_zeroed} zeroed)")
+    print(f"    Torch: {torch_n_smeared} → {torch_n_final} towers ({torch_n_zeroed} zeroed)")
+    
+    print(f"  ✓ Step 6 validation complete.")
     
     print(f"\n  ✓ All SimpleCalorimeter validation complete. Plots saved to {output_dir}")
 
