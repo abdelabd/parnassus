@@ -357,6 +357,10 @@ def process_ecal_pipeline(
     track_phi_bins_list = []
     track_valid_list = []
     tower_results_list = []
+    # New lists for COLUMN_MAP format tensors
+    tower_tensors_list = []
+    eflow_photon_tensors_list = []
+    eflow_track_tensors_list = []
     
     # Debug: Check track ETA_OUTER/PHI_OUTER values before processing
     print("\nDEBUG: Checking track ETA_OUTER/PHI_OUTER values...")
@@ -428,6 +432,11 @@ def process_ecal_pipeline(
                 'track_compact_idx': result['track_compact_idx'].cpu(),
                 'track_energy': result['track_energy'].cpu(),
             })
+            
+            # Collect COLUMN_MAP format tensors for ROOT output
+            tower_tensors_list.append(result['tower_tensor'].cpu())
+            eflow_photon_tensors_list.append(result['eflow_photon_tensor'].cpu())
+            eflow_track_tensors_list.append(result['eflow_track_tensor'].cpu())
     
     return {
         'particle_fractions': particle_fractions_list,
@@ -439,6 +448,10 @@ def process_ecal_pipeline(
         'track_phi_bins': track_phi_bins_list,
         'track_valid': track_valid_list,
         'tower_results': tower_results_list,
+        # COLUMN_MAP format tensors for ROOT output
+        'tower_tensors': tower_tensors_list,
+        'eflow_photon_tensors': eflow_photon_tensors_list,
+        'eflow_track_tensors': eflow_track_tensors_list,
     }
 
 def validate_simple_cal(
@@ -1684,6 +1697,9 @@ def validate_against_benchmark(
         # ('ElectronSmeared', track_kinematic_vars),
         # ('MuonSmeared', track_kinematic_vars),
         # ('MergedTracks', track_kinematic_vars),
+        ('ECalTower', tower_kinematic_vars),
+        ('ECal_EFlowTrack', track_kinematic_vars),
+        ('EFlowPhoton', tower_kinematic_vars),
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -2233,6 +2249,13 @@ def main(
     ecal_results = process_ecal_pipeline(
         pap_tensors, merged_tracks
     )
+    
+    # Add Tower, EFlowPhoton, and EFlowTrack branches to ROOT output
+    branches_torch_root.update({
+        'ECalTower': tensor_to_root_dict(ecal_results['tower_tensors'], 'ECalTower', expected_event_nums),
+        'EFlowPhoton': tensor_to_root_dict(ecal_results['eflow_photon_tensors'], 'EFlowPhoton', expected_event_nums),
+        'ECal_EFlowTrack': tensor_to_root_dict(ecal_results['eflow_track_tensors'], 'ECal_EFlowTrack', expected_event_nums),
+    })
     
     print("\n✓ SimpleCalorimeter Steps 1, 2, & 4 complete")
     
