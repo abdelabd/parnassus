@@ -669,7 +669,7 @@ def validate_simple_cal(
             ax_eta_ratio.axhline(y=1.0, color='orange', linewidth=2)
             ax_eta_ratio.plot(eta_bin_centers, eta_ratio, color='blue', linewidth=2)
             ax_eta_ratio.set_xlabel('Eta Bin Index', fontsize=12)
-            ax_eta_ratio.set_ylabel('Ratio', fontsize=10)
+            ax_eta_ratio.set_ylabel('Torch/C++', fontsize=10)
             ax_eta_ratio.set_ylim([0.9*min(eta_ratio), 1.1*max(eta_ratio)])
             ax_eta_ratio.grid(True, alpha=0.3)
             
@@ -706,7 +706,7 @@ def validate_simple_cal(
             ax_phi_ratio.axhline(y=1.0, color='orange', linewidth=2)
             ax_phi_ratio.plot(phi_bin_centers, phi_ratio, color='blue', linewidth=2)
             ax_phi_ratio.set_xlabel('Phi Bin Index', fontsize=12)
-            ax_phi_ratio.set_ylabel('Ratio', fontsize=10)
+            ax_phi_ratio.set_ylabel('Torch/C++', fontsize=10)
             ax_phi_ratio.set_ylim([0.9*min(phi_ratio), 1.1*max(phi_ratio)])
             ax_phi_ratio.grid(True, alpha=0.3)
             
@@ -1374,106 +1374,130 @@ Ratios (Torch/C++):
     print(f"    C++ Delphes:  {len(cpp_track_energy)} valid tracks")
     
     # Create validation plots
-    fig = plt.figure(figsize=(20, 16))
+    fig = plt.figure(figsize=(20, 28))
     
     # ===== Row 1: Track energy and resolution comparison =====
-    # Plot 1: Track energy distribution
+    # Plot 1: Track energy distribution with ratio
     ax1 = fig.add_subplot(4, 2, 1)
+    ax1_ratio = ax1.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(0, min(cpp_track_energy.max(), 200), 50)
-    cpp_hist, bin_edges = np.histogram(cpp_track_energy, bins=bins)
-    torch_hist, _ = np.histogram(torch_track_energy, bins=bins)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    ax1.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
-    ax1.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax1.hist(cpp_track_energy, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_energy)} tracks', alpha=0.6, color='orange')
+    ax1.hist(torch_track_energy, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_energy)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax1.set_xlabel('Track Energy [GeV]')
     ax1.set_ylabel('Count')
     ax1.set_title('Track Energy Distribution')
     ax1.legend()
     ax1.set_yscale('log')
-    
-    # Plot 2: Track momentum resolution distribution
-    ax2 = fig.add_subplot(4, 2, 2)
-    bins = np.linspace(0, 0.1, 50)
-    cpp_hist, bin_edges = np.histogram(cpp_track_resolution, bins=bins)
-    torch_hist, _ = np.histogram(torch_track_resolution, bins=bins)
+    # Ratio
+    cpp_hist, bin_edges = np.histogram(cpp_track_energy, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_energy, bins=bins)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    ax2.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
-    ax2.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
+    ax1_ratio.step(bin_centers, ratio, where='mid', color='black')
+    ax1_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
+    ax1_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax1_ratio.set_xlabel('Track Energy [GeV]')
+    ax1_ratio.set_ylabel('Torch/C++')
+    
+    # Plot 2: Track momentum resolution distribution with ratio
+    ax2 = fig.add_subplot(4, 2, 2)
+    ax2_ratio = ax2.inset_axes([0, -0.35, 1, 0.3])
+    bins = np.linspace(0, 0.1, 50)
+    ax2.hist(cpp_track_resolution, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_resolution)} tracks', alpha=0.6, color='orange')
+    ax2.hist(torch_track_resolution, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_resolution)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax2.set_xlabel('Track Resolution (σ/pT)')
     ax2.set_ylabel('Count')
     ax2.set_title('Track Momentum Resolution Distribution')
     ax2.legend()
+    # Ratio
+    cpp_hist, bin_edges = np.histogram(cpp_track_resolution, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_resolution, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
+    ax2_ratio.step(bin_centers, ratio, where='mid', color='black')
+    ax2_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
+    ax2_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax2_ratio.set_xlabel('Track Resolution (σ/pT)')
+    ax2_ratio.set_ylabel('Torch/C++')
     
     # ===== Row 2: Calo sigma and tower eta =====
     # Plot 3: Calorimeter sigma with ratio
     ax3 = fig.add_subplot(4, 2, 3)
     ax3_ratio = ax3.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(0, min(cpp_track_calo_sigma.max(), 20), 50)
-    cpp_hist, bin_edges = np.histogram(cpp_track_calo_sigma, bins=bins)
-    torch_hist, _ = np.histogram(torch_track_calo_sigma, bins=bins)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    ax3.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
-    ax3.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax3.hist(cpp_track_calo_sigma, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_calo_sigma)} tracks', alpha=0.6, color='orange')
+    ax3.hist(torch_track_calo_sigma, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_calo_sigma)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax3.set_xlabel('Calorimeter Sigma [GeV]')
     ax3.set_ylabel('Count')
     ax3.set_title('Calorimeter Resolution at Tower η')
     ax3.legend()
     ax3.set_yscale('log')
     # Ratio
+    cpp_hist, bin_edges = np.histogram(cpp_track_calo_sigma, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_calo_sigma, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax3_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax3_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax3_ratio.set_ylim(0.5, 1.5)
+    ax3_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
     ax3_ratio.set_xlabel('Calorimeter Sigma [GeV]')
-    ax3_ratio.set_ylabel('Ratio')
+    ax3_ratio.set_ylabel('Torch/C++')
     
-    # Plot 4: Tower eta for tracks
+    # Plot 4: Tower eta for tracks with ratio
     ax4 = fig.add_subplot(4, 2, 4)
+    ax4_ratio = ax4.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(-5, 5, 50)
-    cpp_hist, bin_edges = np.histogram(cpp_track_tower_eta, bins=bins)
-    torch_hist, _ = np.histogram(torch_track_tower_eta, bins=bins)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    ax4.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
-    ax4.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax4.hist(cpp_track_tower_eta, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_tower_eta)} tracks', alpha=0.6, color='orange')
+    ax4.hist(torch_track_tower_eta, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_tower_eta)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax4.set_xlabel('Tower η')
     ax4.set_ylabel('Count')
     ax4.set_title('Tower η for Valid Tracks')
     ax4.legend()
+    # Ratio
+    cpp_hist, bin_edges = np.histogram(cpp_track_tower_eta, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_tower_eta, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
+    ax4_ratio.step(bin_centers, ratio, where='mid', color='black')
+    ax4_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
+    ax4_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+    ax4_ratio.set_xlabel('Tower η')
+    ax4_ratio.set_ylabel('Torch/C++')
     
     # ===== Row 3: Energy guess comparison =====
     # Plot 5: Energy guess distribution with ratio
     ax5 = fig.add_subplot(4, 2, 5)
     ax5_ratio = ax5.inset_axes([0, -0.35, 1, 0.3])
     bins = np.linspace(0, min(cpp_track_energy_guess.max(), 200), 50)
-    cpp_hist, bin_edges = np.histogram(cpp_track_energy_guess, bins=bins)
-    torch_hist, _ = np.histogram(torch_track_energy_guess, bins=bins)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    ax5.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
-    ax5.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax5.hist(cpp_track_energy_guess, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_energy_guess)} tracks', alpha=0.6, color='orange')
+    ax5.hist(torch_track_energy_guess, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_energy_guess)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax5.set_xlabel('Energy Guess [GeV]')
     ax5.set_ylabel('Count')
     ax5.set_title('Track Energy Guess (based on resolution comparison)')
     ax5.legend()
     ax5.set_yscale('log')
     # Ratio
+    cpp_hist, bin_edges = np.histogram(cpp_track_energy_guess, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_energy_guess, bins=bins)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax5_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax5_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax5_ratio.set_ylim(0.5, 1.5)
+    ax5_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
     ax5_ratio.set_xlabel('Energy Guess [GeV]')
-    ax5_ratio.set_ylabel('Ratio')
+    ax5_ratio.set_ylabel('Torch/C++')
     
     # Plot 6: Sigma^2 contribution per track with ratio
     ax6 = fig.add_subplot(4, 2, 6)
     ax6_ratio = ax6.inset_axes([0, -0.35, 1, 0.3])
     bins = np.logspace(-2, 4, 50)
-    cpp_hist, bin_edges = np.histogram(cpp_track_sigma_sq, bins=bins)
-    torch_hist, _ = np.histogram(torch_track_sigma_sq, bins=bins)
-    bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])  # geometric mean for log bins
-    ax6.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
-    ax6.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+    ax6.hist(cpp_track_sigma_sq, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_track_sigma_sq)} tracks', alpha=0.6, color='orange')
+    ax6.hist(torch_track_sigma_sq, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_track_sigma_sq)} tracks', alpha=0.9, color='blue', linewidth=1.5)
     ax6.set_xlabel('σ² Contribution')
     ax6.set_ylabel('Count')
     ax6.set_title('Per-Track Sigma² Contribution')
@@ -1481,14 +1505,17 @@ Ratios (Torch/C++):
     ax6.set_xscale('log')
     ax6.set_yscale('log')
     # Ratio
+    cpp_hist, bin_edges = np.histogram(cpp_track_sigma_sq, bins=bins)
+    torch_hist, _ = np.histogram(torch_track_sigma_sq, bins=bins)
+    bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])  # geometric mean for log bins
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
     ax6_ratio.step(bin_centers, ratio, where='mid', color='black')
     ax6_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-    ax6_ratio.set_ylim(0.5, 1.5)
+    ax6_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
     ax6_ratio.set_xscale('log')
     ax6_ratio.set_xlabel('σ² Contribution')
-    ax6_ratio.set_ylabel('Ratio')
+    ax6_ratio.set_ylabel('Torch/C++')
     
     # ===== Row 4: Tower-level track sigma =====
     # Aggregate tower track sigma
@@ -1510,21 +1537,23 @@ Ratios (Torch/C++):
     ax7_ratio = ax7.inset_axes([0, -0.35, 1, 0.3])
     
     bins = np.logspace(-2, 3, 50)
-    torch_hist, bin_edges = np.histogram(torch_tower_track_sigma[torch_tower_track_sigma > 0], bins=bins)
-    bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
+    torch_data = torch_tower_track_sigma[torch_tower_track_sigma > 0]
     
     if has_cpp_tracksigma and len(cpp_tower_track_sigma) > 0:
-        cpp_hist, _ = np.histogram(cpp_tower_track_sigma[cpp_tower_track_sigma > 0], bins=bins)
-        ax7.step(bin_centers, cpp_hist, where='mid', label='C++ Delphes', alpha=0.8, color='blue')
-        ax7.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+        cpp_data = cpp_tower_track_sigma[cpp_tower_track_sigma > 0]
+        ax7.hist(cpp_data, bins=bins, histtype='stepfilled', label=f'C++ Delphes; {len(cpp_data)} tracks', alpha=0.6, color='orange')
+        ax7.hist(torch_data, bins=bins, histtype='step', label=f'TorchDelphes; {len(torch_data)} tracks', alpha=0.9, color='blue', linewidth=1.5)
         # Ratio
+        cpp_hist, bin_edges = np.histogram(cpp_data, bins=bins)
+        torch_hist, _ = np.histogram(torch_data, bins=bins)
+        bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
         with np.errstate(divide='ignore', invalid='ignore'):
             ratio = np.where(cpp_hist > 0, torch_hist / cpp_hist, 1.0)
         ax7_ratio.step(bin_centers, ratio, where='mid', color='black')
         ax7_ratio.axhline(1.0, color='red', linestyle='--', alpha=0.5)
-        ax7_ratio.set_ylim(0.5, 1.5)
+        ax7_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
     else:
-        ax7.step(bin_centers, torch_hist, where='mid', label='TorchDelphes', alpha=0.8, color='orange')
+        ax7.hist(torch_data, bins=bins, histtype='step', label='TorchDelphes', alpha=0.9, color='blue', linewidth=1.5)
         ax7_ratio.text(0.5, 0.5, 'No C++ tower-level data', 
                        ha='center', va='center', transform=ax7_ratio.transAxes)
     
@@ -1537,7 +1566,7 @@ Ratios (Torch/C++):
     ax7_ratio.set_xlim(bins[0], bins[-1])
     ax7_ratio.set_xscale('log')
     ax7_ratio.set_xlabel('Tower Track Sigma [GeV]')
-    ax7_ratio.set_ylabel('Ratio')
+    ax7_ratio.set_ylabel('Torch/C++')
     
     # Plot 8: Statistics text
     ax8 = fig.add_subplot(4, 2, 8)
@@ -2215,14 +2244,14 @@ def main(
         cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_100.csv"
         cpp_smearing_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "smearing_100.csv"
         cpp_pertrack_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "pertrack_100.csv"
-        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "track_sigma_100.csv"
+        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "tracksigma_100.csv"
     elif len(expected_event_nums) == 1000:
         cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_1k.csv"
         cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_1k.csv"
         cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_1k.csv"
         cpp_smearing_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "smearing_1k.csv"
         cpp_pertrack_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "pertrack_1k.csv"
-        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "track_sigma_1k.csv"
+        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "tracksigma_1k.csv"
     else: raise FileNotFoundError("expected_event_nums must be 100 or 1000 for validation")
     validation_dir = script_dir / "torch_delphes_validation" / "SimpleCalorimeter"
     validate_simple_cal(
