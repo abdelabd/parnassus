@@ -681,14 +681,14 @@ def validate_simple_cal(
             
             print(f"\n\n\n   hit_type={hit_type}, comparing bin counts:")
             print(f"\n     Eta bins: {eta_bin_edges}")
-            print(f"       C++ counts: {cpp_eta_counts}")
+            print(f"       C++ counts: {[int(i) for i in cpp_eta_counts]}")
             print(f"       C++ total counts: {len(cpp_eta)}")
-            print(f"       TorchDelphes counts: {torch_eta_counts}")
+            print(f"       TorchDelphes counts: {[int(i) for i in torch_eta_counts]}")
             print(f"       TorchDelphes total counts: {len(torch_eta)}")
             print(f"\n     Phi bins: {phi_bin_edges}")
-            print(f"       C++ counts: {cpp_phi_counts}")
+            print(f"       C++ counts: {[int(i) for i in cpp_phi_counts]}")
             print(f"       C++ total counts: {len(cpp_phi)}")
-            print(f"       TorchDelphes counts: {torch_phi_counts}")
+            print(f"       TorchDelphes counts: {[int(i) for i in torch_phi_counts]}")
             print(f"       TorchDelphes total counts: {len(torch_phi)}")
         
         print(f"  ✓ Step 2 validation complete.")
