@@ -738,30 +738,48 @@ def validate_simple_cal(
         print(f"    TorchDelphes: sum={torch_track_energies.sum():.2f}, mean={torch_track_energies.mean():.4f}, max={torch_track_energies.max():.4f}")
         print(f"    C++ Delphes:  sum={cpp_track_energies.sum():.2f}, mean={cpp_track_energies.mean():.4f}, max={cpp_track_energies.max():.4f}")
         
-        # Create comparison plots
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        # Create comparison plots with ratio subplots
+        fig = plt.figure(figsize=(16, 14))
         
-        # Top left: Tower energy distribution
-        ax = axes[0, 0]
+        # ===== Plot 1: Tower energy distribution with ratio =====
+        ax1_main = fig.add_axes([0.05, 0.75, 0.4, 0.2])  # Main histogram
+        ax1_ratio = fig.add_axes([0.05, 0.55, 0.4, 0.1])  # Ratio subplot
+        
         # Use log-spaced bins for energy
         e_min = max(min(torch_tower_energies.min(), cpp_tower_energies.min()), 1e-6)
         e_max = max(torch_tower_energies.max(), cpp_tower_energies.max())
         energy_bins = np.logspace(np.log10(e_min), np.log10(e_max * 1.1), 50)
         
-        ax.hist(cpp_tower_energies, bins=energy_bins, histtype='stepfilled', color='orange', alpha=0.5,
-                label=f'C++ Delphes ({len(cpp_tower_energies)} towers)', density=False)
-        ax.hist(torch_tower_energies, bins=energy_bins, histtype='step', color='blue', linewidth=2,
-                label=f'Parnassus.TorchDelphes ({len(torch_tower_energies)} towers)', density=False)
-        ax.set_xlabel('Tower Energy (GeV)', fontsize=12)
-        ax.set_ylabel('Counts', fontsize=12)
-        ax.set_xscale('log')
-        ax.set_title('SimpleCalorimeter Step 4: Tower Energy (fTowerEnergy)', fontsize=14)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
+        cpp_counts, _ = np.histogram(cpp_tower_energies, bins=energy_bins)
+        torch_counts, _ = np.histogram(torch_tower_energies, bins=energy_bins)
         
-        # Top right: Track energy distribution  
-        ax = axes[0, 1]
-        # Handle case where track energies may be all zero
+        ax1_main.hist(cpp_tower_energies, bins=energy_bins, histtype='stepfilled', color='orange', alpha=0.5,
+                label=f'C++ Delphes ({len(cpp_tower_energies)} towers)')
+        ax1_main.hist(torch_tower_energies, bins=energy_bins, histtype='step', color='blue', linewidth=2,
+                label=f'TorchDelphes ({len(torch_tower_energies)} towers)')
+        ax1_main.set_xscale('log')
+        ax1_main.set_ylabel('Counts', fontsize=12)
+        ax1_main.set_title('Step 4: Tower Energy (fTowerEnergy)', fontsize=14)
+        ax1_main.legend(fontsize=10)
+        ax1_main.grid(True, alpha=0.3)
+        ax1_main.set_xticklabels([])
+        
+        # Ratio subplot
+        bin_centers = np.sqrt(energy_bins[:-1] * energy_bins[1:])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.where(cpp_counts > 0, torch_counts / cpp_counts, np.nan)
+        ax1_ratio.scatter(bin_centers, ratio, s=15, c='purple', alpha=0.7)
+        ax1_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+        ax1_ratio.set_xscale('log')
+        ax1_ratio.set_xlabel('Tower Energy (GeV)', fontsize=12)
+        ax1_ratio.set_ylabel('Torch/C++', fontsize=10)
+        ax1_ratio.set_ylim(0.9*min(ratio), 1.1*max(ratio))
+        ax1_ratio.grid(True, alpha=0.3)
+        
+        # ===== Plot 2: Track energy distribution with ratio =====
+        ax2_main = fig.add_axes([0.55, 0.75, 0.4, 0.2])
+        ax2_ratio = fig.add_axes([0.55, 0.55, 0.4, 0.1])
+        
         nonzero_torch_track = torch_track_energies[torch_track_energies > 0]
         nonzero_cpp_track = cpp_track_energies[cpp_track_energies > 0]
         
@@ -772,24 +790,39 @@ def validate_simple_cal(
                        nonzero_cpp_track.max() if len(nonzero_cpp_track) > 0 else 1)
             track_bins = np.logspace(np.log10(t_min), np.log10(t_max * 1.1), 50)
             
-            ax.hist(nonzero_cpp_track, bins=track_bins, histtype='stepfilled', color='orange', alpha=0.5,
-                    label=f'C++ Delphes ({len(nonzero_cpp_track)} non-zero)', density=False)
-            ax.hist(nonzero_torch_track, bins=track_bins, histtype='step', color='blue', linewidth=2,
-                    label=f'Parnassus.TorchDelphes ({len(nonzero_torch_track)} non-zero)', density=False)
-            ax.set_xscale('log')
+            cpp_track_counts, _ = np.histogram(nonzero_cpp_track, bins=track_bins)
+            torch_track_counts, _ = np.histogram(nonzero_torch_track, bins=track_bins)
+            
+            ax2_main.hist(nonzero_cpp_track, bins=track_bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    label=f'C++ Delphes ({len(nonzero_cpp_track)} non-zero)')
+            ax2_main.hist(nonzero_torch_track, bins=track_bins, histtype='step', color='blue', linewidth=2,
+                    label=f'TorchDelphes ({len(nonzero_torch_track)} non-zero)')
+            ax2_main.set_xscale('log')
+            
+            # Ratio subplot
+            track_bin_centers = np.sqrt(track_bins[:-1] * track_bins[1:])
+            with np.errstate(divide='ignore', invalid='ignore'):
+                track_ratio = np.where(cpp_track_counts > 0, torch_track_counts / cpp_track_counts, np.nan)
+            ax2_ratio.scatter(track_bin_centers, track_ratio, s=15, c='purple', alpha=0.7)
+            ax2_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+            ax2_ratio.set_xscale('log')
+            ax2_ratio.set_ylim(0.9*min(track_ratio), 1.1*max(track_ratio))
         else:
-            ax.text(0.5, 0.5, 'No non-zero track energies', transform=ax.transAxes,
+            ax2_main.text(0.5, 0.5, 'No non-zero track energies', transform=ax2_main.transAxes,
                    ha='center', va='center', fontsize=14)
         
-        ax.set_xlabel('Track Energy in Tower (GeV)', fontsize=12)
-        ax.set_ylabel('Counts', fontsize=12)
-        ax.set_title('SimpleCalorimeter Step 4: Track Energy (fTrackEnergy)', fontsize=14)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
+        ax2_main.set_ylabel('Counts', fontsize=12)
+        ax2_main.set_title('Step 4: Track Energy (fTrackEnergy)', fontsize=14)
+        ax2_main.legend(fontsize=10)
+        ax2_main.grid(True, alpha=0.3)
+        ax2_main.set_xticklabels([])
+        ax2_ratio.set_xlabel('Track Energy in Tower (GeV)', fontsize=12)
+        ax2_ratio.set_ylabel('Torch/C++', fontsize=10)
+        ax2_ratio.grid(True, alpha=0.3)
         
-        # Bottom left: Scatter plot comparing tower energies (sorted)
-        ax = axes[1, 0]
-        # Sort both arrays and compare
+        # ===== Plot 3: Scatter plot comparing tower energies (sorted) =====
+        ax3 = fig.add_axes([0.05, 0.08, 0.4, 0.35])
+        
         torch_sorted = np.sort(torch_tower_energies)[::-1]
         cpp_sorted = np.sort(cpp_tower_energies)[::-1]
         
@@ -798,21 +831,23 @@ def validate_simple_cal(
         torch_padded = np.pad(torch_sorted, (0, max_len - len(torch_sorted)))
         cpp_padded = np.pad(cpp_sorted, (0, max_len - len(cpp_sorted)))
         
-        ax.scatter(cpp_padded, torch_padded, alpha=0.5, s=10, c='purple')
+        ax3.scatter(cpp_padded, torch_padded, alpha=0.5, s=10, c='purple')
         
         # Add y=x line
         max_val = max(cpp_padded.max(), torch_padded.max())
-        ax.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x')
+        ax3.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x')
         
-        ax.set_xlabel('C++ Tower Energy (sorted)', fontsize=12)
-        ax.set_ylabel('TorchDelphes Tower Energy (sorted)', fontsize=12)
-        ax.set_title('Tower Energy Comparison (Sorted)', fontsize=14)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal', adjustable='box')
+        ax3.set_xlabel('C++ Tower Energy (sorted)', fontsize=12)
+        ax3.set_ylabel('TorchDelphes Tower Energy (sorted)', fontsize=12)
+        ax3.set_title('Tower Energy Comparison (Sorted)', fontsize=14)
+        ax3.legend(fontsize=11)
+        ax3.grid(True, alpha=0.3)
+        ax3.set_aspect('equal', adjustable='box')
         
-        # Bottom right: Number of towers per event
-        ax = axes[1, 1]
+        # ===== Plot 4: Number of towers per event with ratio =====
+        ax4_main = fig.add_axes([0.55, 0.20, 0.4, 0.23])
+        ax4_ratio = fig.add_axes([0.55, 0.08, 0.4, 0.10])
+        
         torch_towers_per_event = [r['n_towers'] for r in tower_results]
         cpp_events = cpp_towers_df['event'].unique()
         cpp_towers_per_event = [len(cpp_towers_df[cpp_towers_df['event'] == e]) for e in cpp_events]
@@ -820,16 +855,33 @@ def validate_simple_cal(
         x = np.arange(len(torch_towers_per_event))
         width = 0.35
         
-        ax.bar(x - width/2, cpp_towers_per_event[:len(x)], width, label='C++ Delphes', color='orange', alpha=0.7)
-        ax.bar(x + width/2, torch_towers_per_event, width, label='Parnassus.TorchDelphes', color='blue', alpha=0.7)
+        ax4_main.bar(x - width/2, cpp_towers_per_event[:len(x)], width, label='C++ Delphes', color='orange', alpha=0.7)
+        ax4_main.bar(x + width/2, torch_towers_per_event, width, label='TorchDelphes', color='blue', alpha=0.7)
         
-        ax.set_xlabel('Event', fontsize=12)
-        ax.set_ylabel('Number of Towers', fontsize=12)
-        ax.set_title('Towers per Event', fontsize=14)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3, axis='y')
+        ax4_main.set_ylabel('Number of Towers', fontsize=12)
+        ax4_main.set_title('Towers per Event', fontsize=14)
+        ax4_main.legend(fontsize=10)
+        ax4_main.grid(True, alpha=0.3, axis='y')
+        ax4_main.set_xticklabels([])
         
-        plt.tight_layout()
+        # Ratio subplot
+        cpp_arr = np.array(cpp_towers_per_event[:len(x)])
+        torch_arr = np.array(torch_towers_per_event)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            towers_ratio = np.where(cpp_arr > 0, torch_arr / cpp_arr, np.nan)
+        ax4_ratio.scatter(x, towers_ratio, s=20, c='purple', alpha=0.7)
+        ax4_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5)
+        ax4_ratio.set_xlabel('Event', fontsize=12)
+        ax4_ratio.set_ylabel('Torch/C++', fontsize=10)
+        ax4_ratio.set_ylim(0.9*min(towers_ratio), 1.1*max(towers_ratio))
+        ax4_ratio.grid(True, alpha=0.3)
+        
+        # Add summary statistics
+        total_torch = sum(torch_towers_per_event)
+        total_cpp = sum(cpp_towers_per_event[:len(x)])
+        fig.text(0.55, 0.45, f'Total towers: TorchDelphes={total_torch}, C++={total_cpp} (ratio={total_torch/total_cpp:.3f})',
+                fontsize=11, ha='left')
+        
         plot_file = output_dir / "tower_energies.png"
         plt.savefig(plot_file, dpi=150, bbox_inches='tight')
         plt.close()
@@ -1063,7 +1115,7 @@ def validate_against_benchmark(
                     ax_ratio.bar(bin_centers, ratio, width*2, color='blue', alpha=0.7)
                     ax_ratio.set_xticks(bin_centers)
                     ax_ratio.set_xticklabels([f'{int(pid)}' for pid in unique_pids], rotation=45, ha='right')
-                    ax_ratio.set_ylim([0.5, 1.5])  # Focus on reasonable ratio range
+                    ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±10% range
                 else:
                     # Line plot for continuous variables
                     ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
