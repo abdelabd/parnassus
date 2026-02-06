@@ -496,6 +496,43 @@ def process_hcal_pipeline(
 
     return eflow_tracks, towers, eflow_neutral_hadrons
 
+
+def process_calorimeter_pipeline(
+    ecal_tower_tensors: List[torch.Tensor],
+    hcal_tower_tensors: List[torch.Tensor],
+) -> List[torch.Tensor]:
+    """
+    Apply Calorimeter Merger to combine ECal and HCal towers.
+    
+    The Calorimeter module from delphes_card_CMS_6_0.tcl is a Merger that takes:
+    - InputArray: ECal/ecalTowers
+    - InputArray: HCal/hcalTowers
+    - OutputArray: towers (CalorimeterTower)
+    
+    Args:
+        ecal_tower_tensors: List of ECal tower tensors (one per event)
+        hcal_tower_tensors: List of HCal tower tensors (one per event)
+        
+    Returns:
+        List of merged calorimeter tower tensors (one per event)
+    """
+    
+    # Initialize Merger module
+    calorimeter = Merger().to(DEVICE)
+    
+    merged_tower_tensors = []
+    
+    print("\nCalorimeter Merger: Combining ECal and HCal towers...")
+    
+    # Process event by event
+    for ecal_towers, hcal_towers in tqdm(zip(ecal_tower_tensors, hcal_tower_tensors), total=len(ecal_tower_tensors)):
+        # Merge ECal and HCal towers
+        merged = calorimeter([ecal_towers.to(DEVICE), hcal_towers.to(DEVICE)])
+        merged_tower_tensors.append(merged.cpu())
+    
+    return merged_tower_tensors
+
+
 def validate_against_benchmark(
     torch_output_file: str, 
     benchmark_file: str, 
@@ -549,6 +586,7 @@ def validate_against_benchmark(
         ('HCalTower', tower_kinematic_vars),
         ('HCal_EFlowTrack', track_kinematic_vars),
         ('EFlowNeutralHadron', tower_kinematic_vars),
+        ('CalorimeterTower', tower_kinematic_vars),
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -1130,14 +1168,33 @@ def main(
     print("\n✓ HCal applied")
 
     # ========================================================================
-    # STEP 8: Write final output
+    # STEP 8: Apply Calorimeter (Merger)
+    # ========================================================================
+    
+    print("\n" + "="*80)
+    print("STEP 8: Applying Calorimeter (Merger)")
+    print("="*80)
+
+    merged_towers = process_calorimeter_pipeline(
+        ecal_towers, hcal_towers
+    )
+    
+    # Add CalorimeterTower branch to ROOT output
+    branches_torch_root.update({
+        'CalorimeterTower': tensor_to_root_dict(merged_towers, 'CalorimeterTower', expected_event_nums),
+    })
+    
+    print("\n✓ Calorimeter (Merger) applied")
+
+    # ========================================================================
+    # STEP 9: Write final output
     # ========================================================================
 
     print(f"Writing {output_file}...")
     write_root_file(output_file, branches_torch_root)
 
     # ========================================================================
-    # STEP 9: Print summary
+    # STEP 10: Print summary
     # ========================================================================
     print("\n" + "="*80)
     print("SUMMARY")
@@ -1163,7 +1220,7 @@ def main(
     print("="*80 + "\n")
     
     # ========================================================================
-    # STEP 10: Validate Against C++ Delphes (Final ROOT branches)
+    # STEP 11: Validate Against C++ Delphes (Final ROOT branches)
     # ========================================================================
     
     # Determine benchmark file location
@@ -1186,12 +1243,12 @@ def parse_args() -> argparse.Namespace:
         help="Input HepMC file"
     )
     parser.add_argument(
-        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_5_1_torch.root",
+        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_6_0_torch.root",
         help="Output ROOT file"
     )
     parser.add_argument(
-        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_5_1.root",
-        help="Benchmark ROOT file from C++ Delphes for validation (CMS_5_1 card with ECal)"
+        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_6_0.root",
+        help="Benchmark ROOT file from C++ Delphes for validation (CMS_6_0 card with TowerMerger)"
     )
     parser.add_argument(
         "--max-events", "-n", type=int, default=1000,
