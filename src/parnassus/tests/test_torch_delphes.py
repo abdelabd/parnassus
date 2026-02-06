@@ -354,7 +354,7 @@ def process_ecal_pipeline(
     towers = []
     eflow_photons = []
     for batch_particles, batch_tracks in zip(pap_tensors, merged_tracks):
-        event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]]).cpu().numpy()
+        event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]])
         eflow_tracks_batch = []
         towers_batch = []
         eflow_photons_batch = []
@@ -470,7 +470,7 @@ def process_hcal_pipeline(
     towers = []
     eflow_neutral_hadrons = []
     for batch_particles, batch_tracks in zip(pap_tensors, ecal_eflow_tracks):
-        event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]]).cpu().numpy()
+        event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]])
         eflow_tracks_batch = []
         towers_batch = []
         eflow_neutral_hadrons_batch = []
