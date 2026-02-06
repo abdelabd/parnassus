@@ -31,7 +31,7 @@ class SimpleCalorimeter(nn.Module):
     Output:
         towers: (N_towers, N_FEATURES) - calorimeter towers with smeared energy
         eflow_tracks: (N_eflow_tracks, N_FEATURES) - tracks for particle flow
-        eflow_photons: (N_eflow_photons, N_FEATURES) - neutral excess towers
+        eflow_excess_neutrals: (N_eflow_excess_neutrals, N_FEATURES) - neutral excess towers
     """
 
     def __init__(self, 
@@ -86,7 +86,7 @@ class SimpleCalorimeter(nn.Module):
         Returns:
             towers: (N_towers, N_FEATURES) - calorimeter towers
             eflow_tracks: (N_eflow_tracks, N_FEATURES) - tracks for particle flow
-            eflow_photons: (N_eflow_photons, N_FEATURES) - neutral excess towers
+            eflow_excess_neutrals: (N_eflow_excess_neutrals, N_FEATURES) - neutral excess towers
         """
 
         ######## 1. Compute Energy Fractions ########
@@ -527,16 +527,16 @@ class SimpleCalorimeter(nn.Module):
         )
         
         # Filter to only EFlow tracks
-        eflow_track_output = eflow_tracks[track_is_eflow]
+        eflow_tracks = eflow_tracks[track_is_eflow]
         
         # Set PASS_EFLOW_TRACK mask for all output eflow tracks
-        if eflow_track_output.shape[0] > 0:
-            eflow_track_output[:, CMAP["PASS_EFLOW_TRACK"]] = 1.0
+        if eflow_tracks.shape[0] > 0:
+            eflow_tracks[:, CMAP["PASS_EFLOW_TRACK"]] = 1.0
 
         # ===== Create Tower Tensor with COLUMN_MAP format =====
         # Tower tensor: (n_valid_towers, N_FEATURES)
         r_calo = 1.29  # meters, CMS ECAL radius
-        tower_tensor = torch.zeros(n_valid_towers, N_FEATURES, dtype=torch.float64, device=particles.device)
+        towers = torch.zeros(n_valid_towers, N_FEATURES, dtype=torch.float64, device=particles.device)
         
         if n_valid_towers > 0:
             valid_tower_energy = tower_energy_final[tower_has_energy]
@@ -545,71 +545,71 @@ class SimpleCalorimeter(nn.Module):
             valid_tower_pt = tower_pt[tower_has_energy]
             
             # Set tower properties
-            tower_tensor[:, CMAP["PID"]] = 22.0  # Photon for ECAL towers
-            tower_tensor[:, CMAP["STATUS"]] = 1.0
-            tower_tensor[:, CMAP["CHARGE"]] = 0.0
-            tower_tensor[:, CMAP["E"]] = valid_tower_energy
-            tower_tensor[:, CMAP["PT"]] = valid_tower_pt
-            tower_tensor[:, CMAP["ETA"]] = valid_tower_eta
-            tower_tensor[:, CMAP["PHI"]] = valid_tower_phi
+            towers[:, CMAP["PID"]] = 22.0  # Photon for ECAL towers
+            towers[:, CMAP["STATUS"]] = 1.0
+            towers[:, CMAP["CHARGE"]] = 0.0
+            towers[:, CMAP["E"]] = valid_tower_energy
+            towers[:, CMAP["PT"]] = valid_tower_pt
+            towers[:, CMAP["ETA"]] = valid_tower_eta
+            towers[:, CMAP["PHI"]] = valid_tower_phi
             
             # Compute PX, PY, PZ from PT, ETA, PHI (massless)
-            tower_tensor[:, CMAP["PX"]] = valid_tower_pt * torch.cos(valid_tower_phi)
-            tower_tensor[:, CMAP["PY"]] = valid_tower_pt * torch.sin(valid_tower_phi)
-            tower_tensor[:, CMAP["PZ"]] = valid_tower_pt * torch.sinh(valid_tower_eta)
+            towers[:, CMAP["PX"]] = valid_tower_pt * torch.cos(valid_tower_phi)
+            towers[:, CMAP["PY"]] = valid_tower_pt * torch.sin(valid_tower_phi)
+            towers[:, CMAP["PZ"]] = valid_tower_pt * torch.sinh(valid_tower_eta)
             
             # Position (approximate at calorimeter surface)
-            tower_tensor[:, CMAP["X"]] = r_calo * torch.cos(valid_tower_phi) * 1000  # mm
-            tower_tensor[:, CMAP["Y"]] = r_calo * torch.sin(valid_tower_phi) * 1000  # mm
-            tower_tensor[:, CMAP["Z"]] = r_calo * torch.sinh(valid_tower_eta) * 1000  # mm
-            tower_tensor[:, CMAP["T"]] = 0.0  # TODO: Time weighted average
-            tower_tensor[:, CMAP["MASS"]] = 0.0
+            towers[:, CMAP["X"]] = r_calo * torch.cos(valid_tower_phi) * 1000  # mm
+            towers[:, CMAP["Y"]] = r_calo * torch.sin(valid_tower_phi) * 1000  # mm
+            towers[:, CMAP["Z"]] = r_calo * torch.sinh(valid_tower_eta) * 1000  # mm
+            towers[:, CMAP["T"]] = 0.0  # TODO: Time weighted average
+            towers[:, CMAP["MASS"]] = 0.0
             
             # Outer position same as momentum direction
-            tower_tensor[:, CMAP["ETA_OUTER"]] = valid_tower_eta
-            tower_tensor[:, CMAP["PHI_OUTER"]] = valid_tower_phi
+            towers[:, CMAP["ETA_OUTER"]] = valid_tower_eta
+            towers[:, CMAP["PHI_OUTER"]] = valid_tower_phi
             
             # Set masks
-            tower_tensor[:, CMAP["IS_NOT_PAD"]] = 1.0
-            tower_tensor[:, CMAP["PASS_ECAL_TOWER"]] = 1.0
+            towers[:, CMAP["IS_NOT_PAD"]] = 1.0
+            towers[:, CMAP["PASS_ECAL_TOWER"]] = 1.0
 
         # ===== Create EFlowPhoton Tensor with COLUMN_MAP format =====
         # EFlowPhoton tensor: (n_eflow_towers, N_FEATURES) 
         # These are towers with significant neutral excess
-        eflow_photon_tensor = torch.zeros(n_eflow_towers, N_FEATURES, dtype=torch.float64, device=particles.device)
+        eflow_excess_neutrals = torch.zeros(n_eflow_towers, N_FEATURES, dtype=torch.float64, device=particles.device)
         
         if n_eflow_towers > 0:
             # Set eflow photon properties
-            eflow_photon_tensor[:, CMAP["PID"]] = 22.0  # Photon
-            eflow_photon_tensor[:, CMAP["STATUS"]] = 1.0
-            eflow_photon_tensor[:, CMAP["CHARGE"]] = 0.0
-            eflow_photon_tensor[:, CMAP["E"]] = eflow_tower_energy
-            eflow_photon_tensor[:, CMAP["PT"]] = eflow_tower_pt
-            eflow_photon_tensor[:, CMAP["ETA"]] = eflow_tower_eta
-            eflow_photon_tensor[:, CMAP["PHI"]] = eflow_tower_phi
+            eflow_excess_neutrals[:, CMAP["PID"]] = 22.0  # Photon
+            eflow_excess_neutrals[:, CMAP["STATUS"]] = 1.0
+            eflow_excess_neutrals[:, CMAP["CHARGE"]] = 0.0
+            eflow_excess_neutrals[:, CMAP["E"]] = eflow_tower_energy
+            eflow_excess_neutrals[:, CMAP["PT"]] = eflow_tower_pt
+            eflow_excess_neutrals[:, CMAP["ETA"]] = eflow_tower_eta
+            eflow_excess_neutrals[:, CMAP["PHI"]] = eflow_tower_phi
             
             # Compute PX, PY, PZ from PT, ETA, PHI (massless)
-            eflow_photon_tensor[:, CMAP["PX"]] = eflow_tower_pt * torch.cos(eflow_tower_phi)
-            eflow_photon_tensor[:, CMAP["PY"]] = eflow_tower_pt * torch.sin(eflow_tower_phi)
-            eflow_photon_tensor[:, CMAP["PZ"]] = eflow_tower_pt * torch.sinh(eflow_tower_eta)
+            eflow_excess_neutrals[:, CMAP["PX"]] = eflow_tower_pt * torch.cos(eflow_tower_phi)
+            eflow_excess_neutrals[:, CMAP["PY"]] = eflow_tower_pt * torch.sin(eflow_tower_phi)
+            eflow_excess_neutrals[:, CMAP["PZ"]] = eflow_tower_pt * torch.sinh(eflow_tower_eta)
             
             # Position (approximate at calorimeter surface)
-            eflow_photon_tensor[:, CMAP["X"]] = r_calo * torch.cos(eflow_tower_phi) * 1000  # mm
-            eflow_photon_tensor[:, CMAP["Y"]] = r_calo * torch.sin(eflow_tower_phi) * 1000  # mm
-            eflow_photon_tensor[:, CMAP["Z"]] = r_calo * torch.sinh(eflow_tower_eta) * 1000  # mm
-            eflow_photon_tensor[:, CMAP["T"]] = 0.0
-            eflow_photon_tensor[:, CMAP["MASS"]] = 0.0
+            eflow_excess_neutrals[:, CMAP["X"]] = r_calo * torch.cos(eflow_tower_phi) * 1000  # mm
+            eflow_excess_neutrals[:, CMAP["Y"]] = r_calo * torch.sin(eflow_tower_phi) * 1000  # mm
+            eflow_excess_neutrals[:, CMAP["Z"]] = r_calo * torch.sinh(eflow_tower_eta) * 1000  # mm
+            eflow_excess_neutrals[:, CMAP["T"]] = 0.0
+            eflow_excess_neutrals[:, CMAP["MASS"]] = 0.0
             
             # Outer position same as momentum direction
-            eflow_photon_tensor[:, CMAP["ETA_OUTER"]] = eflow_tower_eta
-            eflow_photon_tensor[:, CMAP["PHI_OUTER"]] = eflow_tower_phi
+            eflow_excess_neutrals[:, CMAP["ETA_OUTER"]] = eflow_tower_eta
+            eflow_excess_neutrals[:, CMAP["PHI_OUTER"]] = eflow_tower_phi
             
             # Set masks
-            eflow_photon_tensor[:, CMAP["IS_NOT_PAD"]] = 1.0
-            eflow_photon_tensor[:, CMAP["PASS_EFLOW_PHOTON"]] = 1.0
+            eflow_excess_neutrals[:, CMAP["IS_NOT_PAD"]] = 1.0
+            eflow_excess_neutrals[:, CMAP["PASS_EFLOW_PHOTON"]] = 1.0
 
         # Return results
-        return eflow_track_output, tower_tensor, eflow_photon_tensor
+        return eflow_tracks, towers, eflow_excess_neutrals
 
     def _compute_phi_bins(self, 
         phi: torch.Tensor,           # (N,) phi values
