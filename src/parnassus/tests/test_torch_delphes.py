@@ -112,11 +112,11 @@ def process_particle_propagator(
         
         # ParticleBeforeProp
         pbp_mask = particles_before_prop_batch[:, CMAP["IS_NOT_PAD"]].float()
-        pbp_tensors.append(particles_before_prop_batch[pbp_mask > 0.5].clone().to(torch.float32))
+        pbp_tensors.append(particles_before_prop_batch[pbp_mask > 0.5].clone())
 
         # ParticleAfterProp
         pap_mask = particles_after_prop_batch[:, CMAP["IS_NOT_PAD"]].float() * particles_after_prop_batch[:, CMAP["PASS_PROP"]].float()
-        pap_tensors.append(particles_after_prop_batch[pap_mask > 0.5].to(torch.float32))
+        pap_tensors.append(particles_after_prop_batch[pap_mask > 0.5].clone())
 
         # ChargedHadron
         ch_tensors.append(charged_hadrons_batch)
@@ -170,9 +170,9 @@ def process_efficiency_pipeline(
         el_batch_out = el_eff_module(el_batch_in)
         mu_batch_out = mu_eff_module(mu_batch_in)
 
-        ch_tensors_eff.append(ch_batch_out.to(torch.float32))
-        el_tensors_eff.append(el_batch_out.to(torch.float32))
-        mu_tensors_eff.append(mu_batch_out.to(torch.float32))
+        ch_tensors_eff.append(ch_batch_out)
+        el_tensors_eff.append(el_batch_out)
+        mu_tensors_eff.append(mu_batch_out)
 
     return ch_tensors_eff, el_tensors_eff, mu_tensors_eff
 
@@ -217,9 +217,9 @@ def process_smearing_pipeline(
         el_batch_out = el_smear_module(el_batch_in)
         mu_batch_out = mu_smear_module(mu_batch_in)
 
-        ch_tensors_smeared.append(ch_batch_out.to(torch.float32))
-        el_tensors_smeared.append(el_batch_out.to(torch.float32))
-        mu_tensors_smeared.append(mu_batch_out.to(torch.float32))
+        ch_tensors_smeared.append(ch_batch_out)
+        el_tensors_smeared.append(el_batch_out)
+        mu_tensors_smeared.append(mu_batch_out)
 
     return ch_tensors_smeared, el_tensors_smeared, mu_tensors_smeared
 
@@ -248,7 +248,7 @@ def process_merger_pipeline(
     # Process in batches
     for ch_batch_in, el_batch_in, mu_batch_in in tqdm(zip(ch_tensors, el_tensors, mu_tensors), total=len(ch_tensors)):
         tracks_batch_out = merger([ch_batch_in, el_batch_in, mu_batch_in])
-        track_tensors.append(tracks_batch_out.to(torch.float32))
+        track_tensors.append(tracks_batch_out)
     
     return track_tensors
 
@@ -338,7 +338,7 @@ def process_ecal_pipeline(
     eta_bins = sorted(eta_phi_map.keys())
     phi_bins_per_eta = [sorted(eta_phi_map[eta]) for eta in eta_bins]
 
-    calo = SimpleCalorimeter(
+    ecal = SimpleCalorimeter(
         eta_bins=eta_bins,
         phi_bins=phi_bins_per_eta,
         energy_min=0.5,
@@ -368,18 +368,17 @@ def process_ecal_pipeline(
             tracks = batch_tracks[event_mask_tracks]
             
             # Run forward pass
-            eflow_tracks_event, towers_event, eflow_photons_event = calo(particles, tracks)
+            eflow_tracks_event, towers_event, eflow_photons_event = ecal(particles, tracks)
 
             eflow_tracks_batch.append(eflow_tracks_event)
             towers_batch.append(towers_event)
             eflow_photons_batch.append(eflow_photons_event)
         
-        eflow_tracks.append(torch.cat(eflow_tracks_batch, dim=0).to(torch.float32))
-        towers.append(torch.cat(towers_batch, dim=0).to(torch.float32))
-        eflow_photons.append(torch.cat(eflow_photons_batch, dim=0).to(torch.float32))
+        eflow_tracks.append(torch.cat(eflow_tracks_batch, dim=0))
+        towers.append(torch.cat(towers_batch, dim=0))
+        eflow_photons.append(torch.cat(eflow_photons_batch, dim=0))
 
     return eflow_tracks, towers, eflow_photons
-
 
 def validate_against_benchmark(
     torch_output_file: str, 
@@ -970,11 +969,11 @@ def main(
     print("\n✓ TrackMerger applied")
     
     # ========================================================================
-    # STEP 6: Apply SimpleCalorimeter
+    # STEP 6: Apply ECal
     # ========================================================================
     
     print("\n" + "="*80)
-    print("STEP 6: Applying SimpleCalorimeter (Steps 1 & 2)")
+    print("STEP 6: Applying ECal")
     print("="*80)
     
     ecal_eflow_tracks, ecal_towers, eflow_photons = process_ecal_pipeline(
@@ -988,7 +987,7 @@ def main(
         'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton', expected_event_nums),
     })
     
-    print("\n✓ SimpleCalorimeter Steps 1, 2, & 4 complete")
+    print("\n✓ ECal applied")
 
     # ========================================================================
     # STEP 7: Write final output
