@@ -71,6 +71,8 @@ class SimpleCalorimeter(nn.Module):
         # Resolution formula
         if resolution_formula == 'ecal_cms':
             self.resolution_func = self._ecal_cms_resolution
+        elif resolution_formula == 'hcal_cms':
+            self.resolution_func = self._hcal_cms_resolution
         elif callable(resolution_formula):
             self.resolution_func = resolution_formula
         else:
@@ -726,6 +728,28 @@ class SimpleCalorimeter(nn.Module):
                     torch.where(abs_eta <= 2.5, endcap_sigma, forward_sigma))
         
         return sigma
+
+    @staticmethod
+    def _hcal_cms_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
+        """
+        HCAL resolution formula from delphes_card_CMS_5_1.tcl.
+        
+        Formula:
+            |eta| <= 3.0: sqrt(E^2*0.050^2 + E*1.50^2)
+            3.0 < |eta| <= 5.0: sqrt(E^2*0.130^2 + E*2.70^2)
+        """
+        abs_eta = torch.abs(eta)
+        
+        # Central: |eta| <= 3.0
+        central_sigma = torch.sqrt(energy**2 * 0.050**2 + energy * 1.50**2)
+        
+        # Forward: 3.0 < |eta| <= 5.0
+        forward_sigma = torch.sqrt(energy**2 * 0.130**2 + energy * 2.70**2)
+        
+        # Select based on eta region
+        sigma = torch.where(abs_eta <= 3.0, central_sigma, forward_sigma)
+        
+        return sigma.to(torch.float64)
 
     @staticmethod
     def _log_normal_smear(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
