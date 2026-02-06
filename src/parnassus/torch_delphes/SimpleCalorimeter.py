@@ -41,7 +41,8 @@ class SimpleCalorimeter(nn.Module):
         resolution_formula: Union[str, Callable] = 'ecal_cms',
         energy_min: float = 0.5,
         energy_sig_min: float = 2.0,
-        is_ecal: bool = True
+        is_ecal: bool = True,
+        smear_tower_center: bool = True  # If True, smear eta/phi uniformly within bin
     ) -> None:
         super().__init__()
         
@@ -49,6 +50,7 @@ class SimpleCalorimeter(nn.Module):
         self.energy_min = energy_min
         self.energy_sig_min = energy_sig_min
         self.is_ecal = is_ecal
+        self.smear_tower_center = smear_tower_center
         
         # Store eta bins as tensor
         self.register_buffer('eta_bins', torch.tensor(eta_bins, dtype=torch.float64))
@@ -238,11 +240,9 @@ class SimpleCalorimeter(nn.Module):
         # tower_eta_bin is in range [1, n_eta_bins-1] for valid towers
         tower_eta_lo = self.eta_bins[tower_eta_bin - 1]
         tower_eta_hi = self.eta_bins[tower_eta_bin]
-        tower_eta = 0.5 * (tower_eta_lo + tower_eta_hi)
         
         # Compute tower phi centers and edges (variable per eta bin)
         # Need to loop over eta bins since phi bins differ
-        tower_phi = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
         tower_phi_lo = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
         tower_phi_hi = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
         
@@ -257,7 +257,16 @@ class SimpleCalorimeter(nn.Module):
             # phi_lo = phi_bins[phiBin - 1], phi_hi = phi_bins[phiBin]
             tower_phi_lo[mask] = phi_bins_eb[pb - 1]
             tower_phi_hi[mask] = phi_bins_eb[pb]
-            tower_phi[mask] = 0.5 * (phi_bins_eb[pb - 1] + phi_bins_eb[pb])
+        
+        # Compute tower eta and phi (either center or smeared uniformly within bin)
+        if self.smear_tower_center:
+            # C++: eta = gRandom->Uniform(fTowerEdges[0], fTowerEdges[1])
+            #      phi = gRandom->Uniform(fTowerEdges[2], fTowerEdges[3])
+            tower_eta = tower_eta_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_eta_hi - tower_eta_lo)
+            tower_phi = tower_phi_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_phi_hi - tower_phi_lo)
+        else:
+            tower_eta = 0.5 * (tower_eta_lo + tower_eta_hi)
+            tower_phi = 0.5 * (tower_phi_lo + tower_phi_hi)
 
 
         ######## 6. Apply Resolution Smearing ########

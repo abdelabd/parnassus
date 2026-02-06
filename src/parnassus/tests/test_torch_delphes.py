@@ -346,7 +346,8 @@ def process_ecal_pipeline(
         energy_sig_min=2.0,
         energy_fractions=energy_fractions,
         resolution_formula='ecal_cms',
-        is_ecal=True
+        is_ecal=True,
+        smear_tower_center=True  # Match C++ Delphes: SmearTowerCenter true
     ).to(DEVICE)
     
     particle_fractions_list = []

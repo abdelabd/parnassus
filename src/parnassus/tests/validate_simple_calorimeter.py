@@ -1325,6 +1325,130 @@ def validate_simple_cal(
         debug = debug,
     )
 
-    # ============ Step 7 validated in test_torch_delphes.py::main(); uses ROOT branches ============
+    # ============ Step 8: Final Tower Outputs ============
+    validate_simple_cal_step_8(
+        ecal_results,
+        output_dir,
+    )
+
+
+def validate_simple_cal_step_8(
+    ecal_results: Dict,
+    output_dir: str,
+) -> None:
+    """
+    Validate SimpleCalorimeter Step 8: Final tower outputs before ROOT conversion.
     
+    This validates the tower_tensor, eflow_photon_tensor, and eflow_track_tensor
+    that will be written to the ROOT file.
+    
+    Args:
+        ecal_results: Dict with keys including 'tower_tensors', 'eflow_photon_tensors', 'eflow_track_tensors'
+        output_dir: Directory to save validation plots
+    """
+    from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+    
+    print(f"\n{'='*70}")
+    print("Validating SimpleCalorimeter Step 8: Final Tower Outputs")
+    print(f"{'='*70}")
+    
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Collect tower tensors
+    tower_tensors = ecal_results.get('tower_tensors', [])
+    eflow_photon_tensors = ecal_results.get('eflow_photon_tensors', [])
+    eflow_track_tensors = ecal_results.get('eflow_track_tensors', [])
+    
+    # Concatenate all tensors
+    if tower_tensors and any(t.shape[0] > 0 for t in tower_tensors):
+        all_towers = torch.cat([t for t in tower_tensors if t.shape[0] > 0], dim=0)
+    else:
+        all_towers = torch.zeros(0, 24)
+    
+    if eflow_photon_tensors and any(t.shape[0] > 0 for t in eflow_photon_tensors):
+        all_eflow_photons = torch.cat([t for t in eflow_photon_tensors if t.shape[0] > 0], dim=0)
+    else:
+        all_eflow_photons = torch.zeros(0, 24)
+    
+    if eflow_track_tensors and any(t.shape[0] > 0 for t in eflow_track_tensors):
+        all_eflow_tracks = torch.cat([t for t in eflow_track_tensors if t.shape[0] > 0], dim=0)
+    else:
+        all_eflow_tracks = torch.zeros(0, 24)
+    
+    # Print summary statistics
+    print(f"\n  Tower Tensor (ECalTower):")
+    print(f"    Count: {all_towers.shape[0]}")
+    if all_towers.shape[0] > 0:
+        tower_eta = all_towers[:, CMAP["ETA"]].numpy()
+        tower_phi = all_towers[:, CMAP["PHI"]].numpy()
+        tower_e = all_towers[:, CMAP["E"]].numpy()
+        print(f"    Eta range: [{tower_eta.min():.4f}, {tower_eta.max():.4f}]")
+        print(f"    Phi range: [{tower_phi.min():.4f}, {tower_phi.max():.4f}]")
+        print(f"    E range: [{tower_e.min():.4f}, {tower_e.max():.4f}]")
+        
+        # Check for edge eta values
+        print(f"\n    Towers with |Eta| > 4.5:")
+        high_eta_mask = np.abs(tower_eta) > 4.5
+        print(f"      Count: {high_eta_mask.sum()}")
+        if high_eta_mask.sum() > 0:
+            high_eta_values = tower_eta[high_eta_mask]
+            unique_high_eta = np.unique(np.round(high_eta_values, 4))
+            print(f"      Unique Eta values: {unique_high_eta}")
+    
+    print(f"\n  EFlowPhoton Tensor:")
+    print(f"    Count: {all_eflow_photons.shape[0]}")
+    if all_eflow_photons.shape[0] > 0:
+        eflow_eta = all_eflow_photons[:, CMAP["ETA"]].numpy()
+        eflow_phi = all_eflow_photons[:, CMAP["PHI"]].numpy()
+        print(f"    Eta range: [{eflow_eta.min():.4f}, {eflow_eta.max():.4f}]")
+        print(f"    Phi range: [{eflow_phi.min():.4f}, {eflow_phi.max():.4f}]")
+        
+        # Check for edge eta values
+        print(f"\n    EFlowPhotons with |Eta| > 4.5:")
+        high_eta_mask = np.abs(eflow_eta) > 4.5
+        print(f"      Count: {high_eta_mask.sum()}")
+        if high_eta_mask.sum() > 0:
+            high_eta_values = eflow_eta[high_eta_mask]
+            unique_high_eta = np.unique(np.round(high_eta_values, 4))
+            print(f"      Unique Eta values: {unique_high_eta}")
+    
+    print(f"\n  EFlowTrack Tensor:")
+    print(f"    Count: {all_eflow_tracks.shape[0]}")
+    if all_eflow_tracks.shape[0] > 0:
+        track_eta = all_eflow_tracks[:, CMAP["ETA"]].numpy()
+        track_phi = all_eflow_tracks[:, CMAP["PHI"]].numpy()
+        print(f"    Eta range: [{track_eta.min():.4f}, {track_eta.max():.4f}]")
+        print(f"    Phi range: [{track_phi.min():.4f}, {track_phi.max():.4f}]")
+    
+    # Also check the intermediate tower_results to see if we're losing towers in filtering
+    tower_results = ecal_results.get('tower_results', [])
+    if tower_results:
+        all_tower_eta = []
+        all_tower_energy_final = []
+        for r in tower_results:
+            all_tower_eta.append(r['tower_eta'].numpy())
+            all_tower_energy_final.append(r['tower_energy_final'].numpy())
+        
+        all_tower_eta = np.concatenate(all_tower_eta)
+        all_tower_energy_final = np.concatenate(all_tower_energy_final)
+        
+        print(f"\n  Intermediate tower_results (before energy filtering):")
+        print(f"    Total towers: {len(all_tower_eta)}")
+        print(f"    Eta range: [{all_tower_eta.min():.4f}, {all_tower_eta.max():.4f}]")
+        print(f"    Towers with energy > 0: {(all_tower_energy_final > 0).sum()}")
+        
+        # Check high-eta towers
+        high_eta_mask = np.abs(all_tower_eta) > 4.5
+        print(f"\n    Towers with |Eta| > 4.5 (before filtering):")
+        print(f"      Count: {high_eta_mask.sum()}")
+        if high_eta_mask.sum() > 0:
+            high_eta_energies = all_tower_energy_final[high_eta_mask]
+            print(f"      With energy > 0: {(high_eta_energies > 0).sum()}")
+            unique_high_eta = np.unique(np.round(all_tower_eta[high_eta_mask], 4))
+            print(f"      Unique Eta values: {unique_high_eta}")
+    
+    print(f"\n  ✓ Step 8 validation complete")
+
+
 
