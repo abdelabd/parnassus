@@ -353,7 +353,6 @@ def process_ecal_pipeline(
     eflow_tracks = []
     towers = []
     eflow_photons = []
-    print("\nSimpleCalorimeter: Computing energy fractions and binning...")
     for batch_particles, batch_tracks in zip(pap_tensors, merged_tracks):
         event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]]).cpu().numpy()
         eflow_tracks_batch = []
@@ -470,7 +469,6 @@ def process_hcal_pipeline(
     eflow_tracks = []
     towers = []
     eflow_neutral_hadrons = []
-    print("\nSimpleCalorimeter: Computing energy fractions and binning...")
     for batch_particles, batch_tracks in zip(pap_tensors, ecal_eflow_tracks):
         event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]]).cpu().numpy()
         eflow_tracks_batch = []
