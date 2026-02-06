@@ -607,78 +607,7 @@ class SimpleCalorimeter(nn.Module):
             eflow_photon_tensor[:, CMAP["PASS_EFLOW_PHOTON"]] = 1.0
 
         # Return results
-        return {
-            # Steps 1-3: Fractions and binning
-            'particle_energy_fractions': particle_energy_fractions,
-            'track_energy_fractions': track_energy_fractions,
-            'particle_eta_bin': particle_eta_bin,
-            'particle_phi_bin': particle_phi_bin,
-            'particle_valid': particle_valid,
-            'track_eta_bin': track_eta_bin,
-            'track_phi_bin': track_phi_bin,
-            'track_valid': track_valid,
-            # Step 4: Tower aggregation
-            'n_towers': n_towers,
-            'unique_tower_idx': unique_tower_idx,
-            'tower_eta_bin': tower_eta_bin,
-            'tower_phi_bin': tower_phi_bin,
-            'tower_energy': tower_energy,
-            'tower_track_energy': tower_track_energy,
-            'max_phi_bins': max_phi_bins,
-            # Step 5: Tower centers and edges
-            'tower_eta': tower_eta,
-            'tower_phi': tower_phi,
-            'tower_eta_lo': tower_eta_lo,
-            'tower_eta_hi': tower_eta_hi,
-            'tower_phi_lo': tower_phi_lo,
-            'tower_phi_hi': tower_phi_hi,
-            # Step 6: Resolution smearing
-            'sigma_before': sigma_before,
-            'tower_energy_smeared': tower_energy_smeared,
-            'sigma_after': sigma_after,
-            'tower_energy_final': tower_energy_final,
-            # Step 7: Track sigma
-            'tower_track_sigma': tower_track_sigma,
-            'track_momentum_resolution': track_momentum_resolution,
-            'track_tower_eta': track_tower_eta,
-            'track_calo_sigma': track_calo_sigma,
-            'track_energy_guess': track_energy_guess,
-            'track_sigma_sq': track_sigma_sq,
-            'track_sigma_valid': track_sigma_valid,
-            'track_compact_idx': track_compact_idx,
-            'track_energy': track_energy,
-            # Step 8: EFlow outputs
-            'neutral_energy': neutral_energy,
-            'neutral_sigma': neutral_sigma,
-            'significant_neutral': significant_neutral,
-            'rescale_tracks': rescale_tracks,
-            'rescale_factor': rescale_factor,
-            # Final outputs
-            'tower_output': {
-                'energy': tower_energy_final[tower_has_energy],
-                'eta': tower_eta[tower_has_energy],
-                'phi': tower_phi[tower_has_energy],
-                'pt': tower_pt[tower_has_energy],
-                'eta_lo': tower_eta_lo[tower_has_energy],
-                'eta_hi': tower_eta_hi[tower_has_energy],
-                'phi_lo': tower_phi_lo[tower_has_energy],
-                'phi_hi': tower_phi_hi[tower_has_energy],
-            },
-            'eflow_tower_output': {
-                'energy': eflow_tower_energy,
-                'eta': eflow_tower_eta,
-                'phi': eflow_tower_phi,
-                'pt': eflow_tower_pt,
-            },
-            'eflow_track_output': eflow_track_output,
-            'n_valid_towers': n_valid_towers,
-            'n_eflow_towers': n_eflow_towers,
-            'n_eflow_tracks': eflow_track_output.shape[0],
-            # COLUMN_MAP format tensors for ROOT output
-            'tower_tensor': tower_tensor,
-            'eflow_photon_tensor': eflow_photon_tensor,
-            'eflow_track_tensor': eflow_track_output,
-        }
+        return eflow_track_output, tower_tensor, eflow_photon_tensor
 
     def _compute_phi_bins(self, 
         phi: torch.Tensor,           # (N,) phi values

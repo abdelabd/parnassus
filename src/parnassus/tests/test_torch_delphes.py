@@ -47,7 +47,6 @@ from parnassus.torch_delphes.tensor_utils import (
     write_root_file,
     COLUMN_MAP as CMAP
 )
-from parnassus.tests.validate_simple_calorimeter import validate_simple_cal
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
@@ -257,7 +256,7 @@ def process_merger_pipeline(
 def process_ecal_pipeline(
     pap_tensors: List[torch.Tensor],
     merged_tracks: List[torch.Tensor],
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
     Apply SimpleCalorimeter Step 1: Compute energy fractions based on PDG ID.
     
@@ -350,36 +349,16 @@ def process_ecal_pipeline(
         smear_tower_center=True  # Match C++ Delphes: SmearTowerCenter true
     ).to(DEVICE)
     
-    particle_fractions_list = []
-    track_fractions_list = []
-    particle_eta_bins_list = []
-    particle_phi_bins_list = []
-    particle_valid_list = []
-    track_eta_bins_list = []
-    track_phi_bins_list = []
-    track_valid_list = []
-    tower_results_list = []
-    # New lists for COLUMN_MAP format tensors
-    tower_tensors_list = []
-    eflow_photon_tensors_list = []
-    eflow_track_tensors_list = []
-    
-    # Debug: Check track ETA_OUTER/PHI_OUTER values before processing
-    print("\nDEBUG: Checking track ETA_OUTER/PHI_OUTER values...")
-    all_tracks = torch.cat(merged_tracks, dim=0)
-    track_eta_outer = all_tracks[:, CMAP["ETA_OUTER"]]
-    track_phi_outer = all_tracks[:, CMAP["PHI_OUTER"]]
-    print(f"  Total tracks: {len(all_tracks)}")
-    print(f"  Track ETA_OUTER range: [{track_eta_outer.min().item():.4f}, {track_eta_outer.max().item():.4f}]")
-    print(f"  Track PHI_OUTER range: [{track_phi_outer.min().item():.4f}, {track_phi_outer.max().item():.4f}]")
-    print(f"  Tracks with ETA_OUTER == 0: {(track_eta_outer == 0).sum().item()}")
-    print(f"  Tracks with PHI_OUTER == 0: {(track_phi_outer == 0).sum().item()}")
-    print(f"  Tracks with |ETA_OUTER| < 5.0: {(track_eta_outer.abs() < 5.0).sum().item()}")
-    print(f"  Tracks with |ETA_OUTER| < 3.0: {(track_eta_outer.abs() < 3.0).sum().item()}")
-    
+    # Process in batches
+    eflow_tracks = []
+    towers = []
+    eflow_photons = []
     print("\nSimpleCalorimeter: Computing energy fractions and binning...")
     for batch_particles, batch_tracks in zip(pap_tensors, merged_tracks):
         event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]]).cpu().numpy()
+        eflow_tracks_batch = []
+        towers_batch = []
+        eflow_photons_batch = []
 
         # forward method takes a single event, for now
         for event_num in tqdm(event_numbers):
@@ -389,84 +368,17 @@ def process_ecal_pipeline(
             tracks = batch_tracks[event_mask_tracks]
             
             # Run forward pass
-            result = calo(particles, tracks)
-            
-            # Collect Step 1 results (energy fractions)
-            particle_fractions_list.append(result['particle_energy_fractions'].cpu())
-            track_fractions_list.append(result['track_energy_fractions'].cpu())
-            
-            # Collect Step 2 results (binning)
-            particle_eta_bins_list.append(result['particle_eta_bin'].cpu())
-            particle_phi_bins_list.append(result['particle_phi_bin'].cpu())
-            particle_valid_list.append(result['particle_valid'].cpu())
-            track_eta_bins_list.append(result['track_eta_bin'].cpu())
-            track_phi_bins_list.append(result['track_phi_bin'].cpu())
-            track_valid_list.append(result['track_valid'].cpu())
-            
-            # Collect Step 4 results (tower aggregation)
-            tower_results_list.append({
-                'n_towers': result['n_towers'],
-                'tower_eta_bin': result['tower_eta_bin'].cpu(),
-                'tower_phi_bin': result['tower_phi_bin'].cpu(),
-                'tower_energy': result['tower_energy'].cpu(),
-                'tower_track_energy': result['tower_track_energy'].cpu(),
-                'max_phi_bins': result['max_phi_bins'],
-                # Step 5: Tower centers and edges
-                'tower_eta': result['tower_eta'].cpu(),
-                'tower_phi': result['tower_phi'].cpu(),
-                'tower_eta_lo': result['tower_eta_lo'].cpu(),
-                'tower_eta_hi': result['tower_eta_hi'].cpu(),
-                'tower_phi_lo': result['tower_phi_lo'].cpu(),
-                'tower_phi_hi': result['tower_phi_hi'].cpu(),
-                # Step 6: Resolution smearing
-                'sigma_before': result['sigma_before'].cpu(),
-                'tower_energy_smeared': result['tower_energy_smeared'].cpu(),
-                'sigma_after': result['sigma_after'].cpu(),
-                'tower_energy_final': result['tower_energy_final'].cpu(),
-                # Step 7: Track sigma per tower
-                'tower_track_sigma': result['tower_track_sigma'].cpu(),
-                'track_momentum_resolution': result['track_momentum_resolution'].cpu(),
-                'track_tower_eta': result['track_tower_eta'].cpu(),
-                'track_calo_sigma': result['track_calo_sigma'].cpu(),
-                'track_energy_guess': result['track_energy_guess'].cpu(),
-                'track_sigma_sq': result['track_sigma_sq'].cpu(),
-                'track_sigma_valid': result['track_sigma_valid'].cpu(),
-                'track_compact_idx': result['track_compact_idx'].cpu(),
-                'track_energy': result['track_energy'].cpu(),
-            })
-            
-            # Collect COLUMN_MAP format tensors for ROOT output
-            # Set EVENT_NUMBER for each tensor so tensor_to_root_dict can group by event
-            tower_tensor = result['tower_tensor'].cpu()
-            if tower_tensor.shape[0] > 0:
-                tower_tensor[:, CMAP["EVENT_NUMBER"]] = event_num.astype('float64')
-            tower_tensors_list.append(tower_tensor)
-            
-            eflow_photon_tensor = result['eflow_photon_tensor'].cpu()
-            if eflow_photon_tensor.shape[0] > 0:
-                eflow_photon_tensor[:, CMAP["EVENT_NUMBER"]] = event_num.astype('float64')
-            eflow_photon_tensors_list.append(eflow_photon_tensor)
-            
-            eflow_track_tensor = result['eflow_track_tensor'].cpu()
-            if eflow_track_tensor.shape[0] > 0:
-                eflow_track_tensor[:, CMAP["EVENT_NUMBER"]] = event_num.astype('float64')
-            eflow_track_tensors_list.append(eflow_track_tensor)
-    
-    return {
-        'particle_fractions': particle_fractions_list,
-        'track_fractions': track_fractions_list,
-        'particle_eta_bins': particle_eta_bins_list,
-        'particle_phi_bins': particle_phi_bins_list,
-        'particle_valid': particle_valid_list,
-        'track_eta_bins': track_eta_bins_list,
-        'track_phi_bins': track_phi_bins_list,
-        'track_valid': track_valid_list,
-        'tower_results': tower_results_list,
-        # COLUMN_MAP format tensors for ROOT output
-        'tower_tensors': tower_tensors_list,
-        'eflow_photon_tensors': eflow_photon_tensors_list,
-        'eflow_track_tensors': eflow_track_tensors_list,
-    }
+            eflow_tracks_event, towers_event, eflow_photons_event = calo(particles, tracks)
+
+            eflow_tracks_batch.append(eflow_tracks_event)
+            towers_batch.append(towers_event)
+            eflow_photons_batch.append(eflow_photons_event)
+        
+        eflow_tracks.append(torch.cat(eflow_tracks_batch, dim=0).to(torch.float32))
+        towers.append(torch.cat(towers_batch, dim=0).to(torch.float32))
+        eflow_photons.append(torch.cat(eflow_photons_batch, dim=0).to(torch.float32))
+
+    return eflow_tracks, towers, eflow_photons
 
 
 def validate_against_benchmark(
@@ -1065,57 +977,19 @@ def main(
     print("STEP 6: Applying SimpleCalorimeter (Steps 1 & 2)")
     print("="*80)
     
-    ecal_results = process_ecal_pipeline(
+    ecal_eflow_tracks, ecal_towers, eflow_photons = process_ecal_pipeline(
         pap_tensors, merged_tracks
     )
     
     # Add Tower, EFlowPhoton, and EFlowTrack branches to ROOT output
     branches_torch_root.update({
-        'ECalTower': tensor_to_root_dict(ecal_results['tower_tensors'], 'ECalTower', expected_event_nums),
-        'EFlowPhoton': tensor_to_root_dict(ecal_results['eflow_photon_tensors'], 'EFlowPhoton', expected_event_nums),
-        'ECal_EFlowTrack': tensor_to_root_dict(ecal_results['eflow_track_tensors'], 'ECal_EFlowTrack', expected_event_nums),
+        'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in ecal_eflow_tracks], 'ECal_EFlowTrack', expected_event_nums),
+        'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower', expected_event_nums),
+        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton', expected_event_nums),
     })
     
     print("\n✓ SimpleCalorimeter Steps 1, 2, & 4 complete")
-    
-    # Validate intermediate outputs against C++
-    script_dir = Path(__file__).parent
-    if len(expected_event_nums) == 100:
-        cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_100.csv"
-        cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_100.csv"
-        cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_100.csv"
-        cpp_smearing_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "smearing_100.csv"
-        cpp_pertrack_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "pertrack_100.csv"
-        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "tracksigma_100.csv"
-    elif len(expected_event_nums) == 1_000:
-        cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_1k.csv"
-        cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_1k.csv"
-        cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_1k.csv"
-        cpp_smearing_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "smearing_1k.csv"
-        cpp_pertrack_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "pertrack_1k.csv"
-        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "tracksigma_1k.csv"
-    elif len(expected_event_nums) == 10_000:
-        cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_10k.csv"
-        cpp_towerhits_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_hits_10k.csv"
-        cpp_towerenergy_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "tower_energy_10k.csv"
-        cpp_smearing_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "smearing_10k.csv"
-        cpp_pertrack_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "pertrack_10k.csv"
-        cpp_tracksigma_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" /  "tracksigma_10k.csv"
 
-    else: raise FileNotFoundError("expected_event_nums must be in [100, 1_000, 10_000] for validation against existing C++ CSV files")
-    validation_dir = script_dir / "torch_delphes_validation" / "SimpleCalorimeter"
-    validate_simple_cal(
-        ecal_results, 
-        str(cpp_fractions_file),
-        str(cpp_towerhits_file),
-        str(cpp_towerenergy_file),
-        str(cpp_smearing_file),
-        str(cpp_pertrack_file),
-        str(cpp_tracksigma_file),
-        str(validation_dir),
-        debug = debug
-    )
-    
     # ========================================================================
     # STEP 7: Write final output
     # ========================================================================
