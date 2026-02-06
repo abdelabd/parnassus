@@ -469,6 +469,147 @@ def process_ecal_pipeline(
     }
 
 
+def process_hcal_pipeline(
+    pap_tensors: List[torch.Tensor],
+    ecal_eflow_tracks: List[torch.Tensor],
+) -> Dict:
+    """
+    Apply HCal SimpleCalorimeter to propagated particles and ECal EFlow tracks.
+    
+    The HCal takes:
+    - ParticleInputArray: ParticlePropagator/stableParticles (same as ECal)
+    - TrackInputArray: ECal/eflowTracks (output from ECal)
+    
+    Args:
+        pap_tensors: List of particle tensors after propagation (one per batch)
+        ecal_eflow_tracks: List of EFlow track tensors from ECal (one per event)
+        
+    Returns:
+        Dict with tower_tensors, eflow_neutral_hadron_tensors, eflow_track_tensors
+        Each is a list of tensors (one per event)
+    """
+    
+    # HCal energy fractions from delphes_card_CMS_5_1.tcl
+    energy_fractions = {
+        0: 1.0,        # default (hadrons) - full HCAL response
+        11: 0.0,       # electrons (no HCAL response - already absorbed by ECAL)
+        22: 0.0,       # photons (no HCAL response)
+        111: 0.0,      # pi0 (no HCAL response)
+        12: 0.0,       # neutrino (electron)
+        13: 0.0,       # muon
+        14: 0.0,       # neutrino (muon)
+        16: 0.0,       # neutrino (tau)
+        1000022: 0.0,  # neutralino
+        1000023: 0.0,  # neutralino
+        1000025: 0.0,  # neutralino
+        1000035: 0.0,  # neutralino
+        1000045: 0.0,  # neutralino
+        310: 0.7,      # K0short (70% HCAL)
+        3122: 0.7,     # Lambda (70% HCAL)
+    }
+    
+    # Build HCal eta/phi bins from delphes_card_CMS_5_1.tcl
+    eta_phi_map = {}  # eta -> set of phi bin edges
+    
+    # 5 degrees towers (barrel): phi bins -36 to 36 in steps of pi/36
+    phi_bins_5deg = [i * np.pi / 36.0 for i in range(-36, 37)]
+    barrel_etas = [-1.566, -1.479, -1.392, -1.305, -1.218, -1.131, -1.044, -0.957, -0.87, -0.783, 
+                   -0.696, -0.609, -0.522, -0.435, -0.348, -0.261, -0.174, -0.087, 0, 
+                   0.087, 0.174, 0.261, 0.348, 0.435, 0.522, 0.609, 0.696, 0.783, 0.87, 
+                   0.957, 1.044, 1.131, 1.218, 1.305, 1.392, 1.479, 1.566, 1.653]
+    for eta in barrel_etas:
+        if eta not in eta_phi_map:
+            eta_phi_map[eta] = set()
+        eta_phi_map[eta].update(phi_bins_5deg)
+    
+    # 10 degrees towers (endcap): phi bins -18 to 18 in steps of pi/18
+    phi_bins_10deg = [i * np.pi / 18.0 for i in range(-18, 19)]
+    endcap_etas = [-4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.95, -2.868, 
+                   -2.65, -2.5, -2.322, -2.172, -2.043, -1.93, -1.83, -1.74, -1.653, 
+                   1.74, 1.83, 1.93, 2.043, 2.172, 2.322, 2.5, 2.65, 2.868, 2.95, 
+                   3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525]
+    for eta in endcap_etas:
+        if eta not in eta_phi_map:
+            eta_phi_map[eta] = set()
+        eta_phi_map[eta].update(phi_bins_10deg)
+    
+    # 20 degrees towers (forward): phi bins -9 to 9 in steps of pi/9
+    phi_bins_20deg = [i * np.pi / 9.0 for i in range(-9, 10)]
+    forward_etas = [-5, -4.7, -4.525, 4.7, 5]
+    for eta in forward_etas:
+        if eta not in eta_phi_map:
+            eta_phi_map[eta] = set()
+        eta_phi_map[eta].update(phi_bins_20deg)
+    
+    # Convert to sorted lists (matching C++ behavior)
+    eta_bins = sorted(eta_phi_map.keys())
+    phi_bins_per_eta = [sorted(eta_phi_map[eta]) for eta in eta_bins]
+
+    hcal = SimpleCalorimeter(
+        eta_bins=eta_bins,
+        phi_bins=phi_bins_per_eta,
+        energy_min=1.0,          # HCal has higher threshold
+        energy_sig_min=1.0,      # HCal has lower significance threshold
+        energy_fractions=energy_fractions,
+        resolution_formula='hcal_cms',
+        is_ecal=False,
+        smear_tower_center=True
+    ).to(DEVICE)
+    
+    # Lists for output tensors (one per event)
+    tower_tensors_list = []
+    eflow_neutral_hadron_tensors_list = []
+    eflow_track_tensors_list = []
+    
+    print("\nHCal SimpleCalorimeter: Processing...")
+    
+    # Process event by event, matching pap_tensors batches with ecal_eflow_tracks
+    # ecal_eflow_tracks is a list of per-event tensors
+    event_idx = 0
+    for batch_particles in pap_tensors:
+        event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]]).cpu().numpy()
+        
+        for event_num in tqdm(event_numbers):
+            event_mask_particles = (batch_particles[:, CMAP["EVENT_NUMBER"]] == event_num)
+            particles = batch_particles[event_mask_particles]
+            
+            # Get ECal EFlow tracks for this event and ensure correct dtype (float64)
+            if event_idx < len(ecal_eflow_tracks):
+                tracks = ecal_eflow_tracks[event_idx].to(DEVICE).to(torch.float64)
+            else:
+                tracks = torch.zeros(0, particles.shape[1], dtype=torch.float64, device=DEVICE)
+            
+            # Run HCal forward pass
+            result = hcal(particles, tracks)
+            
+            # Collect COLUMN_MAP format tensors for ROOT output
+            tower_tensor = result['tower_tensor'].cpu()
+            if tower_tensor.shape[0] > 0:
+                tower_tensor[:, CMAP["EVENT_NUMBER"]] = float(event_num)
+            tower_tensors_list.append(tower_tensor)
+            
+            # EFlowPhoton in HCal is actually EFlowNeutralHadron
+            eflow_neutral_hadron_tensor = result['eflow_photon_tensor'].cpu()
+            if eflow_neutral_hadron_tensor.shape[0] > 0:
+                eflow_neutral_hadron_tensor[:, CMAP["EVENT_NUMBER"]] = float(event_num)
+                # Set PID to 0 for neutral hadrons (not 22 like photons)
+                eflow_neutral_hadron_tensor[:, CMAP["PID"]] = 0.0
+            eflow_neutral_hadron_tensors_list.append(eflow_neutral_hadron_tensor)
+            
+            eflow_track_tensor = result['eflow_track_tensor'].cpu()
+            if eflow_track_tensor.shape[0] > 0:
+                eflow_track_tensor[:, CMAP["EVENT_NUMBER"]] = float(event_num)
+            eflow_track_tensors_list.append(eflow_track_tensor)
+            
+            event_idx += 1
+    
+    return {
+        'tower_tensors': tower_tensors_list,
+        'eflow_neutral_hadron_tensors': eflow_neutral_hadron_tensors_list,
+        'eflow_track_tensors': eflow_track_tensors_list,
+    }
+
+
 def validate_against_benchmark(
     torch_output_file: str, 
     benchmark_file: str, 
@@ -504,21 +645,28 @@ def validate_against_benchmark(
     
     # Branches to validate (branch_name, variable_list)
     branches = [
-        # ('ParticleBeforeProp', track_kinematic_vars),
-        # ('ParticleAfterProp', track_kinematic_vars),
-        # ('ChargedHadron', track_kinematic_vars),
-        # ('Electron', track_kinematic_vars),
-        # ('Muon', track_kinematic_vars),
-        # ('ChargedHadronEfficiency', track_kinematic_vars),
-        # ('ElectronEfficiency', track_kinematic_vars),
-        # ('MuonEfficiency', track_kinematic_vars),
-        # ('ChargedHadronSmeared', track_kinematic_vars),
-        # ('ElectronSmeared', track_kinematic_vars),
-        # ('MuonSmeared', track_kinematic_vars),
-        # ('MergedTracks', track_kinematic_vars),
+        ('ParticleBeforeProp', track_kinematic_vars),
+        ('ParticleAfterProp', track_kinematic_vars),
+        ('ChargedHadron', track_kinematic_vars),
+        ('Electron', track_kinematic_vars),
+        ('Muon', track_kinematic_vars),
+        ('ChargedHadronEfficiency', track_kinematic_vars),
+        ('ElectronEfficiency', track_kinematic_vars),
+        ('MuonEfficiency', track_kinematic_vars),
+        ('ChargedHadronSmeared', track_kinematic_vars),
+        ('ElectronSmeared', track_kinematic_vars),
+        ('MuonSmeared', track_kinematic_vars),
+        ('MergedTracks', track_kinematic_vars),
+
+        # ECal branches
         ('ECalTower', tower_kinematic_vars),
         ('ECal_EFlowTrack', track_kinematic_vars),
         ('EFlowPhoton', tower_kinematic_vars),
+
+        # HCal branches
+        ('HCalTower', tower_kinematic_vars),
+        ('HCal_EFlowTrack', track_kinematic_vars),
+        ('EFlowNeutralHadron', tower_kinematic_vars),
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -991,13 +1139,13 @@ def main(
     all_pap = torch.cat([t for t in pap_tensors if t.shape[0] > 0], dim=0)
     expected_event_nums = sorted(set(all_pap[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist()))
     
-    # branches_torch_root.update({
-    #     'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
-    #     'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
-    #     'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
-    #     'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
-    #     'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
+        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
+        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
+        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
+        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
+    })
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
     print(f"  Total ParticleAfterProp: {sum(t.shape[0] for t in pap_tensors)}")
@@ -1013,11 +1161,11 @@ def main(
     ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
         ch_tensors, el_tensors, mu_tensors
     )
-    # branches_torch_root.update({
-    #     'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
-    #     'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
-    #     'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
+        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
+        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
+    })
 
     print("\n✓ Efficiency applied")
 
@@ -1032,11 +1180,11 @@ def main(
     ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
         ch_filtered, el_filtered, mu_filtered
     )
-    # branches_torch_root.update({
-    #     'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
-    #     'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
-    #     'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
+        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
+        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
+    })
     
     print("\n✓ MomentumSmearing applied")
 
@@ -1051,9 +1199,9 @@ def main(
     merged_tracks = process_merger_pipeline(
         ch_smeared, el_smeared, mu_smeared
     )
-    # branches_torch_root.update({
-    #     'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
+    })
     
     print("\n✓ TrackMerger applied")
     
@@ -1076,9 +1224,31 @@ def main(
         'ECal_EFlowTrack': tensor_to_root_dict(ecal_results['eflow_track_tensors'], 'ECal_EFlowTrack', expected_event_nums),
     })
     
-    print("\n✓ SimpleCalorimeter Steps 1, 2, & 4 complete")
+    print("\n✓ ECal SimpleCalorimeter Steps 1, 2, & 4 complete")
     
-    # Validate intermediate outputs against C++
+    # ========================================================================
+    # STEP 7: Apply HCal
+    # ========================================================================
+    
+    print("\n" + "="*80)
+    print("STEP 7: Applying HCal SimpleCalorimeter")
+    print("="*80)
+    
+    # HCal takes ECal EFlowTracks and ParticleAfterProp as input
+    hcal_results = process_hcal_pipeline(
+        pap_tensors, ecal_results['eflow_track_tensors']
+    )
+    
+    # Add HCal branches to ROOT output
+    branches_torch_root.update({
+        'HCalTower': tensor_to_root_dict(hcal_results['tower_tensors'], 'HCalTower', expected_event_nums),
+        'EFlowNeutralHadron': tensor_to_root_dict(hcal_results['eflow_neutral_hadron_tensors'], 'EFlowNeutralHadron', expected_event_nums),
+        'HCal_EFlowTrack': tensor_to_root_dict(hcal_results['eflow_track_tensors'], 'HCal_EFlowTrack', expected_event_nums),
+    })
+    
+    print("\n✓ HCal SimpleCalorimeter complete")
+    
+    # Validate ECal intermediate outputs against C++
     script_dir = Path(__file__).parent
     if len(expected_event_nums) == 100:
         cpp_fractions_file = script_dir / "torch_delphes_validation" / "SimpleCalorimeter_CPP" / "energy_fractions_100.csv"
@@ -1163,8 +1333,8 @@ def main(
         validate_against_benchmark(output_file, benchmark_file, validation_dir, debug=debug)
     else:
         print(f"\n⚠ Benchmark file not found: {benchmark_file}")
-        print("  Skipping validation. To enable validation, provide HZZ4l_5_0.root")
-        print("  (Generated by C++ Delphes with delphes_card_CMS_5_0.tcl)")
+        print("  Skipping validation. To enable validation, provide HZZ4l_5_1.root")
+        print("  (Generated by C++ Delphes with delphes_card_CMS_5_1.tcl)")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parnassus TorchDelphes HepMC Processing")
@@ -1173,12 +1343,12 @@ def parse_args() -> argparse.Namespace:
         help="Input HepMC file"
     )
     parser.add_argument(
-        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_5_0_torch.root",
+        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_5_1_torch.root",
         help="Output ROOT file"
     )
     parser.add_argument(
-        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_5_0.root",
-        help="Benchmark ROOT file from C++ Delphes for validation (CMS_5_0 card with ECal)"
+        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_5_1.root",
+        help="Benchmark ROOT file from C++ Delphes for validation (CMS_5_1 card with ECal and HCal)"
     )
     parser.add_argument(
         "--max-events", "-n", type=int, default=1000,
