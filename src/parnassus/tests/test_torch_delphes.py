@@ -646,6 +646,59 @@ def process_calorimeter_pipeline(
     return merged_tower_tensors
 
 
+def process_eflow_merger_pipeline(
+    hcal_eflow_tracks: List[torch.Tensor],
+    eflow_photons: List[torch.Tensor],
+    eflow_neutral_hadrons: List[torch.Tensor],
+) -> List[torch.Tensor]:
+    """
+    Apply EFlowMerger to combine tracks, photons, and neutral hadrons.
+    
+    The EFlowMerger module from delphes_card_CMS_6_1.tcl is a Merger that takes:
+    - InputArray: HCal/eflowTracks (Track objects)
+    - InputArray: ECal/eflowPhotons (Tower objects)
+    - InputArray: HCal/eflowNeutralHadrons (Tower objects)
+    - OutputArray: eflow (written as ParticleFlowCandidate / EFlowObject)
+    
+    Note: In C++ Delphes, all objects are internally Candidate objects. The Merger
+    just concatenates them, and the TreeWriter maps fields to ParticleFlowCandidate
+    which is a superset of both Track and Tower fields. Missing fields are 0.
+    
+    In our tensor format, COLUMN_MAP already has all necessary fields for both
+    track-like and tower-like objects, so we can just concatenate the tensors.
+    
+    Args:
+        hcal_eflow_tracks: List of HCal EFlow track tensors (one per event)
+        eflow_photons: List of EFlowPhoton tensors (one per event)
+        eflow_neutral_hadrons: List of EFlowNeutralHadron tensors (one per event)
+        
+    Returns:
+        List of merged EFlow object tensors (one per event)
+    """
+    
+    # Initialize Merger module
+    eflow_merger = Merger().to(DEVICE)
+    
+    merged_eflow_tensors = []
+    
+    print("\nEFlowMerger: Combining tracks, photons, and neutral hadrons...")
+    
+    # Process event by event
+    for tracks, photons, neutral_hadrons in tqdm(
+        zip(hcal_eflow_tracks, eflow_photons, eflow_neutral_hadrons), 
+        total=len(hcal_eflow_tracks)
+    ):
+        # Merge all three inputs
+        merged = eflow_merger([
+            tracks.to(DEVICE), 
+            photons.to(DEVICE), 
+            neutral_hadrons.to(DEVICE)
+        ])
+        merged_eflow_tensors.append(merged.cpu())
+    
+    return merged_eflow_tensors
+
+
 def validate_against_benchmark(
     torch_output_file: str, 
     benchmark_file: str, 
@@ -676,36 +729,41 @@ def validate_against_benchmark(
     # Kinematic variables to compare
     # Track objects: PID, Charge, P, PT, Eta, Phi
     # Tower objects: E, ET, Eta, Phi, Eem, Ehad (no PID - towers are aggregated)
+    # EFlowObject/ParticleFlowCandidate: superset of Track and Tower fields
     track_kinematic_vars = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
     tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi', 'T']
+    eflow_kinematic_vars = ['PID', 'Charge', 'E', 'P', 'PT', 'Eta', 'Phi', 'T']  # Common subset
     
     # Branches to validate (branch_name, variable_list)
     branches = [
-        # ('ParticleBeforeProp', track_kinematic_vars),
-        # ('ParticleAfterProp', track_kinematic_vars),
-        # ('ChargedHadron', track_kinematic_vars),
-        # ('Electron', track_kinematic_vars),
-        # ('Muon', track_kinematic_vars),
-        # ('ChargedHadronEfficiency', track_kinematic_vars),
-        # ('ElectronEfficiency', track_kinematic_vars),
-        # ('MuonEfficiency', track_kinematic_vars),
-        # ('ChargedHadronSmeared', track_kinematic_vars),
-        # ('ElectronSmeared', track_kinematic_vars),
-        # ('MuonSmeared', track_kinematic_vars),
-        # ('MergedTracks', track_kinematic_vars),
+        ('ParticleBeforeProp', track_kinematic_vars),
+        ('ParticleAfterProp', track_kinematic_vars),
+        ('ChargedHadron', track_kinematic_vars),
+        ('Electron', track_kinematic_vars),
+        ('Muon', track_kinematic_vars),
+        ('ChargedHadronEfficiency', track_kinematic_vars),
+        ('ElectronEfficiency', track_kinematic_vars),
+        ('MuonEfficiency', track_kinematic_vars),
+        ('ChargedHadronSmeared', track_kinematic_vars),
+        ('ElectronSmeared', track_kinematic_vars),
+        ('MuonSmeared', track_kinematic_vars),
+        ('MergedTracks', track_kinematic_vars),
 
-        # # ECal branches
-        # ('ECalTower', tower_kinematic_vars),
-        # ('ECal_EFlowTrack', track_kinematic_vars),
-        # ('EFlowPhoton', tower_kinematic_vars),
+        # ECal branches
+        ('ECalTower', tower_kinematic_vars),
+        ('ECal_EFlowTrack', track_kinematic_vars),
+        ('EFlowPhoton', tower_kinematic_vars),
 
-        # # HCal branches
-        # ('HCalTower', tower_kinematic_vars),
-        # ('HCal_EFlowTrack', track_kinematic_vars),
-        # ('EFlowNeutralHadron', tower_kinematic_vars),
+        # HCal branches
+        ('HCalTower', tower_kinematic_vars),
+        ('HCal_EFlowTrack', track_kinematic_vars),
+        ('EFlowNeutralHadron', tower_kinematic_vars),
 
-        # Calorimeter (merged ECal + HCal towers)
+        Calorimeter (merged ECal + HCal towers)
         ('CalorimeterTower', tower_kinematic_vars),
+
+        EFlowMerger (merged tracks + photons + neutral hadrons)
+        ('EFlowObject', eflow_kinematic_vars),
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -1178,13 +1236,13 @@ def main(
     all_pap = torch.cat([t for t in pap_tensors if t.shape[0] > 0], dim=0)
     expected_event_nums = sorted(set(all_pap[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist()))
     
-    # branches_torch_root.update({
-    #     'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
-    #     'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
-    #     'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
-    #     'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
-    #     'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
+        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
+        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
+        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
+        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
+    })
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
     print(f"  Total ParticleAfterProp: {sum(t.shape[0] for t in pap_tensors)}")
@@ -1200,11 +1258,11 @@ def main(
     ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
         ch_tensors, el_tensors, mu_tensors
     )
-    # branches_torch_root.update({
-    #     'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
-    #     'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
-    #     'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
+        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
+        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
+    })
 
     print("\n✓ Efficiency applied")
 
@@ -1219,11 +1277,11 @@ def main(
     ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
         ch_filtered, el_filtered, mu_filtered
     )
-    # branches_torch_root.update({
-    #     'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
-    #     'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
-    #     'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
+        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
+        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
+    })
     
     print("\n✓ MomentumSmearing applied")
 
@@ -1238,9 +1296,9 @@ def main(
     merged_tracks = process_merger_pipeline(
         ch_smeared, el_smeared, mu_smeared
     )
-    # branches_torch_root.update({
-    #     'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
+    })
     
     print("\n✓ TrackMerger applied")
     
@@ -1257,11 +1315,11 @@ def main(
     )
     
     # Add Tower, EFlowPhoton, and EFlowTrack branches to ROOT output
-    # branches_torch_root.update({
-    #     'ECalTower': tensor_to_root_dict(ecal_results['tower_tensors'], 'ECalTower', expected_event_nums),
-    #     'EFlowPhoton': tensor_to_root_dict(ecal_results['eflow_photon_tensors'], 'EFlowPhoton', expected_event_nums),
-    #     'ECal_EFlowTrack': tensor_to_root_dict(ecal_results['eflow_track_tensors'], 'ECal_EFlowTrack', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ECalTower': tensor_to_root_dict(ecal_results['tower_tensors'], 'ECalTower', expected_event_nums),
+        'EFlowPhoton': tensor_to_root_dict(ecal_results['eflow_photon_tensors'], 'EFlowPhoton', expected_event_nums),
+        'ECal_EFlowTrack': tensor_to_root_dict(ecal_results['eflow_track_tensors'], 'ECal_EFlowTrack', expected_event_nums),
+    })
     
     print("\n✓ ECal SimpleCalorimeter Steps 1, 2, & 4 complete")
     
@@ -1279,11 +1337,11 @@ def main(
     )
     
     # Add HCal branches to ROOT output
-    # branches_torch_root.update({
-    #     'HCalTower': tensor_to_root_dict(hcal_results['tower_tensors'], 'HCalTower', expected_event_nums),
-    #     'EFlowNeutralHadron': tensor_to_root_dict(hcal_results['eflow_neutral_hadron_tensors'], 'EFlowNeutralHadron', expected_event_nums),
-    #     'HCal_EFlowTrack': tensor_to_root_dict(hcal_results['eflow_track_tensors'], 'HCal_EFlowTrack', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'HCalTower': tensor_to_root_dict(hcal_results['tower_tensors'], 'HCalTower', expected_event_nums),
+        'EFlowNeutralHadron': tensor_to_root_dict(hcal_results['eflow_neutral_hadron_tensors'], 'EFlowNeutralHadron', expected_event_nums),
+        'HCal_EFlowTrack': tensor_to_root_dict(hcal_results['eflow_track_tensors'], 'HCal_EFlowTrack', expected_event_nums),
+    })
     
     print("\n✓ HCal SimpleCalorimeter complete")
     
@@ -1305,6 +1363,28 @@ def main(
     })
     
     print("\n✓ Calorimeter Merger complete")
+    
+    # ========================================================================
+    # STEP 9: Apply EFlowMerger (Merger of tracks + photons + neutral hadrons)
+    # ========================================================================
+    
+    print("\n" + "="*80)
+    print("STEP 9: Applying EFlowMerger (tracks + photons + neutral hadrons)")
+    print("="*80)
+    
+    eflow_tensors = process_eflow_merger_pipeline(
+        hcal_results['eflow_track_tensors'],
+        ecal_results['eflow_photon_tensors'],
+        hcal_results['eflow_neutral_hadron_tensors']
+    )
+    
+    # Add EFlowObject branch to ROOT output
+    # Note: In C++ Delphes, this is written as ParticleFlowCandidate class
+    branches_torch_root.update({
+        'EFlowObject': tensor_to_root_dict(eflow_tensors, 'EFlowObject', expected_event_nums),
+    })
+    
+    print("\n✓ EFlowMerger complete")
     
     # Validate ECal intermediate outputs against C++
     script_dir = Path(__file__).parent
@@ -1392,7 +1472,7 @@ def main(
     else:
         print(f"\n⚠ Benchmark file not found: {benchmark_file}")
         print("  Skipping validation. To enable validation, provide HZZ4l_5_1.root")
-        print("  (Generated by C++ Delphes with delphes_card_CMS_6_0.tcl)")
+        print("  (Generated by C++ Delphes with delphes_card_CMS_6_1.tcl)")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parnassus TorchDelphes HepMC Processing")
@@ -1401,12 +1481,12 @@ def parse_args() -> argparse.Namespace:
         help="Input HepMC file"
     )
     parser.add_argument(
-        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_6_0_torch.root",
+        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_6_1_torch.root",
         help="Output ROOT file"
     )
     parser.add_argument(
-        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_6_0.root",
-        help="Benchmark ROOT file from C++ Delphes for validation (CMS_6_0 card with ECal, HCal, and Calorimeter)"
+        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_6_1.root",
+        help="Benchmark ROOT file from C++ Delphes for validation (CMS_6_1 card with ECal, HCal, Calorimeter, and EFlowMerger)"
     )
     parser.add_argument(
         "--max-events", "-n", type=int, default=1000,
