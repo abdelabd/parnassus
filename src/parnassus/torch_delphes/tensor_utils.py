@@ -166,7 +166,8 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
         Dictionary with keys like "BranchName/BranchName.Attribute" → awkward array
     """
     # Determine if this is a Tower object or Track object based on branch name
-    is_tower = any(keyword in branch_name for keyword in ['Tower', 'EFlowPhoton'])
+    # Tower objects: Tower, EFlowPhoton (ECal), EFlowNeutralHadron (HCal)
+    is_tower = any(keyword in branch_name for keyword in ['Tower', 'EFlowPhoton', 'EFlowNeutralHadron'])
     
     if is_tower:
         # Tower attributes: E, ET, Eta, Phi, T, Eem, Ehad
