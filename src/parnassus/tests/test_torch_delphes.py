@@ -490,9 +490,9 @@ def process_hcal_pipeline(
             towers_batch.append(towers_event)
             eflow_neutral_hadrons_batch.append(eflow_neutral_hadrons_event)
 
-        eflow_tracks.append(torch.cat(eflow_tracks_batch, dim=0).to(torch.float32))
-        towers.append(torch.cat(towers_batch, dim=0).to(torch.float32))
-        eflow_neutral_hadrons.append(torch.cat(eflow_neutral_hadrons_batch, dim=0).to(torch.float32))
+        eflow_tracks.append(torch.cat(eflow_tracks_batch, dim=0))
+        towers.append(torch.cat(towers_batch, dim=0))
+        eflow_neutral_hadrons.append(torch.cat(eflow_neutral_hadrons_batch, dim=0))
 
     return eflow_tracks, towers, eflow_neutral_hadrons
 
@@ -527,8 +527,8 @@ def process_calorimeter_pipeline(
     # Process event by event
     for ecal_towers, hcal_towers in tqdm(zip(ecal_tower_tensors, hcal_tower_tensors), total=len(ecal_tower_tensors)):
         # Merge ECal and HCal towers
-        merged = calorimeter([ecal_towers.to(DEVICE), hcal_towers.to(DEVICE)])
-        merged_tower_tensors.append(merged.cpu())
+        merged = calorimeter([ecal_towers, hcal_towers])
+        merged_tower_tensors.append(merged)
     
     return merged_tower_tensors
 
