@@ -533,6 +533,52 @@ def process_calorimeter_pipeline(
     return merged_tower_tensors
 
 
+def process_eflow_merger_pipeline(
+    hcal_eflow_tracks: List[torch.Tensor],
+    eflow_photons: List[torch.Tensor],
+    eflow_neutral_hadrons: List[torch.Tensor],
+) -> List[torch.Tensor]:
+    """
+    Apply EFlowMerger to combine charged tracks and neutral calorimeter deposits.
+
+    The EFlowMerger module from delphes_card_CMS_6_1.tcl is a Merger that takes:
+    - InputArray: HCal/eflowTracks (Track objects)
+    - InputArray: ECal/eflowPhotons (Tower objects)
+    - InputArray: HCal/eflowNeutralHadrons (Tower objects)
+    - OutputArray: eflow (ParticleFlowCandidate)
+
+    Note: The output ParticleFlowCandidate objects contain ALL input objects unchanged.
+    When saved to ROOT, Track-specific fields are zero-padded for Tower objects and vice versa.
+
+    Args:
+        hcal_eflow_tracks: List of Track tensors from HCal (one per event)
+        eflow_photons: List of Tower tensors from ECal (one per event)
+        eflow_neutral_hadrons: List of Tower tensors from HCal (one per event)
+
+    Returns:
+        List of merged ParticleFlowCandidate tensors (one per event)
+    """
+
+    # Initialize Merger module
+    eflow_merger = Merger().to(DEVICE)
+
+    eflow_tensors = []
+
+    print("\nEFlowMerger: Combining tracks and calorimeter deposits...")
+
+    # Process event by event
+    for tracks, photons, neutrals in tqdm(
+        zip(hcal_eflow_tracks, eflow_photons, eflow_neutral_hadrons),
+        total=len(hcal_eflow_tracks)
+    ):
+        # Merge all three input arrays
+        # The Merger simply concatenates all inputs (see Merger.cc line 139)
+        merged = eflow_merger([tracks, photons, neutrals])
+        eflow_tensors.append(merged)
+
+    return eflow_tensors
+
+
 def validate_against_benchmark(
     torch_output_file: str, 
     benchmark_file: str, 
@@ -563,9 +609,11 @@ def validate_against_benchmark(
     # Kinematic variables to compare
     # Track objects: PID, Charge, P, PT, Eta, Phi
     # Tower objects: E, ET, Eta, Phi, Eem, Ehad (no PID - towers are aggregated)
+    # ParticleFlowCandidate: Combined Track+Tower fields
     track_kinematic_vars = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
     tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi', 'T']
-    
+    eflow_kinematic_vars = ['PID', 'Charge', 'E', 'P', 'PT', 'Eta', 'Phi', 'T', 'X', 'Y', 'Z', 'Eem', 'Ehad']
+
     # Branches to validate (branch_name, variable_list)
     branches = [
         # ('ParticleBeforeProp', track_kinematic_vars),
@@ -587,6 +635,7 @@ def validate_against_benchmark(
         ('HCal_EFlowTrack', track_kinematic_vars),
         ('EFlowNeutralHadron', tower_kinematic_vars),
         ('CalorimeterTower', tower_kinematic_vars),
+        ('EFlowObject', eflow_kinematic_vars),
     ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -1170,7 +1219,7 @@ def main(
     # ========================================================================
     # STEP 8: Apply Calorimeter (Merger)
     # ========================================================================
-    
+
     print("\n" + "="*80)
     print("STEP 8: Applying Calorimeter (Merger)")
     print("="*80)
@@ -1178,49 +1227,68 @@ def main(
     merged_towers = process_calorimeter_pipeline(
         ecal_towers, hcal_towers
     )
-    
+
     # Add CalorimeterTower branch to ROOT output
     branches_torch_root.update({
         'CalorimeterTower': tensor_to_root_dict(merged_towers, 'CalorimeterTower', expected_event_nums),
     })
-    
+
     print("\n✓ Calorimeter (Merger) applied")
 
     # ========================================================================
-    # STEP 9: Write final output
+    # STEP 9: Apply EFlowMerger
+    # ========================================================================
+
+    print("\n" + "="*80)
+    print("STEP 9: Applying EFlowMerger")
+    print("="*80)
+
+    eflow_objects = process_eflow_merger_pipeline(
+        hcal_eflow_tracks, eflow_photons, eflow_neutral_hadrons
+    )
+
+    # Add EFlowObject branch to ROOT output
+    branches_torch_root.update({
+        'EFlowObject': tensor_to_root_dict(eflow_objects, 'EFlowObject', expected_event_nums),
+    })
+
+    print("\n✓ EFlowMerger applied")
+
+    # ========================================================================
+    # STEP 10: Write final output
     # ========================================================================
 
     print(f"Writing {output_file}...")
     write_root_file(output_file, branches_torch_root)
 
     # ========================================================================
-    # STEP 10: Print summary
+    # STEP 11: Print summary
     # ========================================================================
     print("\n" + "="*80)
     print("SUMMARY")
     print("="*80)
-    
+
     total_ch_input = sum(t.shape[0] for t in ch_tensors)
     total_el_input = sum(t.shape[0] for t in el_tensors)
     total_mu_input = sum(t.shape[0] for t in mu_tensors)
-    
+
     print(f"\nChargedHadrons:")
     print(f"  Input:      {total_ch_input}")
 
-    
+
     print(f"\nElectrons:")
     print(f"  Input:      {total_el_input}")
 
-    
+
     print(f"\nMuons:")
     print(f"  Input:      {total_mu_input}")
 
     print("\n" + "="*80)
     print("✓ ALL PROCESSING COMPLETE!")
     print("="*80 + "\n")
-    
+
     # ========================================================================
-    # STEP 11: Validate Against C++ Delphes (Final ROOT branches)
+    # STEP 12: Validate Against C++ Delphes (Final ROOT branches)
     # ========================================================================
     
     # Determine benchmark file location
@@ -1233,8 +1301,8 @@ def main(
         validate_against_benchmark(output_file, benchmark_file, validation_dir, debug=debug)
     else:
         print(f"\n⚠ Benchmark file not found: {benchmark_file}")
-        print("  Skipping validation. To enable validation, provide HZZ4l_5_1.root")
-        print("  (Generated by C++ Delphes with delphes_card_CMS_5_1.tcl)")
+        print("  Skipping validation. To enable validation, provide HZZ4l_6_1.root")
+        print("  (Generated by C++ Delphes with delphes_card_CMS_6_1.tcl)")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parnassus TorchDelphes HepMC Processing")
@@ -1243,12 +1311,12 @@ def parse_args() -> argparse.Namespace:
         help="Input HepMC file"
     )
     parser.add_argument(
-        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_6_0_torch.root",
+        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_6_1_torch.root",
         help="Output ROOT file"
     )
     parser.add_argument(
-        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_6_0.root",
-        help="Benchmark ROOT file from C++ Delphes for validation (CMS_6_0 card with TowerMerger)"
+        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_6_1.root",
+        help="Benchmark ROOT file from C++ Delphes for validation (CMS_6_1 card with EFlowMerger)"
     )
     parser.add_argument(
         "--max-events", "-n", type=int, default=1000,

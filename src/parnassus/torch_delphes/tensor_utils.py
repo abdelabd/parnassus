@@ -165,14 +165,45 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
     Returns:
         Dictionary with keys like "BranchName/BranchName.Attribute" → awkward array
     """
-    # Determine if this is a Tower object or Track object based on branch name
+    # Determine if this is a Tower object, Track object, or ParticleFlowCandidate based on branch name
     # Tower objects: Tower, EFlowPhoton (ECal), EFlowNeutralHadron (HCal)
-    is_tower = any(keyword in branch_name for keyword in ['Tower', 'EFlowPhoton', 'EFlowNeutralHadron'])
-    
-    if is_tower:
+    # ParticleFlowCandidate: EFlowObject (combines Track and Tower fields)
+    is_tower = any(keyword in branch_name for keyword in ['Tower', 'EFlowPhoton', 'EFlowNeutralHadron']) and 'EFlowObject' not in branch_name
+    is_eflow = 'EFlowObject' in branch_name
+
+    if is_eflow:
+        # ParticleFlowCandidate attributes: combination of Track and Tower fields
+        # This matches the ParticleFlowCandidate class in DelphesClasses.h (lines 532-613)
+        # Track fields: PID, Charge, E, P, PT, Eta, Phi, CtgTheta, C, Mass, EtaOuter, PhiOuter,
+        #               T, X, Y, Z, TOuter, XOuter, YOuter, ZOuter, Xd, Yd, Zd, L, D0, DZ,
+        #               Nclusters, dNdx, ErrorP, ErrorPT, ErrorPhi, ErrorCtgTheta, ErrorT,
+        #               ErrorD0, ErrorDZ, ErrorC, ErrorD0Phi, ErrorD0C, ErrorD0DZ, ErrorD0CtgTheta,
+        #               ErrorPhiC, ErrorPhiDZ, ErrorPhiCtgTheta, ErrorCDZ, ErrorCCtgTheta,
+        #               ErrorDZCtgTheta, VertexIndex
+        # Tower fields: NTimeHits, Eem, Ehad, Edges[4]
+        # Note: For Track objects, Tower fields are zero. For Tower objects, Track-specific fields are zero.
+        attributes = ['PID', 'Charge', 'E', 'P', 'PT', 'Eta', 'Phi', 'T', 'X', 'Y', 'Z', 'Eem', 'Ehad']
+
+        # Column indices for ParticleFlowCandidate attributes
+        column_map = {
+            'PID': PID,
+            'Charge': CHARGE,
+            'E': E,
+            'P': None,  # Will compute from Px, Py, Pz
+            'PT': PT,
+            'Eta': ETA,
+            'Phi': PHI,
+            'T': T,
+            'X': X,
+            'Y': Y,
+            'Z': Z,
+            'Eem': None,  # Will be zero for Track objects (towers don't have this in tensor)
+            'Ehad': None,  # Will be zero for Track objects (towers don't have this in tensor)
+        }
+    elif is_tower:
         # Tower attributes: E, ET, Eta, Phi, T, Eem, Ehad
         attributes = ['E', 'ET', 'Eta', 'Phi', 'T']
-        
+
         # Column indices for tower attributes
         column_map = {
             'E': E,
@@ -239,8 +270,30 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
                 continue
             
             event_np = event_tensor.cpu().numpy()
-            
-            if is_tower:
+
+            if is_eflow:
+                # ParticleFlowCandidate-specific computations
+                # Handles both Track and Tower objects merged together
+                if attr == 'P':
+                    # Compute P = sqrt(Px^2 + Py^2 + Pz^2)
+                    px = event_np[:, PX]
+                    py = event_np[:, PY]
+                    pz = event_np[:, PZ]
+                    values = np.sqrt(px**2 + py**2 + pz**2)
+                elif attr == 'Eem' or attr == 'Ehad':
+                    # Tower-specific fields: set to zero for all objects
+                    # In reality, Track objects have zero, Tower objects would have non-zero
+                    # but our tensor representation doesn't include these fields
+                    values = np.zeros(event_np.shape[0])
+                elif attr == "T":
+                    values = event_np[:, T]*1e-3 / 299792458.0  # Convert mm/c to microseconds
+                elif attr == 'PID':
+                    # PID should be integer
+                    values = event_np[:, column_map[attr]].astype(np.int32)
+                else:
+                    # Direct extraction
+                    values = event_np[:, column_map[attr]]
+            elif is_tower:
                 # Tower-specific computations
                 if attr == 'ET':
                     # ET = E / cosh(Eta)
