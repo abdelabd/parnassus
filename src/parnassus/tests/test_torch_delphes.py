@@ -532,7 +532,6 @@ def process_calorimeter_pipeline(
     
     return merged_tower_tensors
 
-
 def process_eflow_merger_pipeline(
     hcal_eflow_tracks: List[torch.Tensor],
     eflow_photons: List[torch.Tensor],
@@ -617,18 +616,18 @@ def validate_against_benchmark(
 
     # Branches to validate (branch_name, variable_list)
     branches = [
-        # ('ParticleBeforeProp', track_kinematic_vars),
-        # ('ParticleAfterProp', track_kinematic_vars),
-        # ('ChargedHadron', track_kinematic_vars),
-        # ('Electron', track_kinematic_vars),
-        # ('Muon', track_kinematic_vars),
-        # ('ChargedHadronEfficiency', track_kinematic_vars),
-        # ('ElectronEfficiency', track_kinematic_vars),
-        # ('MuonEfficiency', track_kinematic_vars),
-        # ('ChargedHadronSmeared', track_kinematic_vars),
-        # ('ElectronSmeared', track_kinematic_vars),
-        # ('MuonSmeared', track_kinematic_vars),
-        # ('MergedTracks', track_kinematic_vars),
+        ('ParticleBeforeProp', track_kinematic_vars),
+        ('ParticleAfterProp', track_kinematic_vars),
+        ('ChargedHadron', track_kinematic_vars),
+        ('Electron', track_kinematic_vars),
+        ('Muon', track_kinematic_vars),
+        ('ChargedHadronEfficiency', track_kinematic_vars),
+        ('ElectronEfficiency', track_kinematic_vars),
+        ('MuonEfficiency', track_kinematic_vars),
+        ('ChargedHadronSmeared', track_kinematic_vars),
+        ('ElectronSmeared', track_kinematic_vars),
+        ('MuonSmeared', track_kinematic_vars),
+        ('MergedTracks', track_kinematic_vars),
         ('ECalTower', tower_kinematic_vars),
         ('ECal_EFlowTrack', track_kinematic_vars),
         ('EFlowPhoton', tower_kinematic_vars),
@@ -1050,6 +1049,495 @@ def validate_against_benchmark(
     print(f"✓ Validation complete! Plots saved to {output_dir}")
     print(f"{'='*70}")
 
+def validate_specific_event(
+    torch_output_file: str,
+    benchmark_file: str,
+    event_index: int,
+    output_dir: str,
+    debug: bool = False
+) -> None:
+    """
+    Validate a single event by comparing PyTorch and C++ Delphes outputs.
+
+    Args:
+        torch_output_file: Path to PyTorch output ROOT file
+        benchmark_file: Path to C++ Delphes benchmark ROOT file
+        event_index: Event index (0-based) to validate
+        output_dir: Base directory for validation plots
+        debug: If True, print detailed statistics
+    """
+    # Create event-specific output directory
+    output_dir = Path(output_dir) / f"event_{event_index}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n{'='*70}")
+    print(f"Validating Event {event_index}")
+    print(f"{'='*70}")
+    print(f"PyTorch output: {torch_output_file}")
+    print(f"C++ Delphes benchmark: {benchmark_file}")
+    print(f"Output directory: {output_dir}")
+
+    # Load ROOT files
+    torch_root = uproot.open(torch_output_file)
+    torch_tree = torch_root["Delphes"]
+
+    benchmark_root = uproot.open(benchmark_file)
+    benchmark_tree = benchmark_root["Delphes"]
+
+    # Check event bounds
+    # Use a representative branch to check number of events
+    sample_branch = "ParticleBeforeProp/ParticleBeforeProp.PID"
+    if sample_branch in torch_tree.keys():
+        n_events_torch = len(torch_tree[sample_branch].array())
+        n_events_benchmark = len(benchmark_tree[sample_branch].array())
+
+        if event_index >= n_events_torch or event_index >= n_events_benchmark:
+            raise ValueError(
+                f"Event index {event_index} out of range. "
+                f"PyTorch has {n_events_torch} events, "
+                f"C++ has {n_events_benchmark} events."
+            )
+
+        print(f"\nEvent {event_index} / {min(n_events_torch, n_events_benchmark) - 1}")
+
+    # Kinematic variables to compare
+    track_kinematic_vars = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
+    tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi', 'T']
+    eflow_kinematic_vars = ['PID', 'Charge', 'E', 'P', 'PT', 'Eta', 'Phi', 'T', 'X', 'Y', 'Z', 'Eem', 'Ehad']
+
+    # Branches to validate (branch_name, variable_list)
+    branches = [
+        ('ParticleBeforeProp', track_kinematic_vars),
+        ('ParticleAfterProp', track_kinematic_vars),
+        ('ChargedHadron', track_kinematic_vars),
+        ('Electron', track_kinematic_vars),
+        ('Muon', track_kinematic_vars),
+        ('ChargedHadronEfficiency', track_kinematic_vars),
+        ('ElectronEfficiency', track_kinematic_vars),
+        ('MuonEfficiency', track_kinematic_vars),
+        ('ChargedHadronSmeared', track_kinematic_vars),
+        ('ElectronSmeared', track_kinematic_vars),
+        ('MuonSmeared', track_kinematic_vars),
+        ('MergedTracks', track_kinematic_vars),
+        ('ECalTower', tower_kinematic_vars),
+        ('ECal_EFlowTrack', track_kinematic_vars),
+        ('EFlowPhoton', tower_kinematic_vars),
+        ('HCalTower', tower_kinematic_vars),
+        ('HCal_EFlowTrack', track_kinematic_vars),
+        ('EFlowNeutralHadron', tower_kinematic_vars),
+        ('CalorimeterTower', tower_kinematic_vars),
+        ('EFlowObject', eflow_kinematic_vars),
+    ]
+
+    print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
+
+    for branch_name, kinematic_vars in branches:
+        print(f"\n{'='*70}")
+        print(f"Validating {branch_name}...")
+        print(f"{'='*70}")
+
+        # Create branch-specific directory
+        branch_dir = output_dir / branch_name
+        branch_dir.mkdir(exist_ok=True)
+
+        # Check if branch exists in PyTorch output
+        torch_branch_keys = [k for k in torch_tree.keys() if k.startswith(f"{branch_name}/")]
+        if not torch_branch_keys:
+            print(f"  ⚠ {branch_name} not found in PyTorch output, skipping...")
+            continue
+
+        ### 1. Standalone plots for each kinematic variable
+        for var in kinematic_vars:
+            # Check if variable exists in both datasets
+            torch_key = f"{branch_name}/{branch_name}.{var}"
+            benchmark_key = f"{branch_name}/{branch_name}.{var}"
+
+            if torch_key not in torch_tree.keys():
+                print(f"  ⚠ {var} not found in PyTorch {branch_name}, skipping...")
+                continue
+
+            if benchmark_key not in benchmark_tree.keys():
+                print(f"  ⚠ {var} not found in C++ {branch_name}, skipping...")
+                continue
+
+            try:
+                # Load event-wise data
+                torch_data_events = torch_tree[torch_key].array()
+                benchmark_data_events = benchmark_tree[benchmark_key].array()
+
+                # Check event index bounds
+                if event_index >= len(torch_data_events) or event_index >= len(benchmark_data_events):
+                    print(f"  ⚠ Event {event_index} out of range for {var}, skipping...")
+                    continue
+
+                # Extract single event data
+                torch_data = torch_data_events[event_index]
+                benchmark_data = benchmark_data_events[event_index]
+
+                # Convert to numpy for plotting
+                torch_np = np.asarray(torch_data)
+                benchmark_np = np.asarray(benchmark_data)
+
+                # Skip if both are empty
+                if len(torch_np) == 0 and len(benchmark_np) == 0:
+                    print(f"  ⚠ No particles in {branch_name}.{var} for event {event_index}, skipping...")
+                    continue
+
+                # Create figure with two subplots: histogram on top, ratio below
+                fig = plt.figure(figsize=(10, 8))
+                gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.05)
+                ax_hist = fig.add_subplot(gs[0])
+                ax_ratio = fig.add_subplot(gs[1], sharex=ax_hist)
+
+                # Special handling for PID: use discrete bins
+                if var == 'PID':
+                    # Get unique PIDs across both datasets
+                    unique_pids = np.unique(np.concatenate([torch_np, benchmark_np]))
+
+                    # Count occurrences of each PID
+                    torch_counts = np.array([np.sum(torch_np == pid) for pid in unique_pids])
+                    benchmark_counts = np.array([np.sum(benchmark_np == pid) for pid in unique_pids])
+
+                    # Create bar positions
+                    x = np.arange(len(unique_pids))
+                    width = 0.35
+
+                    # Plot bars
+                    ax_hist.bar(x - width/2, benchmark_counts, width, label='C++ Delphes',
+                               color='orange', alpha=0.7)
+                    ax_hist.bar(x + width/2, torch_counts, width, label='Parnassus.TorchDelphes',
+                               color='blue', alpha=0.7)
+
+                    ax_hist.set_xticks(x)
+                    ax_hist.set_xticklabels([f'{int(pid)}' for pid in unique_pids], rotation=45, ha='right')
+                    ax_hist.tick_params(labelbottom=False)
+
+                    # For ratio plot
+                    bin_centers = x
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts,
+                        out=np.ones_like(torch_counts, dtype=float),
+                        where=benchmark_counts > 0
+                    )
+
+                    # Print PID counts if debug mode
+                    if debug:
+                        print(f"\n  PID Counts for {branch_name} (Event {event_index}):")
+                        for pid, torch_count, bench_count in zip(unique_pids, torch_counts, benchmark_counts):
+                            ratio_val = torch_count / bench_count if bench_count > 0 else np.inf
+                            print(f"    PID {int(pid):6d}: PyTorch={torch_count:5d}, C++={bench_count:5d}, Ratio={ratio_val:.4f}")
+
+                else:
+                    # Standard continuous histogram (use fewer bins for single events)
+                    # Determine bin range
+                    all_data = np.concatenate([torch_np, benchmark_np])
+                    if len(all_data) > 0:
+                        bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 30)
+                    else:
+                        bins = 30
+
+                    # Plot histograms
+                    benchmark_counts, bin_edges, _ = ax_hist.hist(
+                        benchmark_np, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                        linewidth=2, label='C++ Delphes', density=False
+                    )
+                    torch_counts, _, _ = ax_hist.hist(
+                        torch_np, bins=bins, histtype='step', color='blue',
+                        linewidth=2, label='Parnassus.TorchDelphes', density=False
+                    )
+
+                    # For ratio plot
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts,
+                        out=np.ones_like(torch_counts),
+                        where=benchmark_counts > 0
+                    )
+
+                # Debug: print histogram statistics
+                if debug and var != 'PID':
+                    print(f"\n{branch_name}.{var} (Event {event_index}) bins:")
+                    print(f"  Total C++ counts: {np.sum(benchmark_counts):.0f}")
+                    print(f"  Total TorchDelphes counts: {np.sum(torch_counts):.0f}")
+                    if np.sum(benchmark_counts) > 0:
+                        print(f"  Ratio (Torch/C++): {np.sum(torch_counts) / np.sum(benchmark_counts):.4f}")
+
+                    # Compute and print ratio statistics
+                    valid_ratio = ratio[benchmark_counts > 0]
+                    if len(valid_ratio) > 0:
+                        print(f"  Ratio mean: {np.mean(valid_ratio):.4f}")
+                        print(f"  Ratio std: {np.std(valid_ratio):.4f}")
+                        print(f"  Ratio min: {np.min(valid_ratio):.4f}")
+                        print(f"  Ratio max: {np.max(valid_ratio):.4f}")
+
+                ax_hist.set_ylabel('Counts', fontsize=12)
+                ax_hist.set_title(f'Event {event_index}: {branch_name}.{var}', fontsize=14, fontweight='bold')
+                ax_hist.legend(fontsize=11)
+                ax_hist.grid(True, alpha=0.3)
+                if var != 'PID':
+                    ax_hist.tick_params(labelbottom=False)  # Hide x-axis labels for top plot
+
+                # Add statistics text
+                stats_text = f'PyTorch: {len(torch_np)} particles\nC++ Delphes: {len(benchmark_np)} particles'
+                ax_hist.text(0.95, 0.95, stats_text, transform=ax_hist.transAxes,
+                       fontsize=10, verticalalignment='top', horizontalalignment='right',
+                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+                # Plot ratio: TorchDelphes / C++ Delphes
+                if var == 'PID':
+                    # Bar plot for PID
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.bar(bin_centers, ratio, width*2, color='blue', alpha=0.7)
+                    ax_ratio.set_xticks(bin_centers)
+                    ax_ratio.set_xticklabels([f'{int(pid)}' for pid in unique_pids], rotation=45, ha='right')
+                    if len(ratio) > 0:
+                        ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±10% range
+                else:
+                    # Line plot for continuous variables
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.plot(bin_centers, ratio, color='blue', markersize=4, linewidth=2)
+                    if len(ratio) > 0:
+                        ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±10% range
+
+                ax_ratio.set_xlabel(var, fontsize=12)
+                ax_ratio.set_ylabel('Torch / C++', fontsize=10)
+                ax_ratio.grid(True, alpha=0.3)
+
+                # Save plot
+                plot_file = branch_dir / f"{var}.png"
+                plt.tight_layout()
+                plt.savefig(plot_file, dpi=150)
+                plt.close()
+
+                print(f"  ✓ {var}: PyTorch={len(torch_np)}, C++={len(benchmark_np)} → {plot_file.name}")
+
+            except Exception as e:
+                print(f"  ✗ {var}: Error - {e}")
+                continue
+
+        ### 2. Combined plot with key kinematic variables
+        # For tracks: Eta, Phi, PT, P
+        # For towers: Eta, Phi, E, ET
+        if 'P' in kinematic_vars:
+            combined_vars = ['Eta', 'Phi', 'PT', 'P']
+            print(f"\n  Creating combined kinematic plot (Eta, Phi, PT, P)...")
+        elif 'E' in kinematic_vars:
+            combined_vars = ['Eta', 'Phi', 'E', 'ET']
+            print(f"\n  Creating combined kinematic plot (Eta, Phi, E, ET)...")
+        else:
+            combined_vars = kinematic_vars[:4]  # Take first 4 variables
+            print(f"\n  Creating combined kinematic plot ({', '.join(combined_vars)})...")
+
+        # Create figure with 2 rows (histogram + ratio) and 4 columns (one per variable)
+        fig = plt.figure(figsize=(30, 6))
+
+        for idx, var in enumerate(combined_vars):
+            torch_key = f"{branch_name}/{branch_name}.{var}"
+            benchmark_key = f"{branch_name}/{branch_name}.{var}"
+
+            if torch_key not in torch_tree.keys() or benchmark_key not in benchmark_tree.keys():
+                continue
+
+            try:
+                # Load event-wise data
+                torch_data_events = torch_tree[torch_key].array()
+                benchmark_data_events = benchmark_tree[benchmark_key].array()
+
+                # Extract single event
+                torch_data = torch_data_events[event_index]
+                benchmark_data = benchmark_data_events[event_index]
+
+                # Convert to numpy
+                torch_np = np.asarray(torch_data)
+                benchmark_np = np.asarray(benchmark_data)
+
+                # Create subplot with histogram on top, ratio below
+                # Use 4 rows to match the 3:1 height ratio, columns for each variable
+                gs = plt.GridSpec(4, 4, figure=fig, hspace=0.05, wspace=0.3,
+                                  height_ratios=[3, 1, 0, 0])
+
+                # Column position (0-3 for Eta, Phi, PT, P)
+                col = idx
+
+                # Histogram subplot (row 0, takes 3 units of height)
+                ax_hist = fig.add_subplot(gs[0, col])
+                # Ratio subplot (row 1, takes 1 unit of height)
+                ax_ratio = fig.add_subplot(gs[1, col], sharex=ax_hist)
+
+                # Determine bin range
+                all_data = np.concatenate([torch_np, benchmark_np])
+                if len(all_data) > 0:
+                    bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 25)
+                else:
+                    bins = 25
+
+                # Plot histograms
+                benchmark_counts, bin_edges, _ = ax_hist.hist(
+                    benchmark_np, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                    linewidth=2, label=f'C++ Delphes: {len(benchmark_np)} particles', density=False
+                )
+                torch_counts, _, _ = ax_hist.hist(
+                    torch_np, bins=bins, histtype='step', color='blue',
+                    linewidth=2, label=f'Parnassus.TorchDelphes: {len(torch_np)} particles', density=False
+                )
+
+                ax_hist.set_ylabel('Counts', fontsize=11)
+                ax_hist.set_title(f'{var}', fontsize=13, fontweight='bold')
+                if idx == 0:  # Only show legend on first subplot
+                    ax_hist.legend(fontsize=10)
+                ax_hist.grid(True, alpha=0.3)
+                ax_hist.tick_params(labelbottom=False)
+
+                # Plot ratio
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                ratio = np.divide(
+                    torch_counts, benchmark_counts,
+                    out=np.ones_like(torch_counts),
+                    where=benchmark_counts > 0
+                )
+
+                ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                ax_ratio.plot(bin_centers, ratio, color='blue', markersize=3, linewidth=2)
+                ax_ratio.set_xlabel(var, fontsize=11)
+                ax_ratio.set_ylabel('Torch/C++', fontsize=9)
+                if len(ratio) > 0:
+                    ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])
+                ax_ratio.grid(True, alpha=0.3)
+
+            except Exception as e:
+                print(f"    ✗ Error plotting {var} in combined plot: {e}")
+                continue
+
+        # Add overall title
+        fig.suptitle(f'Event {event_index}: {branch_name}', fontsize=16, fontweight='bold', y=0.98)
+
+        # Save combined figure
+        combined_plot_file = branch_dir / "all.png"
+        plt.savefig(combined_plot_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ Combined plot saved → {combined_plot_file.name}")
+
+        ### 3. PID-specific combined plots (only for branches with PID field)
+        torch_pid_key = f"{branch_name}/{branch_name}.PID"
+        benchmark_pid_key = f"{branch_name}/{branch_name}.PID"
+
+        if torch_pid_key in torch_tree.keys() and benchmark_pid_key in benchmark_tree.keys():
+
+            # Load PID data for the event
+            torch_pids_events = torch_tree[torch_pid_key].array()
+            benchmark_pids_events = benchmark_tree[benchmark_pid_key].array()
+
+            # Extract event data
+            torch_pids = torch_pids_events[event_index]
+            benchmark_pids = benchmark_pids_events[event_index]
+
+            # Get unique PIDs in this event
+            unique_pids = np.unique(np.concatenate([
+                np.asarray(torch_pids),
+                np.asarray(benchmark_pids)
+            ]))
+
+            # For each unique PID, create a combined plot
+            for pid in unique_pids:
+                pid_int = int(pid)
+
+                # Create figure with 2 rows (histogram + ratio) and 4 columns (one per variable)
+                fig = plt.figure(figsize=(30, 6))
+
+                for idx, var in enumerate(combined_vars):
+                    torch_key = f"{branch_name}/{branch_name}.{var}"
+                    benchmark_key = f"{branch_name}/{branch_name}.{var}"
+
+                    if torch_key not in torch_tree.keys() or benchmark_key not in benchmark_tree.keys():
+                        continue
+
+                    # Load event-wise data
+                    torch_data_events = torch_tree[torch_key].array()
+                    benchmark_data_events = benchmark_tree[benchmark_key].array()
+
+                    # Extract event data
+                    torch_data_event = torch_data_events[event_index]
+                    benchmark_data_event = benchmark_data_events[event_index]
+
+                    # Get PID arrays for this event
+                    torch_pid_event = torch_pids_events[event_index]
+                    benchmark_pid_event = benchmark_pids_events[event_index]
+
+                    # Filter by PID within the event
+                    torch_data_filtered = np.asarray(torch_data_event)[np.asarray(torch_pid_event) == pid]
+                    benchmark_data_filtered = np.asarray(benchmark_data_event)[np.asarray(benchmark_pid_event) == pid]
+
+                    # Skip if no data for this PID
+                    if len(torch_data_filtered) == 0 and len(benchmark_data_filtered) == 0:
+                        continue
+
+                    # Create subplot with histogram on top, ratio below
+                    gs = plt.GridSpec(4, 4, figure=fig, hspace=0.05, wspace=0.3,
+                                        height_ratios=[3, 1, 0, 0])
+
+                    # Column position (0-3 for variables)
+                    col = idx
+
+                    # Histogram subplot (row 0, takes 3 units of height)
+                    ax_hist = fig.add_subplot(gs[0, col])
+                    # Ratio subplot (row 1, takes 1 unit of height)
+                    ax_ratio = fig.add_subplot(gs[1, col], sharex=ax_hist)
+
+                    # Determine bin range
+                    all_data = np.concatenate([torch_data_filtered, benchmark_data_filtered])
+                    if len(all_data) > 0:
+                        bins = np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 25)
+                    else:
+                        bins = 25
+
+                    # Plot histograms
+                    benchmark_counts, bin_edges, _ = ax_hist.hist(
+                        benchmark_data_filtered, bins=bins, histtype='stepfilled', color='orange', alpha=0.5,
+                        linewidth=2, label=f'C++ Delphes, {len(benchmark_data_filtered)} particles', density=False
+                    )
+                    torch_counts, _, _ = ax_hist.hist(
+                        torch_data_filtered, bins=bins, histtype='step', color='blue',
+                        linewidth=2, label=f'Parnassus.TorchDelphes, {len(torch_data_filtered)} particles', density=False
+                    )
+
+                    ax_hist.set_ylabel('Counts', fontsize=11)
+                    ax_hist.set_title(f'{var}', fontsize=13, fontweight='bold')
+                    if idx == 0:  # Only show legend on first subplot
+                        ax_hist.legend(fontsize=10)
+                    ax_hist.grid(True, alpha=0.3)
+                    ax_hist.tick_params(labelbottom=False)
+
+                    # Plot ratio
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts,
+                        out=np.ones_like(torch_counts),
+                        where=benchmark_counts > 0
+                    )
+
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.plot(bin_centers, ratio, color='blue', markersize=3, linewidth=2)
+                    ax_ratio.set_xlabel(var, fontsize=11)
+                    ax_ratio.set_ylabel('Torch/C++', fontsize=9)
+                    if len(ratio) > 0:
+                        ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])
+                    ax_ratio.grid(True, alpha=0.3)
+
+                # Add overall title with PID
+                fig.suptitle(f'Event {event_index}: {branch_name} (PID={pid_int})', fontsize=16, fontweight='bold', y=0.98)
+
+                # Save PID-specific combined figure
+                pid_plot_file = branch_dir / f"pid_{pid_int}.png"
+                plt.savefig(pid_plot_file, dpi=150, bbox_inches='tight')
+                plt.close()
+
+        else:
+            print(f"  ℹ No PID field - skipping PID-specific plots (normal for Tower objects)")
+
+    print(f"\n{'='*70}")
+    print(f"✓ Event {event_index} validation complete! Plots saved to {output_dir}")
+    print(f"{'='*70}")
+
 def main(
     input_file: str, 
     output_file: str, 
@@ -1109,13 +1597,13 @@ def main(
     all_pap = torch.cat([t for t in pap_tensors if t.shape[0] > 0], dim=0)
     expected_event_nums = sorted(set(all_pap[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist()))
     
-    # branches_torch_root.update({
-    #     'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
-    #     'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
-    #     'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
-    #     'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
-    #     'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
+        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
+        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
+        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
+        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
+    })
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
     print(f"  Total ParticleAfterProp: {sum(t.shape[0] for t in pap_tensors)}")
@@ -1131,11 +1619,11 @@ def main(
     ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
         ch_tensors, el_tensors, mu_tensors
     )
-    # branches_torch_root.update({
-    #     'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
-    #     'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
-    #     'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
+        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
+        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
+    })
 
     print("\n✓ Efficiency applied")
 
@@ -1150,11 +1638,11 @@ def main(
     ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
         ch_filtered, el_filtered, mu_filtered
     )
-    # branches_torch_root.update({
-    #     'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
-    #     'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
-    #     'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
+        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
+        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
+    })
     
     print("\n✓ MomentumSmearing applied")
 
@@ -1169,9 +1657,9 @@ def main(
     merged_tracks = process_merger_pipeline(
         ch_smeared, el_smeared, mu_smeared
     )
-    # branches_torch_root.update({
-    #     'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
-    # })
+    branches_torch_root.update({
+        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
+    })
     
     print("\n✓ TrackMerger applied")
     
@@ -1331,13 +1819,38 @@ def parse_args() -> argparse.Namespace:
         "--debug", action="store_true",
         help="Print histogram bin counts and edges for debugging"
     )
+    parser.add_argument(
+        "--validate-event", type=int, default=None,
+        help="Validate a specific event by index (0-based). If not set, validates all events aggregated."
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
     tic = time.time()
     args = parse_args()
 
-    main(args.input, args.output, args.benchmark, max_events=args.max_events, batch_size=args.batch_size, debug=args.debug)
+    # Check if validating a specific event
+    if args.validate_event is not None:
+        # Only run single-event validation (skip full pipeline)
+        script_dir = Path(__file__).parent
+        validation_dir = script_dir / "torch_delphes_validation"
+
+        if Path(args.output).exists() and Path(args.benchmark).exists():
+            validate_specific_event(
+                args.output,
+                args.benchmark,
+                args.validate_event,
+                validation_dir,
+                debug=args.debug
+            )
+        else:
+            print(f"\n⚠ Error: Output or benchmark file not found!")
+            print(f"  Output: {args.output}")
+            print(f"  Benchmark: {args.benchmark}")
+            print(f"  Please run the full pipeline first (without --validate-event) to generate output files.")
+    else:
+        # Run full pipeline (includes all-events validation)
+        main(args.input, args.output, args.benchmark, max_events=args.max_events, batch_size=args.batch_size, debug=args.debug)
 
     toc = time.time()
     dur = toc - tic
