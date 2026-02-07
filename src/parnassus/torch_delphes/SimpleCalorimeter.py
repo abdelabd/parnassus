@@ -582,6 +582,11 @@ class SimpleCalorimeter(nn.Module):
             towers[:, CMAP["IS_NOT_PAD"]] = 1.0
             towers[:, CMAP["PASS_ECAL_TOWER"]] = 1.0
 
+            # Preserve EVENT_NUMBER from input particles
+            # All particles in this forward() call have the same event number
+            event_number = particles[0, CMAP["EVENT_NUMBER"]]
+            towers[:, CMAP["EVENT_NUMBER"]] = event_number
+
         # ===== Create EFlowPhoton Tensor with COLUMN_MAP format =====
         # EFlowPhoton tensor: (n_eflow_towers, N_FEATURES) 
         # These are towers with significant neutral excess
@@ -616,6 +621,10 @@ class SimpleCalorimeter(nn.Module):
             # Set masks
             eflow_excess_neutrals[:, CMAP["IS_NOT_PAD"]] = 1.0
             eflow_excess_neutrals[:, CMAP["PASS_EFLOW_PHOTON"]] = 1.0
+
+            # Preserve EVENT_NUMBER from input particles
+            event_number = particles[0, CMAP["EVENT_NUMBER"]]
+            eflow_excess_neutrals[:, CMAP["EVENT_NUMBER"]] = event_number
 
         # Return results
         return eflow_tracks, towers, eflow_excess_neutrals
