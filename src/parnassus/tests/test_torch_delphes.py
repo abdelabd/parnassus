@@ -40,7 +40,7 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter
+from parnassus.torch_delphes import Efficiency, EFlowMerger, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
@@ -541,14 +541,16 @@ def process_eflow_merger_pipeline(
     """
     Apply EFlowMerger to combine charged tracks and neutral calorimeter deposits.
 
-    The EFlowMerger module from delphes_card_CMS_6_1.tcl is a Merger that takes:
+    The EFlowMerger module from delphes_card_CMS_6_1.tcl merges:
     - InputArray: HCal/eflowTracks (Track objects)
     - InputArray: ECal/eflowPhotons (Tower objects)
     - InputArray: HCal/eflowNeutralHadrons (Tower objects)
     - OutputArray: eflow (ParticleFlowCandidate)
 
-    Note: The output ParticleFlowCandidate objects contain ALL input objects unchanged.
-    When saved to ROOT, Track-specific fields are zero-padded for Tower objects and vice versa.
+    The EFlowMerger class applies necessary transformations:
+    - Tracks: Eta field set to EtaOuter (position eta) for ParticleFlow consistency
+    - Photons: PID=22, X/Y/Z=0, Eem=E, Ehad=0
+    - Neutral Hadrons: PID=0, X/Y/Z=0, Eem=0, Ehad=E
 
     Args:
         hcal_eflow_tracks: List of Track tensors from HCal (one per event)
@@ -559,8 +561,8 @@ def process_eflow_merger_pipeline(
         List of merged ParticleFlowCandidate tensors (one per event)
     """
 
-    # Initialize Merger module
-    eflow_merger = Merger().to(DEVICE)
+    # Initialize EFlowMerger module
+    eflow_merger = EFlowMerger().to(DEVICE)
 
     eflow_tensors = []
 
@@ -571,8 +573,7 @@ def process_eflow_merger_pipeline(
         zip(hcal_eflow_tracks, eflow_photons, eflow_neutral_hadrons),
         total=len(hcal_eflow_tracks)
     ):
-        # Merge all three input arrays
-        # The Merger simply concatenates all inputs (see Merger.cc line 139)
+        # Merge all three input arrays with proper transformations
         merged = eflow_merger([tracks, photons, neutrals])
         eflow_tensors.append(merged)
 

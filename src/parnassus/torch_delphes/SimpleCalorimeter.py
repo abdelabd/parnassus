@@ -9,6 +9,15 @@ This module:
 2. Accumulates energy per tower with PDG-dependent fractions
 3. Applies log-normal energy resolution smearing
 4. Computes energy flow by comparing calorimeter and track energies
+
+TODO: Add Eem/Ehad fields to tower tensor representation
+Currently, Eem (electromagnetic energy) and Ehad (hadronic energy) are computed
+during ROOT file writing based on PID. A cleaner approach would be to:
+- Add dedicated columns for Eem/Ehad in the tensor
+- Set Eem=E, Ehad=0 for ECal towers (IsEcal=true)
+- Set Eem=0, Ehad=E for HCal towers (IsEcal=false)
+This would match C++ SimpleCalorimeter.cc:462-463 behavior more directly.
+See EFlowMerger.md for details.
 """
 
 import torch

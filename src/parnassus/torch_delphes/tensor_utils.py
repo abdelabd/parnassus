@@ -273,18 +273,30 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
 
             if is_eflow:
                 # ParticleFlowCandidate-specific computations
-                # Handles both Track and Tower objects merged together
+                # Note: EFlowMerger has already applied transformations:
+                # - Track Eta → EtaOuter (position eta)
+                # - Tower PID set correctly (22 for photons, 0 for neutral hadrons)
+                # - Tower X/Y/Z set to zero
                 if attr == 'P':
                     # Compute P = sqrt(Px^2 + Py^2 + Pz^2)
                     px = event_np[:, PX]
                     py = event_np[:, PY]
                     pz = event_np[:, PZ]
                     values = np.sqrt(px**2 + py**2 + pz**2)
-                elif attr == 'Eem' or attr == 'Ehad':
-                    # Tower-specific fields: set to zero for all objects
-                    # In reality, Track objects have zero, Tower objects would have non-zero
-                    # but our tensor representation doesn't include these fields
-                    values = np.zeros(event_np.shape[0])
+                elif attr == 'Eta':
+                    # EFlowMerger already set Eta to position eta for both tracks and towers
+                    # Just use ETA column directly
+                    values = event_np[:, ETA]
+                elif attr == 'Eem':
+                    # Electromagnetic energy: E for photons (PID=22), 0 otherwise
+                    pid_vals = event_np[:, PID]
+                    e_vals = event_np[:, E]
+                    values = np.where(pid_vals == 22, e_vals, 0.0)
+                elif attr == 'Ehad':
+                    # Hadronic energy: E for neutral hadrons (PID=0), 0 otherwise
+                    pid_vals = event_np[:, PID]
+                    e_vals = event_np[:, E]
+                    values = np.where(pid_vals == 0, e_vals, 0.0)
                 elif attr == "T":
                     values = event_np[:, T]*1e-3 / 299792458.0  # Convert mm/c to microseconds
                 elif attr == 'PID':
