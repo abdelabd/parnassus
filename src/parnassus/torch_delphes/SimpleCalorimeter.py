@@ -269,15 +269,10 @@ class SimpleCalorimeter(nn.Module):
             tower_phi_lo[mask] = phi_bins_eb[pb - 1]
             tower_phi_hi[mask] = phi_bins_eb[pb]
         
-        # Compute tower eta and phi (either center or smeared uniformly within bin)
-        if self.smear_tower_center:
-            # C++: eta = gRandom->Uniform(fTowerEdges[0], fTowerEdges[1])
-            #      phi = gRandom->Uniform(fTowerEdges[2], fTowerEdges[3])
-            tower_eta = tower_eta_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_eta_hi - tower_eta_lo)
-            tower_phi = tower_phi_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_phi_hi - tower_phi_lo)
-        else:
-            tower_eta = 0.5 * (tower_eta_lo + tower_eta_hi)
-            tower_phi = 0.5 * (tower_phi_lo + tower_phi_hi)
+        # Compute bin centers for resolution calculation
+        # C++ uses bin centers (fTowerEta, fTowerPhi) for resolution, NOT smeared positions
+        tower_eta_center = 0.5 * (tower_eta_lo + tower_eta_hi)
+        tower_phi_center = 0.5 * (tower_phi_lo + tower_phi_hi)
 
 
         ######## 6. Apply Resolution Smearing ########
@@ -286,15 +281,17 @@ class SimpleCalorimeter(nn.Module):
         #   energy = LogNormal(fTowerEnergy, sigma);
         #   sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, energy);  // recompute with smeared
         #   if(energy < fEnergyMin || energy < fEnergySignificanceMin * sigma) energy = 0.0;
+        #
+        # IMPORTANT: C++ uses bin CENTER (fTowerEta) for resolution, then smears position AFTER
         
-        # Compute sigma before smearing
-        sigma_before = self.resolution_func(tower_eta, tower_energy)
+        # Compute sigma before smearing - using bin CENTER
+        sigma_before = self.resolution_func(tower_eta_center, tower_energy)
         
         # Apply LogNormal smearing
         tower_energy_smeared = self._log_normal_smear(tower_energy, sigma_before)
         
-        # Recompute sigma with smeared energy
-        sigma_after = self.resolution_func(tower_eta, tower_energy_smeared)
+        # Recompute sigma with smeared energy - still using bin CENTER
+        sigma_after = self.resolution_func(tower_eta_center, tower_energy_smeared)
         
         # Apply energy thresholds
         # Tower energy is zeroed if below minimum or below significance threshold
@@ -303,6 +300,22 @@ class SimpleCalorimeter(nn.Module):
         tower_energy_final = torch.where(below_min | below_sig, 
                                          torch.zeros_like(tower_energy_smeared),
                                          tower_energy_smeared)
+
+
+        ######## 6b. Smear Tower Position (AFTER resolution smearing) ########
+        # C++: Position smearing happens AFTER energy smearing/thresholds
+        #   if(fSmearTowerCenter) {
+        #       eta = gRandom->Uniform(fTowerEdges[0], fTowerEdges[1]);
+        #       phi = gRandom->Uniform(fTowerEdges[2], fTowerEdges[3]);
+        #   } else {
+        #       eta = fTowerEta;  phi = fTowerPhi;
+        #   }
+        if self.smear_tower_center:
+            tower_eta = tower_eta_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_eta_hi - tower_eta_lo)
+            tower_phi = tower_phi_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_phi_hi - tower_phi_lo)
+        else:
+            tower_eta = tower_eta_center
+            tower_phi = tower_phi_center
 
 
         ######## 7. Compute track sigma per Tower ########
@@ -315,14 +328,16 @@ class SimpleCalorimeter(nn.Module):
         #   fTrackSigma += (track->TrackResolution * energyGuess) * (track->TrackResolution * energyGuess);
         #   ...
         #   fTrackSigma = TMath::Sqrt(fTrackSigma);  // in FinalizeTower
+        #
+        # NOTE: C++ uses fTowerEta (bin center) for resolution, not smeared position
         
         # Get track resolution from MomentumSmearing (stored in TRACK_RESOLUTION column)
         track_momentum_resolution = tracks[:, CMAP["TRACK_RESOLUTION"]]
         n_tracks = tracks.shape[0]
         
-        # For valid tracks, get the tower eta using the track's tower assignment
+        # For valid tracks, get the tower eta CENTER using the track's tower assignment
         # Only tracks with fraction > 1e-9 contribute to fTrackSigma
-        track_tower_eta = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
+        track_tower_eta_center = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
         track_calo_sigma = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
         track_energy_guess = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
         track_sigma_sq = torch.zeros(n_tracks, dtype=torch.float64, device=tracks.device)
@@ -330,16 +345,17 @@ class SimpleCalorimeter(nn.Module):
         # Mask for tracks that contribute to track sigma (valid AND has fraction)
         track_sigma_valid = track_valid & track_has_fraction
         
-        # Get tower eta for each valid track from the tower mapping
+        # Get tower eta CENTER for each valid track from the tower mapping
+        # Use bin center (tower_eta_center) for resolution, not smeared position
         for i in range(n_towers):
             tower_mask = (track_compact_idx == i)
             if tower_mask.any():
-                track_tower_eta[tower_mask] = tower_eta[i]
+                track_tower_eta_center[tower_mask] = tower_eta_center[i]
         
-        # Compute calorimeter sigma at tower eta using track energy
+        # Compute calorimeter sigma at tower eta CENTER using track energy
         # C++: sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, momentum.E())
         track_calo_sigma[track_sigma_valid] = self.resolution_func(
-            track_tower_eta[track_sigma_valid],
+            track_tower_eta_center[track_sigma_valid],
             track_energy[track_sigma_valid]
         )
         
