@@ -112,8 +112,9 @@ class SimpleCalorimeter(nn.Module):
         ######## 2. Bin particles into Towers ########
         # C++: if(fraction < 1.0E-9) continue;  // particles with zero fraction are skipped
         # Get particle positions (eta, phi from Position, not Momentum)
-        particle_eta = particles[:, CMAP["ETA_OUTER"]]  # Position-based eta
-        particle_phi = particles[:, CMAP["PHI_OUTER"]]  # Position-based phi
+        # Use .contiguous() to avoid performance warning from searchsorted
+        particle_eta = particles[:, CMAP["ETA_OUTER"]].contiguous()  # Position-based eta
+        particle_phi = particles[:, CMAP["PHI_OUTER"]].contiguous()  # Position-based phi
         
         # Find eta bin for each particle
         particle_eta_bin = torch.searchsorted(self.eta_bins, particle_eta)
@@ -129,8 +130,9 @@ class SimpleCalorimeter(nn.Module):
         # C++: tracks are NOT filtered by fraction before binning
         # Get track positions (eta and phi from outer position, set by ParticlePropagator)
         # C++ uses track->Position.Eta() and track->Position.Phi()
-        track_eta = tracks[:, CMAP["ETA_OUTER"]]  # Position-based eta
-        track_phi = tracks[:, CMAP["PHI_OUTER"]]  # Position-based phi
+        # Use .contiguous() to avoid performance warning from searchsorted
+        track_eta = tracks[:, CMAP["ETA_OUTER"]].contiguous()  # Position-based eta
+        track_phi = tracks[:, CMAP["PHI_OUTER"]].contiguous()  # Position-based phi
         
         # Find eta bin for each track
         track_eta_bin = torch.searchsorted(self.eta_bins, track_eta)
@@ -679,7 +681,8 @@ class SimpleCalorimeter(nn.Module):
             phi_bins_eb = self.phi_bins_per_eta[eb].to(phi.device)
             
             # Compute phi bin (equivalent to lower_bound + distance)
-            phi_vals = phi[mask]
+            # Use .contiguous() to avoid performance warning from searchsorted
+            phi_vals = phi[mask].contiguous()
             pb = torch.searchsorted(phi_bins_eb, phi_vals)
             
             # Valid phi bin range: [1, len(phi_bins_eb) - 1]
