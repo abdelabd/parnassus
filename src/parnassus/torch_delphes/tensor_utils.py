@@ -3,7 +3,7 @@ Utility functions for converting between ROOT files and PyTorch tensors.
 
 This module provides:
 - Column index constants for the tensor representation
-- ROOT → Tensor conversion (per particle type)
+- HepMC → Tensor conversion (per particle type)
 - Tensor → ROOT conversion (for writing output files)
 """
 import torch
@@ -16,9 +16,6 @@ from tqdm import tqdm
 
 
 # ==================== TENSOR COLUMN INDICES ====================
-# Track objects from ParticlePropagator have 11 attributes.
-# We expand this to 15 columns for compatibility with physics calculations.
-#
 # Columns 0-14 (15 total):
 PID = 0        # Particle ID (PDG code)
 STATUS = 1     # Status (dummy value for Track objects, always 1)
@@ -78,8 +75,6 @@ N_FEATURES = max(COLUMN_MAP.values()) + 1
 
 
 # ==================== PDG ID CONSTANTS ====================
-# Note: ParticlePropagator separates particles by type, so we may not need
-# explicit PDG filtering. But useful for reference and future extensions.
 ELECTRON_PDG = 11
 MUON_PDG = 13
 CHARGED_PION_PDG = 211
@@ -239,11 +234,13 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
     # Concatenate all batches into a single tensor
     if len(batch_tensors) == 0 or all(b.shape[0] == 0 for b in batch_tensors):
         # No particles at all - create empty arrays for all expected events
-        all_particles = None
+        all_particles_np = None
         all_event_numbers = set()
     else:
+        # Single CPU transfer - do this once for all attributes
         all_particles = torch.cat([b for b in batch_tensors if b.shape[0] > 0], dim=0)
-        all_event_numbers = set(torch.unique(all_particles[:, EVENT_NUMBER]).cpu().numpy().tolist())
+        all_particles_np = all_particles.cpu().numpy()
+        all_event_numbers = set(np.unique(all_particles_np[:, EVENT_NUMBER]).tolist())
     
     # Determine which event numbers to iterate over
     if expected_event_numbers is not None:
@@ -251,99 +248,95 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
     else:
         event_nums_to_process = sorted(all_event_numbers)
     
-    # TODO: Fix manual computations
-    for attr in attributes:
-        # Extract values for all events
-        attr_values = []
+    # Pre-group particles by event number for efficient access
+    # This avoids repeated filtering per attribute
+    if all_particles_np is not None and len(all_particles_np) > 0:
+        event_indices = all_particles_np[:, EVENT_NUMBER]
+        sort_indices = np.argsort(event_indices)
+        sorted_particles = all_particles_np[sort_indices]
+        sorted_event_nums = event_indices[sort_indices]
         
-        for event_num in event_nums_to_process:
-            if all_particles is None or event_num not in all_event_numbers:
-                # Empty event - no particles of this type
-                attr_values.append(np.array([], dtype=np.float64))
-                continue
-            
-            event_tensor = all_particles[all_particles[:, EVENT_NUMBER] == event_num]
+        # Find boundaries where event number changes
+        event_boundaries = np.searchsorted(sorted_event_nums, event_nums_to_process)
+        event_end_boundaries = np.searchsorted(sorted_event_nums, event_nums_to_process, side='right')
         
-            if event_tensor.shape[0] == 0:
-                # Empty event
-                attr_values.append(np.array([], dtype=np.float64))
-                continue
-            
-            event_np = event_tensor.cpu().numpy()
-
-            if is_eflow:
-                # ParticleFlowCandidate-specific computations
-                # Note: EFlowMerger has already applied transformations:
-                # - Track Eta → EtaOuter (position eta)
-                # - Tower PID set correctly (22 for photons, 0 for neutral hadrons)
-                # - Tower X/Y/Z set to zero
-                if attr == 'P':
-                    # Compute P = sqrt(Px^2 + Py^2 + Pz^2)
-                    px = event_np[:, PX]
-                    py = event_np[:, PY]
-                    pz = event_np[:, PZ]
-                    values = np.sqrt(px**2 + py**2 + pz**2)
-                elif attr == 'Eta':
-                    # EFlowMerger already set Eta to position eta for both tracks and towers
-                    # Just use ETA column directly
-                    values = event_np[:, ETA]
-                elif attr == 'Eem':
-                    # Electromagnetic energy: E for photons (PID=22), 0 otherwise
-                    pid_vals = event_np[:, PID]
-                    e_vals = event_np[:, E]
-                    values = np.where(pid_vals == 22, e_vals, 0.0)
-                elif attr == 'Ehad':
-                    # Hadronic energy: E for neutral hadrons (PID=0), 0 otherwise
-                    pid_vals = event_np[:, PID]
-                    e_vals = event_np[:, E]
-                    values = np.where(pid_vals == 0, e_vals, 0.0)
-                elif attr == "T":
-                    values = event_np[:, T]*1e-3 / 299792458.0  # Convert mm/c to microseconds
-                elif attr == 'PID':
-                    # PID should be integer
-                    values = event_np[:, column_map[attr]].astype(np.int32)
-                else:
-                    # Direct extraction
-                    values = event_np[:, column_map[attr]]
-            elif is_tower:
-                # Tower-specific computations
-                if attr == 'ET':
-                    # ET = E / cosh(Eta)
-                    e = event_np[:, E]
-                    eta = event_np[:, ETA]
-                    values = e / np.cosh(eta)
-                elif attr == 'T':
-                    # Convert mm/c to seconds (same as tracks)
-                    values = event_np[:, T]*1e-3 / 299792458.0
-                elif attr in column_map and column_map[attr] is not None:
-                    values = event_np[:, column_map[attr]]
-                else:
-                    values = np.zeros(event_np.shape[0])
+        # Build a dict mapping event_num -> slice of sorted_particles
+        event_slices = {}
+        for i, event_num in enumerate(event_nums_to_process):
+            start_idx = event_boundaries[i]
+            end_idx = event_end_boundaries[i]
+            if start_idx < end_idx:
+                event_slices[event_num] = sorted_particles[start_idx:end_idx]
             else:
-                # Track-specific computations
-                if attr == 'P':
-                    # Compute P = sqrt(Px^2 + Py^2 + Pz^2)
-                    px = event_np[:, PX]
-                    py = event_np[:, PY]
-                    pz = event_np[:, PZ]
-                    values = np.sqrt(px**2 + py**2 + pz**2) 
-                elif attr == 'Eta':
-                    # Compute momentum eta from Px, Py, Pz
-                    px = event_np[:, PX]
-                    py = event_np[:, PY]
-                    pz = event_np[:, PZ]
-                    pt = np.sqrt(px**2 + py**2) 
-                    values = np.arcsinh(pz / (pt + 1e-10))
-                elif attr == "T":
-                    values = event_np[:, T]*1e-3 / 299792458.0  # Convert mm/c to microseconds
-                elif attr == 'PID':
-                    # PID should be integer
-                    values = event_np[:, column_map[attr]].astype(np.int32)
-                else:
-                    # Direct extraction
-                    values = event_np[:, column_map[attr]]
-            
-            attr_values.append(values)
+                event_slices[event_num] = None
+    else:
+        event_slices = {en: None for en in event_nums_to_process}
+    
+    # Helper function to compute attribute values for a single event
+    def compute_attr_values(event_np, attr):
+        """Compute attribute values for particles in one event."""
+        if event_np is None or len(event_np) == 0:
+            return np.array([], dtype=np.float64)
+        
+        if is_eflow:
+            # ParticleFlowCandidate-specific computations
+            if attr == 'P':
+                px = event_np[:, PX]
+                py = event_np[:, PY]
+                pz = event_np[:, PZ]
+                return np.sqrt(px**2 + py**2 + pz**2)
+            elif attr == 'Eta':
+                return event_np[:, ETA]
+            elif attr == 'Eem':
+                pid_vals = event_np[:, PID]
+                e_vals = event_np[:, E]
+                return np.where(pid_vals == 22, e_vals, 0.0)
+            elif attr == 'Ehad':
+                pid_vals = event_np[:, PID]
+                e_vals = event_np[:, E]
+                return np.where(pid_vals == 0, e_vals, 0.0)
+            elif attr == "T":
+                return event_np[:, T]*1e-3 / 299792458.0
+            elif attr == 'PID':
+                return event_np[:, column_map[attr]].astype(np.int32)
+            else:
+                return event_np[:, column_map[attr]]
+        elif is_tower:
+            # Tower-specific computations
+            if attr == 'ET':
+                e = event_np[:, E]
+                eta = event_np[:, ETA]
+                return e / np.cosh(eta)
+            elif attr == 'T':
+                return event_np[:, T]*1e-3 / 299792458.0
+            elif attr in column_map and column_map[attr] is not None:
+                return event_np[:, column_map[attr]]
+            else:
+                return np.zeros(event_np.shape[0])
+        else:
+            # Track-specific computations
+            if attr == 'P':
+                px = event_np[:, PX]
+                py = event_np[:, PY]
+                pz = event_np[:, PZ]
+                return np.sqrt(px**2 + py**2 + pz**2)
+            elif attr == 'Eta':
+                px = event_np[:, PX]
+                py = event_np[:, PY]
+                pz = event_np[:, PZ]
+                pt = np.sqrt(px**2 + py**2)
+                return np.arcsinh(pz / (pt + 1e-10))
+            elif attr == "T":
+                return event_np[:, T]*1e-3 / 299792458.0
+            elif attr == 'PID':
+                return event_np[:, column_map[attr]].astype(np.int32)
+            else:
+                return event_np[:, column_map[attr]]
+    
+    # Process all attributes using pre-grouped events
+    for attr in attributes:
+        attr_values = [compute_attr_values(event_slices[event_num], attr) 
+                       for event_num in event_nums_to_process]
         
         # Convert to awkward array
         ak_array = ak.Array(attr_values)
@@ -434,8 +427,8 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
             phi = np.arctan2(py, px)
             
             # Vectorized charge and mass lookup
-            charges = get_charges_vectorized(pids)
-            masses = get_masses_vectorized(pids)
+            charges = get_charge_from_pdg_id(pids)
+            masses = get_mass_from_pdg_id(pids)
             
             # ===== BUILD TENSOR IN ONE SHOT =====
             particles = np.zeros((n_particles, N_FEATURES), dtype=np.float64)
@@ -464,7 +457,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
 
 # ==================== PDG ID UTILITIES (VECTORIZED) ====================
 
-def get_charges_vectorized(pids: np.ndarray) -> np.ndarray:
+def get_charge_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     """
     Get electric charges for an array of PDG IDs (vectorized).
     
@@ -527,8 +520,7 @@ def get_charges_vectorized(pids: np.ndarray) -> np.ndarray:
     
     return charges
 
-
-def get_masses_vectorized(pids: np.ndarray) -> np.ndarray:
+def get_mass_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     """
     Get particle masses for an array of PDG IDs (vectorized).
     
@@ -593,120 +585,3 @@ def get_masses_vectorized(pids: np.ndarray) -> np.ndarray:
     
     return masses
 
-def get_charge_from_pdg(pdg_id: int) -> float:
-    """
-    Get electric charge from PDG ID.
-    
-    Args:
-        pdg_id: Particle Data Group ID code
-        
-    Returns:
-        Electric charge in units of elementary charge
-    """
-    # Leptons
-    if abs(pdg_id) == 11:  # electron
-        return -1.0 if pdg_id > 0 else 1.0
-    elif abs(pdg_id) == 13:  # muon
-        return -1.0 if pdg_id > 0 else 1.0
-    elif abs(pdg_id) == 15:  # tau
-        return -1.0 if pdg_id > 0 else 1.0
-    
-    # Neutrinos (neutral)
-    elif abs(pdg_id) in [12, 14, 16]:
-        return 0.0
-    
-    # Photon
-    elif pdg_id == 22:
-        return 0.0
-    
-    # Pions
-    elif abs(pdg_id) == 211:  # charged pion
-        return 1.0 if pdg_id > 0 else -1.0
-    elif pdg_id == 111:  # neutral pion
-        return 0.0
-    
-    # Kaons
-    elif abs(pdg_id) == 321:  # charged kaon
-        return 1.0 if pdg_id > 0 else -1.0
-    elif pdg_id == 130 or pdg_id == 310 or pdg_id == 311:  # neutral kaons
-        return 0.0
-    
-    # Proton/neutron
-    elif pdg_id == 2212:  # proton
-        return 1.0
-    elif pdg_id == -2212:  # antiproton
-        return -1.0
-    elif pdg_id == 2112 or pdg_id == -2112:  # neutron/antineutron
-        return 0.0
-    
-    # Quarks (should not appear as stable particles, but just in case)
-    elif abs(pdg_id) in [1, 3, 5]:  # d, s, b quarks
-        return -1.0/3.0 if pdg_id > 0 else 1.0/3.0
-    elif abs(pdg_id) in [2, 4, 6]:  # u, c, t quarks
-        return 2.0/3.0 if pdg_id > 0 else -2.0/3.0
-    
-    # For unknown particles, try to infer from PDG numbering scheme
-    # This is a simplified approximation
-    else:
-        # Mesons (100-999): last digit gives charge
-        if 100 <= abs(pdg_id) < 1000:
-            last_digit = abs(pdg_id) % 10
-            if last_digit == 0:  # neutral
-                return 0.0
-            elif pdg_id > 0:
-                return 1.0 if last_digit in [1, 3, 5] else -1.0
-            else:
-                return -1.0 if last_digit in [1, 3, 5] else 1.0
-        
-        # Baryons (1000-9999)
-        elif 1000 <= abs(pdg_id) < 10000:
-            # Extract quark content (simplified)
-            return 1.0 if pdg_id > 0 else -1.0
-        
-        # Default to neutral for unknown particles
-        return 0.0
-
-
-def get_mass_from_pdg(pdg_id: int) -> float:
-    """
-    Get particle mass from PDG ID.
-    
-    Args:
-        pdg_id: Particle Data Group ID code
-        
-    Returns:
-        Mass in GeV
-    """
-    mass_table = {
-        # Leptons
-        11: ELECTRON_MASS,
-        13: MUON_MASS,
-        15: 1.77686,  # tau
-        12: 0.0,  # electron neutrino
-        14: 0.0,  # muon neutrino
-        16: 0.0,  # tau neutrino
-        
-        # Photon
-        22: 0.0,
-        
-        # Pions
-        111: 0.13498,  # pi0
-        211: PION_MASS,  # pi+/-
-        
-        # Kaons
-        130: 0.49761,  # KL
-        310: 0.49761,  # KS
-        311: 0.49761,  # K0
-        321: KAON_MASS,  # K+/-
-        
-        # Proton/neutron
-        2212: PROTON_MASS,
-        2112: 0.93957,  # neutron
-    }
-    
-    abs_pdg = abs(pdg_id)
-    if abs_pdg in mass_table:
-        return mass_table[abs_pdg]
-    
-    # Default mass for unknown particles (use pion mass as reasonable default)
-    return PION_MASS
