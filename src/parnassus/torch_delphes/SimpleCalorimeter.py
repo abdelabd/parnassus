@@ -653,14 +653,17 @@ class SimpleCalorimeter(nn.Module):
             towers[:, CMAP["PHI"]] = valid_tower_phi
             
             # Compute PX, PY, PZ from PT, ETA, PHI (massless)
-            towers[:, CMAP["PX"]] = valid_tower_pt * torch.cos(valid_tower_phi)
-            towers[:, CMAP["PY"]] = valid_tower_pt * torch.sin(valid_tower_phi)
-            towers[:, CMAP["PZ"]] = valid_tower_pt * torch.sinh(valid_tower_eta)
+            cos_valid_tower_phi = torch.cos(valid_tower_phi)
+            sin_valid_tower_phi = torch.sin(valid_tower_phi)
+            sinh_valid_tower_eta = torch.sinh(valid_tower_eta)
+            towers[:, CMAP["PX"]] = valid_tower_pt * cos_valid_tower_phi
+            towers[:, CMAP["PY"]] = valid_tower_pt * sin_valid_tower_phi
+            towers[:, CMAP["PZ"]] = valid_tower_pt * sinh_valid_tower_eta
             
             # Position (approximate at calorimeter surface)
-            towers[:, CMAP["X"]] = r_calo * torch.cos(valid_tower_phi) * 1000  # mm
-            towers[:, CMAP["Y"]] = r_calo * torch.sin(valid_tower_phi) * 1000  # mm
-            towers[:, CMAP["Z"]] = r_calo * torch.sinh(valid_tower_eta) * 1000  # mm
+            towers[:, CMAP["X"]] = r_calo * cos_valid_tower_phi * 1000  # mm
+            towers[:, CMAP["Y"]] = r_calo * sin_valid_tower_phi * 1000  # mm
+            towers[:, CMAP["Z"]] = r_calo * sinh_valid_tower_eta * 1000  # mm
             towers[:, CMAP["T"]] = tower_time[tower_has_energy]  # Time-weighted average
             towers[:, CMAP["MASS"]] = 0.0
             
@@ -693,14 +696,17 @@ class SimpleCalorimeter(nn.Module):
             eflow_excess_neutrals[:, CMAP["PHI"]] = eflow_tower_phi
             
             # Compute PX, PY, PZ from PT, ETA, PHI (massless)
-            eflow_excess_neutrals[:, CMAP["PX"]] = eflow_tower_pt * torch.cos(eflow_tower_phi)
-            eflow_excess_neutrals[:, CMAP["PY"]] = eflow_tower_pt * torch.sin(eflow_tower_phi)
-            eflow_excess_neutrals[:, CMAP["PZ"]] = eflow_tower_pt * torch.sinh(eflow_tower_eta)
+            cos_eflow_tower_phi = torch.cos(eflow_tower_phi)
+            sin_eflow_tower_phi = torch.sin(eflow_tower_phi)
+            sinh_eflow_tower_eta = torch.sinh(eflow_tower_eta)
+            eflow_excess_neutrals[:, CMAP["PX"]] = eflow_tower_pt * cos_eflow_tower_phi
+            eflow_excess_neutrals[:, CMAP["PY"]] = eflow_tower_pt * sin_eflow_tower_phi
+            eflow_excess_neutrals[:, CMAP["PZ"]] = eflow_tower_pt * sinh_eflow_tower_eta
             
             # Position (approximate at calorimeter surface)
-            eflow_excess_neutrals[:, CMAP["X"]] = r_calo * torch.cos(eflow_tower_phi) * 1000  # mm
-            eflow_excess_neutrals[:, CMAP["Y"]] = r_calo * torch.sin(eflow_tower_phi) * 1000  # mm
-            eflow_excess_neutrals[:, CMAP["Z"]] = r_calo * torch.sinh(eflow_tower_eta) * 1000  # mm
+            eflow_excess_neutrals[:, CMAP["X"]] = r_calo * cos_eflow_tower_phi * 1000  # mm
+            eflow_excess_neutrals[:, CMAP["Y"]] = r_calo * sin_eflow_tower_phi * 1000  # mm
+            eflow_excess_neutrals[:, CMAP["Z"]] = r_calo * sinh_eflow_tower_eta * 1000  # mm
             eflow_excess_neutrals[:, CMAP["T"]] = eflow_tower_time  # Time-weighted average
             eflow_excess_neutrals[:, CMAP["MASS"]] = 0.0
             
