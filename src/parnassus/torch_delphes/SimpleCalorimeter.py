@@ -388,10 +388,9 @@ class SimpleCalorimeter(nn.Module):
         
         # Get tower eta CENTER for each valid track from the tower mapping
         # Use bin center (tower_eta_center) for resolution, not smeared position
-        for i in range(n_towers):
-            tower_mask = (track_compact_idx == i)
-            if tower_mask.any():
-                track_tower_eta_center[tower_mask] = tower_eta_center[i]
+        # For tracks with valid tower assignment, directly index into tower_eta_center
+        valid_tower_mask = track_compact_idx >= 0
+        track_tower_eta_center[valid_tower_mask] = tower_eta_center[track_compact_idx[valid_tower_mask]]
         
         # Compute calorimeter sigma at tower eta CENTER using track energy
         # C++: sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, momentum.E())
@@ -530,15 +529,28 @@ class SimpleCalorimeter(nn.Module):
         track_in_rescale_tower = torch.zeros(n_tracks, dtype=torch.bool, device=tracks.device)
         track_rescale_factor = torch.ones(n_tracks, dtype=torch.float64, device=tracks.device)
         
-        # Map tower properties to tracks
-        for i in range(n_towers):
-            tower_mask = (track_compact_idx == i) & track_sigma_valid
-            if tower_mask.any():
-                if significant_neutral[i]:
-                    track_in_significant_tower[tower_mask] = True
-                elif rescale_tracks[i]:
-                    track_in_rescale_tower[tower_mask] = True
-                    track_rescale_factor[tower_mask] = rescale_factor[i]
+        # For tracks with valid tower assignment, directly gather tower properties
+        valid_sigma_tower_mask = (track_compact_idx >= 0) & track_sigma_valid
+        valid_tower_indices = track_compact_idx[valid_sigma_tower_mask]
+        
+        # Gather tower properties for valid tracks
+        tower_is_significant = significant_neutral[valid_tower_indices]
+        tower_is_rescale = rescale_tracks[valid_tower_indices]
+        tower_rescale_values = rescale_factor[valid_tower_indices]
+        
+        # Assign to track arrays
+        # Track is in significant tower if its tower has significant neutral excess
+        track_in_significant_tower[valid_sigma_tower_mask] = tower_is_significant
+        
+        # Track is in rescale tower if its tower needs rescaling AND is not significant
+        track_in_rescale_tower[valid_sigma_tower_mask] = tower_is_rescale & ~tower_is_significant
+        
+        # Assign rescale factors (only matters for tracks in rescale towers)
+        track_rescale_factor[valid_sigma_tower_mask] = torch.where(
+            tower_is_rescale & ~tower_is_significant,
+            tower_rescale_values,
+            torch.ones_like(tower_rescale_values)
+        )
         
         # Tracks that become EFlowTracks: either in significant tower OR in rescale tower
         track_is_eflow = track_in_significant_tower | track_in_rescale_tower
