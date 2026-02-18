@@ -143,6 +143,7 @@ class EFlowMerger(nn.Module):
         photons[:, X] = 0.0
         photons[:, Y] = 0.0
         photons[:, Z] = 0.0
+        photons[:, T] = 0.0
 
         # Note: Eem and Ehad are not stored in the tensor, they will be computed
         # during ROOT writing based on E and PID
@@ -174,6 +175,8 @@ class EFlowMerger(nn.Module):
         neutral_hadrons[:, X] = 0.0
         neutral_hadrons[:, Y] = 0.0
         neutral_hadrons[:, Z] = 0.0
+        neutral_hadrons[:, T] = 0.0
+
 
         # Note: Eem and Ehad are not stored in the tensor, they will be computed
         # during ROOT writing based on E and PID
