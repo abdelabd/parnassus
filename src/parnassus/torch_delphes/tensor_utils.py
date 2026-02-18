@@ -312,6 +312,9 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
                     e = event_np[:, E]
                     eta = event_np[:, ETA]
                     values = e / np.cosh(eta)
+                elif attr == 'T':
+                    # Convert mm/c to seconds (same as tracks)
+                    values = event_np[:, T]*1e-3 / 299792458.0
                 elif attr in column_map and column_map[attr] is not None:
                     values = event_np[:, column_map[attr]]
                 else:
