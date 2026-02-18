@@ -81,9 +81,6 @@ def process_particle_propagator(
         bz=3.8,             # Magnetic field in Tesla
     ).to(DEVICE)
     
-    print(f"\nParticlePropagator (batch_size={batch_size})...")
-    print(f"genevent_tensors.shape: {genevent_tensors.shape}")
-
     genevent_tensors_propagated = torch.zeros(genevent_tensors.shape, dtype=genevent_tensors.dtype).to(DEVICE)
     # Collect particle_after_prop, charged_hadron, electron, muon tensors after propagation (for intermediate testing and validation)
     
@@ -755,12 +752,9 @@ def validate_against_benchmark(
                 # Debug: print histogram statistics
                 if debug and var != 'PID':
                     print(f"\n{branch_name}.{var} bins:")
-                    print(f"  Bin edges: {bin_edges}, len(bin_edges)={len(bin_edges)}")
+                    print(f"  Bin edges: {bin_edges}")
                     print(f"  C++ counts: {benchmark_counts}")
                     print(f"  TorchDelphes counts: {torch_counts}")
-                    print(f"  Total C++ counts: {np.sum(benchmark_counts):.0f}")
-                    print(f"  Total TorchDelphes counts: {np.sum(torch_counts):.0f}")
-                    print(f"  Ratio (Torch/C++): {np.sum(torch_counts) / np.sum(benchmark_counts):.4f}")
                     
                     # Compute and print ratio statistics
                     valid_ratio = ratio[benchmark_counts > 0]
@@ -1605,8 +1599,7 @@ def main(
         'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
     })
 
-    print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events")
-    print(f"  Total ParticleAfterProp: {sum(t.shape[0] for t in pap_tensors)}")
+    print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events, {sum(t.shape[0] for t in pap_tensors)} particles")
 
     # ========================================================================
     # STEP 3: Apply (Tracking)Efficiency
