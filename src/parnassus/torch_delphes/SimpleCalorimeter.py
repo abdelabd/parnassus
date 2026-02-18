@@ -523,11 +523,11 @@ class SimpleCalorimeter(nn.Module):
         tower_pt = tower_energy_final / torch.cosh(tower_eta)
         
         # Build tower output (towers with energy > 0)
-        n_valid_towers = tower_has_energy.sum().item()
+        n_valid_towers = tower_has_energy.sum()
         
         # ===== Create EFlowTower output (neutral excess) =====
         # Only for towers with significant neutral excess
-        n_eflow_towers = significant_neutral.sum().item()
+        n_eflow_towers = significant_neutral.sum()
         
         eflow_tower_energy = neutral_energy[significant_neutral]
         eflow_tower_eta = tower_eta[significant_neutral]
