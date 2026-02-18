@@ -378,7 +378,6 @@ def write_root_file(output_file: str, branches_dict: Dict[str, Dict[str, ak.Arra
 
 
 def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tensor]:
-
     """
     Convert HepMC file to list of PyTorch tensors (one per event).
     
@@ -389,7 +388,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
         max_events: Maximum number of events to process
         
     Returns:
-        List of tensors, one per event, each of shape (n_particles, 15)
+        Batched tensor of shape (n_events, max_particles, N_FEATURES)
     """
     
     event_tensors = []
@@ -408,65 +407,191 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tenso
                 event_tensors.append(torch.zeros((0, N_FEATURES), dtype=torch.float64))
                 continue
             
-            # Create tensor for this event
-            particles = np.zeros((n_particles, N_FEATURES)).astype(np.float64)
+            # ===== VECTORIZED EXTRACTION =====
+            # Extract all PIDs at once
+            pids = np.array([p.pid for p in stable_particles], dtype=np.int64)
             
-            for i, p in enumerate(stable_particles):
-                # Extract raw particle properties - NO COMPUTATIONS
-                # Let modules compute PT, Eta, Phi as needed
-                pid = p.pid
-                status = p.status
-                momentum = p.momentum
-                
-                # Lookup charge and mass from PDG ID
-                charge = get_charge_from_pdg(pid)
-                mass = get_mass_from_pdg(pid)
-                
-                # Extract raw momentum components
-                e = torch.tensor(momentum.e).to(torch.float64)
-                px = torch.tensor(momentum.px).to(torch.float64)
-                py = torch.tensor(momentum.py).to(torch.float64)
-                pz = torch.tensor(momentum.pz).to(torch.float64)
-                pt = torch.sqrt(px**2 + py**2)
-                eta = torch.asinh(pz / (pt + 1e-10))
-                phi = torch.atan2(py, px)
-                
-                # Extract production vertex
-                if p.production_vertex:
-                    vertex = p.production_vertex.position
-                    x = torch.tensor(vertex.x).to(torch.float64)  # mm in HepMC
-                    y = torch.tensor(vertex.y).to(torch.float64)
-                    z = torch.tensor(vertex.z).to(torch.float64)
-                    t = torch.tensor(vertex.t).to(torch.float64)
-                else:
-                    x = y = z = t = torch.tensor(0.0).to(torch.float64)
-
-                # Fill tensor row with RAW data only
-                particles[i, PID] = pid
-                particles[i, STATUS] = status
-                particles[i, CHARGE] = charge
-                particles[i, E] = e
-                particles[i, PX] = px
-                particles[i, PY] = py
-                particles[i, PZ] = pz
-                particles[i, PT] = pt
-                particles[i, ETA] = eta
-                particles[i, PHI] = phi
-                particles[i, T] = t
-                particles[i, X] = x
-                particles[i, Y] = y
-                particles[i, Z] = z
-                particles[i, MASS] = mass
-                # ETA_OUTER - will be computed by ParticlePropagator  
-                # PHI_outer - will be computed by ParticlePropagator
-                particles[i, EVENT_NUMBER] = event_number
+            # Extract all momenta at once: (n_particles, 4) for [e, px, py, pz]
+            momenta = np.array([[p.momentum.e, p.momentum.px, p.momentum.py, p.momentum.pz] 
+                               for p in stable_particles], dtype=np.float64)
             
-            # Convert to torch tensor
-            event_tensors.append(torch.from_numpy(particles).to(torch.float64))
+            # Extract all vertices at once: (n_particles, 4) for [x, y, z, t]
+            vertices = np.array([
+                [p.production_vertex.position.x, p.production_vertex.position.y,
+                 p.production_vertex.position.z, p.production_vertex.position.t]
+                if p.production_vertex else [0.0, 0.0, 0.0, 0.0]
+                for p in stable_particles
+            ], dtype=np.float64)
+            
+            # ===== VECTORIZED COMPUTATIONS =====
+            e = momenta[:, 0]
+            px = momenta[:, 1]
+            py = momenta[:, 2]
+            pz = momenta[:, 3]
+            
+            pt = np.sqrt(px**2 + py**2)
+            eta = np.arcsinh(pz / (pt + 1e-10))
+            phi = np.arctan2(py, px)
+            
+            # Vectorized charge and mass lookup
+            charges = get_charges_vectorized(pids)
+            masses = get_masses_vectorized(pids)
+            
+            # ===== BUILD TENSOR IN ONE SHOT =====
+            particles = np.zeros((n_particles, N_FEATURES), dtype=np.float64)
+            particles[:, PID] = pids
+            particles[:, STATUS] = 1  # All stable particles have status 1
+            particles[:, CHARGE] = charges
+            particles[:, E] = e
+            particles[:, PX] = px
+            particles[:, PY] = py
+            particles[:, PZ] = pz
+            particles[:, PT] = pt
+            particles[:, ETA] = eta
+            particles[:, PHI] = phi
+            particles[:, T] = vertices[:, 3]
+            particles[:, X] = vertices[:, 0]
+            particles[:, Y] = vertices[:, 1]
+            particles[:, Z] = vertices[:, 2]
+            particles[:, MASS] = masses
+            particles[:, EVENT_NUMBER] = event_number
+            # ETA_OUTER, PHI_OUTER will be computed by ParticlePropagator
+            
+            event_tensors.append(torch.from_numpy(particles))
     
     return zero_pad_to_max_particles(event_tensors)
 
-# ==================== PDG ID UTILITIES ====================
+
+# ==================== PDG ID UTILITIES (VECTORIZED) ====================
+
+def get_charges_vectorized(pids: np.ndarray) -> np.ndarray:
+    """
+    Get electric charges for an array of PDG IDs (vectorized).
+    
+    Args:
+        pids: NumPy array of PDG IDs
+        
+    Returns:
+        NumPy array of electric charges
+    """
+    abs_pids = np.abs(pids)
+    signs = np.sign(pids)
+    charges = np.zeros_like(pids, dtype=np.float64)
+    
+    # Leptons (electron, muon, tau): charge = -sign(pid)
+    lepton_mask = (abs_pids == 11) | (abs_pids == 13) | (abs_pids == 15)
+    charges[lepton_mask] = -signs[lepton_mask]
+    
+    # Neutrinos: charge = 0 (already initialized)
+    
+    # Photon: charge = 0 (already initialized)
+    
+    # Charged pions: charge = sign(pid)
+    charges[abs_pids == 211] = signs[abs_pids == 211]
+    
+    # Neutral pion: charge = 0 (already initialized)
+    
+    # Charged kaons: charge = sign(pid)
+    charges[abs_pids == 321] = signs[abs_pids == 321]
+    
+    # Neutral kaons: charge = 0 (already initialized)
+    
+    # Proton: charge = sign(pid)
+    charges[abs_pids == 2212] = signs[abs_pids == 2212]
+    
+    # Neutron: charge = 0 (already initialized)
+    
+    # Lambda baryon (3122): charge = 0 (already initialized)
+    
+    # Sigma baryons
+    charges[abs_pids == 3222] = signs[abs_pids == 3222]   # Sigma+
+    charges[abs_pids == 3112] = -signs[abs_pids == 3112]  # Sigma-
+    # Sigma0 (3212): charge = 0 (already initialized)
+    
+    # Xi baryons
+    charges[abs_pids == 3312] = -signs[abs_pids == 3312]  # Xi-
+    # Xi0 (3322): charge = 0 (already initialized)
+    
+    # Omega baryon
+    charges[abs_pids == 3334] = -signs[abs_pids == 3334]  # Omega-
+    
+    # D mesons
+    charges[abs_pids == 411] = signs[abs_pids == 411]   # D+
+    charges[abs_pids == 421] = 0  # D0
+    charges[abs_pids == 431] = signs[abs_pids == 431]   # Ds+
+    
+    # B mesons
+    charges[abs_pids == 521] = signs[abs_pids == 521]   # B+
+    charges[abs_pids == 511] = 0  # B0
+    charges[abs_pids == 531] = 0  # Bs0
+    
+    return charges
+
+
+def get_masses_vectorized(pids: np.ndarray) -> np.ndarray:
+    """
+    Get particle masses for an array of PDG IDs (vectorized).
+    
+    Args:
+        pids: NumPy array of PDG IDs
+        
+    Returns:
+        NumPy array of masses in GeV
+    """
+    abs_pids = np.abs(pids)
+    
+    # Default to pion mass for unknown particles
+    masses = np.full_like(pids, PION_MASS, dtype=np.float64)
+    
+    # Leptons
+    masses[abs_pids == 11] = ELECTRON_MASS
+    masses[abs_pids == 13] = MUON_MASS
+    masses[abs_pids == 15] = 1.77686  # tau
+    
+    # Neutrinos
+    masses[(abs_pids == 12) | (abs_pids == 14) | (abs_pids == 16)] = 0.0
+    
+    # Photon
+    masses[abs_pids == 22] = 0.0
+    
+    # Pions
+    masses[abs_pids == 111] = 0.13498  # pi0
+    masses[abs_pids == 211] = PION_MASS  # pi+/-
+    
+    # Kaons
+    masses[(abs_pids == 130) | (abs_pids == 310) | (abs_pids == 311)] = 0.49761  # neutral kaons
+    masses[abs_pids == 321] = KAON_MASS  # K+/-
+    
+    # Nucleons
+    masses[abs_pids == 2212] = PROTON_MASS
+    masses[abs_pids == 2112] = 0.93957  # neutron
+    
+    # Lambda
+    masses[abs_pids == 3122] = 1.11568
+    
+    # Sigma baryons
+    masses[abs_pids == 3222] = 1.18937  # Sigma+
+    masses[abs_pids == 3212] = 1.19264  # Sigma0
+    masses[abs_pids == 3112] = 1.19745  # Sigma-
+    
+    # Xi baryons
+    masses[abs_pids == 3322] = 1.31486  # Xi0
+    masses[abs_pids == 3312] = 1.32171  # Xi-
+    
+    # Omega
+    masses[abs_pids == 3334] = 1.67245
+    
+    # D mesons
+    masses[abs_pids == 411] = 1.86966  # D+
+    masses[abs_pids == 421] = 1.86484  # D0
+    masses[abs_pids == 431] = 1.96835  # Ds+
+    
+    # B mesons
+    masses[abs_pids == 521] = 5.27934  # B+
+    masses[abs_pids == 511] = 5.27965  # B0
+    masses[abs_pids == 531] = 5.36688  # Bs0
+    
+    return masses
 
 def get_charge_from_pdg(pdg_id: int) -> float:
     """
