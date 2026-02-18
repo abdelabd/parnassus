@@ -750,46 +750,35 @@ class SimpleCalorimeter(nn.Module):
         
     def _setup_fraction_lookup(self) -> None:
         """
-        Setup efficient PDG → energy fraction lookup using a dense LUT.
+        Setup efficient PDG → energy fraction lookup using a fully dense LUT.
         
-        - For common PDG IDs (|pid| <= MAX_COMMON_PDG), use dense tensor indexing
-        - For rare large PDG IDs (neutralinos, K0short, Lambda), store separately
+        Creates a single dense tensor that covers all PDG IDs up to the maximum
+        configured PDG ID (e.g., 1000045 for neutralinos). This enables:
+        - Pure tensor operations with no conditional branches
+        - Full compatibility with batched processing
+        - Clean gradient flow for differentiability
+        
+        Memory usage is ~8MB for max PDG ID of 1000045, which is negligible.
         """
-        MAX_COMMON_PDG = 500  # Covers electrons (11), muons (13), photons (22), pions (111, 211), etc.
+        # Find the maximum PDG ID we need to handle
+        max_pdg_id = max(abs(pid) for pid in self.energy_fractions.keys())
         
-        # Build dense LUT for common PDG IDs
-        # lut[abs_pid] = fraction for abs_pid in [0, MAX_COMMON_PDG]
-        lut = torch.full((MAX_COMMON_PDG + 1,), self.default_fraction, dtype=torch.float64)
-        
-        # Separate storage for large/rare PDG IDs
-        large_pdg_ids = []
-        large_pdg_fractions = []
+        # Build fully dense LUT: lut[abs_pid] = fraction
+        # All unspecified PDG IDs get the default fraction
+        lut = torch.full((max_pdg_id + 1,), self.default_fraction, dtype=torch.float64)
         
         for pid, frac in self.energy_fractions.items():
-            abs_pid = abs(pid)
-            if abs_pid <= MAX_COMMON_PDG:
-                lut[abs_pid] = frac
-            else:
-                # Store large PDG IDs separately (neutralinos, K0short, Lambda, etc.)
-                large_pdg_ids.append(abs_pid)
-                large_pdg_fractions.append(frac)
+            lut[abs(pid)] = frac
         
         self.register_buffer('_fraction_lut', lut)
-        self._max_common_pdg = MAX_COMMON_PDG
-        
-        # Register large PDG IDs and their fractions
-        if large_pdg_ids:
-            self.register_buffer('_large_pdg_ids', torch.tensor(large_pdg_ids, dtype=torch.int64))
-            self.register_buffer('_large_pdg_fractions', torch.tensor(large_pdg_fractions, dtype=torch.float64))
-        else:
-            self._large_pdg_ids = None
-            self._large_pdg_fractions = None
+        self._max_pdg_id = max_pdg_id
     
     def _compute_energy_fractions(self, pids: torch.Tensor) -> torch.Tensor:
         """
         Compute energy fractions for particles based on their PDG IDs.
         
-        Uses LUT-based lookup for O(1) complexity instead of O(K) loop.
+        Uses fully dense LUT lookup - pure tensor operation with no branches.
+        Fully compatible with batching and differentiable.
         
         This matches the C++ Delphes behavior:
         1. Look up |PDG ID| in the fraction map
@@ -803,23 +792,11 @@ class SimpleCalorimeter(nn.Module):
         """
         abs_pids = torch.abs(pids).to(torch.int64)
         
-        # Clamp to LUT range for safe indexing (values outside range will be handled separately)
-        clamped_pids = abs_pids.clamp(max=self._max_common_pdg)
+        # Clamp to LUT range - any PDG ID beyond max gets default fraction
+        clamped_pids = abs_pids.clamp(max=self._max_pdg_id)
         
-        # LUT lookup - O(1) for common PDG IDs
+        # Pure tensor lookup - no branches, fully differentiable
         fractions = self._fraction_lut[clamped_pids]
-        
-        # Handle large PDG IDs that were clamped (they got default fraction from LUT)
-        # Only process if there are large PDG IDs configured
-        if self._large_pdg_ids is not None:
-            # Mask for particles with PDG ID > MAX_COMMON_PDG
-            large_pid_mask = abs_pids > self._max_common_pdg
-            
-            if large_pid_mask.any():
-                # For each large PDG ID, apply its fraction using torch.where
-                for large_pid, large_frac in zip(self._large_pdg_ids, self._large_pdg_fractions):
-                    match_mask = abs_pids == large_pid
-                    fractions = torch.where(match_mask, large_frac, fractions)
         
         return fractions
     
