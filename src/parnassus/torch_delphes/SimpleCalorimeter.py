@@ -51,7 +51,8 @@ class SimpleCalorimeter(nn.Module):
         energy_min: float = 0.5,
         energy_sig_min: float = 2.0,
         is_ecal: bool = True,
-        smear_tower_center: bool = True  # If True, smear eta/phi uniformly within bin
+        smear_tower_center: bool = True,  # If True, smear eta/phi uniformly within bin
+        compute_phi_bins_fn: Optional[Callable] = None  # Custom phi bin computation function
     ) -> None:
         super().__init__()
         
@@ -64,13 +65,10 @@ class SimpleCalorimeter(nn.Module):
         # Store eta bins as tensor
         self.register_buffer('eta_bins', torch.tensor(eta_bins, dtype=torch.float64))
         
-        # TODO: Use constant phi bins in future after debugging
-            # This is much slower for not much benefit, but matches Delphes behavior
-        # Store phi bins per eta as list of tensors
-        # phi_bins[i] gives the phi bin edges for eta bin i
-        self.phi_bins_per_eta = [torch.tensor(pb, dtype=torch.float64) for pb in phi_bins]
-        # Register a dummy buffer for device tracking
-        self.register_buffer('_device_tracker', torch.tensor([0.0], dtype=torch.float64))
+        # Store phi bins as padded 2D tensor for vectorized operations
+        # phi_bins_2d[eta_bin_idx, :] gives phi bin edges for that eta bin
+        # Padded with +inf so searchsorted returns max index for out-of-range values
+        self._setup_phi_bins_2d(phi_bins)
         
         # Store energy fractions as lookup table
         self.energy_fractions = energy_fractions
@@ -86,6 +84,36 @@ class SimpleCalorimeter(nn.Module):
             self.resolution_func = resolution_formula
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
+        
+        # Optional custom phi bin computation function
+        self._custom_compute_phi_bins_fn = compute_phi_bins_fn
+    
+    def _setup_phi_bins_2d(self, phi_bins: List[List[float]]) -> None:
+        """
+        Setup phi bins as a padded 2D tensor for vectorized lookups.
+        
+        Creates:
+        - _phi_bins_2d: (n_eta_bins, max_n_phi_bins) tensor, padded with +inf
+        - _n_phi_bins_per_eta: (n_eta_bins,) tensor with count of valid phi bins per eta
+        
+        The +inf padding ensures searchsorted returns the last valid index for 
+        any phi value when that eta bin has fewer phi bins than the maximum.
+        """
+        n_eta_bins = len(phi_bins)
+        max_n_phi_bins = max(len(pb) for pb in phi_bins)
+        
+        # Initialize with +inf (ensures searchsorted returns max index for padded region)
+        phi_bins_2d = torch.full((n_eta_bins, max_n_phi_bins), float('inf'), dtype=torch.float64)
+        n_phi_bins_per_eta = torch.zeros(n_eta_bins, dtype=torch.long)
+        
+        for i, pb in enumerate(phi_bins):
+            n_bins = len(pb)
+            phi_bins_2d[i, :n_bins] = torch.tensor(pb, dtype=torch.float64)
+            n_phi_bins_per_eta[i] = n_bins
+        
+        self.register_buffer('_phi_bins_2d', phi_bins_2d)
+        self.register_buffer('_n_phi_bins_per_eta', n_phi_bins_per_eta)
+        self._max_n_phi_bins = max_n_phi_bins
 
     def forward(self, 
         particles: torch.Tensor,  # (N_particles, N_FEATURES)
@@ -160,7 +188,7 @@ class SimpleCalorimeter(nn.Module):
         
         # Create unique tower index from (eta_bin, phi_bin)
         # Using max_phi_bins to create unique indices
-        max_phi_bins = max(len(pb) for pb in self.phi_bins_per_eta)
+        max_phi_bins = self._max_n_phi_bins
         n_eta_bins = len(self.eta_bins)
         
         # Tower index = eta_bin * max_phi_bins + phi_bin
@@ -293,22 +321,14 @@ class SimpleCalorimeter(nn.Module):
         tower_eta_lo = self.eta_bins[tower_eta_bin - 1]
         tower_eta_hi = self.eta_bins[tower_eta_bin]
         
-        # Compute tower phi centers and edges (variable per eta bin)
-        # Need to loop over eta bins since phi bins differ
-        tower_phi_lo = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
-        tower_phi_hi = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        # Compute tower phi centers and edges using vectorized 2D gather
+        # Gather the phi bins row for each tower's eta bin: (n_towers, max_n_phi_bins)
+        tower_phi_bins = self._phi_bins_2d[tower_eta_bin]  # (n_towers, max_n_phi_bins)
         
-        for eb in range(1, len(self.eta_bins)):
-            mask = (tower_eta_bin == eb)
-            if not mask.any():
-                continue
-            
-            phi_bins_eb = self.phi_bins_per_eta[eb].to(particles.device)
-            pb = tower_phi_bin[mask]
-            
-            # phi_lo = phi_bins[phiBin - 1], phi_hi = phi_bins[phiBin]
-            tower_phi_lo[mask] = phi_bins_eb[pb - 1]
-            tower_phi_hi[mask] = phi_bins_eb[pb]
+        # Gather phi_lo = phi_bins[phi_bin - 1], phi_hi = phi_bins[phi_bin]
+        # Use gather to select the specific phi bin edges for each tower
+        tower_phi_lo = tower_phi_bins.gather(1, (tower_phi_bin - 1).unsqueeze(1)).squeeze(1)
+        tower_phi_hi = tower_phi_bins.gather(1, tower_phi_bin.unsqueeze(1)).squeeze(1)
         
         # Compute bin centers for resolution calculation
         # C++ uses bin centers (fTowerEta, fTowerPhi) for resolution, NOT smeared positions
@@ -706,6 +726,9 @@ class SimpleCalorimeter(nn.Module):
         """
         Compute phi bin for each particle/track using variable phi binning per eta.
         
+        Uses vectorized operations with padded 2D phi bin tensor.
+        Supports custom override via compute_phi_bins_fn in __init__.
+        
         In C++ Delphes:
             phiBins = fPhiBins[etaBin];
             itPhiBin = lower_bound(phiBins->begin(), phiBins->end(), position.Phi());
@@ -716,34 +739,42 @@ class SimpleCalorimeter(nn.Module):
             phi_bin: (N,) phi bin indices
             valid: (N,) boolean mask for valid bins (eta and phi both in range)
         """
+        # Allow custom override
+        if self._custom_compute_phi_bins_fn is not None:
+            return self._custom_compute_phi_bins_fn(phi, eta_bin, self)
+        
         n = len(phi)
-        phi_bin = torch.zeros(n, dtype=torch.long, device=phi.device)
-        valid = torch.zeros(n, dtype=torch.bool, device=phi.device)
+        device = phi.device
         
         # Filter by valid eta bin first: [1, len(eta_bins) - 1]
-        valid_eta = (eta_bin > 0) & (eta_bin < len(self.eta_bins))
+        n_eta_bins = len(self.eta_bins)
+        valid_eta = (eta_bin > 0) & (eta_bin < n_eta_bins)
         
-        # For each eta bin, compute phi bins for all particles/tracks in that eta bin
-        for eb in range(1, len(self.eta_bins)):
-            mask = (eta_bin == eb) & valid_eta
-            if not mask.any():
-                continue
-            
-            # Get phi bins for this eta bin
-            phi_bins_eb = self.phi_bins_per_eta[eb].to(phi.device)
-            
-            # Compute phi bin (equivalent to lower_bound + distance)
-            # Use .contiguous() to avoid performance warning from searchsorted
-            phi_vals = phi[mask].contiguous()
-            pb = torch.searchsorted(phi_bins_eb, phi_vals)
-            
-            # Valid phi bin range: [1, len(phi_bins_eb) - 1]
-            # (not at begin or end, matching C++ continue conditions)
-            valid_phi = (pb > 0) & (pb < len(phi_bins_eb))
-            
-            # Store results
-            phi_bin[mask] = pb
-            valid[mask] = valid_phi
+        # Clamp eta_bin to valid range for safe indexing (invalid will be filtered by valid_eta)
+        eta_bin_clamped = eta_bin.clamp(0, n_eta_bins - 1)
+        
+        # Gather phi bins for each particle's eta bin: (N, max_n_phi_bins)
+        # This is the key vectorization - we get all phi bins for all particles at once
+        phi_bins_per_particle = self._phi_bins_2d[eta_bin_clamped]  # (N, max_n_phi_bins)
+        
+        # Vectorized searchsorted along the last dimension
+        # For each particle, find which phi bin its phi value falls into
+        phi_expanded = phi.unsqueeze(1)  # (N, 1)
+        
+        # Compare phi against all bin edges: phi_bins_per_particle is (N, max_n_phi_bins)
+        # We want: for each particle i, find smallest j such that phi_bins[i,j] > phi[i]
+        # This is equivalent to searchsorted behavior
+        phi_bin = torch.searchsorted(phi_bins_per_particle.contiguous(), phi_expanded.contiguous()).squeeze(1)  # (N,)
+        
+        # Get the number of valid phi bins for each particle's eta bin
+        n_phi_bins = self._n_phi_bins_per_eta[eta_bin_clamped]  # (N,)
+        
+        # Valid phi bin range: [1, n_phi_bins - 1]
+        # (not at begin or end, matching C++ continue conditions)
+        valid_phi = (phi_bin > 0) & (phi_bin < n_phi_bins)
+        
+        # Combine eta and phi validity
+        valid = valid_eta & valid_phi
         
         return phi_bin, valid
 
