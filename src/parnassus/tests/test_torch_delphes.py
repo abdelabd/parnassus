@@ -346,33 +346,17 @@ def process_ecal_pipeline(
         smear_tower_center=True  # Match C++ Delphes: SmearTowerCenter true
     ).to(DEVICE)
     
-    # Process in batches
+    # Process in batches - now supports multi-event batched processing
     eflow_tracks = []
     towers = []
     eflow_photons = []
-    for batch_particles, batch_tracks in zip(pap_tensors, merged_tracks):
-        event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]])
-        eflow_tracks_batch = []
-        towers_batch = []
-        eflow_photons_batch = []
+    for batch_particles, batch_tracks in tqdm(zip(pap_tensors, merged_tracks)):
+        # Run forward pass on entire batch (handles multiple events via EVENT_NUMBER column)
+        eflow_tracks_batch, towers_batch, eflow_photons_batch = ecal(batch_particles, batch_tracks)
 
-        # forward method takes a single event, for now
-        for event_num in tqdm(event_numbers):
-            event_mask_particles = (batch_particles[:, CMAP["EVENT_NUMBER"]] == event_num)
-            event_mask_tracks = (batch_tracks[:, CMAP["EVENT_NUMBER"]] == event_num)
-            particles = batch_particles[event_mask_particles]
-            tracks = batch_tracks[event_mask_tracks]
-            
-            # Run forward pass
-            eflow_tracks_event, towers_event, eflow_photons_event = ecal(particles, tracks)
-
-            eflow_tracks_batch.append(eflow_tracks_event)
-            towers_batch.append(towers_event)
-            eflow_photons_batch.append(eflow_photons_event)
-        
-        eflow_tracks.append(torch.cat(eflow_tracks_batch, dim=0))
-        towers.append(torch.cat(towers_batch, dim=0))
-        eflow_photons.append(torch.cat(eflow_photons_batch, dim=0))
+        eflow_tracks.append(eflow_tracks_batch)
+        towers.append(towers_batch)
+        eflow_photons.append(eflow_photons_batch)
 
     return eflow_tracks, towers, eflow_photons
 
@@ -462,34 +446,17 @@ def process_hcal_pipeline(
         smear_tower_center=True
     ).to(DEVICE)
     
-    # Process in batches
+    # Process in batches - now supports multi-event batched processing
     eflow_tracks = []
     towers = []
     eflow_neutral_hadrons = []
-    for batch_particles, batch_tracks in zip(pap_tensors, ecal_eflow_tracks):
-        event_numbers = torch.unique(batch_particles[:, CMAP["EVENT_NUMBER"]])
-        eflow_tracks_batch = []
-        towers_batch = []
-        eflow_neutral_hadrons_batch = []
+    for batch_particles, batch_tracks in tqdm(zip(pap_tensors, ecal_eflow_tracks)):
+        # Run forward pass on entire batch (handles multiple events via EVENT_NUMBER column)
+        eflow_tracks_batch, towers_batch, eflow_neutral_hadrons_batch = hcal(batch_particles, batch_tracks)
 
-        # forward method takes a single event, for now
-        for event_num in tqdm(event_numbers):
-            event_mask_particles = (batch_particles[:, CMAP["EVENT_NUMBER"]] == event_num)
-            event_mask_tracks = (batch_tracks[:, CMAP["EVENT_NUMBER"]] == event_num)
-            
-            particles = batch_particles[event_mask_particles]
-            tracks = batch_tracks[event_mask_tracks]
-            
-            # Run forward pass
-            eflow_tracks_event, towers_event, eflow_neutral_hadrons_event = hcal(particles, tracks)
-
-            eflow_tracks_batch.append(eflow_tracks_event)
-            towers_batch.append(towers_event)
-            eflow_neutral_hadrons_batch.append(eflow_neutral_hadrons_event)
-
-        eflow_tracks.append(torch.cat(eflow_tracks_batch, dim=0))
-        towers.append(torch.cat(towers_batch, dim=0))
-        eflow_neutral_hadrons.append(torch.cat(eflow_neutral_hadrons_batch, dim=0))
+        eflow_tracks.append(eflow_tracks_batch)
+        towers.append(towers_batch)
+        eflow_neutral_hadrons.append(eflow_neutral_hadrons_batch)
 
     return eflow_tracks, towers, eflow_neutral_hadrons
 
@@ -1557,9 +1524,6 @@ def main(
     print(f"\nInput:  {input_file}")
     print(f"Batch size: {batch_size}")
     print(f"Device: {DEVICE}")
-
-    # Set up dict for ROOT branches
-    branches_torch_root = {}
     
     # ========================================================================
     # STEP 1: Load HepMC and convert to tensors
@@ -1572,7 +1536,6 @@ def main(
     n_events = len(genevent_tensors)
     print(f"Loaded {n_events} events from HepMC")
     print(f"  Total stable particles: {sum(t.shape[0] for t in genevent_tensors)}")
-
 
     # ========================================================================
     # STEP 2: Apply ParticlePropagator
@@ -1590,14 +1553,6 @@ def main(
     # This ensures all branches have the same number of events
     all_pap = torch.cat([t for t in pap_tensors if t.shape[0] > 0], dim=0)
     expected_event_nums = sorted(set(all_pap[:, CMAP["EVENT_NUMBER"]].cpu().numpy().tolist()))
-    
-    branches_torch_root.update({
-        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
-        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
-        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
-        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
-        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
-    })
 
     print(f"\nAfter ParticlePropagator: {len(genevent_tensors)} events, {sum(t.shape[0] for t in pap_tensors)} particles")
 
@@ -1612,11 +1567,6 @@ def main(
     ch_filtered, el_filtered, mu_filtered = process_efficiency_pipeline(
         ch_tensors, el_tensors, mu_tensors
     )
-    branches_torch_root.update({
-        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
-        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
-        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
-    })
 
     print("\n✓ Efficiency applied")
 
@@ -1631,11 +1581,6 @@ def main(
     ch_smeared, el_smeared, mu_smeared = process_smearing_pipeline(
         ch_filtered, el_filtered, mu_filtered
     )
-    branches_torch_root.update({
-        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
-        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
-        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
-    })
     
     print("\n✓ MomentumSmearing applied")
 
@@ -1650,9 +1595,6 @@ def main(
     merged_tracks = process_merger_pipeline(
         ch_smeared, el_smeared, mu_smeared
     )
-    branches_torch_root.update({
-        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
-    })
     
     print("\n✓ TrackMerger applied")
     
@@ -1668,13 +1610,6 @@ def main(
         pap_tensors, merged_tracks
     )
     
-    # Add Tower, EFlowPhoton, and EFlowTrack branches to ROOT output
-    branches_torch_root.update({
-        'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in ecal_eflow_tracks], 'ECal_EFlowTrack', expected_event_nums),
-        'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower', expected_event_nums),
-        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton', expected_event_nums),
-    })
-    
     print("\n✓ ECal applied")
 
     # ========================================================================
@@ -1688,13 +1623,6 @@ def main(
     hcal_eflow_tracks, hcal_towers, eflow_neutral_hadrons = process_hcal_pipeline(
         pap_tensors, ecal_eflow_tracks
     )
-    
-    # Add Tower, EFlowPhoton, and EFlowTrack branches to ROOT output
-    branches_torch_root.update({
-        'HCal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in hcal_eflow_tracks], 'HCal_EFlowTrack', expected_event_nums),
-        'HCalTower': tensor_to_root_dict([i.cpu() for i in hcal_towers], 'HCalTower', expected_event_nums),
-        'EFlowNeutralHadron': tensor_to_root_dict([i.cpu() for i in eflow_neutral_hadrons], 'EFlowNeutralHadron', expected_event_nums),
-    })
 
     print("\n✓ HCal applied")
 
@@ -1710,11 +1638,6 @@ def main(
         ecal_towers, hcal_towers
     )
 
-    # Add CalorimeterTower branch to ROOT output
-    branches_torch_root.update({
-        'CalorimeterTower': tensor_to_root_dict(merged_towers, 'CalorimeterTower', expected_event_nums),
-    })
-
     print("\n✓ Calorimeter (Merger) applied")
 
     # ========================================================================
@@ -1729,18 +1652,39 @@ def main(
         hcal_eflow_tracks, eflow_photons, eflow_neutral_hadrons
     )
 
-    # Add EFlowObject branch to ROOT output
-    branches_torch_root.update({
-        'EFlowObject': tensor_to_root_dict(eflow_objects, 'EFlowObject', expected_event_nums),
-    })
-
     print("\n✓ EFlowMerger applied")
+
+    toc_torch = time.time()
+    dur_torch = toc_torch - tic_torch
+    print(f"\nTorch processing time: {dur_torch//60} minutes, {dur_torch%60} seconds")
 
     # ========================================================================
     # STEP 10: Write final output
     # ========================================================================
 
     print(f"Writing {output_file}...")
+    branches_torch_root = {
+        'ParticleBeforeProp': tensor_to_root_dict([i.cpu() for i in pbp_tensors], 'ParticleBeforeProp', expected_event_nums),
+        'ParticleAfterProp': tensor_to_root_dict([i.cpu() for i in pap_tensors], 'ParticleAfterProp', expected_event_nums),
+        'ChargedHadron': tensor_to_root_dict([i.cpu() for i in ch_tensors], 'ChargedHadron', expected_event_nums),
+        'Electron': tensor_to_root_dict([i.cpu() for i in el_tensors], 'Electron', expected_event_nums),
+        'Muon': tensor_to_root_dict([i.cpu() for i in mu_tensors], 'Muon', expected_event_nums),
+        'ChargedHadronEfficiency': tensor_to_root_dict([i.cpu() for i in ch_filtered], 'ChargedHadronEfficiency', expected_event_nums),
+        'ElectronEfficiency': tensor_to_root_dict([i.cpu() for i in el_filtered], 'ElectronEfficiency', expected_event_nums),
+        'MuonEfficiency': tensor_to_root_dict([i.cpu() for i in mu_filtered], 'MuonEfficiency', expected_event_nums),
+        'ChargedHadronSmeared': tensor_to_root_dict([i.cpu() for i in ch_smeared], 'ChargedHadronSmeared', expected_event_nums),
+        'ElectronSmeared': tensor_to_root_dict([i.cpu() for i in el_smeared], 'ElectronSmeared', expected_event_nums),
+        'MuonSmeared': tensor_to_root_dict([i.cpu() for i in mu_smeared], 'MuonSmeared', expected_event_nums),
+        'MergedTracks': tensor_to_root_dict([i.cpu() for i in merged_tracks], 'MergedTracks', expected_event_nums),
+        'ECal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in ecal_eflow_tracks], 'ECal_EFlowTrack', expected_event_nums),
+        'ECalTower': tensor_to_root_dict([i.cpu() for i in ecal_towers], 'ECalTower', expected_event_nums),
+        'EFlowPhoton': tensor_to_root_dict([i.cpu() for i in eflow_photons], 'EFlowPhoton', expected_event_nums),
+        'HCal_EFlowTrack': tensor_to_root_dict([i.cpu() for i in hcal_eflow_tracks], 'HCal_EFlowTrack', expected_event_nums),
+        'HCalTower': tensor_to_root_dict([i.cpu() for i in hcal_towers], 'HCalTower', expected_event_nums),
+        'EFlowNeutralHadron': tensor_to_root_dict([i.cpu() for i in eflow_neutral_hadrons], 'EFlowNeutralHadron', expected_event_nums),
+        'CalorimeterTower': tensor_to_root_dict(merged_towers, 'CalorimeterTower', expected_event_nums),
+        'EFlowObject': tensor_to_root_dict(eflow_objects, 'EFlowObject', expected_event_nums),
+    }
     write_root_file(output_file, branches_torch_root)
 
     # ========================================================================
