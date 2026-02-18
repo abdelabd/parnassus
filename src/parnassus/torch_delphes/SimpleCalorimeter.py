@@ -116,15 +116,36 @@ class SimpleCalorimeter(nn.Module):
         self._max_n_phi_bins = max_n_phi_bins
 
     def forward(self, 
-        particles: torch.Tensor,  # (N_particles, N_FEATURES)
-        tracks: torch.Tensor      # (N_tracks, N_FEATURES)
+        particles: torch.Tensor,  # (N_particles, N_FEATURES) - can span multiple events
+        tracks: torch.Tensor      # (N_tracks, N_FEATURES) - can span multiple events
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
+        Process particles and tracks from one or more events.
+        
+        Supports batched processing: particles and tracks can come from multiple events,
+        identified by their EVENT_NUMBER column. Towers are aggregated per-event using
+        event-indexed tower keys to prevent cross-event mixing.
+        
         Returns:
-            towers: (N_towers, N_FEATURES) - calorimeter towers
             eflow_tracks: (N_eflow_tracks, N_FEATURES) - tracks for particle flow
+            towers: (N_towers, N_FEATURES) - calorimeter towers
             eflow_excess_neutrals: (N_eflow_excess_neutrals, N_FEATURES) - neutral excess towers
         """
+        
+        ######## 0. Extract Event Indices ########
+        # Get event numbers and map to compact indices [0, n_events)
+        particle_event_num = particles[:, CMAP["EVENT_NUMBER"]]
+        track_event_num = tracks[:, CMAP["EVENT_NUMBER"]]
+        
+        # Find unique events across both particles and tracks
+        all_event_nums = torch.cat([particle_event_num, track_event_num])
+        unique_event_nums, inverse_indices = torch.unique(all_event_nums, return_inverse=True)
+        n_events = len(unique_event_nums)
+        
+        # Map event numbers to compact indices
+        n_particles = particles.shape[0]
+        particle_event_idx = inverse_indices[:n_particles]
+        track_event_idx = inverse_indices[n_particles:]
 
         ######## 1. Compute Energy Fractions ########
         # Get PDG IDs
@@ -186,14 +207,18 @@ class SimpleCalorimeter(nn.Module):
         particle_weighted_energy = particle_energy * particle_energy_fractions
         track_weighted_energy = track_energy * track_energy_fractions
         
-        # Create unique tower index from (eta_bin, phi_bin)
-        # Using max_phi_bins to create unique indices
+        # Create unique tower index from (event_idx, eta_bin, phi_bin)
+        # Using event-indexed keys to prevent cross-event mixing in batched processing
         max_phi_bins = self._max_n_phi_bins
         n_eta_bins = len(self.eta_bins)
+        n_towers_per_event = n_eta_bins * max_phi_bins
         
-        # Tower index = eta_bin * max_phi_bins + phi_bin
-        particle_tower_idx = particle_eta_bin * max_phi_bins + particle_phi_bin
-        track_tower_idx = track_eta_bin * max_phi_bins + track_phi_bin
+        # Global tower index = event_idx * n_towers_per_event + eta_bin * max_phi_bins + phi_bin
+        particle_local_tower_idx = particle_eta_bin * max_phi_bins + particle_phi_bin
+        track_local_tower_idx = track_eta_bin * max_phi_bins + track_phi_bin
+        
+        particle_tower_idx = particle_event_idx * n_towers_per_event + particle_local_tower_idx
+        track_tower_idx = track_event_idx * n_towers_per_event + track_local_tower_idx
         
         # For tracks, only those with fraction > 1e-9 contribute to fTrackEnergy
         # C++: if(fTrackFractions[number] > 1.0E-9) { fTrackEnergy += energy; ... }
@@ -224,13 +249,15 @@ class SimpleCalorimeter(nn.Module):
         n_towers = len(unique_tower_idx)
         
         # Create mapping from global tower index to compact tower index [0, n_towers)
-        tower_idx_map = torch.full((n_eta_bins * max_phi_bins,), -1, 
+        # Size must accommodate all events: n_events * n_towers_per_event
+        max_global_tower_idx = n_events * n_towers_per_event
+        tower_idx_map = torch.full((max_global_tower_idx,), -1, 
                                     dtype=torch.long, device=particles.device)
         tower_idx_map[unique_tower_idx] = torch.arange(n_towers, device=particles.device)
         
         # Map particles and tracks to compact tower indices
         # Clamp tower indices to valid range before lookup (invalid particles have valid=False anyway)
-        max_idx = n_eta_bins * max_phi_bins - 1
+        max_idx = max_global_tower_idx - 1
         particle_tower_idx_clamped = particle_tower_idx.clamp(0, max_idx)
         track_tower_idx_clamped = track_tower_idx.clamp(0, max_idx)
         
@@ -302,9 +329,15 @@ class SimpleCalorimeter(nn.Module):
             torch.zeros_like(tower_time_weighted)
         )
         
-        # Extract eta_bin and phi_bin for each unique tower
-        tower_eta_bin = unique_tower_idx // max_phi_bins
-        tower_phi_bin = unique_tower_idx % max_phi_bins
+        # Extract event_idx, eta_bin, and phi_bin from global tower index
+        # Global tower index = event_idx * n_towers_per_event + eta_bin * max_phi_bins + phi_bin
+        tower_event_idx = unique_tower_idx // n_towers_per_event
+        tower_local_idx = unique_tower_idx % n_towers_per_event
+        tower_eta_bin = tower_local_idx // max_phi_bins
+        tower_phi_bin = tower_local_idx % max_phi_bins
+        
+        # Map tower event indices back to original event numbers for output
+        tower_event_num = unique_event_nums[tower_event_idx]
 
 
         ######## 5. Compute Tower Centers ########
@@ -642,6 +675,7 @@ class SimpleCalorimeter(nn.Module):
             valid_tower_eta = tower_eta[tower_has_energy]
             valid_tower_phi = tower_phi[tower_has_energy]
             valid_tower_pt = tower_pt[tower_has_energy]
+            valid_tower_event_num = tower_event_num[tower_has_energy]
             
             # Set tower properties
             towers[:, CMAP["PID"]] = 22.0  # Photon for ECAL towers
@@ -675,10 +709,8 @@ class SimpleCalorimeter(nn.Module):
             towers[:, CMAP["IS_NOT_PAD"]] = 1.0
             towers[:, CMAP["PASS_ECAL_TOWER"]] = 1.0
 
-            # Preserve EVENT_NUMBER from input particles
-            # All particles in this forward() call have the same event number
-            event_number = particles[0, CMAP["EVENT_NUMBER"]]
-            towers[:, CMAP["EVENT_NUMBER"]] = event_number
+            # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
+            towers[:, CMAP["EVENT_NUMBER"]] = valid_tower_event_num
 
         # ===== Create EFlowPhoton Tensor with COLUMN_MAP format =====
         # EFlowPhoton tensor: (n_eflow_towers, N_FEATURES) 
@@ -686,6 +718,9 @@ class SimpleCalorimeter(nn.Module):
         eflow_excess_neutrals = torch.zeros(n_eflow_towers, N_FEATURES, dtype=torch.float64, device=particles.device)
         
         if n_eflow_towers > 0:
+            # Get event numbers for eflow towers
+            eflow_tower_event_num = tower_event_num[significant_neutral]
+            
             # Set eflow photon properties
             eflow_excess_neutrals[:, CMAP["PID"]] = 22.0  # Photon
             eflow_excess_neutrals[:, CMAP["STATUS"]] = 1.0
@@ -718,9 +753,8 @@ class SimpleCalorimeter(nn.Module):
             eflow_excess_neutrals[:, CMAP["IS_NOT_PAD"]] = 1.0
             eflow_excess_neutrals[:, CMAP["PASS_EFLOW_PHOTON"]] = 1.0
 
-            # Preserve EVENT_NUMBER from input particles
-            event_number = particles[0, CMAP["EVENT_NUMBER"]]
-            eflow_excess_neutrals[:, CMAP["EVENT_NUMBER"]] = event_number
+            # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
+            eflow_excess_neutrals[:, CMAP["EVENT_NUMBER"]] = eflow_tower_event_num
 
         # Return results
         return eflow_tracks, towers, eflow_excess_neutrals
