@@ -104,6 +104,7 @@ class MomentumSmearing(nn.Module):
         phi = particles[:, CMAP["PHI"]]
 
         # Compute resolution for each particle using eta_outer
+        # Resolution is relative (dimensionless, like 0.06 = 6%)
         resolution = self.resolution_func(pt, eta_outer)
         resolution = torch.clamp(resolution, max=1.0)
         
@@ -111,7 +112,9 @@ class MomentumSmearing(nn.Module):
         particles[:, CMAP["TRACK_RESOLUTION"]] = resolution
         
         # Apply smearing using log-normal distribution
-        smeared_pt = log_normal_sample(pt, resolution)
+        # C++ does: LogNormal(pt, res * pt) where res is relative resolution
+        # So sigma = resolution * pt (absolute resolution in GeV)
+        smeared_pt = log_normal_sample(pt, resolution * pt)
         
         # Update PT, PX, PY, PZ, E
         particles[:, CMAP["PT"]] = smeared_pt
@@ -135,7 +138,8 @@ class MomentumSmearing(nn.Module):
             eta_outer: pseudorapidity
             
         Returns:
-            resolution: absolute momentum resolution (GeV)
+            resolution: relative momentum resolution (dimensionless, e.g., 0.06 = 6%)
+                        To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
         
@@ -173,7 +177,8 @@ class MomentumSmearing(nn.Module):
             eta_outer: pseudorapidity
             
         Returns:
-            resolution: absolute momentum resolution (GeV)
+            resolution: relative momentum resolution (dimensionless, e.g., 0.03 = 3%)
+                        To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)
@@ -206,7 +211,8 @@ class MomentumSmearing(nn.Module):
             eta_outer: pseudorapidity
             
         Returns:
-            resolution: absolute momentum resolution (GeV)
+            resolution: relative momentum resolution (dimensionless, e.g., 0.01 = 1%)
+                        To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)
