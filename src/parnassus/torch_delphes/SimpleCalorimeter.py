@@ -235,6 +235,45 @@ class SimpleCalorimeter(nn.Module):
             track_weighted_energy[valid_track_mask]
         )
         
+        ######## 4b. Compute Time-Weighted Average per Tower ########
+        # C++: fTowerTime += energy * energy * position.T();  // sigma_t ~ 1/E
+        #      fTowerTimeWeight += energy * energy;
+        #      time = (fTowerTimeWeight < 1.0E-09) ? 0.0 : fTowerTime / fTowerTimeWeight;
+        # Note: The "energy" here is the weighted energy (E * fraction)
+        
+        # Get particle times
+        particle_time = particles[:, CMAP["T"]]
+        
+        # Compute E^2 weights for particles (weighted_energy^2)
+        particle_time_weight = particle_weighted_energy ** 2
+        
+        # Compute E^2 * T for particles
+        particle_time_weighted = particle_time_weight * particle_time
+        
+        # Aggregate time-weighted sum per tower
+        tower_time_weighted = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_time_weighted.scatter_add_(
+            0,
+            particle_compact_idx[valid_particle_mask],
+            particle_time_weighted[valid_particle_mask]
+        )
+        
+        # Aggregate time weights per tower
+        tower_time_weight = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+        tower_time_weight.scatter_add_(
+            0,
+            particle_compact_idx[valid_particle_mask],
+            particle_time_weight[valid_particle_mask]
+        )
+        
+        # Compute final tower time: time = time_weighted_sum / weight_sum
+        # Set to 0 if weight is too small (matching C++ check: fTowerTimeWeight < 1.0E-09)
+        tower_time = torch.where(
+            tower_time_weight > 1e-9,
+            tower_time_weighted / tower_time_weight,
+            torch.zeros_like(tower_time_weighted)
+        )
+        
         # Extract eta_bin and phi_bin for each unique tower
         tower_eta_bin = unique_tower_idx // max_phi_bins
         tower_phi_bin = unique_tower_idx % max_phi_bins
@@ -475,6 +514,7 @@ class SimpleCalorimeter(nn.Module):
         eflow_tower_eta = tower_eta[significant_neutral]
         eflow_tower_phi = tower_phi[significant_neutral]
         eflow_tower_pt = eflow_tower_energy / torch.cosh(eflow_tower_eta)
+        eflow_tower_time = tower_time[significant_neutral]
         
         # ===== Create EFlowTrack output =====
         # Tracks are output in two cases:
@@ -589,7 +629,7 @@ class SimpleCalorimeter(nn.Module):
             towers[:, CMAP["X"]] = r_calo * torch.cos(valid_tower_phi) * 1000  # mm
             towers[:, CMAP["Y"]] = r_calo * torch.sin(valid_tower_phi) * 1000  # mm
             towers[:, CMAP["Z"]] = r_calo * torch.sinh(valid_tower_eta) * 1000  # mm
-            towers[:, CMAP["T"]] = 0.0  # TODO: Time weighted average
+            towers[:, CMAP["T"]] = tower_time[tower_has_energy]  # Time-weighted average
             towers[:, CMAP["MASS"]] = 0.0
             
             # Outer position same as momentum direction
@@ -629,7 +669,7 @@ class SimpleCalorimeter(nn.Module):
             eflow_excess_neutrals[:, CMAP["X"]] = r_calo * torch.cos(eflow_tower_phi) * 1000  # mm
             eflow_excess_neutrals[:, CMAP["Y"]] = r_calo * torch.sin(eflow_tower_phi) * 1000  # mm
             eflow_excess_neutrals[:, CMAP["Z"]] = r_calo * torch.sinh(eflow_tower_eta) * 1000  # mm
-            eflow_excess_neutrals[:, CMAP["T"]] = 0.0
+            eflow_excess_neutrals[:, CMAP["T"]] = eflow_tower_time  # Time-weighted average
             eflow_excess_neutrals[:, CMAP["MASS"]] = 0.0
             
             # Outer position same as momentum direction
