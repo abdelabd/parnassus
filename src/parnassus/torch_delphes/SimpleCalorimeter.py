@@ -749,17 +749,47 @@ class SimpleCalorimeter(nn.Module):
 
         
     def _setup_fraction_lookup(self) -> None:
-        """Setup efficient PDG → energy fraction lookup."""
-        # Store known PDG IDs and their fractions as tensors for vectorized lookup
-        pdg_ids = list(self.energy_fractions.keys())
-        fractions = [self.energy_fractions[pid] for pid in pdg_ids]
+        """
+        Setup efficient PDG → energy fraction lookup using a dense LUT.
         
-        self.register_buffer('known_pdg_ids', torch.tensor(pdg_ids, dtype=torch.int64))
-        self.register_buffer('known_fractions', torch.tensor(fractions, dtype=torch.float64))
+        - For common PDG IDs (|pid| <= MAX_COMMON_PDG), use dense tensor indexing
+        - For rare large PDG IDs (neutralinos, K0short, Lambda), store separately
+        """
+        MAX_COMMON_PDG = 500  # Covers electrons (11), muons (13), photons (22), pions (111, 211), etc.
+        
+        # Build dense LUT for common PDG IDs
+        # lut[abs_pid] = fraction for abs_pid in [0, MAX_COMMON_PDG]
+        lut = torch.full((MAX_COMMON_PDG + 1,), self.default_fraction, dtype=torch.float64)
+        
+        # Separate storage for large/rare PDG IDs
+        large_pdg_ids = []
+        large_pdg_fractions = []
+        
+        for pid, frac in self.energy_fractions.items():
+            abs_pid = abs(pid)
+            if abs_pid <= MAX_COMMON_PDG:
+                lut[abs_pid] = frac
+            else:
+                # Store large PDG IDs separately (neutralinos, K0short, Lambda, etc.)
+                large_pdg_ids.append(abs_pid)
+                large_pdg_fractions.append(frac)
+        
+        self.register_buffer('_fraction_lut', lut)
+        self._max_common_pdg = MAX_COMMON_PDG
+        
+        # Register large PDG IDs and their fractions
+        if large_pdg_ids:
+            self.register_buffer('_large_pdg_ids', torch.tensor(large_pdg_ids, dtype=torch.int64))
+            self.register_buffer('_large_pdg_fractions', torch.tensor(large_pdg_fractions, dtype=torch.float64))
+        else:
+            self._large_pdg_ids = None
+            self._large_pdg_fractions = None
     
     def _compute_energy_fractions(self, pids: torch.Tensor) -> torch.Tensor:
         """
         Compute energy fractions for particles based on their PDG IDs.
+        
+        Uses LUT-based lookup for O(1) complexity instead of O(K) loop.
         
         This matches the C++ Delphes behavior:
         1. Look up |PDG ID| in the fraction map
@@ -773,15 +803,23 @@ class SimpleCalorimeter(nn.Module):
         """
         abs_pids = torch.abs(pids).to(torch.int64)
         
-        # Initialize with default fraction
-        fractions = torch.full_like(pids, self.default_fraction, dtype=torch.float64)
+        # Clamp to LUT range for safe indexing (values outside range will be handled separately)
+        clamped_pids = abs_pids.clamp(max=self._max_common_pdg)
         
-        # Look up each known PDG ID and set its fraction
-        for i, (known_pid, known_frac) in enumerate(zip(self.known_pdg_ids, self.known_fractions)):
-            if known_pid == 0:
-                continue  # Skip default, already set
-            mask = (abs_pids == known_pid)
-            fractions = torch.where(mask, known_frac, fractions)
+        # LUT lookup - O(1) for common PDG IDs
+        fractions = self._fraction_lut[clamped_pids]
+        
+        # Handle large PDG IDs that were clamped (they got default fraction from LUT)
+        # Only process if there are large PDG IDs configured
+        if self._large_pdg_ids is not None:
+            # Mask for particles with PDG ID > MAX_COMMON_PDG
+            large_pid_mask = abs_pids > self._max_common_pdg
+            
+            if large_pid_mask.any():
+                # For each large PDG ID, apply its fraction using torch.where
+                for large_pid, large_frac in zip(self._large_pdg_ids, self._large_pdg_fractions):
+                    match_mask = abs_pids == large_pid
+                    fractions = torch.where(match_mask, large_frac, fractions)
         
         return fractions
     
