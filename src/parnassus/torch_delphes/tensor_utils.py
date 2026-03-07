@@ -370,7 +370,7 @@ def write_root_file(output_file: str, branches_dict: Dict[str, Dict[str, ak.Arra
         f[tree_name] = combined_dict
 
 
-def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> List[torch.Tensor]:
+def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> torch.Tensor:
     """
     Convert HepMC file to list of PyTorch tensors (one per event).
     

@@ -214,6 +214,9 @@ class ParticlePropagator(nn.Module):
             muons[:, CMAP[var]] = muons_before_prop[:, CMAP[var]].clone()
             neutrals[:, CMAP[var]] = neutrals_before_prop[:, CMAP[var]].clone()
 
+        valid_particles_mask = mask & (particles[:, CMAP["IS_NOT_PAD"]] > 0.5)
+        particles = particles[valid_particles_mask].to(torch.float32).clone()
+
         return particles, neutrals, charged_hadrons, electrons, muons
     
     def _propagate_neutral(
