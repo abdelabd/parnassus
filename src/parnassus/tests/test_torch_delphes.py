@@ -40,7 +40,7 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-from parnassus.torch_delphes import Efficiency, EFlowMerger, Merger, MomentumSmearing, ParticlePropagator, SimpleCalorimeter, CMSEnergyFlowDefault
+from parnassus.torch_delphes import CMSEnergyFlowDefault, ATLASEnergyFlowDefault
 from parnassus.torch_delphes.tensor_utils import (
     hepmc_to_tensor,
     tensor_to_root_dict,
@@ -625,6 +625,7 @@ def main(
     output_file: str, 
     benchmark_file: str, 
     validation_dir: Path,
+    detector: str = "CMS",
     max_events: Optional[int] = None, 
     batch_size: int = 1_000_000, 
     debug: bool = False
@@ -672,7 +673,15 @@ def main(
     print("STEP 2: Applying CMSModule...")
     print("="*80)
 
-    cms_module = CMSEnergyFlowDefault(debug=debug).to(DEVICE)
+    if detector=="CMS":
+        print("Using module: CMSEnergyFlowDefault")
+        torch_detector = CMSEnergyFlowDefault(debug=debug).to(DEVICE)
+    elif detector=="ATLAS":
+        print("Using module: ATLASDefault")
+        torch_detector = ATLASEnergyFlowDefault(debug=debug).to(DEVICE)
+    else:  
+        raise NotImplementedError(f"Detector {detector} not implemented. Choose 'CMS' or 'ATLAS'.")
+    
     tic_torch = time.time()
     results = {}
     for batch_start in tqdm(range(0, n_part_total, batch_size)):
@@ -680,7 +689,7 @@ def main(
         batch_end = min(batch_start + batch_size, n_part_total)
         batch_particles = stable_particles[batch_start:batch_end]
 
-        batch_results = cms_module(batch_particles)
+        batch_results = torch_detector(batch_particles)
 
         for k,v in batch_results.items():
             if k not in results:

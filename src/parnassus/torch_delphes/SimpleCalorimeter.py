@@ -80,6 +80,10 @@ class SimpleCalorimeter(nn.Module):
             self.resolution_func = self._ecal_cms_resolution
         elif resolution_formula == 'hcal_cms':
             self.resolution_func = self._hcal_cms_resolution
+        elif resolution_formula == 'ecal_atlas':
+            self.resolution_func = self._ecal_atlas_resolution
+        elif resolution_formula == 'hcal_atlas':
+            self.resolution_func = self._hcal_atlas_resolution
         elif callable(resolution_formula):
             self.resolution_func = resolution_formula
         else:
@@ -891,6 +895,37 @@ class SimpleCalorimeter(nn.Module):
         # Select based on eta region
         sigma = torch.where(abs_eta <= 1.5, barrel_sigma,
                     torch.where(abs_eta <= 2.5, endcap_sigma, forward_sigma))
+        # TODO: Should it be zero if eta>5.0, i.e. the below? See delphes_cards/delphes_card_CMS_6_1.tcl, lines 267->269
+        # sigma = torch.where(abs_eta <= 1.5, barrel_sigma,
+        #             torch.where(abs_eta <= 2.5, endcap_sigma, 
+        #                     torch.where(abs_eta <= 5.0, forward_sigma, 0)))
+        
+        return sigma
+    
+    @staticmethod
+    def _ecal_atlas_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
+        """
+        ECAL resolution formula from delphes_card_CMS_5_0.tcl.
+        
+        Formula:
+            |eta| <= 1.5: (1 + 0.64*eta^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
+            1.5 < |eta| <= 2.5: (2.16 + 5.6*(|eta|-2)^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
+            2.5 < |eta| <= 5.0: sqrt(E^2*0.107^2 + E*2.08^2)
+        """
+        abs_eta = torch.abs(eta)
+        
+        # Barrel + Endcap: |eta| <= 3.2
+        barrel_endcap_sigma = torch.sqrt( (energy**2) * (0.0017**2) + energy * (0.101**2)) 
+
+        # Forward: 2.5 < |eta| <= 5.0
+        forward_sigma = torch.sqrt( (energy**2) * (0.0035**2) + energy * (0.285**2)) 
+        
+        # Select based on eta region
+        sigma = torch.where(abs_eta <= 3.2, barrel_endcap_sigma, forward_sigma)
+
+        # TODO: Should it be zero if eta>4.9, i.e. the below? See delphes_cards/delphes_card_ATLAS_6_1.tcl, lines 260->261
+        # sigma = torch.where(abs_eta <= 3.2, barrel_endcap_sigma, 
+        #             torch.where(abs_eta <= 4.9, forward_sigma, 0))
         
         return sigma
 
@@ -913,6 +948,41 @@ class SimpleCalorimeter(nn.Module):
         
         # Select based on eta region
         sigma = torch.where(abs_eta <= 3.0, central_sigma, forward_sigma)
+
+        # TODO: Should it be zero if eta>5.0, i.e. the below? See delphes_cards/delphes_card_CMS_6_1.tcl, lines 347->348
+        # sigma = torch.where(abs_eta <= 3.0, central_sigma, 
+        #             torch.where(abs_eta <= 5.0, forward_sigma, 0)) 
+
+        return sigma.to(torch.float64)
+    
+    @staticmethod
+    def _hcal_atlas_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
+        """
+        HCAL resolution formula from delphes_card_CMS_5_1.tcl.
+        
+        Formula:
+            |eta| <= 3.0: sqrt(E^2*0.050^2 + E*1.50^2)
+            3.0 < |eta| <= 5.0: sqrt(E^2*0.130^2 + E*2.70^2)
+        """
+        abs_eta = torch.abs(eta)
+        
+        # Inner: |eta| <= 1.7
+        inner_sigma = torch.sqrt( (energy**2) * (0.0302**2) + energy * (0.5205**2) + (1.59**2))
+
+        # Central: 1.7 < |eta| <= 3.2
+        central_sigma = torch.sqrt( (energy**2) * (0.0500**2) + energy * (0.706**2))
+        
+        # Forward: 3.0 < |eta| <= 4.9
+        forward_sigma = torch.sqrt( (energy**2) * (0.09420**2) + energy * (1.00**2))
+        
+        # Select based on eta region
+        sigma = torch.where(abs_eta <= 1.7, inner_sigma, 
+                    torch.where(abs_eta <= 3.2, central_sigma, forward_sigma))
+        
+        # TODO: Should it be zero if eta>4.9, i.e. the below? See delphes_cards/delphes_card_ATLAS_6_1.tcl, lines 334->336
+        # sigma = torch.where(abs_eta <= 1.7, inner_sigma, 
+        #             torch.where(abs_eta <= 3.2, central_sigma, 
+        #                 torch.where(abs_eta <= 4.9, forward_sigma, 0)))
         
         return sigma.to(torch.float64)
 
