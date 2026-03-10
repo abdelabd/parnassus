@@ -624,6 +624,7 @@ def main(
     input_file: str, 
     output_file: str, 
     benchmark_file: str, 
+    validation_dir: Path,
     max_events: Optional[int] = None, 
     batch_size: int = 1_000_000, 
     debug: bool = False
@@ -714,11 +715,6 @@ def main(
     # ========================================================================
     # 4. Validate Against C++ Delphes (Final ROOT branches)
     # ========================================================================
-    
-    # Determine benchmark file location
-    script_dir = Path(__file__).parent
-    validation_dir = script_dir / "torch_delphes_validation"
-    
     if Path(benchmark_file).exists():
         print(f"\nBenchmark file: {benchmark_file}")
         print(f"Validation directory: {validation_dir}")
@@ -731,20 +727,16 @@ def main(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parnassus TorchDelphes HepMC Processing")
     parser.add_argument(
-        "--input", "-i", type=str, default="delphes_data/HZZ4l/HZZ4l_0.hepmc",
-        help="Input HepMC file"
-    )
-    parser.add_argument(
-        "--output", "-o", type=str, default="delphes_data/HZZ4l/HZZ4l_6_1_torch.root",
-        help="Output ROOT file"
-    )
-    parser.add_argument(
-        "--benchmark", "-bm", type=str, default="delphes_data/HZZ4l/HZZ4l_6_1.root",
-        help="Benchmark ROOT file from C++ Delphes for validation (CMS_6_1 card with EFlowMerger)"
-    )
-    parser.add_argument(
-        "--max-events", "-n", type=int, default=1000,
+        "--num-events", "-n", type=int, default=1_000,
         help="Maximum number of events to process (default: 1000)"
+    )
+    parser.add_argument(
+        "--process", "-proc", type=str, default="HZZ4l", choices=["HZZ4l"],
+        help="Process to simulate (default: HZZ4l)"
+    )
+    parser.add_argument(
+        "--detector", "-det", type=str, default="CMS", choices=["CMS", "ATLAS"],
+        help="Detector configuration to use (default: CMS)"
     )
     parser.add_argument(
         "--batch-size", "-bs", type=int, default=1_000_000,
@@ -768,19 +760,47 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+def _get_paths(args, script_dir: Path) -> Tuple[Path, Path, Path, Path]:
+
+    data_process_dir = script_dir / "delphes_data" / args.process
+    data_detector_dir = data_process_dir / args.detector
+
+    validation_dir = script_dir / "torch_delphes_validation" / args.process / args.detector
+    validation_dir.mkdir(parents=True, exist_ok=True)
+    
+    if args.num_events<=100:
+        input_fpath = data_process_dir  / f"{args.process}_100_0.hepmc"
+        output_fpath = data_detector_dir / f"{args.process}_100_6_1_torch.root"
+        benchmark_fpath = data_detector_dir / f"{args.process}_100_6_1.root"
+    elif args.num_events<=1_000:
+        input_fpath = data_process_dir / f"{args.process}_1k_0.hepmc"
+        output_fpath = data_detector_dir / f"{args.process}_1k_6_1_torch.root"
+        benchmark_fpath = data_detector_dir / f"{args.process}_1k_6_1.root"
+    elif args.num_events<=10_000:
+        input_fpath = data_process_dir / f"{args.process}_10k_0.hepmc"
+        output_fpath = data_detector_dir / f"{args.process}_10k_6_1_torch.root"
+        benchmark_fpath = data_detector_dir / f"{args.process}_10k_6_1.root"
+    elif args.num_events<=100_000:
+        input_fpath = data_process_dir / f"{args.process}_100k_0.hepmc"
+        output_fpath = data_detector_dir / f"{args.process}_100k_6_1_torch.root"
+        benchmark_fpath = data_detector_dir / f"{args.process}_100k_6_1.root"
+    else:
+        raise ValueError(f"Unsupported number of events: {args.n_events}. Supported values: <= 100k.")
+
+    return input_fpath, output_fpath, benchmark_fpath, validation_dir
+
 if __name__ == "__main__":
     tic = time.time()
     args = parse_args()
-    
     script_dir = Path(__file__).parent
-    validation_dir = script_dir / "torch_delphes_validation"
+    input_fpath, output_fpath, benchmark_fpath, validation_dir = _get_paths(args, script_dir)
 
     if args.skip_gen:
         # Skip generation, just run validation
         if Path(args.output).exists() and Path(args.benchmark).exists():
             validate_against_benchmark(
-                args.output,
-                args.benchmark,
+                output_fpath,
+                benchmark_fpath,
                 validation_dir,
                 debug=args.debug,
                 event_number=args.specific_event,
@@ -793,14 +813,14 @@ if __name__ == "__main__":
             print(f"  Please run the full pipeline first (without --skip-gen) to generate output files.")
     else:
         # Run full pipeline
-        main(args.input, args.output, args.benchmark, max_events=args.max_events, batch_size=args.batch_size, debug=args.debug)
+        main(input_fpath, output_fpath, benchmark_fpath, validation_dir, max_events=args.num_events, batch_size=args.batch_size, debug=args.debug)
         
         # If --validate-event was specified, run single-event validation after full pipeline
         if args.specific_event is not None:
             if Path(args.output).exists() and Path(args.benchmark).exists():
                 validate_against_benchmark(
-                    args.output,
-                    args.benchmark,
+                    output_fpath,
+                    benchmark_fpath,
                     validation_dir,
                     debug=args.debug,
                     event_number=args.specific_event,
