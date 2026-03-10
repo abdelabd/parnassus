@@ -36,12 +36,11 @@ ETA_OUTER = 15 # Pseudorapidity at point of intersection with detector (position
 PHI_OUTER = 16 # Azimuthal angle at closest-approach to z-axis (position)
 EVENT_NUMBER = 17
 
-IS_NOT_PAD = 18  # Column index for initial validity mask (1=real, 0=padded)
-PASS_PROP = 19
-PASS_ECAL_TOWER = 20  # Column index for ECal tower mask
-PASS_EFLOW_TRACK = 21  # Column index for energy flow track mask
-PASS_EFLOW_PHOTON = 22  # Column index for energy flow photon mask
-TRACK_RESOLUTION = 23  # Track momentum resolution (set by MomentumSmearing module)
+PASS_PROP = 18
+PASS_ECAL_TOWER = 19  # Column index for ECal tower mask
+PASS_EFLOW_TRACK = 20  # Column index for energy flow track mask
+PASS_EFLOW_PHOTON = 21  # Column index for energy flow photon mask
+TRACK_RESOLUTION = 22  # Track momentum resolution (set by MomentumSmearing module)
 
 COLUMN_MAP = {
     "PID": PID,
@@ -62,7 +61,6 @@ COLUMN_MAP = {
     "ETA_OUTER": ETA_OUTER,
     "PHI_OUTER": PHI_OUTER,
     "EVENT_NUMBER": EVENT_NUMBER,
-    "IS_NOT_PAD": IS_NOT_PAD,
     "PASS_PROP": PASS_PROP,
     "PASS_ECAL_TOWER": PASS_ECAL_TOWER,
     "PASS_EFLOW_TRACK": PASS_EFLOW_TRACK,
@@ -106,43 +104,6 @@ def compute_max_particles(event_tensors: List[torch.Tensor], scale: float = 1.2)
         return 0
     max_count = max(t.shape[0] for t in event_tensors)
     return int(max_count * scale)
-
-
-def zero_pad_to_max_particles(event_tensors: List[torch.Tensor]) -> torch.Tensor:
-    """
-    max_particles must be greater than or equal to the largest event in event_tensors.
-
-    Pad events to max_particles and stack into batch with mask.
-    
-    The mask is filled in on column IS_NOT_PAD to indicate real vs padded particles.
-    
-    Args:
-        event_tensors: List of (N_i, N_FEATURES) tensors
-        max_particles: Max particles to pad to
-        
-    Returns:
-        batch: (B, max_particles, N_FEATURES) where:
-               - batch[:, :, :IS_NOT_PAD] = particle data (padded with zeros)
-               - batch[:, :, IS_NOT_PAD] = mask (1.0 for real particles, 0.0 for padding)
-    """
-
-    n_events = len(event_tensors)
-    max_particles = compute_max_particles(event_tensors)
-    dtype = torch.float64 
-    device = event_tensors[0].device
-    
-    # Create padded batch tensor (B, max_particles, N_FEATURES+1)
-    # Initialize with zeros (padding)
-    padded_events = torch.zeros((n_events, max_particles, N_FEATURES), dtype=dtype, device=device)
-    
-    for i, event in enumerate(event_tensors):
-        n_particles = event.shape[0]
-        padded_events[i, :n_particles, :] = event
-        padded_events[i, :n_particles, IS_NOT_PAD] = 1.0  # Mask for real particles
-        # Rest is already zeros (padding)
-
-    return padded_events
-
 
 def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str, 
                         expected_event_numbers: List[float] = None) -> Dict[str, ak.Array]:
@@ -452,8 +413,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> torch.Tensor:
             
             event_tensors.append(torch.from_numpy(particles))
     
-    return zero_pad_to_max_particles(event_tensors)
-
+    return torch.cat(event_tensors, dim=0)
 
 # ==================== PDG ID UTILITIES (VECTORIZED) ====================
 

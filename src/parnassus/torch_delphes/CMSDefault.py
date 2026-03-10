@@ -93,14 +93,12 @@ class CMSEnergyFlowDefault(nn.Module):
                     'EFlowObject': Tensor of shape (N_events, N_eflow_objects, N_FEATURES) - reconstructed EnergyFlow candidates,
                 }
         """
-        n_event, n_part, n_dim = genevent_tensors.shape
+        n_part, n_dim = genevent_tensors.shape
         
         # ParticlePropagator
         particles = genevent_tensors.reshape(-1, n_dim)
         if self.debug:
             particles_before_prop = particles.clone()
-            pbp_mask = particles_before_prop[:, CMAP["IS_NOT_PAD"]] > 0.5
-            particles_before_prop = particles_before_prop[pbp_mask]
         particles_propagated, neutrals_propagated, charged_hadrons_propagated, electrons_propagated, muons_propagated = self.ParticlePropagator(particles)
 
         # TrackingEfficiency

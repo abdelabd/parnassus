@@ -32,7 +32,7 @@ class Merger(nn.Module):
     that have passed propagation, efficiency, and momentum smearing.
     
     Input shape: (N_events, N_particles, N_FEATURES)
-        Must contain IS_NOT_PAD, PASS_PROP mask columns
+        Must contain PASS_PROP mask column
     
     Output shape: (N_events, N_particles, D)
     """

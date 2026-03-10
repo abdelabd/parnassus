@@ -103,9 +103,8 @@ class Efficiency(nn.Module):
         """
     
         # We want to compute effiency vector based on particles that satisfy:
-            # 1. real particles (IS_NOT_PAD == 1)
-            # 2. particles that passed propagation (PASS_PROP == 1)
-            # 3. particles of the desired type
+            # 1. particles that passed propagation (PASS_PROP == 1)
+            # 2. particles of the desired type
 
         pt = particles[:, CMAP["PT"]]   # PT (transverse momentum)
         eta_outer = particles[:, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)

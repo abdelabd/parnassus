@@ -706,7 +706,6 @@ class SimpleCalorimeter(nn.Module):
             towers[:, CMAP["PHI_OUTER"]] = valid_tower_phi
             
             # Set masks
-            towers[:, CMAP["IS_NOT_PAD"]] = 1.0
             towers[:, CMAP["PASS_ECAL_TOWER"]] = 1.0
 
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
@@ -750,7 +749,6 @@ class SimpleCalorimeter(nn.Module):
             eflow_excess_neutrals[:, CMAP["PHI_OUTER"]] = eflow_tower_phi
             
             # Set masks
-            eflow_excess_neutrals[:, CMAP["IS_NOT_PAD"]] = 1.0
             eflow_excess_neutrals[:, CMAP["PASS_EFLOW_PHOTON"]] = 1.0
 
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)

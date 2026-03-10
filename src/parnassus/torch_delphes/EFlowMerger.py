@@ -21,7 +21,7 @@ from typing import List
 
 from .tensor_utils import (
     PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI, T, X, Y, Z,
-    ETA_OUTER, PHI_OUTER, EVENT_NUMBER, IS_NOT_PAD
+    ETA_OUTER, PHI_OUTER, EVENT_NUMBER
 )
 
 

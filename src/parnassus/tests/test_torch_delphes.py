@@ -959,7 +959,7 @@ def main(
     output_file: str, 
     benchmark_file: str, 
     max_events: Optional[int] = None, 
-    batch_size: int = 100, 
+    batch_size: int = 1_000_000, 
     debug: bool = False
 ) -> None:
     """Main processing function.
@@ -988,9 +988,10 @@ def main(
     print("="*80)
     
     genevent_tensors = hepmc_to_tensor(input_file, max_events).to(DEVICE)
-    n_event, n_part, n_dim = genevent_tensors.shape
+    n_event = len(torch.unique(genevent_tensors[:, CMAP["EVENT_NUMBER"]]))
+    n_part_total = genevent_tensors.shape[0]
     print(f"Loaded {n_event} events from HepMC")
-    print(f"  Total stable particles: {sum(t.shape[0] for t in genevent_tensors)}")
+    print(f"  Total stable particles: {n_part_total}")
 
     # ========================================================================
     # 2. Apply CMSModule
@@ -1002,12 +1003,12 @@ def main(
     cms_module = CMSEnergyFlowDefault(debug=args.debug).to(DEVICE)
     tic_torch = time.time()
     results = {}
-    for batch_start in tqdm(range(0, n_event, batch_size)):
+    for batch_start in tqdm(range(0, n_part_total, batch_size)):
 
-        batch_end = min(batch_start + batch_size, n_event)
-        batch_events = genevent_tensors[batch_start:batch_end]
+        batch_end = min(batch_start + batch_size, n_part_total)
+        batch_particles = genevent_tensors[batch_start:batch_end]
 
-        batch_results = cms_module(batch_events)
+        batch_results = cms_module(batch_particles)
 
         for k,v in batch_results.items():
             if k not in results:
@@ -1063,8 +1064,8 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of events to process (default: 1000)"
     )
     parser.add_argument(
-        "--batch-size", "-bs", type=int, default=100,
-        help="Batch size for processing (default: 1000)"
+        "--batch-size", "-bs", type=int, default=1_000_000,
+        help="Batch size for processing (default: 1_000_000)"
     )
     parser.add_argument(
         "--debug", action="store_true",

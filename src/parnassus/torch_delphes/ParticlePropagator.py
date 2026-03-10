@@ -189,19 +189,19 @@ class ParticlePropagator(nn.Module):
 
         # Collect the 4 branches/outputs
         # NOTE: Since we will use both the particles object and the specific branch objects, we instantiate the branches as clones
-        charged_hadron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.charged_hadron_filter(particles)
+        charged_hadron_pid_mask = mask * pdg_filters.charged_hadron_filter(particles)
         charged_hadrons = particles[charged_hadron_pid_mask > 0.5].to(torch.float32).clone()
         charged_hadrons_before_prop = particles_before_prop[charged_hadron_pid_mask > 0.5].to(torch.float32)
 
-        electron_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.electron_filter(particles)
+        electron_pid_mask = mask * pdg_filters.electron_filter(particles)
         electrons = particles[electron_pid_mask > 0.5].to(torch.float32).clone()
         electrons_before_prop = particles_before_prop[electron_pid_mask > 0.5].to(torch.float32)
 
-        muon_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.muon_filter(particles)
+        muon_pid_mask = mask * pdg_filters.muon_filter(particles)
         muons = particles[muon_pid_mask > 0.5].to(torch.float32).clone()
         muons_before_prop = particles_before_prop[muon_pid_mask > 0.5].to(torch.float32)
 
-        neutral_pid_mask = mask * particles[:, CMAP["IS_NOT_PAD"]] * pdg_filters.neutral_filter(particles)
+        neutral_pid_mask = mask * pdg_filters.neutral_filter(particles)
         neutrals = particles[neutral_pid_mask > 0.5].to(torch.float32).clone()
         neutrals_before_prop = particles_before_prop[neutral_pid_mask > 0.5].to(torch.float32)
 
@@ -214,7 +214,7 @@ class ParticlePropagator(nn.Module):
             muons[:, CMAP[var]] = muons_before_prop[:, CMAP[var]].clone()
             neutrals[:, CMAP[var]] = neutrals_before_prop[:, CMAP[var]].clone()
 
-        valid_particles_mask = mask & (particles[:, CMAP["IS_NOT_PAD"]] > 0.5)
+        valid_particles_mask = mask
         particles = particles[valid_particles_mask].to(torch.float32).clone()
 
         return particles, neutrals, charged_hadrons, electrons, muons
