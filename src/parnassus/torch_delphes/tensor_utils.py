@@ -37,10 +37,7 @@ PHI_OUTER = 16 # Azimuthal angle at closest-approach to z-axis (position)
 EVENT_NUMBER = 17
 
 PASS_PROP = 18
-PASS_ECAL_TOWER = 19  # Column index for ECal tower mask
-PASS_EFLOW_TRACK = 20  # Column index for energy flow track mask
-PASS_EFLOW_PHOTON = 21  # Column index for energy flow photon mask
-TRACK_RESOLUTION = 22  # Track momentum resolution (set by MomentumSmearing module)
+TRACK_RESOLUTION = 19  # Track momentum resolution (set by MomentumSmearing module)
 
 COLUMN_MAP = {
     "PID": PID,
@@ -62,9 +59,6 @@ COLUMN_MAP = {
     "PHI_OUTER": PHI_OUTER,
     "EVENT_NUMBER": EVENT_NUMBER,
     "PASS_PROP": PASS_PROP,
-    "PASS_ECAL_TOWER": PASS_ECAL_TOWER,
-    "PASS_EFLOW_TRACK": PASS_EFLOW_TRACK,
-    "PASS_EFLOW_PHOTON": PASS_EFLOW_PHOTON,
     "TRACK_RESOLUTION": TRACK_RESOLUTION
 }
 

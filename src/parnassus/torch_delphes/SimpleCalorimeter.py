@@ -660,10 +660,6 @@ class SimpleCalorimeter(nn.Module):
         
         # Filter to only EFlow tracks
         eflow_tracks = eflow_tracks[track_is_eflow]
-        
-        # Set PASS_EFLOW_TRACK mask for all output eflow tracks
-        if eflow_tracks.shape[0] > 0:
-            eflow_tracks[:, CMAP["PASS_EFLOW_TRACK"]] = 1.0
 
         # ===== Create Tower Tensor with COLUMN_MAP format =====
         # Tower tensor: (n_valid_towers, N_FEATURES)
@@ -704,9 +700,6 @@ class SimpleCalorimeter(nn.Module):
             # Outer position same as momentum direction
             towers[:, CMAP["ETA_OUTER"]] = valid_tower_eta
             towers[:, CMAP["PHI_OUTER"]] = valid_tower_phi
-            
-            # Set masks
-            towers[:, CMAP["PASS_ECAL_TOWER"]] = 1.0
 
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
             towers[:, CMAP["EVENT_NUMBER"]] = valid_tower_event_num
@@ -749,7 +742,6 @@ class SimpleCalorimeter(nn.Module):
             eflow_excess_neutrals[:, CMAP["PHI_OUTER"]] = eflow_tower_phi
             
             # Set masks
-            eflow_excess_neutrals[:, CMAP["PASS_EFLOW_PHOTON"]] = 1.0
 
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
             eflow_excess_neutrals[:, CMAP["EVENT_NUMBER"]] = eflow_tower_event_num
