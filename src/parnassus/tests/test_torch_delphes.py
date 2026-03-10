@@ -134,21 +134,24 @@ def validate_against_benchmark(
             ('ChargedHadronSmeared', track_kinematic_vars),
             ('ElectronSmeared', track_kinematic_vars),
             ('MuonSmeared', track_kinematic_vars),
-            ('MergedTracks', track_kinematic_vars),
+            ('Track', track_kinematic_vars),
             ('ECalTower', tower_kinematic_vars),
             ('ECal_EFlowTrack', track_kinematic_vars),
             ('EFlowPhoton', tower_kinematic_vars),
             ('HCalTower', tower_kinematic_vars),
-            ('HCal_EFlowTrack', track_kinematic_vars),
+            ('EFlowTrack', track_kinematic_vars),
             ('EFlowNeutralHadron', tower_kinematic_vars),
-            ('CalorimeterTower', tower_kinematic_vars),
+            ('Tower', tower_kinematic_vars),
             ('EFlowObject', eflow_kinematic_vars),
         ]
     else:
         branches = [
             ('Particle', genparticle_kinematic_vars),
-            ('CalorimeterTower', tower_kinematic_vars),
-            ('EFlowObject', eflow_kinematic_vars),
+            ('Track', track_kinematic_vars),
+            ('Tower', tower_kinematic_vars),
+            ('EFlowTrack', track_kinematic_vars),
+            ('EFlowPhoton', tower_kinematic_vars),
+            ('EFlowNeutralHadron', tower_kinematic_vars),
         ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
@@ -651,12 +654,12 @@ def main(
     print("="*80)
     
     stable_particles, all_particles = hepmc_to_tensor(input_file, max_events)
-    genevent_tensors = stable_particles.to(DEVICE)
-    all_particles_tensor = all_particles  # Keep on CPU for now, will write to ROOT
+    stable_particles = stable_particles.to(DEVICE)
+    all_particles = all_particles.to(DEVICE)
     
-    n_event = len(torch.unique(genevent_tensors[:, CMAP["EVENT_NUMBER"]]))
-    n_part_total = genevent_tensors.shape[0]
-    n_all_particles = all_particles_tensor.shape[0]
+    n_event = len(torch.unique(stable_particles[:, CMAP["EVENT_NUMBER"]]))
+    n_part_total = stable_particles.shape[0]
+    n_all_particles = all_particles.shape[0]
     print(f"Loaded {n_event} events from HepMC")
     print(f"  Total stable particles: {n_part_total}")
     print(f"  Total all particles (including unstable): {n_all_particles}")
@@ -674,7 +677,7 @@ def main(
     for batch_start in tqdm(range(0, n_part_total, batch_size)):
 
         batch_end = min(batch_start + batch_size, n_part_total)
-        batch_particles = genevent_tensors[batch_start:batch_end]
+        batch_particles = stable_particles[batch_start:batch_end]
 
         batch_results = cms_module(batch_particles)
 
@@ -699,7 +702,7 @@ def main(
     
     # Add all_particles (Particle branch) to results for ROOT writing
     # Wrap in list since tensor_to_root_dict expects list of batch tensors
-    results["Particle"] = all_particles_tensor
+    results["Particle"] = all_particles
     
     # Convert to ROOT format and write
     # tensor_to_root_dict expects List[Tensor], so wrap single tensors in a list

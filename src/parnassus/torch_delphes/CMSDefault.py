@@ -79,12 +79,12 @@ class CMSEnergyFlowDefault(nn.Module):
         self.EFlowMerger = EFlowMerger()
         
 
-    def forward(self, genevent_tensors: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, stable_particles: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Apply the CMS Delphes simulation (up to EnergyFlow objects) to the input generator-level event tensors.
         
         Args:
-            genevent_tensors: Tensor of shape (N_events, N_particles, N_FEATURES) containing generator-level particles
+            stable_particles: Tensor of shape (N_events, N_particles, N_FEATURES) containing generator-level particles
         
         Returns:
             output: Dictionary containing reconstructed particle tensors, e.g.:
@@ -93,10 +93,10 @@ class CMSEnergyFlowDefault(nn.Module):
                     'EFlowObject': Tensor of shape (N_events, N_eflow_objects, N_FEATURES) - reconstructed EnergyFlow candidates,
                 }
         """
-        n_part, n_dim = genevent_tensors.shape
+        n_part, n_dim = stable_particles.shape
         
         # ParticlePropagator
-        particles = genevent_tensors.reshape(-1, n_dim)
+        particles = stable_particles.reshape(-1, n_dim)
         if self.debug:
             particles_before_prop = particles.clone()
         particles_propagated, neutrals_propagated, charged_hadrons_propagated, electrons_propagated, muons_propagated = self.ParticlePropagator(particles)
@@ -143,24 +143,27 @@ class CMSEnergyFlowDefault(nn.Module):
                 "ElectronSmeared": electrons_smeared,
                 "MuonSmeared": muons_smeared,
 
-                "MergedTracks": merged_tracks,
+                "Track": merged_tracks,
 
                 "ECal_EFlowTrack": ecal_tracks,
                 "ECalTower": ecal_towers,
                 "EFlowPhoton": eflow_photons,
 
-                "HCal_EFlowTrack": hcal_tracks,
+                "EFlowTrack": hcal_tracks,
                 "HCalTower": hcal_towers,
                 "EFlowNeutralHadron": eflow_neutral_hadrons,
 
-                "CalorimeterTower": merged_towers,
+                "Tower": merged_towers,
 
                 "EFlowObject": eflow_objects,
                 }
         else:
             return {
-                "CalorimeterTower": merged_towers,
-                "EFlowObject": eflow_objects,
+                "Track": merged_tracks,
+                "Tower": merged_towers,
+                "EFlowTrack": hcal_tracks,
+                "EFlowPhoton": eflow_photons, 
+                "EFlowNeutralHadron": eflow_neutral_hadrons,
             }
 
     def _setup_ECal(self):
