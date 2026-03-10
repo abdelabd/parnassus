@@ -517,10 +517,35 @@ _PDG_MASS_CACHE: Dict[int, float] = {}
 def _get_pdg_charge(pid: int) -> float:
     """
     Get charge for a single PDG ID using the particle library.
-    Returns -999 for unknown particles (matching C++ Delphes behavior).
+    Matches C++ Delphes behavior:
+    - Returns 0 for quarks and diquarks (fractional charge particles)
+    - Returns -999 for unknown particles
     """
     if pid in _PDG_CHARGE_CACHE:
         return _PDG_CHARGE_CACHE[pid]
+    
+    abs_pid = abs(pid)
+    
+    # Quarks (1-6) have fractional charges - C++ Delphes returns 0
+    if 1 <= abs_pid <= 6:
+        _PDG_CHARGE_CACHE[pid] = 0
+        return 0
+    
+    # Diquarks have codes in format: n1 n2 n3 n4 (4 digits)
+    # n1 = first quark flavor (1-6)
+    # n2 = second quark flavor (1-6)  
+    # n3 = orbital angular momentum (usually 0)
+    # n4 = 2*J+1 (1 or 3 for spin-0 or spin-1)
+    # e.g., 2101 = ud_0, 2103 = ud_1, 3303 = ss_1
+    # These have fractional charges - C++ Delphes returns 0
+    if 1000 <= abs_pid <= 9999:
+        n4 = abs_pid % 10  # 2J+1
+        n3 = (abs_pid // 10) % 10  # orbital L
+        n2 = (abs_pid // 100) % 10  # second quark
+        n1 = (abs_pid // 1000) % 10  # first quark
+        if n4 in (1, 3) and n3 == 0 and 1 <= n1 <= 6 and 1 <= n2 <= 6:
+            _PDG_CHARGE_CACHE[pid] = 0
+            return 0
     
     try:
         import particle
