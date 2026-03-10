@@ -115,13 +115,40 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
     Returns:
         Dictionary with keys like "BranchName/BranchName.Attribute" → awkward array
     """
-    # Determine if this is a Tower object, Track object, or ParticleFlowCandidate based on branch name
+    # Determine the branch type based on name
     # Tower objects: Tower, EFlowPhoton (ECal), EFlowNeutralHadron (HCal)
     # ParticleFlowCandidate: EFlowObject (combines Track and Tower fields)
+    # GenParticle: Particle (all particles from HepMC including unstable)
     is_tower = any(keyword in branch_name for keyword in ['Tower', 'EFlowPhoton', 'EFlowNeutralHadron']) and 'EFlowObject' not in branch_name
     is_eflow = 'EFlowObject' in branch_name
+    is_genparticle = branch_name == 'Particle'
 
-    if is_eflow:
+    if is_genparticle:
+        # GenParticle attributes: matches Delphes GenParticle class
+        # See DelphesClasses.h for full list. Core attributes:
+        # PID, Status, Charge, E, Px, Py, Pz, P, PT, Eta, Phi, Rapidity, Mass, T, X, Y, Z
+        # M1, M2, D1, D2 (mother/daughter indices - not available in tensor)
+        attributes = ['PID', 'Status', 'Charge', 'E', 'Px', 'Py', 'Pz', 'P', 'PT', 'Eta', 'Phi', 'Mass', 'T', 'X', 'Y', 'Z']
+        
+        column_map = {
+            'PID': PID,
+            'Status': STATUS,
+            'Charge': CHARGE,
+            'E': E,
+            'Px': PX,
+            'Py': PY,
+            'Pz': PZ,
+            'P': None,  # Will compute from Px, Py, Pz
+            'PT': PT,
+            'Eta': ETA,
+            'Phi': PHI,
+            'Mass': MASS,
+            'T': T,
+            'X': X,
+            'Y': Y,
+            'Z': Z,
+        }
+    elif is_eflow:
         # ParticleFlowCandidate attributes: combination of Track and Tower fields
         # This matches the ParticleFlowCandidate class in DelphesClasses.h (lines 532-613)
         # Track fields: PID, Charge, E, P, PT, Eta, Phi, CtgTheta, C, Mass, EtaOuter, PhiOuter,
@@ -233,7 +260,22 @@ def tensor_to_root_dict(batch_tensors: List[torch.Tensor], branch_name: str,
         if event_np is None or len(event_np) == 0:
             return np.array([], dtype=np.float64)
         
-        if is_eflow:
+        if is_genparticle:
+            # GenParticle-specific computations to match C++ Delphes behavior
+            if attr == 'P':
+                # C++ Delphes never sets P for GenParticles, leaving it uninitialized
+                # The uninitialized value is 0x99999999 = -1.58818668e-23
+                # We use the same sentinel value for exact validation match
+                import struct
+                sentinel = struct.unpack('f', bytes.fromhex('99999999'))[0]
+                return np.full(event_np.shape[0], sentinel, dtype=np.float32)
+            elif attr in ['PID', 'Status']:
+                return event_np[:, column_map[attr]].astype(np.int32)
+            elif attr in column_map and column_map[attr] is not None:
+                return event_np[:, column_map[attr]]
+            else:
+                return np.zeros(event_np.shape[0])
+        elif is_eflow:
             # ParticleFlowCandidate-specific computations
             if attr == 'P':
                 px = event_np[:, PX]
@@ -325,95 +367,178 @@ def write_root_file(output_file: str, branches_dict: Dict[str, Dict[str, ak.Arra
         f[tree_name] = combined_dict
 
 
-def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> torch.Tensor:
+def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Convert HepMC file to list of PyTorch tensors (one per event).
+    Convert HepMC file to PyTorch tensors.
     
-    Reads stable particles from HepMC events and converts to tensor format.
+    Reads particles from HepMC events and converts to tensor format.
+    Returns both stable particles (for detector simulation) and all particles
+    (for truth-level studies).
     
     Args:
         hepmc_file: Path to HepMC file (.hepmc, .hepmc3, or .hepmc.gz)
         max_events: Maximum number of events to process
         
     Returns:
-        Batched tensor of shape (n_events, max_particles, N_FEATURES)
+        Tuple of:
+            - stable_particles: Tensor of shape (n_stable_total, N_FEATURES) with status==1 particles
+            - all_particles: Tensor of shape (n_all_total, N_FEATURES) with all particles
     """
     
-    event_tensors = []
+    stable_event_tensors = []
+    all_event_tensors = []
     
     with pyhepmc.open(hepmc_file) as f:
         for event_idx, event in tqdm(enumerate(f), total=max_events):
             if max_events is not None and event_idx >= max_events:
                 break
             
-            # Get all stable particles (status == 1)
             event_number = event.event_number
-            stable_particles = [p for p in event.particles if p.status == 1]
             
-            n_particles = len(stable_particles)
-            if n_particles == 0:
-                event_tensors.append(torch.zeros((0, N_FEATURES), dtype=torch.float64))
-                continue
+            # Get all particles and stable particles
+            all_particles_list = list(event.particles)
+            stable_particles_list = [p for p in all_particles_list if p.status == 1]
             
-            # ===== VECTORIZED EXTRACTION =====
-            # Extract all PIDs at once
-            pids = np.array([p.pid for p in stable_particles], dtype=np.int64)
+            # Process stable particles
+            stable_tensor = _particles_to_tensor(stable_particles_list, event_number)
+            stable_event_tensors.append(stable_tensor)
             
-            # Extract all momenta at once: (n_particles, 4) for [e, px, py, pz]
-            momenta = np.array([[p.momentum.e, p.momentum.px, p.momentum.py, p.momentum.pz] 
-                               for p in stable_particles], dtype=np.float64)
-            
-            # Extract all vertices at once: (n_particles, 4) for [x, y, z, t]
-            vertices = np.array([
-                [p.production_vertex.position.x, p.production_vertex.position.y,
-                 p.production_vertex.position.z, p.production_vertex.position.t]
-                if p.production_vertex else [0.0, 0.0, 0.0, 0.0]
-                for p in stable_particles
-            ], dtype=np.float64)
-            
-            # ===== VECTORIZED COMPUTATIONS =====
-            e = momenta[:, 0]
-            px = momenta[:, 1]
-            py = momenta[:, 2]
-            pz = momenta[:, 3]
-            
-            pt = np.sqrt(px**2 + py**2)
-            eta = np.arcsinh(pz / (pt + 1e-10))
-            phi = np.arctan2(py, px)
-            
-            # Vectorized charge and mass lookup
-            charges = get_charge_from_pdg_id(pids)
-            masses = get_mass_from_pdg_id(pids)
-            
-            # ===== BUILD TENSOR IN ONE SHOT =====
-            particles = np.zeros((n_particles, N_FEATURES), dtype=np.float64)
-            particles[:, PID] = pids
-            particles[:, STATUS] = 1  # All stable particles have status 1
-            particles[:, CHARGE] = charges
-            particles[:, E] = e
-            particles[:, PX] = px
-            particles[:, PY] = py
-            particles[:, PZ] = pz
-            particles[:, PT] = pt
-            particles[:, ETA] = eta
-            particles[:, PHI] = phi
-            particles[:, T] = vertices[:, 3]
-            particles[:, X] = vertices[:, 0]
-            particles[:, Y] = vertices[:, 1]
-            particles[:, Z] = vertices[:, 2]
-            particles[:, MASS] = masses
-            particles[:, EVENT_NUMBER] = event_number
-            # ETA_OUTER, PHI_OUTER will be computed by ParticlePropagator
-            
-            event_tensors.append(torch.from_numpy(particles))
+            # Process all particles
+            all_tensor = _particles_to_tensor(all_particles_list, event_number)
+            all_event_tensors.append(all_tensor)
     
-    return torch.cat(event_tensors, dim=0)
+    stable_particles = torch.cat(stable_event_tensors, dim=0) if stable_event_tensors else torch.zeros((0, N_FEATURES), dtype=torch.float64)
+    all_particles = torch.cat(all_event_tensors, dim=0) if all_event_tensors else torch.zeros((0, N_FEATURES), dtype=torch.float64)
+    
+    return stable_particles, all_particles
+
+
+def _particles_to_tensor(particles_list: list, event_number: int, use_hepmc_mass: bool = True) -> torch.Tensor:
+    """
+    Convert a list of HepMC particles to a tensor.
+    
+    This function reads particle properties directly from HepMC to match
+    C++ Delphes behavior:
+    - Mass: Read from HepMC generated_mass (what the generator produced)
+    - Charge: Look up from PDG ID (HepMC doesn't store charge)
+    - Eta: Use ±999.9 for particles with zero transverse momentum
+    
+    Args:
+        particles_list: List of pyhepmc particle objects
+        event_number: Event number to assign to all particles
+        use_hepmc_mass: If True, read mass from HepMC generated_mass. 
+                        If False, use PDG mass lookup. Default True to match C++ Delphes.
+        
+    Returns:
+        Tensor of shape (n_particles, N_FEATURES)
+    """
+    n_particles = len(particles_list)
+    if n_particles == 0:
+        return torch.zeros((0, N_FEATURES), dtype=torch.float64)
+    
+    # ===== VECTORIZED EXTRACTION =====
+    # Extract all PIDs at once
+    pids = np.array([p.pid for p in particles_list], dtype=np.int64)
+    
+    # Extract all status codes
+    statuses = np.array([p.status for p in particles_list], dtype=np.int64)
+    
+    # Extract all momenta at once: (n_particles, 4) for [e, px, py, pz]
+    momenta = np.array([[p.momentum.e, p.momentum.px, p.momentum.py, p.momentum.pz] 
+                       for p in particles_list], dtype=np.float64)
+    
+    # Extract all vertices at once: (n_particles, 4) for [x, y, z, t]
+    vertices = np.array([
+        [p.production_vertex.position.x, p.production_vertex.position.y,
+         p.production_vertex.position.z, p.production_vertex.position.t]
+        if p.production_vertex else [0.0, 0.0, 0.0, 0.0]
+        for p in particles_list
+    ], dtype=np.float64)
+    
+    # ===== MASS: Read from HepMC generated_mass to match C++ Delphes =====
+    # C++ Delphes reads mass directly from HepMC, not from PDG tables
+    if use_hepmc_mass:
+        masses = np.array([p.generated_mass for p in particles_list], dtype=np.float64)
+    else:
+        masses = get_mass_from_pdg_id(pids)
+    
+    # ===== VECTORIZED COMPUTATIONS =====
+    e = momenta[:, 0]
+    px = momenta[:, 1]
+    py = momenta[:, 2]
+    pz = momenta[:, 3]
+    
+    pt = np.sqrt(px**2 + py**2)
+    phi = np.arctan2(py, px)
+    
+    # ===== ETA: Match C++ Delphes behavior for zero-pt particles =====
+    # C++ Delphes uses eta = ±999.9 for particles with pt ≈ 0
+    # This is to avoid numerical issues with arctanh/arcsinh
+    PT_MIN = 1e-10  # Same threshold as C++ Delphes
+    eta = np.where(
+        pt < PT_MIN,
+        np.sign(pz) * 999.9,  # ±999.9 for zero-pt particles
+        np.arcsinh(pz / pt)   # Normal eta computation
+    )
+    # Handle pz=0 case (sign returns 0) - these are truly perpendicular particles
+    eta = np.where((pt < PT_MIN) & (pz == 0), 0.0, eta)
+    
+    # Vectorized charge lookup (HepMC doesn't store charge, must use PDG)
+    charges = get_charge_from_pdg_id(pids)
+    
+    # ===== BUILD TENSOR IN ONE SHOT =====
+    particles = np.zeros((n_particles, N_FEATURES), dtype=np.float64)
+    particles[:, PID] = pids
+    particles[:, STATUS] = statuses
+    particles[:, CHARGE] = charges
+    particles[:, E] = e
+    particles[:, PX] = px
+    particles[:, PY] = py
+    particles[:, PZ] = pz
+    particles[:, PT] = pt
+    particles[:, ETA] = eta
+    particles[:, PHI] = phi
+    particles[:, T] = vertices[:, 3]
+    particles[:, X] = vertices[:, 0]
+    particles[:, Y] = vertices[:, 1]
+    particles[:, Z] = vertices[:, 2]
+    particles[:, MASS] = masses
+    particles[:, EVENT_NUMBER] = event_number
+    # ETA_OUTER, PHI_OUTER will be computed by ParticlePropagator
+
+    return torch.from_numpy(particles)
 
 # ==================== PDG ID UTILITIES (VECTORIZED) ====================
+
+# Cache for PDG lookups to avoid repeated particle library queries
+_PDG_CHARGE_CACHE: Dict[int, float] = {}
+_PDG_MASS_CACHE: Dict[int, float] = {}
+
+def _get_pdg_charge(pid: int) -> float:
+    """
+    Get charge for a single PDG ID using the particle library.
+    Returns -999 for unknown particles (matching C++ Delphes behavior).
+    """
+    if pid in _PDG_CHARGE_CACHE:
+        return _PDG_CHARGE_CACHE[pid]
+    
+    try:
+        import particle
+        p = particle.Particle.from_pdgid(pid)
+        # Charge is in units of e, round to int for standard particles
+        charge = int(round(p.charge)) if p.charge is not None else -999
+        _PDG_CHARGE_CACHE[pid] = charge
+        return charge
+    except Exception:
+        _PDG_CHARGE_CACHE[pid] = -999
+        return -999
+
 
 def get_charge_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     """
     Get electric charges for an array of PDG IDs (vectorized).
+    Uses the particle library for comprehensive PDG coverage.
+    Returns -999 for unknown particles (matching C++ Delphes behavior).
     
     Args:
         pids: NumPy array of PDG IDs
@@ -421,56 +546,14 @@ def get_charge_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     Returns:
         NumPy array of electric charges
     """
-    abs_pids = np.abs(pids)
-    signs = np.sign(pids)
-    charges = np.zeros_like(pids, dtype=np.float64)
+    # Get unique PIDs to minimize lookups
+    unique_pids = np.unique(pids)
     
-    # Leptons (electron, muon, tau): charge = -sign(pid)
-    lepton_mask = (abs_pids == 11) | (abs_pids == 13) | (abs_pids == 15)
-    charges[lepton_mask] = -signs[lepton_mask]
+    # Build charge map for unique PIDs
+    charge_map = {pid: _get_pdg_charge(int(pid)) for pid in unique_pids}
     
-    # Neutrinos: charge = 0 (already initialized)
-    
-    # Photon: charge = 0 (already initialized)
-    
-    # Charged pions: charge = sign(pid)
-    charges[abs_pids == 211] = signs[abs_pids == 211]
-    
-    # Neutral pion: charge = 0 (already initialized)
-    
-    # Charged kaons: charge = sign(pid)
-    charges[abs_pids == 321] = signs[abs_pids == 321]
-    
-    # Neutral kaons: charge = 0 (already initialized)
-    
-    # Proton: charge = sign(pid)
-    charges[abs_pids == 2212] = signs[abs_pids == 2212]
-    
-    # Neutron: charge = 0 (already initialized)
-    
-    # Lambda baryon (3122): charge = 0 (already initialized)
-    
-    # Sigma baryons
-    charges[abs_pids == 3222] = signs[abs_pids == 3222]   # Sigma+
-    charges[abs_pids == 3112] = -signs[abs_pids == 3112]  # Sigma-
-    # Sigma0 (3212): charge = 0 (already initialized)
-    
-    # Xi baryons
-    charges[abs_pids == 3312] = -signs[abs_pids == 3312]  # Xi-
-    # Xi0 (3322): charge = 0 (already initialized)
-    
-    # Omega baryon
-    charges[abs_pids == 3334] = -signs[abs_pids == 3334]  # Omega-
-    
-    # D mesons
-    charges[abs_pids == 411] = signs[abs_pids == 411]   # D+
-    charges[abs_pids == 421] = 0  # D0
-    charges[abs_pids == 431] = signs[abs_pids == 431]   # Ds+
-    
-    # B mesons
-    charges[abs_pids == 521] = signs[abs_pids == 521]   # B+
-    charges[abs_pids == 511] = 0  # B0
-    charges[abs_pids == 531] = 0  # Bs0
+    # Vectorized lookup using the map
+    charges = np.array([charge_map[pid] for pid in pids], dtype=np.float64)
     
     return charges
 

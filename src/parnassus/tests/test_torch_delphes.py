@@ -56,7 +56,8 @@ def validate_against_benchmark(
     benchmark_file: str, 
     output_dir: str, 
     debug: bool = False,
-    event_number: Optional[int] = None
+    event_number: Optional[int] = None,
+    validate_pid: bool = False
 ) -> None:
     """
     Validate PyTorch Delphes implementation against C++ Delphes benchmark.
@@ -68,6 +69,8 @@ def validate_against_benchmark(
         debug: If True, print histogram bin counts and edges
         event_number: Optional event index (0-based) to validate a single event.
                      If None, validates all events aggregated.
+        validate_pid: If True, create PID-specific combined plots for each unique PID.
+                     These can be slow for large datasets with many PIDs. Default False.
     """
     # Create output directory (with event subdirectory if single event)
     output_dir = Path(output_dir)
@@ -110,13 +113,16 @@ def validate_against_benchmark(
     # Track objects: PID, Charge, P, PT, Eta, Phi
     # Tower objects: E, ET, Eta, Phi, Eem, Ehad (no PID - towers are aggregated)
     # ParticleFlowCandidate: Combined Track+Tower fields
+    # GenParticle: All HepMC particles including unstable
     track_kinematic_vars = ['PID', 'Charge', 'P', 'PT', 'Eta', 'EtaOuter', 'Phi', 'T', 'X', 'Y', 'Z']
     tower_kinematic_vars = ['E', 'ET', 'Eta', 'Phi', 'T']
     eflow_kinematic_vars = ['PID', 'Charge', 'E', 'P', 'PT', 'Eta', 'Phi', 'T', 'X', 'Y', 'Z', 'Eem', 'Ehad']
+    genparticle_kinematic_vars = ['PID', 'Status', 'Charge', 'E', 'Px', 'Py', 'Pz', 'P', 'PT', 'Eta', 'Phi', 'Mass', 'T', 'X', 'Y', 'Z']
 
     # Branches to validate (branch_name, variable_list)
     if debug:
         branches = [
+            ('Particle', genparticle_kinematic_vars),
             ('ParticleBeforeProp', track_kinematic_vars),
             ('ParticleAfterProp', track_kinematic_vars),
             ('ChargedHadron', track_kinematic_vars),
@@ -140,6 +146,7 @@ def validate_against_benchmark(
         ]
     else:
         branches = [
+            ('Particle', genparticle_kinematic_vars),
             ('CalorimeterTower', tower_kinematic_vars),
             ('EFlowObject', eflow_kinematic_vars),
         ]
@@ -239,6 +246,37 @@ def validate_against_benchmark(
                         out=np.ones_like(torch_counts, dtype=float),
                         where=benchmark_counts > 0
                     )
+                
+                elif var in ['Charge', 'Status']:
+                    # Charge and Status are discrete integer values - use bar chart like PID
+                    # Get unique values across both datasets
+                    unique_vals = np.unique(np.concatenate([torch_np, benchmark_np]))
+                    
+                    # Count occurrences of each value
+                    torch_counts = np.array([np.sum(torch_np == val) for val in unique_vals])
+                    benchmark_counts = np.array([np.sum(benchmark_np == val) for val in unique_vals])
+                    
+                    # Create bar positions
+                    x = np.arange(len(unique_vals))
+                    width = 0.35
+                    
+                    # Plot bars
+                    ax_hist.bar(x - width/2, benchmark_counts, width, label='C++ Delphes', 
+                               color='orange', alpha=0.7)
+                    ax_hist.bar(x + width/2, torch_counts, width, label='Parnassus.TorchDelphes', 
+                               color='blue', alpha=0.7)
+                    
+                    ax_hist.set_xticks(x)
+                    ax_hist.set_xticklabels([f'{int(val)}' for val in unique_vals])
+                    ax_hist.tick_params(labelbottom=False)
+                    
+                    # For ratio plot
+                    bin_centers = x
+                    ratio = np.divide(
+                        torch_counts, benchmark_counts,
+                        out=np.ones_like(torch_counts, dtype=float),
+                        where=benchmark_counts > 0
+                    )
                     
                 else:
                     # Standard continuous histogram
@@ -274,7 +312,7 @@ def validate_against_benchmark(
                 ax_hist.set_title(title, fontsize=14, fontweight='bold')
                 ax_hist.legend(fontsize=11)
                 ax_hist.grid(True, alpha=0.3)
-                if var != 'PID':
+                if var not in ['PID', 'Charge', 'Status']:
                     ax_hist.tick_params(labelbottom=False)  # Hide x-axis labels for top plot
                 
                 # Add statistics text
@@ -290,6 +328,13 @@ def validate_against_benchmark(
                     ax_ratio.bar(bin_centers, ratio, width*2, color='blue', alpha=0.7)
                     ax_ratio.set_xticks(bin_centers)
                     ax_ratio.set_xticklabels([f'{int(pid)}' for pid in unique_pids], rotation=45, ha='right')
+                    ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±10% range
+                elif var in ['Charge', 'Status']:
+                    # Bar plot for discrete integer values
+                    ax_ratio.axhline(y=1.0, color='orange', linewidth=2)
+                    ax_ratio.bar(bin_centers, ratio, width*2, color='blue', alpha=0.7)
+                    ax_ratio.set_xticks(bin_centers)
+                    ax_ratio.set_xticklabels([f'{int(val)}' for val in unique_vals])
                     ax_ratio.set_ylim([0.9*min(ratio), 1.1*max(ratio)])  # Focus on ±10% range
                 else:
                     # Line plot for continuous variables
@@ -314,14 +359,22 @@ def validate_against_benchmark(
                 continue
         
         ### 2. Combined plot with key kinematic variables
+        # For GenParticle: Eta, Phi, PT, E
         # For tracks: Eta, Phi, PT, P
         # For towers: Eta, Phi, E, ET
-        if 'P' in kinematic_vars:
+        if branch_name == 'Particle':
+            combined_vars = ['Eta', 'Phi', 'PT', 'E']
+            print(f"\n  Creating combined kinematic plot (Eta, Phi, PT, E)...")
+        elif 'P' in kinematic_vars and 'E' not in kinematic_vars:
             combined_vars = ['Eta', 'Phi', 'PT', 'P']
             print(f"\n  Creating combined kinematic plot (Eta, Phi, PT, P)...")
-        elif 'E' in kinematic_vars:
+        elif 'E' in kinematic_vars and 'P' not in kinematic_vars:
             combined_vars = ['Eta', 'Phi', 'E', 'ET']
             print(f"\n  Creating combined kinematic plot (Eta, Phi, E, ET)...")
+        elif 'P' in kinematic_vars and 'E' in kinematic_vars:
+            # EFlow or GenParticle - has both P and E
+            combined_vars = ['Eta', 'Phi', 'PT', 'E']
+            print(f"\n  Creating combined kinematic plot (Eta, Phi, PT, E)...")
         else:
             combined_vars = kinematic_vars[:4]  # Take first 4 variables
             print(f"\n  Creating combined kinematic plot ({', '.join(combined_vars)})...")
@@ -422,6 +475,10 @@ def validate_against_benchmark(
         print(f"  ✓ Combined plot saved → {combined_plot_file.name}")
         
         ### 3. PID-specific combined plots (only for branches with PID field)
+        # Skip if --validate-pid not specified
+        if not validate_pid:
+            continue
+            
         torch_pid_key = f"{branch_name}/{branch_name}.PID"
         benchmark_pid_key = f"{branch_name}/{branch_name}.PID"
         
@@ -593,20 +650,25 @@ def main(
     print(f"STEP 1: Loading HepMC file and converting to tensors: {input_file}")
     print("="*80)
     
-    genevent_tensors = hepmc_to_tensor(input_file, max_events).to(DEVICE)
+    stable_particles, all_particles = hepmc_to_tensor(input_file, max_events)
+    genevent_tensors = stable_particles.to(DEVICE)
+    all_particles_tensor = all_particles  # Keep on CPU for now, will write to ROOT
+    
     n_event = len(torch.unique(genevent_tensors[:, CMAP["EVENT_NUMBER"]]))
     n_part_total = genevent_tensors.shape[0]
+    n_all_particles = all_particles_tensor.shape[0]
     print(f"Loaded {n_event} events from HepMC")
     print(f"  Total stable particles: {n_part_total}")
+    print(f"  Total all particles (including unstable): {n_all_particles}")
 
     # ========================================================================
     # 2. Apply CMSModule
     # ========================================================================
     print("\n" + "="*80)
-    print("STEP 3: Applying CMSModule...")
+    print("STEP 2: Applying CMSModule...")
     print("="*80)
 
-    cms_module = CMSEnergyFlowDefault(debug=args.debug).to(DEVICE)
+    cms_module = CMSEnergyFlowDefault(debug=debug).to(DEVICE)
     tic_torch = time.time()
     results = {}
     for batch_start in tqdm(range(0, n_part_total, batch_size)):
@@ -623,15 +685,27 @@ def main(
 
     toc_torch = time.time()
     dur_torch = toc_torch - tic_torch
-    print(f"\nTorch processing time: {dur_torch//60} minutes, {dur_torch%60} seconds")
+    print(f"\nTorch processing time: {dur_torch//60:.0f} minutes, {dur_torch%60:.2f} seconds")
 
     # ========================================================================
     # 3. Write output
     # ========================================================================
 
-    print(f"Writing {output_file}...")
-    event_nums = range(genevent_tensors.shape[0])
-    branches_torch_root = {k: tensor_to_root_dict(v, k, event_nums) for k, v in results.items()}
+    print(f"\nWriting {output_file}...")
+    
+    # Concatenate batched results
+    for k in results:
+        results[k] = torch.cat(results[k], dim=0)
+    
+    # Add all_particles (Particle branch) to results for ROOT writing
+    # Wrap in list since tensor_to_root_dict expects list of batch tensors
+    results["Particle"] = all_particles_tensor
+    
+    # Convert to ROOT format and write
+    # tensor_to_root_dict expects List[Tensor], so wrap single tensors in a list
+    event_nums = range(n_event)  # Event numbers for grouping
+    branches_torch_root = {k: tensor_to_root_dict([v] if not isinstance(v, list) else v, k, event_nums) 
+                          for k, v in results.items()}
     write_root_file(output_file, branches_torch_root)
 
     # ========================================================================
@@ -685,6 +759,10 @@ def parse_args() -> argparse.Namespace:
         "--skip-gen", action="store_true",
         help="Skip Torch generation and ROOT writing, jump directly to validation (requires existing output file)"
     )
+    parser.add_argument(
+        "--validate-pid", action="store_true",
+        help="Create PID-specific combined plots for each unique PID (can be slow for large datasets)"
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -702,7 +780,8 @@ if __name__ == "__main__":
                 args.benchmark,
                 validation_dir,
                 debug=args.debug,
-                event_number=args.specific_event
+                event_number=args.specific_event,
+                validate_pid=args.validate_pid
             )
         else:
             print(f"\n⚠ Error: Output or benchmark file not found!")
@@ -721,7 +800,8 @@ if __name__ == "__main__":
                     args.benchmark,
                     validation_dir,
                     debug=args.debug,
-                    event_number=args.specific_event
+                    event_number=args.specific_event,
+                    validate_pid=args.validate_pid
                 )
 
     toc = time.time()
