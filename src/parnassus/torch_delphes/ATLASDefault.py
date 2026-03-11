@@ -121,7 +121,7 @@ class ATLASEnergyFlowDefault(nn.Module):
         hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(particles_propagated, ecal_tracks)
 
         # CalorimeterMerger
-        merged_towers = self.CalorimeterMerger([ecal_towers, hcal_towers])
+        merged_towers = self.CalorimeterMerger([ecal_towers, hcal_towers, muons_smeared])
 
         # EFlowMerger
         eflow_objects = self.EFlowMerger([hcal_tracks, eflow_photons, eflow_neutral_hadrons])
