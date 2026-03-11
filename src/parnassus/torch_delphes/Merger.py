@@ -1,62 +1,57 @@
 """
 PyTorch implementation of Delphes Merger module.
 
-The Merger module combines multiple input arrays into a single output array.
-In the tensor representation, this means applying a mask to indicate which
-particles should be included in the merged output.
+Combines multiple input particle collections into a single output tensor.
+This is a simple concatenation operation that preserves all particle properties.
 
-For TrackMerger specifically, this combines:
-- Charged hadrons (after momentum smearing)
-- Electrons (after momentum smearing)
-- Muons (after momentum smearing)
-into a unified "tracks" collection.
+Common uses:
+- **TrackMerger**: Combines charged hadrons, electrons, and muons into unified tracks
+- **CalorimeterMerger**: Combines ECal and HCal towers (and optionally muons for ATLAS)
+
+Reference:
+    C++ Delphes: modules/Merger.cc
 """
+
 import torch
 import torch.nn as nn
-import numpy as np
 from typing import List
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
-#TODO: Update docstrings
 
 class Merger(nn.Module):
     """
-    TODO: Update docstring
     PyTorch implementation of Delphes Merger module.
     
-    This module:
-    1. Filters particles based on PID (which particle types to include)
+    Concatenates multiple particle tensors into a single output tensor along
+    the particle dimension. No transformations are applied to the particles;
+    all properties are preserved exactly as input.
     
-    For TrackMerger, this combines charged hadrons, electrons, and muons
-    that have passed propagation, efficiency, and momentum smearing.
+    This is the simplest merger that just combines collections. For mergers
+    that need to transform particles (e.g., setting PID, zeroing positions),
+    use EFlowMerger instead.
     
-    Input shape: (N_events, N_particles, N_FEATURES)
-        Must contain PASS_PROP mask column
-    
-    Output shape: (N_events, N_particles, D)
+    Example:
+        >>> merger = Merger()
+        >>> tracks = merger([charged_hadrons, electrons, muons])
+        >>> towers = merger([ecal_towers, hcal_towers])
     """
     
     def __init__(self) -> None:
-        """
-        Args:
-            particle_types: List of particle types to include in merger
-                           Options: 'charged_hadron', 'electron', 'muon', 'neutral'
-        """
+        """Initialize the Merger module (no parameters needed)."""
         super().__init__()
 
-    def forward(self, different_particle_type_tensors: List[torch.Tensor],) -> torch.Tensor:
+    def forward(self, input_tensors: List[torch.Tensor]) -> torch.Tensor:
         """
-        TODO: Update docstring
-        Apply merger to create unified output
+        Concatenate multiple particle tensors.
         
         Args:
-            different_particle_type_tensors: List of tensors for each particle type
-                Each tensor shape: (N_events, N_particles_type, N_FEATURES)
+            input_tensors: List of tensors, each of shape (N_i, N_FEATURES).
+                All tensors must have the same number of features (columns).
+                Empty tensors (N_i = 0) are handled gracefully.
                 
         Returns:
-            track_tensors: tensor of shape (N_events, N_particles, D)
+            Concatenated tensor of shape (sum(N_i), N_FEATURES) containing
+            all particles from all input tensors.
         """
-
-        track_tensors = torch.cat(different_particle_type_tensors, dim=0)
-        return track_tensors
+        return torch.cat(input_tensors, dim=0)

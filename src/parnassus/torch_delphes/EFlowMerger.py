@@ -1,18 +1,21 @@
 """
-EFlowMerger: Energy Flow Merger Module
+PyTorch implementation of Energy Flow (Particle Flow) Merger module.
 
-This module merges Track and Tower objects into ParticleFlowCandidate objects.
-It handles the necessary transformations to ensure consistency between Track and Tower
-representations when they are merged together.
+Merges Track and Tower objects into a unified ParticleFlowCandidate format.
+This module applies the necessary transformations to ensure consistency between
+different object types when they are combined.
 
-Based on the Delphes C++ Merger module, but with special handling for ParticleFlowCandidate
-output format.
+Key transformations:
+- **Tracks**: Eta is set to EtaOuter (position-based) for consistency with towers
+- **Photons**: PID=22, vertex position zeroed, T zeroed
+- **Neutral Hadrons**: PID=0, vertex position zeroed, T zeroed
 
-TODO: Rely on Eem/Ehad fields from SimpleCalorimeter
-Currently, we infer Eem/Ehad during ROOT writing based on PID values.
-If SimpleCalorimeter is updated to include Eem/Ehad in the tensor (see TODO in
-SimpleCalorimeter.py), this module can preserve those values directly without
-needing to recompute them. See EFlowMerger.md for validation details.
+The Eem/Ehad fields are not stored in the tensor representation; they are
+computed during ROOT file writing based on PID values.
+
+Reference:
+    C++ Delphes: modules/Merger.cc (used for EFlowMerger in TCL cards)
+    See also: EFlowMerger.md for validation details
 """
 
 import torch
@@ -27,36 +30,53 @@ from .tensor_utils import (
 
 class EFlowMerger(nn.Module):
     """
-    EFlowMerger: Merges Track and Tower objects into ParticleFlowCandidate objects.
-
-    This merger takes three input streams:
-    1. Tracks (from HCal/eflowTracks): charged particles with track information
-    2. Photons (from ECal/eflowPhotons): electromagnetic calorimeter towers
-    3. Neutral Hadrons (from HCal/eflowNeutralHadrons): hadronic calorimeter towers
-
-    Key transformations applied:
-    - For Tracks: Eta field is set to EtaOuter (position eta) for consistency with ParticleFlow
-    - For Photons: PID set to 22, X/Y/Z set to 0, Eem set to E, Ehad set to 0
-    - For Neutral Hadrons: PID set to 0, X/Y/Z set to 0, Eem set to 0, Ehad set to E
-
-    The output is a single tensor with all ParticleFlowCandidate objects.
+    Merges Track and Tower objects into ParticleFlowCandidate format.
+    
+    This merger takes exactly three input streams and applies specific
+    transformations to each before concatenating:
+    
+    1. **Tracks** (e.g., from HCal/eflowTracks):
+       - Eta field is set to EtaOuter (position-based pseudorapidity)
+       - All other fields preserved
+       
+    2. **Photons** (e.g., from ECal/eflowPhotons):
+       - PID set to 22 (photon PDG code)
+       - X, Y, Z, T set to 0 (towers have no vertex position)
+       
+    3. **Neutral Hadrons** (e.g., from HCal/eflowNeutralHadrons):
+       - PID set to 0 (C++ Delphes convention for neutral hadrons)
+       - X, Y, Z, T set to 0 (towers have no vertex position)
+    
+    Note:
+        The order of inputs matters! The transformations are applied based
+        on position in the input list, not based on particle content.
+        
+    Example:
+        >>> merger = EFlowMerger()
+        >>> eflow = merger([tracks, photons, neutral_hadrons])
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize the EFlowMerger module (no parameters needed)."""
         super().__init__()
 
     def forward(self, input_arrays: List[torch.Tensor]) -> torch.Tensor:
         """
-        Merge Track and Tower objects into ParticleFlowCandidate objects.
+        Merge Track and Tower objects into ParticleFlowCandidate format.
 
         Args:
-            input_arrays: List of 3 tensors:
-                [0] tracks: (N_tracks, N_FEATURES) - Track objects from HCal/eflowTracks
-                [1] photons: (N_photons, N_FEATURES) - Tower objects from ECal/eflowPhotons
-                [2] neutral_hadrons: (N_neutrals, N_FEATURES) - Tower objects from HCal/eflowNeutralHadrons
+            input_arrays: List of exactly 3 tensors:
+            
+                - [0] tracks: (N_tracks, N_FEATURES) - Track objects
+                - [1] photons: (N_photons, N_FEATURES) - ECal tower objects
+                - [2] neutral_hadrons: (N_neutrals, N_FEATURES) - HCal tower objects
 
         Returns:
-            merged: (N_total, N_FEATURES) - ParticleFlowCandidate objects
+            Merged tensor of shape (N_total, N_FEATURES) containing all
+            ParticleFlowCandidate objects with appropriate transformations applied.
+            
+        Raises:
+            ValueError: If input_arrays does not contain exactly 3 tensors.
         """
         if len(input_arrays) != 3:
             raise ValueError(f"EFlowMerger expects exactly 3 input arrays, got {len(input_arrays)}")

@@ -1,58 +1,73 @@
 """
 PyTorch implementation of Delphes MomentumSmearing module.
 
-Performs transverse momentum resolution smearing using a log-normal distribution.
+Applies momentum resolution smearing to charged particle tracks using a 
+log-normal distribution. The resolution depends on particle kinematics
+(pT, η) and detector region.
+
+The log-normal distribution ensures smeared pT values remain positive,
+which is physically required. The smearing preserves the particle direction
+(η, φ) while only modifying the magnitude of the transverse momentum.
+
+Reference:
+    C++ Delphes: modules/MomentumSmearing.cc
+    CMS tracking resolution: arXiv:1405.6569
 """
 
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Callable, Union, Tuple
+from typing import Callable, Union
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes.stochastic_utils import log_normal_sample
 
-#TODO: Update docstrings
 
 class MomentumSmearing(nn.Module):
     """
     PyTorch implementation of Delphes MomentumSmearing module.
     
-    Applies momentum resolution smearing to particles based on their kinematics (pt, eta_outer).
-    The smearing is applied using a log-normal distribution to ensure positive PT values.
+    Applies momentum resolution smearing based on particle kinematics. The 
+    resolution formula takes (pT, η_outer) and returns a relative resolution
+    (e.g., 0.06 = 6% resolution). The pT is then smeared using a log-normal
+    distribution with this resolution.
     
-    Input shape: (N, N_FEATURES) where:
-        - column 0: PID (Particle ID)
-        - column 1: Status
-        - column 2: Charge
-        - column 3: E (Energy)
-        - columns 4-6: Px, Py, Pz (3-momentum)
-        - column 7: PT (transverse momentum)
-        - column 8: Eta (pseudorapidity for resolution formula - typically position-based)
-        - column 9: Phi (azimuthal angle)
-        - column 10: T (time)
-        - columns 11-13: X, Y, Z (position)
-        - column 14: Mass
-        - column 15: EtaOuter (pseudorapidity at outer position)
-        - column 16: PhiOuter (azimuthal angle at closest approach to z-axis)
-        - columns 17->23: masks
+    The module uses **position-based η (EtaOuter)** for the resolution formula,
+    matching C++ Delphes where detector geometry determines resolution.
+    However, the **momentum-based η** is preserved (not smeared).
     
-    NOTE: Position-Eta is used for evaluating the resolution formula, but Momentum-Eta is updated
-
-    The resolution formula from CMS card (for charged hadrons):
-        (abs(eta_outer) <= 0.5) * (pt > 0.1) * sqrt(0.06^2 + pt^2*1.3e-3^2) +
-        (abs(eta_outer) > 0.5 && abs(eta_outer) <= 1.5) * (pt > 0.1) * sqrt(0.10^2 + pt^2*1.7e-3^2) +
-        (abs(eta_outer) > 1.5 && abs(eta_outer) <= 2.5) * (pt > 0.1) * sqrt(0.25^2 + pt^2*3.1e-3^2)
+    After smearing pT:
+    
+    - Px, Py, Pz are recomputed from smeared pT and original η, φ
+    - E is recomputed from the new momentum and original mass
+    - The track resolution is stored in TRACK_RESOLUTION column for use
+      by SimpleCalorimeter in energy flow computation
+    
+    Predefined resolution formulas:
+    
+    - **charged_hadron_cms**: CMS charged hadron momentum resolution
+    - **electron_cms**: CMS electron momentum resolution
+    - **muon_cms**: CMS muon momentum resolution
+    
+    Attributes:
+        resolution_func: Function that computes resolution from (pt, eta_outer)
+        
+    Example:
+        >>> smear = MomentumSmearing(resolution_formula='charged_hadron_cms')
+        >>> smeared_tracks = smear(tracks)
     """
     
     def __init__(
         self, 
-        resolution_formula: Union[str, Callable] = 'charged_hadron_cms',
+        resolution_formula: Union[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = 'charged_hadron_cms',
     ) -> None:
         """
+        Initialize the MomentumSmearing module.
+        
         Args:
-            resolution_formula: Name of predefined formula or custom callable
-            deterministic: If True, no smearing (for testing)
+            resolution_formula: Either a string naming a predefined formula
+                ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a
+                callable that takes (pt, eta_outer) tensors and returns
+                relative resolution values (e.g., 0.06 for 6%).
         """
         super().__init__()
         
@@ -72,28 +87,24 @@ class MomentumSmearing(nn.Module):
         """
         Apply momentum smearing to particles.
         
+        Computes the momentum resolution for each particle, then smears the pT
+        using a log-normal distribution. All momentum components and energy
+        are updated to be consistent with the smeared pT.
+        
         Args:
-            particles: tensor of shape (N, 15) or (B, N, 16)
-                If (N, 15): single event
-                If (B, N, 16): batched events with mask in column 15
+            particles: Tensor of shape (N, N_FEATURES) containing tracks.
+                Required columns:
                 
-                column 0: PID (Particle ID)
-                column 1: Status
-                column 2: Charge
-                column 3: E (Energy)
-                columns 4-6: Px, Py, Pz (3-momentum)
-                column 7: PT (transverse momentum, pre-computed)
-                column 8: Eta (pseudorapidity, pre-computed)
-                column 9: Phi (azimuthal angle, pre-computed)
-                column 10: T (time)
-                columns 11-13: X, Y, Z (position)
-                column 14: Mass
-                column 15: etaOuter (pseudorapidity at outer position)
-                column 16: phiOuter (azimuthal angle at outer position)
-                columns 17->23: masks
+                - PT (col 7): Transverse momentum in GeV
+                - ETA (col 8): Momentum-based pseudorapidity
+                - PHI (col 9): Azimuthal angle
+                - MASS (col 14): Particle mass in GeV
+                - ETA_OUTER (col 15): Position-based pseudorapidity
         
         Returns:
-            smeared_particles: particles with smeared PT
+            Updated tensor of shape (N, N_FEATURES) with smeared momentum.
+            Modified columns: PT, PX, PY, PZ, E, TRACK_RESOLUTION.
+            Original η and φ are preserved.
         """
 
         pt = particles[:, CMAP["PT"]]   # Column 7: PT (transverse momentum)

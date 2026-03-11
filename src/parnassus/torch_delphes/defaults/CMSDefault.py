@@ -1,7 +1,31 @@
+"""
+PyTorch implementation of default CMS detector simulation.
+
+Implements the CMS detector response chain from the Delphes TCL card
+(delphes_card_CMS_6_1.tcl), producing energy flow objects suitable for
+jet clustering and physics analysis.
+
+Detector parameters:
+- Tracker radius: 1.29 m
+- Tracker half-length: 3.0 m
+- Magnetic field: 3.8 T
+
+Processing chain:
+1. ParticlePropagator → propagate particles to tracker surface
+2. Efficiency → apply tracking efficiency (charged hadrons, electrons, muons)
+3. MomentumSmearing → smear track momenta
+4. TrackMerger → combine all tracks
+5. ECal/HCal → calorimeter simulation with energy flow
+6. EFlowMerger → combine tracks and calorimeter objects
+
+Reference:
+    C++ Delphes card: cards/delphes_card_CMS_6_1.tcl
+"""
+
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import List, Dict, Callable, Union, Tuple, Optional
+from typing import Dict
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes import pdg_filters
@@ -12,23 +36,57 @@ from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
 from parnassus.torch_delphes.Merger import Merger
 from parnassus.torch_delphes.EFlowMerger import EFlowMerger
 
-#TODO: Update docstrings
 
 class CMSEnergyFlowDefault(nn.Module):
     """
-    PyTorch implementation of a default CMS Delphes card.
+    PyTorch implementation of the default CMS Delphes detector simulation.
     
-    Combines multiple modules to simulate the full detector response:
-        - ParticlePropagator: Propagates particles through the magnetic field
-        - Efficiency: Applies tracking efficiency based on kinematics
-        - MomentumSmearing: Smears momentum measurements
-        - SimpleCalorimeter: Simulates calorimeter response
-        - Merger: Merges particles into jets
-        - EFlowMerger: Merges charged and neutral particles for eflow reconstruction
+    Simulates the full CMS detector response chain including:
+    
+    - **Tracking**: Particle propagation through 3.8T magnetic field,
+      tracking efficiency, and momentum smearing
+    - **Calorimetry**: ECal and HCal simulation with energy deposits,
+      tower clustering, and energy resolution smearing
+    - **Particle Flow**: Energy flow reconstruction combining tracks
+      and calorimeter deposits
+      
+    The module can operate in two modes controlled by the `debug` flag:
+    
+    - **Normal mode** (debug=False): Returns only final reconstructed objects
+      (Track, Tower, EFlowTrack, EFlowPhoton, EFlowNeutralHadron)
+    - **Debug mode** (debug=True): Returns all intermediate objects for
+      validation against C++ Delphes
+      
+    Attributes:
+        debug: If True, return all intermediate processing stages
+        ParticlePropagator: Propagates particles to tracker surface
+        ChargedHadronTrackingEfficiency: Tracking efficiency for hadrons
+        ElectronTrackingEfficiency: Tracking efficiency for electrons
+        MuonTrackingEfficiency: Tracking efficiency for muons
+        ChargedHadronMomentumSmearing: Momentum resolution for hadrons
+        ElectronMomentumSmearing: Momentum resolution for electrons
+        MuonMomentumSmearing: Momentum resolution for muons
+        TrackMerger: Combines all track types
+        ECal: Electromagnetic calorimeter
+        HCal: Hadronic calorimeter
+        CalorimeterMerger: Combines ECal and HCal towers
+        EFlowMerger: Creates particle flow candidates
+        
+    Example:
+        >>> cms = CMSEnergyFlowDefault(debug=False)
+        >>> results = cms(stable_particles)
+        >>> tracks = results['Track']
+        >>> eflow_tracks = results['EFlowTrack']
     """
     
-    def __init__(self, 
-                 debug: bool = False) -> None:
+    def __init__(self, debug: bool = False) -> None:
+        """
+        Initialize the CMS detector simulation.
+        
+        Args:
+            debug: If True, return all intermediate processing stages
+                for validation. If False, return only final objects.
+        """
         super().__init__()
         self.debug = debug
 
@@ -81,17 +139,41 @@ class CMSEnergyFlowDefault(nn.Module):
 
     def forward(self, stable_particles: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        Apply the CMS Delphes simulation (up to EnergyFlow objects) to the input generator-level event tensors.
+        Apply the full CMS detector simulation to input particles.
+        
+        Processes generator-level stable particles through the complete
+        detector simulation chain: propagation, tracking, calorimetry,
+        and particle flow reconstruction.
         
         Args:
-            stable_particles: Tensor of shape (N_events, N_particles, N_FEATURES) containing generator-level particles
+            stable_particles: Tensor of shape (N, N_FEATURES) containing
+                generator-level stable particles. Should be flattened
+                (not batched by event). Required columns include:
+                
+                - PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI
+                - X, Y, Z, T (production vertex)
+                - MASS, EVENT_NUMBER
         
         Returns:
-            output: Dictionary containing reconstructed particle tensors, e.g.:
-                {
-                    'MergedTower': Tensor of shape (N_events, N_ecal_towers+N_hcal_towers, N_FEATURES) - reconstructed tracks,
-                    'EFlowObject': Tensor of shape (N_events, N_eflow_objects, N_FEATURES) - reconstructed EnergyFlow candidates,
-                }
+            Dictionary mapping branch names to tensors. Contents depend on
+            debug mode:
+            
+            **Normal mode** (debug=False):
+            
+            - 'Track': Merged tracks after smearing
+            - 'Tower': Merged calorimeter towers
+            - 'EFlowTrack': Tracks for particle flow
+            - 'EFlowPhoton': Photon candidates from ECal
+            - 'EFlowNeutralHadron': Neutral hadron candidates from HCal
+            
+            **Debug mode** (debug=True): All of the above plus:
+            
+            - 'ParticleBeforeProp', 'ParticleAfterProp'
+            - 'ChargedHadron', 'Electron', 'Muon', 'NeutralParticle'
+            - 'ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency'
+            - 'ChargedHadronSmeared', 'ElectronSmeared', 'MuonSmeared'
+            - 'ECal_EFlowTrack', 'ECalTower', 'HCalTower'
+            - 'EFlowObject'
         """
         n_part, n_dim = stable_particles.shape
         

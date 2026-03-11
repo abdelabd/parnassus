@@ -1,7 +1,37 @@
+"""
+PyTorch implementation of default ATLAS detector simulation.
+
+Implements the ATLAS detector response chain from the Delphes TCL card
+(delphes_card_ATLAS_6_1.tcl), producing energy flow objects suitable for
+jet clustering and physics analysis.
+
+Detector parameters:
+- Tracker radius: 1.15 m
+- Tracker half-length: 3.51 m  
+- Magnetic field: 2.0 T
+
+Key differences from CMS:
+- ATLAS includes muons in the Tower branch (CalorimeterMerger)
+- Different detector geometry and magnetic field strength
+- Same efficiency/resolution formulas (functionally equivalent in TCL)
+
+Processing chain:
+1. ParticlePropagator → propagate particles to tracker surface
+2. Efficiency → apply tracking efficiency (charged hadrons, electrons, muons)
+3. MomentumSmearing → smear track momenta
+4. TrackMerger → combine all tracks
+5. ECal/HCal → calorimeter simulation with energy flow
+6. CalorimeterMerger → combine ECal towers, HCal towers, AND muons
+7. EFlowMerger → combine tracks and calorimeter objects
+
+Reference:
+    C++ Delphes card: cards/delphes_card_ATLAS_6_1.tcl
+"""
+
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import List, Dict, Callable, Union, Tuple, Optional
+from typing import Dict
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes import pdg_filters
@@ -12,29 +42,66 @@ from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
 from parnassus.torch_delphes.Merger import Merger
 from parnassus.torch_delphes.EFlowMerger import EFlowMerger
 
-#TODO: Update docstrings
 
 class ATLASEnergyFlowDefault(nn.Module):
     """
-    PyTorch implementation of a default CMS Delphes card.
+    PyTorch implementation of the default ATLAS Delphes detector simulation.
     
-    Combines multiple modules to simulate the full detector response:
-        - ParticlePropagator: Propagates particles through the magnetic field
-        - Efficiency: Applies tracking efficiency based on kinematics
-        - MomentumSmearing: Smears momentum measurements
-        - SimpleCalorimeter: Simulates calorimeter response
-        - Merger: Merges particles into jets
-        - EFlowMerger: Merges charged and neutral particles for eflow reconstruction
+    Simulates the full ATLAS detector response chain including:
+    
+    - **Tracking**: Particle propagation through 2.0T magnetic field,
+      tracking efficiency, and momentum smearing
+    - **Calorimetry**: ECal and HCal simulation with energy deposits,
+      tower clustering, and energy resolution smearing
+    - **Particle Flow**: Energy flow reconstruction combining tracks
+      and calorimeter deposits
+      
+    Key difference from CMS: The Tower branch includes muons in addition
+    to ECal and HCal towers, matching the ATLAS TCL card configuration.
+      
+    The module can operate in two modes controlled by the `debug` flag:
+    
+    - **Normal mode** (debug=False): Returns only final reconstructed objects
+      (Track, Tower, EFlowTrack, EFlowPhoton, EFlowNeutralHadron)
+    - **Debug mode** (debug=True): Returns all intermediate objects for
+      validation against C++ Delphes
+      
+    Attributes:
+        debug: If True, return all intermediate processing stages
+        ParticlePropagator: Propagates particles to tracker surface (r=1.15m, z=3.51m)
+        ChargedHadronTrackingEfficiency: Tracking efficiency for hadrons
+        ElectronTrackingEfficiency: Tracking efficiency for electrons
+        MuonTrackingEfficiency: Tracking efficiency for muons
+        ChargedHadronMomentumSmearing: Momentum resolution for hadrons
+        ElectronMomentumSmearing: Momentum resolution for electrons
+        MuonMomentumSmearing: Momentum resolution for muons
+        TrackMerger: Combines all track types
+        ECal: Electromagnetic calorimeter
+        HCal: Hadronic calorimeter
+        CalorimeterMerger: Combines ECal towers, HCal towers, AND muons
+        EFlowMerger: Creates particle flow candidates
+        
+    Example:
+        >>> atlas = ATLASEnergyFlowDefault(debug=False)
+        >>> results = atlas(stable_particles)
+        >>> tracks = results['Track']
+        >>> towers = results['Tower']  # Includes muons!
     """
     
-    def __init__(self, 
-                 debug: bool = False) -> None:
+    def __init__(self, debug: bool = False) -> None:
+        """
+        Initialize the ATLAS detector simulation.
+        
+        Args:
+            debug: If True, return all intermediate processing stages
+                for validation. If False, return only final objects.
+        """
         super().__init__()
         self.debug = debug
 
         self.params = {}
 
-        # ParticlePropagator
+        # ParticlePropagator - ATLAS geometry
         self.ParticlePropagator = ParticlePropagator(
             radius=1.15,
             half_length=3.51,
@@ -81,17 +148,44 @@ class ATLASEnergyFlowDefault(nn.Module):
 
     def forward(self, stable_particles: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        Apply the CMS Delphes simulation (up to EnergyFlow objects) to the input generator-level event tensors.
+        Apply the full ATLAS detector simulation to input particles.
+        
+        Processes generator-level stable particles through the complete
+        detector simulation chain: propagation, tracking, calorimetry,
+        and particle flow reconstruction.
+        
+        Note: Unlike CMS, the ATLAS Tower branch includes muons in addition
+        to calorimeter towers.
         
         Args:
-            stable_particles: Tensor of shape (N_events, N_particles, N_FEATURES) containing generator-level particles
+            stable_particles: Tensor of shape (N, N_FEATURES) containing
+                generator-level stable particles. Should be flattened
+                (not batched by event). Required columns include:
+                
+                - PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI
+                - X, Y, Z, T (production vertex)
+                - MASS, EVENT_NUMBER
         
         Returns:
-            output: Dictionary containing reconstructed particle tensors, e.g.:
-                {
-                    'MergedTower': Tensor of shape (N_events, N_ecal_towers+N_hcal_towers, N_FEATURES) - reconstructed tracks,
-                    'EFlowObject': Tensor of shape (N_events, N_eflow_objects, N_FEATURES) - reconstructed EnergyFlow candidates,
-                }
+            Dictionary mapping branch names to tensors. Contents depend on
+            debug mode:
+            
+            **Normal mode** (debug=False):
+            
+            - 'Track': Merged tracks after smearing
+            - 'Tower': Merged calorimeter towers + muons
+            - 'EFlowTrack': Tracks for particle flow
+            - 'EFlowPhoton': Photon candidates from ECal
+            - 'EFlowNeutralHadron': Neutral hadron candidates from HCal
+            
+            **Debug mode** (debug=True): All of the above plus:
+            
+            - 'ParticleBeforeProp', 'ParticleAfterProp'
+            - 'ChargedHadron', 'Electron', 'Muon', 'NeutralParticle'
+            - 'ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency'
+            - 'ChargedHadronSmeared', 'ElectronSmeared', 'MuonSmeared'
+            - 'ECal_EFlowTrack', 'ECalTower', 'HCalTower'
+            - 'EFlowObject'
         """
         n_part, n_dim = stable_particles.shape
         

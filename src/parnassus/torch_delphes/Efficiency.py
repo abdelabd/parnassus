@@ -1,60 +1,70 @@
 """
 PyTorch implementation of Delphes Efficiency module.
 
-Implements the ChargedHadronTrackingEfficiency from delphes_card_CMS.tcl
-as a differentiable PyTorch module.
-"""
+Applies tracking efficiency based on particle kinematics (pT, η). The efficiency
+determines the probability that a particle is successfully reconstructed as a track.
 
+This module supports different efficiency formulas for:
+- Charged hadrons (pions, kaons, protons)
+- Electrons  
+- Muons
+
+The efficiency is applied stochastically: particles pass with probability equal
+to their computed efficiency value.
+
+Reference:
+    C++ Delphes: modules/Efficiency.cc
+    CMS tracking efficiency: arXiv:1405.6569
+"""
 
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Callable, Union, Tuple, Optional
+from typing import Callable, Union
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes import pdg_filters
 
-#TODO: Update docstrings
 
 class Efficiency(nn.Module):
     """
     PyTorch implementation of Delphes Efficiency module.
     
-    Applies tracking efficiency based on particle kinematics (pt, eta_outer)
-    similar to Delphes ChargedHadronTrackingEfficiency.
+    Applies tracking efficiency based on particle kinematics. The efficiency
+    formula takes (pT, η_outer) and returns a probability [0, 1]. Particles
+    are then stochastically accepted or rejected based on this probability.
     
-    Input shape: (N, N_FEATURES) where:
-        - column 0: PID (Particle ID)
-        - column 1: Status
-        - column 2: Charge
-        - column 3: E (Energy)
-        - columns 4-6: Px, Py, Pz (3-momentum)
-        - column 7: PT (transverse momentum)
-        - column 8: Eta (pseudorapidity)
-        - column 9: Phi (azimuthal angle)
-        - column 10: T (time)
-        - columns 11-13: X, Y, Z (position)
-        - column 14: mass
-        - column 15: etaOuter (pseudorapidity at outer position)
-        - column 16: phiOuter (azimuthal angle at outer position)
-        - columns 17->23: masks
+    The module uses **position-based η (EtaOuter)** for the efficiency formula,
+    matching the C++ Delphes behavior where the track position at the detector
+    surface determines reconstruction efficiency.
     
-    The efficiency formula from CMS card:
-        (pt <= 0.1)   * (0.00) +
-        (abs(eta_outer) <= 1.5) * (pt > 0.1 && pt <= 1.0)   * (0.70) +
-        (abs(eta_outer) <= 1.5) * (pt > 1.0)                * (0.95) +
-        (abs(eta_outer) > 1.5 && abs(eta_outer) <= 2.5) * (pt > 0.1 && pt <= 1.0)   * (0.60) +
-        (abs(eta_outer) > 1.5 && abs(eta_outer) <= 2.5) * (pt > 1.0)                * (0.85) +
-        (abs(eta_outer) > 2.5)                                                * (0.00)
+    Predefined efficiency formulas:
+    
+    - **charged_hadron_cms**: CMS charged hadron tracking efficiency
+    - **electron_cms**: CMS electron tracking efficiency  
+    - **muon_cms**: CMS muon tracking efficiency
+    
+    Attributes:
+        efficiency_formula: Name of formula or callable
+        efficiency_func: The actual efficiency function
+        pdg_filter_func: Optional PDG filter for particle selection
+        
+    Example:
+        >>> eff_module = Efficiency(efficiency_formula='charged_hadron_cms')
+        >>> passed_particles = eff_module(charged_hadrons)
     """
     
     def __init__(
         self, 
-        efficiency_formula: Union[str, Callable] = 'charged_hadron_cms',
+        efficiency_formula: Union[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = 'charged_hadron_cms',
     ) -> None:
         """
+        Initialize the Efficiency module.
+        
         Args:
-            efficiency_formula: Name of predefined formula or custom callable
+            efficiency_formula: Either a string naming a predefined formula
+                ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a 
+                callable that takes (pt, eta_outer) tensors and returns
+                efficiency values in [0, 1].
         """
         super().__init__()
         self.efficiency_formula = efficiency_formula
@@ -78,28 +88,21 @@ class Efficiency(nn.Module):
 
     def forward(self, particles: torch.Tensor) -> torch.Tensor:
         """
-        Apply efficiency filter to particles using mask-based filtering.
+        Apply efficiency filter to particles.
+        
+        Computes the efficiency probability for each particle based on its
+        kinematics, then stochastically accepts or rejects particles.
         
         Args:
-            particles: tensor of shape (N, 15), (N, 16), (B, N, 15), or (B, N, 16)
-                column 0: PID (Particle ID)
-                column 1: Status
-                column 2: Charge
-                column 3: E (Energy)
-                columns 4-6: Px, Py, Pz (3-momentum)
-                column 7: PT (transverse momentum, pre-computed)
-                column 8: Eta (pseudorapidity, pre-computed)
-                column 9: Phi (azimuthal angle, pre-computed)
-                column 10: T (time)
-                columns 11-13: X, Y, Z (position)
-                column 15: etaOuter (pseudorapidity at outer position)
-                column 16: phiOuter (azimuthal angle at outer position)
-                columns 17->23: masks
-
+            particles: Tensor of shape (N, N_FEATURES) containing particles.
+                Required columns:
+                
+                - PT (col 7): Transverse momentum in GeV
+                - ETA_OUTER (col 15): Position-based pseudorapidity at detector
+                
         Returns:
-            filtered_particles: tensor with mask in column 15
-                               Single event: (N, 16) with mask
-                               Batched: (B, N, 16) with updated mask
+            Filtered tensor of shape (M, N_FEATURES) where M ≤ N containing
+            only particles that passed the efficiency cut.
         """
     
         # We want to compute effiency vector based on particles that satisfy:

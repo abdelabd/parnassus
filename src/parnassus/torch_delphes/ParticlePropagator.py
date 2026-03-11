@@ -1,57 +1,66 @@
 """
 PyTorch implementation of Delphes ParticlePropagator module.
 
-Propagates charged and neutral particles from a given vertex to a cylinder
-defined by its radius and half-length, centered at (0,0,0) with axis along z.
+Propagates charged and neutral particles from a given vertex to a cylindrical
+detector surface defined by its radius and half-length, centered at (0,0,0) 
+with the axis along z.
 
 This module:
-1. Propagates neutral particles in straight lines
-2. Propagates charged particles in helical paths through magnetic field
-3. Separates output into: stableParticles, chargedHadrons, electrons, muons, neutralParticles
+1. Propagates neutral particles in straight lines to the detector surface
+2. Propagates charged particles in helical paths through the magnetic field
+3. Computes position-based EtaOuter and PhiOuter at detector intersection
+4. Separates output into five branches: ParticleAfterProp, NeutralParticle, 
+   ChargedHadron, Electron, Muon
+
+Units:
+    - Positions are stored in mm (converted from m during calculations)
+    - Momentum is in GeV
+    - Time T is stored as propagation time * c * 1e3 (mm/c units)
+    - Magnetic field Bz is in Tesla
+    - Detector dimensions (radius, half_length) are in meters
+
+Reference:
+    C++ Delphes: modules/ParticlePropagator.cc
 """
 
 import torch
 import torch.nn as nn
-import numpy as np
 from typing import Tuple, Optional
 
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes import pdg_filters
 
-#TODO: Update docstrings
 
 class ParticlePropagator(nn.Module):
     """
     PyTorch implementation of Delphes ParticlePropagator module.
     
     Propagates particles from production vertex to detector surface (cylinder).
-    Uses masks to separately handle:
-    - Neutral particles (straight line propagation)
-    - Charged particles (helix propagation in magnetic field)
+    Handles three cases:
     
-    Module also computes position-based EtaOuter and PhiOuter from raw data:
-    - EtaOuter: asinh(Z / sqrt(X² + Y²)) - POSITION-based, at intersection with detector
-    - PhiOuter: atan2(Py, Px) (p) - POSITION-based, from closest approach to z-axis
+    1. **Neutral particles**: Straight-line propagation to cylinder surface
+    2. **Charged particles**: Helical propagation through magnetic field
+    3. **Already outside**: Particles starting outside tracker pass through unchanged
     
-    Position-based Eta is used by the Efficiency module (matching C++ Delphes behavior).
+    The module computes position-based quantities at the detector surface:
     
-    Input shape: (N, N_FEATURES) - GenParticle format where:
-        - column 0: PID (Particle ID)
-        - column 1: Status
-        - column 2: Charge
-        - column 3: E (Energy)
-        - columns 4-6: Px, Py, Pz (3-momentum)
-        - column 7: PT 
-        - column 8: Eta
-        - column 9: Phi 
-        - column 10: T (time)
-        - columns 11-13: X, Y, Z (position at production vertex)
-        - column 14: Mass
-        - column 15: EtaOuter (computed here, initially zero)
-        - column 16: PhiOuter (computed here, initially zero)
-        - column 16->23: zeros (reserved for future use)
-
-    Output: Propagated particles in Track format (same 15 columns but with updated positions)
+    - **EtaOuter**: asinh(Z / sqrt(X² + Y²)) at detector intersection
+    - **PhiOuter**: Azimuthal angle at point of closest approach to z-axis
+    
+    For charged particles, the momentum direction (Px, Py, Phi) is updated to 
+    reflect the direction at closest approach to the z-axis, matching C++ Delphes.
+    
+    Attributes:
+        radius: Detector cylinder radius in meters
+        half_length: Detector cylinder half-length in meters  
+        bz: Magnetic field strength in Tesla (along z-axis)
+        radius_max: Maximum radius for valid particle origin
+        half_length_max: Maximum |z| for valid particle origin
+        c_light: Speed of light constant (m/s)
+    
+    Example:
+        >>> propagator = ParticlePropagator(radius=1.29, half_length=3.0, bz=3.8)
+        >>> particles_out, neutrals, charged_hadrons, electrons, muons = propagator(particles)
     """
     
     def __init__(
@@ -86,16 +95,41 @@ class ParticlePropagator(nn.Module):
         particles: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Propagate particles to detector surface using mask-based filtering.
+        Propagate particles to the detector surface.
+        
+        Processes all input particles and returns five separate tensors for
+        different particle categories. Each output tensor contains only the
+        particles that passed propagation for that category.
         
         Args:
-            particles: tensor of shape (N, N_FEATURES) - NOT (B, N, N_FEATURES))
-                i.e. MUST BE UNBATCHED/FLATTENED, NOT GROUPED BY EVENT
-
+            particles: Tensor of shape (N, N_FEATURES) containing generator-level
+                particles. Must be flattened (not batched by event). Key columns:
+                
+                - PID (col 0): PDG particle ID
+                - CHARGE (col 2): Electric charge
+                - E (col 3): Energy in GeV
+                - PX, PY, PZ (cols 4-6): Momentum components in GeV
+                - PT (col 7): Transverse momentum in GeV
+                - X, Y, Z (cols 11-13): Production vertex in mm
+                - T (col 10): Production time
+                
         Returns:
-            dict with keys 'ParticleAfterProp', 'ChargedHadron', etc.
-                Each value is a tensor of shape (N, N_FEATURES) where column PASS_PROP is the mask
-                (1.0 = particle survived, 0.0 = filtered out)
+            Tuple of 5 tensors, each of shape (N_i, N_FEATURES):
+            
+            - **particles_propagated**: All particles that passed propagation,
+              with updated positions (X, Y, Z, T) at detector surface
+            - **neutrals**: Neutral particles (photons, neutral hadrons, etc.)
+            - **charged_hadrons**: Charged hadrons (pions, kaons, protons, etc.)
+            - **electrons**: Electrons and positrons (|PDG| = 11)
+            - **muons**: Muons and antimuons (|PDG| = 13)
+            
+            For the individual particle branches (neutrals, charged_hadrons, 
+            electrons, muons), the X, Y, Z, T values are reset to the 
+            production vertex for consistency with C++ Delphes Track output.
+            
+        Note:
+            Charged particles that fail to reach the detector (helix doesn't
+            intersect cylinder) are filtered out and not included in any output.
         """
         
         # TODO: Remove after debugging
@@ -233,11 +267,25 @@ class ParticlePropagator(nn.Module):
         e: torch.Tensor
     ) -> torch.Tensor:
         """
-        Propagate neutral particles in straight lines.
-        Updates positions in-place for particles where mask=True.
+        Propagate neutral particles in straight lines to detector surface.
         
-        Solves: pt^2*t^2 + 2*(px*x + py*y)*t - (radius^2 - x^2 - y^2) = 0
-        for time t to reach detector cylinder.
+        For neutral particles, trajectories are straight lines. The intersection
+        with the detector cylinder is found by solving the quadratic equation
+        for the time to reach either the cylindrical surface or the endcaps.
+        
+        The time T is updated as: T_new = T_old + t * E * 1e3
+        where t is the propagation time and E is the energy (speed = c for neutrals).
+        
+        Args:
+            particles: Full particle tensor to update in-place
+            mask: Boolean mask indicating which particles to propagate
+            x, y, z: Initial positions in meters
+            px, py, pz: Momentum components in GeV
+            pt: Transverse momentum in GeV
+            e: Energy in GeV
+            
+        Returns:
+            Updated particles tensor with propagated positions for masked particles
         """
         
         # Convert mask to boolean if needed (it might be int64 from operations)
@@ -319,9 +367,34 @@ class ParticlePropagator(nn.Module):
     ) -> torch.Tensor:
         """
         Propagate charged particles in helical paths through magnetic field.
-        Updates positions in-place for particles where mask=True.
         
-        This implements the helix propagation from C++ Delphes ParticlePropagator.
+        In a uniform magnetic field Bz along the z-axis, charged particles follow
+        helical trajectories. The helix parameters are computed from the particle's
+        momentum and charge, and the intersection with the detector cylinder is found.
+        
+        Key physics:
+        
+        - Helix radius: r = pt / (q * Bz) * c
+        - Gyration frequency: ω = q * Bz / (γm)
+        - z-velocity: vz = pz * c / E (constant along helix)
+        
+        The momentum direction (Px, Py, Phi) is updated to the value at the point
+        of closest approach to the z-axis, matching C++ Delphes behavior.
+        
+        The time T is updated as: T_new = T_old + t * c_light * 1e3
+        
+        Args:
+            particles: Full particle tensor to update in-place
+            mask: Boolean mask indicating which particles to propagate
+            x, y, z: Initial positions in meters
+            px, py, pz: Momentum components in GeV
+            pt: Transverse momentum in GeV
+            e: Energy in GeV
+            q: Electric charge
+            
+        Returns:
+            Updated particles tensor. Particles that fail to reach the detector
+            (helix doesn't intersect cylinder) have their positions set to zero.
         """
         
         # Convert mask to boolean if needed (it might be int64 from operations)
