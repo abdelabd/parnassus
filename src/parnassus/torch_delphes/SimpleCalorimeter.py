@@ -455,7 +455,7 @@ class SimpleCalorimeter(nn.Module):
             track_tower_eta_center[track_sigma_valid],
             track_energy[track_sigma_valid]
         )
-        
+
         # Determine energy_guess based on resolution comparison
         # C++: if(sigma / momentum.E() < track->TrackResolution) energyGuess = energy; else energyGuess = momentum.E()
         calo_relative_sigma = track_calo_sigma / (track_energy + 1e-30)  # Avoid div by zero
@@ -912,6 +912,7 @@ class SimpleCalorimeter(nn.Module):
             1.5 < |eta| <= 2.5: (2.16 + 5.6*(|eta|-2)^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
             2.5 < |eta| <= 5.0: sqrt(E^2*0.107^2 + E*2.08^2)
         """
+        energy = energy.to(torch.float64)
         abs_eta = torch.abs(eta)
         
         # Barrel + Endcap: |eta| <= 3.2
