@@ -134,6 +134,7 @@ class CMSEnergyFlowDefault(nn.Module):
                 "ChargedHadron": charged_hadrons_propagated,
                 "Electron": electrons_propagated,
                 "Muon": muons_propagated,
+                "NeutralParticle": neutrals_propagated,
 
                 "ChargedHadronEfficiency": charged_hadrons_eff,
                 "ElectronEfficiency": electrons_eff,

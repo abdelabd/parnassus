@@ -128,6 +128,7 @@ def validate_against_benchmark(
             ('ChargedHadron', track_kinematic_vars),
             ('Electron', track_kinematic_vars),
             ('Muon', track_kinematic_vars),
+            ('NeutralParticle', track_kinematic_vars),
             ('ChargedHadronEfficiency', track_kinematic_vars),
             ('ElectronEfficiency', track_kinematic_vars),
             ('MuonEfficiency', track_kinematic_vars),
