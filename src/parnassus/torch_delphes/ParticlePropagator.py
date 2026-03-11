@@ -164,7 +164,7 @@ class ParticlePropagator(nn.Module):
         z_out = particles[already_outside_tracker, CMAP["Z"]] * 1.0e-3  # mm to m
         r_xy_out = torch.sqrt(x_out**2 + y_out**2)
         eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
-        particles[already_outside_tracker, CMAP["ETA"]] = eta_out
+        particles[already_outside_tracker, CMAP["ETA_OUTER"]] = eta_out
     
         # ==================== FILTER CHARGED PARTICLES THAT FAILED PROPAGATION ====================
         # C++ Delphes: for charged particles, only add to output if r_t > 0.0 (line 338)
