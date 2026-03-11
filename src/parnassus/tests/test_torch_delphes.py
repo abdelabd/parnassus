@@ -626,7 +626,7 @@ def main(
     output_file: str, 
     benchmark_file: str, 
     validation_dir: Path,
-    detector: str = "CMS",
+    detector: str,
     max_events: Optional[int] = None, 
     batch_size: int = 1_000_000, 
     debug: bool = False
@@ -823,7 +823,7 @@ if __name__ == "__main__":
             print(f"  Please run the full pipeline first (without --skip-gen) to generate output files.")
     else:
         # Run full pipeline
-        main(input_fpath, output_fpath, benchmark_fpath, validation_dir, max_events=args.num_events, batch_size=args.batch_size, debug=args.debug)
+        main(input_fpath, output_fpath, benchmark_fpath, validation_dir, detector=args.detector, max_events=args.num_events, batch_size=args.batch_size, debug=args.debug)
         
         # If --validate-event was specified, run single-event validation after full pipeline
         if args.specific_event is not None:
