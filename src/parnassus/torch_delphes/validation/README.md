@@ -34,5 +34,10 @@ g++ -O2 -std=c++17 pythia_cards/HZZ4l.cc -o bin/HZZ4l $(bin/pythia8-config --cxx
 python validate_torch_delphes.py --det=CMS --process=HZZ4l
 ```
 
+To validate all intermediate products, pass the `--debug` flag:
+```
+python validate_torch_delphes.py --det=CMS --process=HZZ4l --det
+```
+
 ### 4. Inspect validation plots at `validation_plots`/
 

@@ -247,6 +247,7 @@ class CMSEnergyFlowDefault(nn.Module):
                 "EFlowTrack": hcal_tracks,
                 "EFlowPhoton": eflow_photons, 
                 "EFlowNeutralHadron": eflow_neutral_hadrons,
+                "EFlowObject": eflow_objects,
             }
 
     def _setup_ECal(self):

@@ -180,6 +180,7 @@ def validate_against_benchmark(
             ('EFlowTrack', track_kinematic_vars),
             ('EFlowPhoton', tower_kinematic_vars),
             ('EFlowNeutralHadron', tower_kinematic_vars),
+            ('EFlowObject', eflow_kinematic_vars),
         ]
     
     print(f"\nValidating branches: {', '.join([b[0] for b in branches])}")
