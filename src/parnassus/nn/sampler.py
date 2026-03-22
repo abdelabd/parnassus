@@ -55,7 +55,7 @@ class Sampler(ABC):
         mask: Tensor | None = None,
         device: torch.device = default_device,
     ):
-        fastsim = self.distribution.sample(shape).to(device)
+        fastsim = self.distribution.sample(shape).to(device).to(torch.float32)
         if mask is not None and self.zero_init_padded and mask.shape[-1] == 2:
             fastsim[~mask[..., 1]] = 0
         return fastsim

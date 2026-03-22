@@ -286,11 +286,11 @@ def get_mock_input_data(
     mask = rng.random((BS, L)) > 0.5 if mode == "evt" else rng.random((BS, L, 2)) > 0.5
     fs_data = rng.random((BS, num_fs_feats)) if mode == "evt" else rng.random((BS, L, num_fs_feats))
     return {
-        "fs_data": Tensor(fs_data),
-        "ctxt_data": Tensor(rng.random((BS, L, num_ctxt_feats))),
+        "fs_data": Tensor(fs_data).float(),
+        "ctxt_data": Tensor(rng.random((BS, L, num_ctxt_feats))).float(),
         "mask": Tensor(mask).bool(),
-        "ctxt_global_data": Tensor(rng.random((BS, num_global_feats))),
-        "timestep": Tensor(rng.random((BS, 1))),
+        "ctxt_global_data": Tensor(rng.random((BS, num_global_feats))).float(),
+        "timestep": Tensor(rng.random((BS, 1))).float(),
     }
 
 
