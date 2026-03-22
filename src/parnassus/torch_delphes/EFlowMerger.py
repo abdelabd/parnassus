@@ -114,21 +114,16 @@ class EFlowMerger(nn.Module):
     def _transform_tracks(self, tracks: torch.Tensor) -> torch.Tensor:
         """Transform Track objects for ParticleFlow representation.
 
-        For ParticleFlow, the Eta field should be the position eta (EtaOuter),
-        not the momentum eta. This ensures consistency with calorimeter towers.
+        Actually does nothing, except copying the input tensor.
 
         Args:
             tracks: (N, N_FEATURES) Track objects
 
         Returns
         -------
-            transformed: (N, N_FEATURES) Track objects with Eta set to EtaOuter
+            transformed: (N, N_FEATURES)
         """
         tracks = tracks.clone()
-
-        # Set Eta to EtaOuter (position eta at calorimeter edge)
-        # This is the key transformation for ParticleFlow consistency
-        tracks[:, ColumnMap.ETA] = tracks[:, ColumnMap.ETA_OUTER]
 
         # Note: X, Y, Z should already be non-zero for tracks (from vertex position)
         # PID, Charge, E, PT, Phi, etc. remain unchanged
