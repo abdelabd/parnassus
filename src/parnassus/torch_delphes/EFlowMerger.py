@@ -17,7 +17,6 @@ Reference:
     See also: EFlowMerger.md for validation details
 """
 
-
 import torch
 from torch import nn
 
@@ -34,26 +33,26 @@ from .tensor_utils import (
 
 class EFlowMerger(nn.Module):
     """Merges Track and Tower objects into ParticleFlowCandidate format.
-    
+
     This merger takes exactly three input streams and applies specific
     transformations to each before concatenating:
-    
+
     1. **Tracks** (e.g., from HCal/eflowTracks):
        - Eta field is set to EtaOuter (position-based pseudorapidity)
        - All other fields preserved
-       
+
     2. **Photons** (e.g., from ECal/eflowPhotons):
        - PID set to 22 (photon PDG code)
        - X, Y, Z, T set to 0 (towers have no vertex position)
-       
+
     3. **Neutral Hadrons** (e.g., from HCal/eflowNeutralHadrons):
        - PID set to 0 (C++ Delphes convention for neutral hadrons)
        - X, Y, Z, T set to 0 (towers have no vertex position)
-    
+
     Note:
         The order of inputs matters! The transformations are applied based
         on position in the input list, not based on particle content.
-        
+
     Example:
         >>> merger = EFlowMerger()
         >>> eflow = merger([tracks, photons, neutral_hadrons])
@@ -68,7 +67,7 @@ class EFlowMerger(nn.Module):
 
         Args:
             input_arrays: List of exactly 3 tensors:
-            
+
                 - [0] tracks: (N_tracks, N_FEATURES) - Track objects
                 - [1] photons: (N_photons, N_FEATURES) - ECal tower objects
                 - [2] neutral_hadrons: (N_neutrals, N_FEATURES) - HCal tower objects
@@ -77,7 +76,7 @@ class EFlowMerger(nn.Module):
         -------
             Merged tensor of shape (N_total, N_FEATURES) containing all
             ParticleFlowCandidate objects with appropriate transformations applied.
-            
+
         Raises
         ------
             ValueError: If input_arrays does not contain exactly 3 tensors.
@@ -110,9 +109,11 @@ class EFlowMerger(nn.Module):
 
         if len(all_objects) == 0:
             # No objects - return empty tensor
-            return torch.zeros((0, tracks.shape[1] if tracks.shape[0] > 0 else photons.shape[1]),
-                             dtype=tracks.dtype if tracks.shape[0] > 0 else photons.dtype,
-                             device=tracks.device if tracks.shape[0] > 0 else photons.device)
+            return torch.zeros(
+                (0, tracks.shape[1] if tracks.shape[0] > 0 else photons.shape[1]),
+                dtype=tracks.dtype if tracks.shape[0] > 0 else photons.dtype,
+                device=tracks.device if tracks.shape[0] > 0 else photons.device,
+            )
 
         merged = torch.cat(all_objects, dim=0)
 

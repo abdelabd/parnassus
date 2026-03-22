@@ -11,22 +11,21 @@ Reference:
     C++ Delphes: modules/Merger.cc
 """
 
-
 import torch
 from torch import nn
 
 
 class Merger(nn.Module):
     """PyTorch implementation of Delphes Merger module.
-    
+
     Concatenates multiple particle tensors into a single output tensor along
     the particle dimension. No transformations are applied to the particles;
     all properties are preserved exactly as input.
-    
+
     This is the simplest merger that just combines collections. For mergers
     that need to transform particles (e.g., setting PID, zeroing positions),
     use EFlowMerger instead.
-    
+
     Example:
         >>> merger = Merger()
         >>> tracks = merger([charged_hadrons, electrons, muons])
@@ -39,12 +38,12 @@ class Merger(nn.Module):
 
     def forward(self, input_tensors: list[torch.Tensor]) -> torch.Tensor:
         """Concatenate multiple particle tensors.
-        
+
         Args:
             input_tensors: List of tensors, each of shape (N_i, N_FEATURES).
                 All tensors must have the same number of features (columns).
                 Empty tensors (N_i = 0) are handled gracefully.
-                
+
         Returns
         -------
             Concatenated tensor of shape (sum(N_i), N_FEATURES) containing

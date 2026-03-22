@@ -30,27 +30,28 @@ from parnassus.torch_delphes.tensor_utils import N_FEATURES
 
 class SimpleCalorimeter(nn.Module):
     """PyTorch implementation of Delphes SimpleCalorimeter module.
-    
+
     Input:
         particles: (N_particles, N_FEATURES) - stable particles after propagation
         tracks: (N_tracks, N_FEATURES) - merged tracks after momentum smearing
-    
+
     Output:
         towers: (N_towers, N_FEATURES) - calorimeter towers with smeared energy
         eflow_tracks: (N_eflow_tracks, N_FEATURES) - tracks for particle flow
         eflow_excess_neutrals: (N_eflow_excess_neutrals, N_FEATURES) - neutral excess towers
     """
 
-    def __init__(self,
-        eta_bins: list[float],           # From TCL EtaPhiBins
-        phi_bins: list[list[float]],     # Phi bins per eta bin - len must equal len(eta_bins)
+    def __init__(
+        self,
+        eta_bins: list[float],  # From TCL EtaPhiBins
+        phi_bins: list[list[float]],  # Phi bins per eta bin - len must equal len(eta_bins)
         energy_fractions: dict[int, float],  # PDG → fraction
         resolution_formula: str | Callable = "ecal_cms",
         energy_min: float = 0.5,
         energy_sig_min: float = 2.0,
         is_ecal: bool = True,
         smear_tower_center: bool = True,  # If True, smear eta/phi uniformly within bin
-        compute_phi_bins_fn: Callable | None = None  # Custom phi bin computation function
+        compute_phi_bins_fn: Callable | None = None,  # Custom phi bin computation function
     ) -> None:
         super().__init__()
 
@@ -92,12 +93,12 @@ class SimpleCalorimeter(nn.Module):
 
     def _setup_phi_bins_2d(self, phi_bins: list[list[float]]) -> None:
         """Setup phi bins as a padded 2D tensor for vectorized lookups.
-        
+
         Creates:
         - _phi_bins_2d: (n_eta_bins, max_n_phi_bins) tensor, padded with +inf
         - _n_phi_bins_per_eta: (n_eta_bins,) tensor with count of valid phi bins per eta
-        
-        The +inf padding ensures searchsorted returns the last valid index for 
+
+        The +inf padding ensures searchsorted returns the last valid index for
         any phi value when that eta bin has fewer phi bins than the maximum.
         """
         n_eta_bins = len(phi_bins)
@@ -116,16 +117,17 @@ class SimpleCalorimeter(nn.Module):
         self.register_buffer("_n_phi_bins_per_eta", n_phi_bins_per_eta)
         self._max_n_phi_bins = max_n_phi_bins
 
-    def forward(self,
+    def forward(
+        self,
         particles: torch.Tensor,  # (N_particles, N_FEATURES) - can span multiple events
-        tracks: torch.Tensor      # (N_tracks, N_FEATURES) - can span multiple events
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tracks: torch.Tensor,  # (N_tracks, N_FEATURES) - can span multiple events
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Process particles and tracks from one or more events.
-        
+
         Supports batched processing: particles and tracks can come from multiple events,
         identified by their EVENT_NUMBER column. Towers are aggregated per-event using
         event-indexed tower keys to prevent cross-event mixing.
-        
+
         Returns
         -------
             eflow_tracks: (N_eflow_tracks, N_FEATURES) - tracks for particle flow
@@ -227,20 +229,18 @@ class SimpleCalorimeter(nn.Module):
         #       Tracks create tower hits regardless of fraction; the fraction check
         #       only affects whether they contribute to fTrackEnergy.
         valid_particle_tower_idx = torch.where(
-            particle_valid,
-            particle_tower_idx,
-            torch.full_like(particle_tower_idx, -1)
+            particle_valid, particle_tower_idx, torch.full_like(particle_tower_idx, -1)
         )
         valid_track_tower_idx = torch.where(
             track_valid,  # NOT filtered by fraction for tower creation
             track_tower_idx,
-            torch.full_like(track_tower_idx, -1)
+            torch.full_like(track_tower_idx, -1),
         )
 
         # Combine all valid tower indices to find unique towers
         all_tower_idx = torch.cat([
             valid_particle_tower_idx[particle_valid],
-            valid_track_tower_idx[track_valid]  # NOT filtered by fraction
+            valid_track_tower_idx[track_valid],  # NOT filtered by fraction
         ])
         unique_tower_idx = torch.unique(all_tower_idx[all_tower_idx >= 0])
         n_towers = len(unique_tower_idx)
@@ -248,8 +248,9 @@ class SimpleCalorimeter(nn.Module):
         # Create mapping from global tower index to compact tower index [0, n_towers)
         # Size must accommodate all events: n_events * n_towers_per_event
         max_global_tower_idx = n_events * n_towers_per_event
-        tower_idx_map = torch.full((max_global_tower_idx,), -1,
-                                    dtype=torch.long, device=particles.device)
+        tower_idx_map = torch.full(
+            (max_global_tower_idx,), -1, dtype=torch.long, device=particles.device
+        )
         tower_idx_map[unique_tower_idx] = torch.arange(n_towers, device=particles.device)
 
         # Map particles and tracks to compact tower indices
@@ -261,12 +262,12 @@ class SimpleCalorimeter(nn.Module):
         particle_compact_idx = torch.where(
             particle_valid,
             tower_idx_map[particle_tower_idx_clamped],
-            torch.full_like(particle_tower_idx, -1)
+            torch.full_like(particle_tower_idx, -1),
         )
         track_compact_idx = torch.where(
             track_valid & track_has_fraction,
             tower_idx_map[track_tower_idx_clamped],
-            torch.full_like(track_tower_idx, -1)
+            torch.full_like(track_tower_idx, -1),
         )
 
         # Aggregate particle energies per tower using scatter_add
@@ -275,16 +276,14 @@ class SimpleCalorimeter(nn.Module):
         tower_energy.scatter_add_(
             0,
             particle_compact_idx[valid_particle_mask],
-            particle_weighted_energy[valid_particle_mask]
+            particle_weighted_energy[valid_particle_mask],
         )
 
         # Aggregate track energies per tower
         tower_track_energy = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
         valid_track_mask = track_compact_idx >= 0
         tower_track_energy.scatter_add_(
-            0,
-            track_compact_idx[valid_track_mask],
-            track_weighted_energy[valid_track_mask]
+            0, track_compact_idx[valid_track_mask], track_weighted_energy[valid_track_mask]
         )
 
         # 4b. Compute Time-Weighted Average per Tower ########
@@ -297,7 +296,7 @@ class SimpleCalorimeter(nn.Module):
         particle_time = particles[:, CMAP["T"]]
 
         # Compute E^2 weights for particles (weighted_energy^2)
-        particle_time_weight = particle_weighted_energy ** 2
+        particle_time_weight = particle_weighted_energy**2
 
         # Compute E^2 * T for particles
         particle_time_weighted = particle_time_weight * particle_time
@@ -307,15 +306,13 @@ class SimpleCalorimeter(nn.Module):
         tower_time_weighted.scatter_add_(
             0,
             particle_compact_idx[valid_particle_mask],
-            particle_time_weighted[valid_particle_mask]
+            particle_time_weighted[valid_particle_mask],
         )
 
         # Aggregate time weights per tower
         tower_time_weight = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
         tower_time_weight.scatter_add_(
-            0,
-            particle_compact_idx[valid_particle_mask],
-            particle_time_weight[valid_particle_mask]
+            0, particle_compact_idx[valid_particle_mask], particle_time_weight[valid_particle_mask]
         )
 
         # Compute final tower time: time = time_weighted_sum / weight_sum
@@ -323,7 +320,7 @@ class SimpleCalorimeter(nn.Module):
         tower_time = torch.where(
             tower_time_weight > 1e-9,
             tower_time_weighted / tower_time_weight,
-            torch.zeros_like(tower_time_weighted)
+            torch.zeros_like(tower_time_weighted),
         )
 
         # Extract event_idx, eta_bin, and phi_bin from global tower index
@@ -386,9 +383,9 @@ class SimpleCalorimeter(nn.Module):
         # Tower energy is zeroed if below minimum or below significance threshold
         below_min = tower_energy_smeared < self.energy_min
         below_sig = tower_energy_smeared < self.energy_sig_min * sigma_after
-        tower_energy_final = torch.where(below_min | below_sig,
-                                         torch.zeros_like(tower_energy_smeared),
-                                         tower_energy_smeared)
+        tower_energy_final = torch.where(
+            below_min | below_sig, torch.zeros_like(tower_energy_smeared), tower_energy_smeared
+        )
 
         # 6b. Smear Tower Position (AFTER resolution smearing) ########
         # C++: Position smearing happens AFTER energy smearing/thresholds
@@ -399,8 +396,12 @@ class SimpleCalorimeter(nn.Module):
         #       eta = fTowerEta;  phi = fTowerPhi;
         #   }
         if self.smear_tower_center:
-            tower_eta = tower_eta_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_eta_hi - tower_eta_lo)
-            tower_phi = tower_phi_lo + torch.rand(n_towers, dtype=torch.float64, device=particles.device) * (tower_phi_hi - tower_phi_lo)
+            tower_eta = tower_eta_lo + torch.rand(
+                n_towers, dtype=torch.float64, device=particles.device
+            ) * (tower_eta_hi - tower_eta_lo)
+            tower_phi = tower_phi_lo + torch.rand(
+                n_towers, dtype=torch.float64, device=particles.device
+            ) * (tower_phi_hi - tower_phi_lo)
         else:
             tower_eta = tower_eta_center
             tower_phi = tower_phi_center
@@ -436,13 +437,14 @@ class SimpleCalorimeter(nn.Module):
         # Use bin center (tower_eta_center) for resolution, not smeared position
         # For tracks with valid tower assignment, directly index into tower_eta_center
         valid_tower_mask = track_compact_idx >= 0
-        track_tower_eta_center[valid_tower_mask] = tower_eta_center[track_compact_idx[valid_tower_mask]]
+        track_tower_eta_center[valid_tower_mask] = tower_eta_center[
+            track_compact_idx[valid_tower_mask]
+        ]
 
         # Compute calorimeter sigma at tower eta CENTER using track energy
         # C++: sigma = fResolutionFormula->Eval(0.0, fTowerEta, 0.0, momentum.E())
         track_calo_sigma[track_sigma_valid] = self.resolution_func(
-            track_tower_eta_center[track_sigma_valid],
-            track_energy[track_sigma_valid]
+            track_tower_eta_center[track_sigma_valid], track_energy[track_sigma_valid]
         )
 
         # Determine energy_guess based on resolution comparison
@@ -454,7 +456,7 @@ class SimpleCalorimeter(nn.Module):
         track_energy_guess = torch.where(
             use_weighted_energy & track_sigma_valid,
             track_weighted_energy,  # energy = momentum.E() * fraction
-            torch.where(track_sigma_valid, track_energy, torch.zeros_like(track_energy))
+            torch.where(track_sigma_valid, track_energy, torch.zeros_like(track_energy)),
         )
 
         # Compute per-track sigma squared: (track_resolution * energy_guess)^2
@@ -463,9 +465,7 @@ class SimpleCalorimeter(nn.Module):
         # Aggregate track_sigma_sq per tower using scatter_add
         tower_track_sigma_sq = torch.zeros(n_towers, dtype=torch.float64, device=tracks.device)
         tower_track_sigma_sq.scatter_add_(
-            0,
-            track_compact_idx[track_sigma_valid],
-            track_sigma_sq[track_sigma_valid]
+            0, track_compact_idx[track_sigma_valid], track_sigma_sq[track_sigma_valid]
         )
 
         # Final tower track sigma = sqrt(sum of squares)
@@ -499,14 +499,14 @@ class SimpleCalorimeter(nn.Module):
         # neutralSigma = neutralEnergy / sqrt(trackSigma² + sigma²)
         denominator = torch.sqrt(tower_track_sigma**2 + sigma**2)
         neutral_sigma = torch.where(
-            denominator > 0,
-            neutral_energy / denominator,
-            torch.zeros_like(neutral_energy)
+            denominator > 0, neutral_energy / denominator, torch.zeros_like(neutral_energy)
         )
 
         # Case A: Neutral excess is significant
         # Condition: neutralEnergy > EnergyMin AND neutralSigma > EnergySignificanceMin
-        significant_neutral = (neutral_energy > self.energy_min) & (neutral_sigma > self.energy_sig_min)
+        significant_neutral = (neutral_energy > self.energy_min) & (
+            neutral_sigma > self.energy_sig_min
+        )
 
         # Case B: Neutral excess is NOT significant but has track energy
         # Condition: NOT significant_neutral AND tower_track_energy > 0
@@ -516,27 +516,21 @@ class SimpleCalorimeter(nn.Module):
         # weightTrack = 1 / (trackSigma^2), weightCalo = 1 / (sigma^2)
         # bestEnergyEstimate = (weightTrack * trackEnergy + weightCalo * energy) / (weightTrack + weightCalo)
         weight_track = torch.where(
-            tower_track_sigma > 0,
-            1.0 / (tower_track_sigma**2),
-            torch.zeros_like(tower_track_sigma)
+            tower_track_sigma > 0, 1.0 / (tower_track_sigma**2), torch.zeros_like(tower_track_sigma)
         )
-        weight_calo = torch.where(
-            sigma > 0,
-            1.0 / (sigma**2),
-            torch.zeros_like(sigma)
-        )
+        weight_calo = torch.where(sigma > 0, 1.0 / (sigma**2), torch.zeros_like(sigma))
 
         total_weight = weight_track + weight_calo
         best_energy_estimate = torch.where(
             total_weight > 0,
             (weight_track * tower_track_energy + weight_calo * energy) / total_weight,
-            tower_track_energy  # Fallback to track energy if no weights
+            tower_track_energy,  # Fallback to track energy if no weights
         )
 
         rescale_factor = torch.where(
             tower_track_energy > 0,
             best_energy_estimate / tower_track_energy,
-            torch.ones_like(tower_track_energy)
+            torch.ones_like(tower_track_energy),
         )
 
         # ===== Create Tower output =====
@@ -594,7 +588,7 @@ class SimpleCalorimeter(nn.Module):
         track_rescale_factor[valid_sigma_tower_mask] = torch.where(
             tower_is_rescale & ~tower_is_significant,
             tower_rescale_values,
-            torch.ones_like(tower_rescale_values)
+            torch.ones_like(tower_rescale_values),
         )
 
         # Tracks that become EFlowTracks: either in significant tower OR in rescale tower
@@ -615,11 +609,7 @@ class SimpleCalorimeter(nn.Module):
         rescaled_pt = original_pt * track_rescale_factor
 
         # Only apply to tracks in rescale towers
-        eflow_tracks[:, CMAP["PT"]] = torch.where(
-            track_in_rescale_tower,
-            rescaled_pt,
-            original_pt
-        )
+        eflow_tracks[:, CMAP["PT"]] = torch.where(track_in_rescale_tower, rescaled_pt, original_pt)
 
         # Recompute PX, PY from rescaled PT
         eta = eflow_tracks[:, CMAP["ETA"]]
@@ -627,27 +617,23 @@ class SimpleCalorimeter(nn.Module):
         mass = eflow_tracks[:, CMAP["MASS"]]
 
         eflow_tracks[:, CMAP["PX"]] = torch.where(
-            track_in_rescale_tower,
-            rescaled_pt * torch.cos(phi),
-            eflow_tracks[:, CMAP["PX"]]
+            track_in_rescale_tower, rescaled_pt * torch.cos(phi), eflow_tracks[:, CMAP["PX"]]
         )
         eflow_tracks[:, CMAP["PY"]] = torch.where(
-            track_in_rescale_tower,
-            rescaled_pt * torch.sin(phi),
-            eflow_tracks[:, CMAP["PY"]]
+            track_in_rescale_tower, rescaled_pt * torch.sin(phi), eflow_tracks[:, CMAP["PY"]]
         )
         eflow_tracks[:, CMAP["PZ"]] = torch.where(
-            track_in_rescale_tower,
-            rescaled_pt * torch.sinh(eta),
-            eflow_tracks[:, CMAP["PZ"]]
+            track_in_rescale_tower, rescaled_pt * torch.sinh(eta), eflow_tracks[:, CMAP["PZ"]]
         )
 
         # Recompute E from P and mass
-        p_sq = eflow_tracks[:, CMAP["PX"]]**2 + eflow_tracks[:, CMAP["PY"]]**2 + eflow_tracks[:, CMAP["PZ"]]**2
+        p_sq = (
+            eflow_tracks[:, CMAP["PX"]] ** 2
+            + eflow_tracks[:, CMAP["PY"]] ** 2
+            + eflow_tracks[:, CMAP["PZ"]] ** 2
+        )
         eflow_tracks[:, CMAP["E"]] = torch.where(
-            track_in_rescale_tower,
-            torch.sqrt(p_sq + mass**2),
-            eflow_tracks[:, CMAP["E"]]
+            track_in_rescale_tower, torch.sqrt(p_sq + mass**2), eflow_tracks[:, CMAP["E"]]
         )
 
         # Filter to only EFlow tracks
@@ -656,7 +642,9 @@ class SimpleCalorimeter(nn.Module):
         # ===== Create Tower Tensor with COLUMN_MAP format =====
         # Tower tensor: (n_valid_towers, N_FEATURES)
         r_calo = 1.29  # meters, CMS ECAL radius
-        towers = torch.zeros(n_valid_towers, N_FEATURES, dtype=torch.float64, device=particles.device)
+        towers = torch.zeros(
+            n_valid_towers, N_FEATURES, dtype=torch.float64, device=particles.device
+        )
 
         if n_valid_towers > 0:
             valid_tower_energy = tower_energy_final[tower_has_energy]
@@ -699,7 +687,9 @@ class SimpleCalorimeter(nn.Module):
         # ===== Create EFlowPhoton Tensor with COLUMN_MAP format =====
         # EFlowPhoton tensor: (n_eflow_towers, N_FEATURES)
         # These are towers with significant neutral excess
-        eflow_excess_neutrals = torch.zeros(n_eflow_towers, N_FEATURES, dtype=torch.float64, device=particles.device)
+        eflow_excess_neutrals = torch.zeros(
+            n_eflow_towers, N_FEATURES, dtype=torch.float64, device=particles.device
+        )
 
         if n_eflow_towers > 0:
             # Get event numbers for eflow towers
@@ -741,21 +731,22 @@ class SimpleCalorimeter(nn.Module):
         # Return results
         return eflow_tracks, towers, eflow_excess_neutrals
 
-    def _compute_phi_bins(self,
-        phi: torch.Tensor,           # (N,) phi values
-        eta_bin: torch.Tensor,       # (N,) eta bin indices
+    def _compute_phi_bins(
+        self,
+        phi: torch.Tensor,  # (N,) phi values
+        eta_bin: torch.Tensor,  # (N,) eta bin indices
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute phi bin for each particle/track using variable phi binning per eta.
-        
+
         Uses vectorized operations with padded 2D phi bin tensor.
         Supports custom override via compute_phi_bins_fn in __init__.
-        
+
         In C++ Delphes:
             phiBins = fPhiBins[etaBin];
             itPhiBin = lower_bound(phiBins->begin(), phiBins->end(), position.Phi());
             if(itPhiBin == phiBins->begin() || itPhiBin == phiBins->end()) continue;
             phiBin = distance(phiBins->begin(), itPhiBin);
-        
+
         Returns
         -------
             phi_bin: (N,) phi bin indices
@@ -786,7 +777,9 @@ class SimpleCalorimeter(nn.Module):
         # Compare phi against all bin edges: phi_bins_per_particle is (N, max_n_phi_bins)
         # We want: for each particle i, find smallest j such that phi_bins[i,j] > phi[i]
         # This is equivalent to searchsorted behavior
-        phi_bin = torch.searchsorted(phi_bins_per_particle.contiguous(), phi_expanded.contiguous()).squeeze(1)  # (N,)
+        phi_bin = torch.searchsorted(
+            phi_bins_per_particle.contiguous(), phi_expanded.contiguous()
+        ).squeeze(1)  # (N,)
 
         # Get the number of valid phi bins for each particle's eta bin
         n_phi_bins = self._n_phi_bins_per_eta[eta_bin_clamped]  # (N,)
@@ -802,13 +795,13 @@ class SimpleCalorimeter(nn.Module):
 
     def _setup_fraction_lookup(self) -> None:
         """Setup efficient PDG → energy fraction lookup using a fully dense LUT.
-        
+
         Creates a single dense tensor that covers all PDG IDs up to the maximum
         configured PDG ID (e.g., 1000045 for neutralinos). This enables:
         - Pure tensor operations with no conditional branches
         - Full compatibility with batched processing
         - Clean gradient flow for differentiability
-        
+
         Memory usage is ~8MB for max PDG ID of 1000045, which is negligible.
         """
         # Find the maximum PDG ID we need to handle
@@ -826,17 +819,17 @@ class SimpleCalorimeter(nn.Module):
 
     def _compute_energy_fractions(self, pids: torch.Tensor) -> torch.Tensor:
         """Compute energy fractions for particles based on their PDG IDs.
-        
+
         Uses fully dense LUT lookup - pure tensor operation with no branches.
         Fully compatible with batching and differentiable.
-        
+
         This matches the C++ Delphes behavior:
         1. Look up |PDG ID| in the fraction map
         2. If not found, use the default fraction (PDG=0)
-        
+
         Args:
             pids: (N,) tensor of PDG IDs
-            
+
         Returns
         -------
             fractions: (N,) tensor of energy fractions
@@ -854,7 +847,7 @@ class SimpleCalorimeter(nn.Module):
     @staticmethod
     def _ecal_cms_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
         """ECAL resolution formula from delphes_card_CMS_5_0.tcl.
-        
+
         Formula:
             |eta| <= 1.5: (1 + 0.64*eta^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
             1.5 < |eta| <= 2.5: (2.16 + 5.6*(|eta|-2)^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
@@ -870,15 +863,16 @@ class SimpleCalorimeter(nn.Module):
         barrel_sigma = barrel_factor * common_term
 
         # Endcap: 1.5 < |eta| <= 2.5
-        endcap_factor = 2.16 + 5.6 * (abs_eta - 2.0)**2
+        endcap_factor = 2.16 + 5.6 * (abs_eta - 2.0) ** 2
         endcap_sigma = endcap_factor * common_term
 
         # Forward: 2.5 < |eta| <= 5.0
         forward_sigma = torch.sqrt(energy**2 * 0.107**2 + energy * 2.08**2)
 
         # Select based on eta region
-        sigma = torch.where(abs_eta <= 1.5, barrel_sigma,
-                    torch.where(abs_eta <= 2.5, endcap_sigma, forward_sigma))
+        sigma = torch.where(
+            abs_eta <= 1.5, barrel_sigma, torch.where(abs_eta <= 2.5, endcap_sigma, forward_sigma)
+        )
         # TODO: Should it be zero if eta>5.0, i.e. the below? See delphes_cards/delphes_card_CMS_6_1.tcl, lines 267->269
         # sigma = torch.where(abs_eta <= 1.5, barrel_sigma,
         #             torch.where(abs_eta <= 2.5, endcap_sigma,
@@ -889,7 +883,7 @@ class SimpleCalorimeter(nn.Module):
     @staticmethod
     def _ecal_atlas_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
         """ECAL resolution formula from delphes_card_CMS_5_0.tcl.
-        
+
         Formula:
             |eta| <= 1.5: (1 + 0.64*eta^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
             1.5 < |eta| <= 2.5: (2.16 + 5.6*(|eta|-2)^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
@@ -916,7 +910,7 @@ class SimpleCalorimeter(nn.Module):
     @staticmethod
     def _hcal_cms_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
         """HCAL resolution formula from delphes_card_CMS_5_1.tcl.
-        
+
         Formula:
             |eta| <= 3.0: sqrt(E^2*0.050^2 + E*1.50^2)
             3.0 < |eta| <= 5.0: sqrt(E^2*0.130^2 + E*2.70^2)
@@ -941,7 +935,7 @@ class SimpleCalorimeter(nn.Module):
     @staticmethod
     def _hcal_atlas_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
         """HCAL resolution formula from delphes_card_CMS_5_1.tcl.
-        
+
         Formula:
             |eta| <= 3.0: sqrt(E^2*0.050^2 + E*1.50^2)
             3.0 < |eta| <= 5.0: sqrt(E^2*0.130^2 + E*2.70^2)
@@ -958,8 +952,9 @@ class SimpleCalorimeter(nn.Module):
         forward_sigma = torch.sqrt((energy**2) * (0.09420**2) + energy * (1.00**2))
 
         # Select based on eta region
-        sigma = torch.where(abs_eta <= 1.7, inner_sigma,
-                    torch.where(abs_eta <= 3.2, central_sigma, forward_sigma))
+        sigma = torch.where(
+            abs_eta <= 1.7, inner_sigma, torch.where(abs_eta <= 3.2, central_sigma, forward_sigma)
+        )
 
         # TODO: Should it be zero if eta>4.9, i.e. the below? See delphes_cards/delphes_card_ATLAS_6_1.tcl, lines 334->336
         # sigma = torch.where(abs_eta <= 1.7, inner_sigma,
@@ -971,7 +966,7 @@ class SimpleCalorimeter(nn.Module):
     @staticmethod
     def _log_normal_smear(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         """Apply log-normal smearing to energy values.
-        
+
         C++ implementation:
             if(mean > 0.0) {
                 b = sqrt(log((1.0 + (sigma * sigma) / (mean * mean))));
@@ -980,11 +975,11 @@ class SimpleCalorimeter(nn.Module):
             } else {
                 return 0.0;
             }
-        
+
         Args:
             mean: Tower energy (before smearing)
             sigma: Resolution sigma
-            
+
         Returns
         -------
             Smeared energy values

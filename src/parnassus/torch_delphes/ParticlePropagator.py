@@ -1,14 +1,14 @@
 """PyTorch implementation of Delphes ParticlePropagator module.
 
 Propagates charged and neutral particles from a given vertex to a cylindrical
-detector surface defined by its radius and half-length, centered at (0,0,0) 
+detector surface defined by its radius and half-length, centered at (0,0,0)
 with the axis along z.
 
 This module:
 1. Propagates neutral particles in straight lines to the detector surface
 2. Propagates charged particles in helical paths through the magnetic field
 3. Computes position-based EtaOuter and PhiOuter at detector intersection
-4. Separates output into five branches: ParticleAfterProp, NeutralParticle, 
+4. Separates output into five branches: ParticleAfterProp, NeutralParticle,
    ChargedHadron, Electron, Muon
 
 Units:
@@ -22,7 +22,6 @@ Reference:
     C++ Delphes: modules/ParticlePropagator.cc
 """
 
-
 import torch
 from torch import nn
 
@@ -32,31 +31,31 @@ from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 class ParticlePropagator(nn.Module):
     """PyTorch implementation of Delphes ParticlePropagator module.
-    
+
     Propagates particles from production vertex to detector surface (cylinder).
     Handles three cases:
-    
+
     1. **Neutral particles**: Straight-line propagation to cylinder surface
     2. **Charged particles**: Helical propagation through magnetic field
     3. **Already outside**: Particles starting outside tracker pass through unchanged
-    
+
     The module computes position-based quantities at the detector surface:
-    
+
     - **EtaOuter**: asinh(Z / sqrt(X² + Y²)) at detector intersection
     - **PhiOuter**: Azimuthal angle at point of closest approach to z-axis
-    
-    For charged particles, the momentum direction (Px, Py, Phi) is updated to 
+
+    For charged particles, the momentum direction (Px, Py, Phi) is updated to
     reflect the direction at closest approach to the z-axis, matching C++ Delphes.
-    
+
     Attributes
     ----------
         radius: Detector cylinder radius in meters
-        half_length: Detector cylinder half-length in meters  
+        half_length: Detector cylinder half-length in meters
         bz: Magnetic field strength in Tesla (along z-axis)
         radius_max: Maximum radius for valid particle origin
         half_length_max: Maximum |z| for valid particle origin
         c_light: Speed of light constant (m/s)
-    
+
     Example:
         >>> propagator = ParticlePropagator(radius=1.29, half_length=3.0, bz=3.8)
         >>> particles_out, neutrals, charged_hadrons, electrons, muons = propagator(particles)
@@ -64,10 +63,10 @@ class ParticlePropagator(nn.Module):
 
     def __init__(
         self,
-        radius: float = 1.29,           # Detector radius in meters
-        half_length: float = 3.0,       # Detector half-length in meters
-        bz: float = 3.8,                # Magnetic field in Tesla
-        radius_max: float | None = None,       # Max radius for initial position check
+        radius: float = 1.29,  # Detector radius in meters
+        half_length: float = 3.0,  # Detector half-length in meters
+        bz: float = 3.8,  # Magnetic field in Tesla
+        radius_max: float | None = None,  # Max radius for initial position check
         half_length_max: float | None = None,  # Max half-length for initial position check
     ) -> None:
         """Args:
@@ -89,19 +88,18 @@ class ParticlePropagator(nn.Module):
         self.c_light = 2.99792458e8  # Speed of light in m/s
 
     def forward(
-        self,
-        particles: torch.Tensor
+        self, particles: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Propagate particles to the detector surface.
-        
+
         Processes all input particles and returns five separate tensors for
         different particle categories. Each output tensor contains only the
         particles that passed propagation for that category.
-        
+
         Args:
             particles: Tensor of shape (N, N_FEATURES) containing generator-level
                 particles. Must be flattened (not batched by event). Key columns:
-                
+
                 - PID (col 0): PDG particle ID
                 - CHARGE (col 2): Electric charge
                 - E (col 3): Energy in GeV
@@ -109,22 +107,22 @@ class ParticlePropagator(nn.Module):
                 - PT (col 7): Transverse momentum in GeV
                 - X, Y, Z (cols 11-13): Production vertex in mm
                 - T (col 10): Production time
-                
+
         Returns
         -------
             Tuple of 5 tensors, each of shape (N_i, N_FEATURES):
-            
+
             - **particles_propagated**: All particles that passed propagation,
               with updated positions (X, Y, Z, T) at detector surface
             - **neutrals**: Neutral particles (photons, neutral hadrons, etc.)
             - **charged_hadrons**: Charged hadrons (pions, kaons, protons, etc.)
             - **electrons**: Electrons and positrons (|PDG| = 11)
             - **muons**: Muons and antimuons (|PDG| = 13)
-            
-            For the individual particle branches (neutrals, charged_hadrons, 
-            electrons, muons), the X, Y, Z, T values are reset to the 
+
+            For the individual particle branches (neutrals, charged_hadrons,
+            electrons, muons), the X, Y, Z, T values are reset to the
             production vertex for consistency with C++ Delphes Track output.
-            
+
         Note:
             Charged particles that fail to reach the detector (helix doesn't
             intersect cylinder) are filtered out and not included in any output.
@@ -172,20 +170,17 @@ class ParticlePropagator(nn.Module):
 
         # Separate neutral and charged particles (among those needing propagation)
         no_bfield = 1 if torch.abs(self.bz) < 1.0e-9 else 0
-        neutral_mask = (no_bfield * (torch.ones_like(q, dtype=torch.bool)) + (1 - no_bfield) * (torch.abs(q) < 1.0e-9)) & needs_propagation
+        neutral_mask = (
+            no_bfield * (torch.ones_like(q, dtype=torch.bool))
+            + (1 - no_bfield) * (torch.abs(q) < 1.0e-9)
+        ) & needs_propagation
         charged_mask = (~(torch.abs(q) < 1.0e-9)) & needs_propagation
 
         # ==================== NEUTRAL PARTICLE PROPAGATION ====================
-        particles = self._propagate_neutral(
-            particles, neutral_mask,
-            x, y, z, px, py, pz, pt, e
-        )
+        particles = self._propagate_neutral(particles, neutral_mask, x, y, z, px, py, pz, pt, e)
 
         # ==================== CHARGED PARTICLE PROPAGATION ====================
-        particles = self._propagate_charged(
-            particles, charged_mask,
-            x, y, z, px, py, pz, pt, e, q
-        )
+        particles = self._propagate_charged(particles, charged_mask, x, y, z, px, py, pz, pt, e, q)
 
         # ==================== COMPUTE ETA FOR "ALREADY OUTSIDE" PARTICLES ====================
         # Particles that were already outside tracker don't go through propagation
@@ -222,7 +217,9 @@ class ParticlePropagator(nn.Module):
         # NOTE: Since we will use both the particles object and the specific branch objects, we instantiate the branches as clones
         charged_hadron_pid_mask = mask * pdg_filters.charged_hadron_filter(particles)
         charged_hadrons = particles[charged_hadron_pid_mask > 0.5].to(torch.float32).clone()
-        charged_hadrons_before_prop = particles_before_prop[charged_hadron_pid_mask > 0.5].to(torch.float32)
+        charged_hadrons_before_prop = particles_before_prop[charged_hadron_pid_mask > 0.5].to(
+            torch.float32
+        )
 
         electron_pid_mask = mask * pdg_filters.electron_filter(particles)
         electrons = particles[electron_pid_mask > 0.5].to(torch.float32).clone()
@@ -261,17 +258,17 @@ class ParticlePropagator(nn.Module):
         py: torch.Tensor,
         pz: torch.Tensor,
         pt: torch.Tensor,
-        e: torch.Tensor
+        e: torch.Tensor,
     ) -> torch.Tensor:
         """Propagate neutral particles in straight lines to detector surface.
-        
+
         For neutral particles, trajectories are straight lines. The intersection
         with the detector cylinder is found by solving the quadratic equation
         for the time to reach either the cylindrical surface or the endcaps.
-        
+
         The time T is updated as: T_new = T_old + t * E * 1e3
         where t is the propagation time and E is the energy (speed = c for neutrals).
-        
+
         Args:
             particles: Full particle tensor to update in-place
             mask: Boolean mask indicating which particles to propagate
@@ -279,7 +276,7 @@ class ParticlePropagator(nn.Module):
             px, py, pz: Momentum components in GeV
             pt: Transverse momentum in GeV
             e: Energy in GeV
-            
+
         Returns
         -------
             Updated particles tensor with propagated positions for masked particles
@@ -310,7 +307,7 @@ class ParticlePropagator(nn.Module):
         t_z = torch.where(
             torch.abs(pz_n) > 1e-10,
             (torch.sign(pz_n) * self.half_length - z_n) / pz_n,
-            torch.full_like(pz_n, 1.0e99)
+            torch.full_like(pz_n, 1.0e99),
         )
 
         # Take minimum time
@@ -335,12 +332,18 @@ class ParticlePropagator(nn.Module):
         # We need to map from masked indices to full particle array
         mask_indices = torch.where(mask)[0]
 
-        particles[mask_indices, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
-        particles[mask_indices, CMAP["PHI_OUTER"]] = particles[mask_indices, CMAP["PHI"]]  # PhiOuter (same as momentum phi for neutral)
+        particles[mask_indices, CMAP["ETA_OUTER"]] = (
+            eta_outer  # EtaOuter (position eta at final position)
+        )
+        particles[mask_indices, CMAP["PHI_OUTER"]] = particles[
+            mask_indices, CMAP["PHI"]
+        ]  # PhiOuter (same as momentum phi for neutral)
         particles[mask_indices, CMAP["X"]] = x_t * 1.0e3  # X
         particles[mask_indices, CMAP["Y"]] = y_t * 1.0e3  # Y
         particles[mask_indices, CMAP["Z"]] = z_t * 1.0e3  # Z
-        particles[mask_indices, CMAP["T"]] = particles[mask_indices, CMAP["T"]] + t * e_n * 1.0e3  # T (time in mm/c)
+        particles[mask_indices, CMAP["T"]] = (
+            particles[mask_indices, CMAP["T"]] + t * e_n * 1.0e3
+        )  # T (time in mm/c)
 
         # Store path length (could be stored in a new column if needed)
         # For now we don't have a dedicated column for L in the 16-column format
@@ -359,25 +362,25 @@ class ParticlePropagator(nn.Module):
         pz: torch.Tensor,
         pt: torch.Tensor,
         e: torch.Tensor,
-        q: torch.Tensor
+        q: torch.Tensor,
     ) -> torch.Tensor:
         """Propagate charged particles in helical paths through magnetic field.
-        
+
         In a uniform magnetic field Bz along the z-axis, charged particles follow
         helical trajectories. The helix parameters are computed from the particle's
         momentum and charge, and the intersection with the detector cylinder is found.
-        
+
         Key physics:
-        
+
         - Helix radius: r = pt / (q * Bz) * c
         - Gyration frequency: ω = q * Bz / (γm)
         - z-velocity: vz = pz * c / E (constant along helix)
-        
+
         The momentum direction (Px, Py, Phi) is updated to the value at the point
         of closest approach to the z-axis, matching C++ Delphes behavior.
-        
+
         The time T is updated as: T_new = T_old + t * c_light * 1e3
-        
+
         Args:
             particles: Full particle tensor to update in-place
             mask: Boolean mask indicating which particles to propagate
@@ -386,7 +389,7 @@ class ParticlePropagator(nn.Module):
             pt: Transverse momentum in GeV
             e: Energy in GeV
             q: Electric charge
-            
+
         Returns
         -------
             Updated particles tensor. Particles that fail to reach the detector
@@ -432,7 +435,7 @@ class ParticlePropagator(nn.Module):
         t_z = torch.where(
             torch.abs(vz) > 1e-10,
             (torch.sign(pz_c) * self.half_length - z_c) / vz,
-            torch.full_like(vz, 1.0e99)
+            torch.full_like(vz, 1.0e99),
         )
 
         # Check if helix crosses cylinder sides
@@ -465,7 +468,7 @@ class ParticlePropagator(nn.Module):
         r_t = torch.sqrt(x_t**2 + y_t**2)
 
         # Path length
-        path_length = torch.abs(t) * torch.sqrt(vz**2 + (r * omega)**2)
+        path_length = torch.abs(t) * torch.sqrt(vz**2 + (r * omega) ** 2)
 
         # Only update particles that successfully reached detector
         valid = r_t > 0.0
@@ -490,7 +493,7 @@ class ParticlePropagator(nn.Module):
         phi_final = torch.atan2(py_d, px_d)
 
         # Compute position-based eta at final position (EtaOuter)
-        r_t_xy = torch.sqrt(x_t[valid]**2 + y_t[valid]**2)
+        r_t_xy = torch.sqrt(x_t[valid] ** 2 + y_t[valid] ** 2)
         eta_outer = torch.asinh(z_t[valid] / (r_t_xy + 1e-10))
 
         # Update particles for valid propagations
@@ -500,13 +503,21 @@ class ParticlePropagator(nn.Module):
 
         particles[valid_indices, CMAP["PX"]] = px_d[valid]  # Px (at closest approach)
         particles[valid_indices, CMAP["PY"]] = py_d[valid]  # Py (at closest approach)
-        particles[valid_indices, CMAP["PHI"]] = phi_final[valid]  # Phi = atan2(Py, Px) for perfect consistency
-        particles[valid_indices, CMAP["ETA_OUTER"]] = eta_outer  # EtaOuter (position eta at final position)
-        particles[valid_indices, CMAP["PHI_OUTER"]] = phi_final[valid]  # PhiOuter (same as momentum phi)
+        particles[valid_indices, CMAP["PHI"]] = phi_final[
+            valid
+        ]  # Phi = atan2(Py, Px) for perfect consistency
+        particles[valid_indices, CMAP["ETA_OUTER"]] = (
+            eta_outer  # EtaOuter (position eta at final position)
+        )
+        particles[valid_indices, CMAP["PHI_OUTER"]] = phi_final[
+            valid
+        ]  # PhiOuter (same as momentum phi)
         particles[valid_indices, CMAP["X"]] = x_t[valid] * 1.0e3  # X (m to mm) - final position
         particles[valid_indices, CMAP["Y"]] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
         particles[valid_indices, CMAP["Z"]] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
-        particles[valid_indices, CMAP["T"]] = particles[valid_indices, CMAP["T"]] + t[valid] * self.c_light * 1.0e3  # T
+        particles[valid_indices, CMAP["T"]] = (
+            particles[valid_indices, CMAP["T"]] + t[valid] * self.c_light * 1.0e3
+        )  # T
 
         # Mark invalid particles by setting position to zero
         invalid_indices = mask_indices[~valid]

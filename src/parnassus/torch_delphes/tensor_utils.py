@@ -15,21 +15,21 @@ from tqdm import tqdm
 
 # ==================== TENSOR COLUMN INDICES ====================
 # Columns 0-14 (15 total):
-PID = 0        # Particle ID (PDG code)
-STATUS = 1     # Status (dummy value for Track objects, always 1)
-CHARGE = 2     # Electric charge
-E = 3          # Energy (approximated from P for Track objects)
-PX = 4         # X-component of momentum
-PY = 5         # Y-component of momentum
-PZ = 6         # Z-component of momentum
-PT = 7         # Transverse momentum
-ETA = 8        # Pseudorapidity (momentum)
-PHI = 9        # Azimuthal angle (momentum)
-T = 10         # Time
-X = 11         # X position
-Y = 12         # Y position
-Z = 13         # Z position
-MASS = 14      # Mass (not stored in Track, will be computed/set based on PID)
+PID = 0  # Particle ID (PDG code)
+STATUS = 1  # Status (dummy value for Track objects, always 1)
+CHARGE = 2  # Electric charge
+E = 3  # Energy (approximated from P for Track objects)
+PX = 4  # X-component of momentum
+PY = 5  # Y-component of momentum
+PZ = 6  # Z-component of momentum
+PT = 7  # Transverse momentum
+ETA = 8  # Pseudorapidity (momentum)
+PHI = 9  # Azimuthal angle (momentum)
+T = 10  # Time
+X = 11  # X position
+Y = 12  # Y position
+Z = 13  # Z position
+MASS = 14  # Mass (not stored in Track, will be computed/set based on PID)
 ETA_OUTER = 15  # Pseudorapidity at point of intersection with detector (position)
 PHI_OUTER = 16  # Azimuthal angle at closest-approach to z-axis (position)
 EVENT_NUMBER = 17
@@ -57,7 +57,7 @@ COLUMN_MAP = {
     "PHI_OUTER": PHI_OUTER,
     "EVENT_NUMBER": EVENT_NUMBER,
     "PASS_PROP": PASS_PROP,
-    "TRACK_RESOLUTION": TRACK_RESOLUTION
+    "TRACK_RESOLUTION": TRACK_RESOLUTION,
 }
 
 # Number of features per particle
@@ -81,13 +81,14 @@ MUON_MASS = 0.10566
 
 # ==================== BATCHING UTILITIES ====================
 
+
 def compute_max_particles(event_tensors: list[torch.Tensor], scale: float = 1.2) -> int:
     """Compute max_particles for padding as scale * max particle count in dataset.
-    
+
     Args:
         event_tensors: List of (N_i, N_FEATURES) tensors
         scale: Scaling factor (default 1.2 = 20% buffer)
-        
+
     Returns
     -------
         max_particles: Integer max particles for padding
@@ -98,18 +99,19 @@ def compute_max_particles(event_tensors: list[torch.Tensor], scale: float = 1.2)
     return int(max_count * scale)
 
 
-def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
-                        expected_event_numbers: list[float] = None) -> dict[str, ak.Array]:
+def tensor_to_root_dict(
+    batch_tensors: list[torch.Tensor], branch_name: str, expected_event_numbers: list[float] = None
+) -> dict[str, ak.Array]:
     """Convert list of event tensors to ROOT-compatible dictionary of awkward arrays.
-    
+
     This creates the structure needed for writing to ROOT files with uproot.
-    
+
     Args:
         batch_tensors: List of tensors, one per batch, each of shape (n_particles, N_FEATURES)
         branch_name: Name for the branch (e.g., "ChargedHadronEfficiency")
         expected_event_numbers: List of all expected event numbers. If provided, ensures
                                all events are represented (with empty arrays for missing events).
-        
+
     Returns
     -------
         Dictionary with keys like "BranchName/BranchName.Attribute" → awkward array
@@ -118,7 +120,10 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
     # Tower objects: Tower, EFlowPhoton (ECal), EFlowNeutralHadron (HCal)
     # ParticleFlowCandidate: EFlowObject (combines Track and Tower fields)
     # GenParticle: Particle (all particles from HepMC including unstable)
-    is_tower = any(keyword in branch_name for keyword in ["Tower", "EFlowPhoton", "EFlowNeutralHadron"]) and "EFlowObject" not in branch_name
+    is_tower = (
+        any(keyword in branch_name for keyword in ["Tower", "EFlowPhoton", "EFlowNeutralHadron"])
+        and "EFlowObject" not in branch_name
+    )
     is_eflow = "EFlowObject" in branch_name
     is_genparticle = branch_name == "Particle"
 
@@ -127,7 +132,24 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
         # See DelphesClasses.h for full list. Core attributes:
         # PID, Status, Charge, E, Px, Py, Pz, P, PT, Eta, Phi, Rapidity, Mass, T, X, Y, Z
         # M1, M2, D1, D2 (mother/daughter indices - not available in tensor)
-        attributes = ["PID", "Status", "Charge", "E", "Px", "Py", "Pz", "P", "PT", "Eta", "Phi", "Mass", "T", "X", "Y", "Z"]
+        attributes = [
+            "PID",
+            "Status",
+            "Charge",
+            "E",
+            "Px",
+            "Py",
+            "Pz",
+            "P",
+            "PT",
+            "Eta",
+            "Phi",
+            "Mass",
+            "T",
+            "X",
+            "Y",
+            "Z",
+        ]
 
         column_map = {
             "PID": PID,
@@ -158,7 +180,21 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
         #               ErrorDZCtgTheta, VertexIndex
         # Tower fields: NTimeHits, Eem, Ehad, Edges[4]
         # Note: For Track objects, Tower fields are zero. For Tower objects, Track-specific fields are zero.
-        attributes = ["PID", "Charge", "E", "P", "PT", "Eta", "Phi", "T", "X", "Y", "Z", "Eem", "Ehad"]
+        attributes = [
+            "PID",
+            "Charge",
+            "E",
+            "P",
+            "PT",
+            "Eta",
+            "Phi",
+            "T",
+            "X",
+            "Y",
+            "Z",
+            "Eem",
+            "Ehad",
+        ]
 
         # Column indices for ParticleFlowCandidate attributes
         column_map = {
@@ -186,7 +222,7 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
             "ET": None,  # Will compute as E / cosh(Eta)
             "Eta": ETA,  # Momentum eta
             "Phi": PHI,  # Momentum phi
-            "T": T
+            "T": T,
         }
     else:
         # Track attributes (existing code)
@@ -205,7 +241,7 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
             "T": T,
             "X": X,
             "Y": Y,
-            "Z": Z
+            "Z": Z,
         }
 
     # Build dictionary
@@ -239,7 +275,9 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
 
         # Find boundaries where event number changes
         event_boundaries = np.searchsorted(sorted_event_nums, event_nums_to_process)
-        event_end_boundaries = np.searchsorted(sorted_event_nums, event_nums_to_process, side="right")
+        event_end_boundaries = np.searchsorted(
+            sorted_event_nums, event_nums_to_process, side="right"
+        )
 
         # Build a dict mapping event_num -> slice of sorted_particles
         event_slices = {}
@@ -266,6 +304,7 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
                 # The uninitialized value is 0x99999999 = -1.58818668e-23
                 # We use the same sentinel value for exact validation match
                 import struct
+
                 sentinel = struct.unpack("f", bytes.fromhex("99999999"))[0]
                 return np.full(event_np.shape[0], sentinel, dtype=np.float32)
             if attr in ["PID", "Status"]:
@@ -326,8 +365,10 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
 
     # Process all attributes using pre-grouped events
     for attr in attributes:
-        attr_values = [compute_attr_values(event_slices[event_num], attr)
-                       for event_num in event_nums_to_process]
+        attr_values = [
+            compute_attr_values(event_slices[event_num], attr)
+            for event_num in event_nums_to_process
+        ]
 
         # Convert to awkward array
         ak_array = ak.Array(attr_values)
@@ -339,10 +380,11 @@ def tensor_to_root_dict(batch_tensors: list[torch.Tensor], branch_name: str,
     return root_dict
 
 
-def write_root_file(output_file: str, branches_dict: dict[str, dict[str, ak.Array]],
-                   tree_name: str = "Delphes"):
+def write_root_file(
+    output_file: str, branches_dict: dict[str, dict[str, ak.Array]], tree_name: str = "Delphes"
+):
     """Write multiple branches to a ROOT file.
-    
+
     Args:
         output_file: Path to output ROOT file
         branches_dict: Dictionary mapping branch names to their data dictionaries
@@ -361,15 +403,15 @@ def write_root_file(output_file: str, branches_dict: dict[str, dict[str, ak.Arra
 
 def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert HepMC file to PyTorch tensors.
-    
+
     Reads particles from HepMC events and converts to tensor format.
     Returns both stable particles (for detector simulation) and all particles
     (for truth-level studies).
-    
+
     Args:
         hepmc_file: Path to HepMC file (.hepmc, .hepmc3, or .hepmc.gz)
         max_events: Maximum number of events to process
-        
+
     Returns
     -------
         Tuple of:
@@ -398,27 +440,37 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> tuple[torch.Tens
             all_tensor = _particles_to_tensor(all_particles_list, event_number)
             all_event_tensors.append(all_tensor)
 
-    stable_particles = torch.cat(stable_event_tensors, dim=0) if stable_event_tensors else torch.zeros((0, N_FEATURES), dtype=torch.float64)
-    all_particles = torch.cat(all_event_tensors, dim=0) if all_event_tensors else torch.zeros((0, N_FEATURES), dtype=torch.float64)
+    stable_particles = (
+        torch.cat(stable_event_tensors, dim=0)
+        if stable_event_tensors
+        else torch.zeros((0, N_FEATURES), dtype=torch.float64)
+    )
+    all_particles = (
+        torch.cat(all_event_tensors, dim=0)
+        if all_event_tensors
+        else torch.zeros((0, N_FEATURES), dtype=torch.float64)
+    )
 
     return stable_particles, all_particles
 
 
-def _particles_to_tensor(particles_list: list, event_number: int, use_hepmc_mass: bool = True) -> torch.Tensor:
+def _particles_to_tensor(
+    particles_list: list, event_number: int, use_hepmc_mass: bool = True
+) -> torch.Tensor:
     """Convert a list of HepMC particles to a tensor.
-    
+
     This function reads particle properties directly from HepMC to match
     C++ Delphes behavior:
     - Mass: Read from HepMC generated_mass (what the generator produced)
     - Charge: Look up from PDG ID (HepMC doesn't store charge)
     - Eta: Use ±999.9 for particles with zero transverse momentum
-    
+
     Args:
         particles_list: List of pyhepmc particle objects
         event_number: Event number to assign to all particles
-        use_hepmc_mass: If True, read mass from HepMC generated_mass. 
+        use_hepmc_mass: If True, read mass from HepMC generated_mass.
                         If False, use PDG mass lookup. Default True to match C++ Delphes.
-        
+
     Returns
     -------
         Tensor of shape (n_particles, N_FEATURES)
@@ -435,16 +487,26 @@ def _particles_to_tensor(particles_list: list, event_number: int, use_hepmc_mass
     statuses = np.array([p.status for p in particles_list], dtype=np.int64)
 
     # Extract all momenta at once: (n_particles, 4) for [e, px, py, pz]
-    momenta = np.array([[p.momentum.e, p.momentum.px, p.momentum.py, p.momentum.pz]
-                       for p in particles_list], dtype=np.float64)
+    momenta = np.array(
+        [[p.momentum.e, p.momentum.px, p.momentum.py, p.momentum.pz] for p in particles_list],
+        dtype=np.float64,
+    )
 
     # Extract all vertices at once: (n_particles, 4) for [x, y, z, t]
-    vertices = np.array([
-        [p.production_vertex.position.x, p.production_vertex.position.y,
-         p.production_vertex.position.z, p.production_vertex.position.t]
-        if p.production_vertex else [0.0, 0.0, 0.0, 0.0]
-        for p in particles_list
-    ], dtype=np.float64)
+    vertices = np.array(
+        [
+            [
+                p.production_vertex.position.x,
+                p.production_vertex.position.y,
+                p.production_vertex.position.z,
+                p.production_vertex.position.t,
+            ]
+            if p.production_vertex
+            else [0.0, 0.0, 0.0, 0.0]
+            for p in particles_list
+        ],
+        dtype=np.float64,
+    )
 
     # ===== MASS: Read from HepMC generated_mass to match C++ Delphes =====
     # C++ Delphes reads mass directly from HepMC, not from PDG tables
@@ -469,7 +531,7 @@ def _particles_to_tensor(particles_list: list, event_number: int, use_hepmc_mass
     eta = np.where(
         pt < PT_MIN,
         np.sign(pz) * 999.9,  # ±999.9 for zero-pt particles
-        np.arcsinh(pz / pt)   # Normal eta computation
+        np.arcsinh(pz / pt),  # Normal eta computation
     )
     # Handle pz=0 case (sign returns 0) - these are truly perpendicular particles
     eta = np.where((pt < PT_MIN) & (pz == 0), 0.0, eta)
@@ -541,6 +603,7 @@ def _get_pdg_charge(pid: int) -> float:
 
     try:
         import particle
+
         p = particle.Particle.from_pdgid(pid)
         # Charge is in units of e, round to int for standard particles
         charge = int(round(p.charge)) if p.charge is not None else -999
@@ -555,10 +618,10 @@ def get_charge_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     """Get electric charges for an array of PDG IDs (vectorized).
     Uses the particle library for comprehensive PDG coverage.
     Returns -999 for unknown particles (matching C++ Delphes behavior).
-    
+
     Args:
         pids: NumPy array of PDG IDs
-        
+
     Returns
     -------
         NumPy array of electric charges
@@ -577,10 +640,10 @@ def get_charge_from_pdg_id(pids: np.ndarray) -> np.ndarray:
 
 def get_mass_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     """Get particle masses for an array of PDG IDs (vectorized).
-    
+
     Args:
         pids: NumPy array of PDG IDs
-        
+
     Returns
     -------
         NumPy array of masses in GeV

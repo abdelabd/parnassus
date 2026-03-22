@@ -21,7 +21,6 @@ Reference:
     C++ Delphes card: cards/delphes_card_CMS_6_1.tcl
 """
 
-
 import numpy as np
 import torch
 from torch import nn
@@ -36,23 +35,23 @@ from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
 
 class CMSEnergyFlowDefault(nn.Module):
     """PyTorch implementation of the default CMS Delphes detector simulation.
-    
+
     Simulates the full CMS detector response chain including:
-    
+
     - **Tracking**: Particle propagation through 3.8T magnetic field,
       tracking efficiency, and momentum smearing
     - **Calorimetry**: ECal and HCal simulation with energy deposits,
       tower clustering, and energy resolution smearing
     - **Particle Flow**: Energy flow reconstruction combining tracks
       and calorimeter deposits
-      
+
     The module can operate in two modes controlled by the `debug` flag:
-    
+
     - **Normal mode** (debug=False): Returns only final reconstructed objects
       (Track, Tower, EFlowTrack, EFlowPhoton, EFlowNeutralHadron)
     - **Debug mode** (debug=True): Returns all intermediate objects for
       validation against C++ Delphes
-      
+
     Attributes
     ----------
         debug: If True, return all intermediate processing stages
@@ -68,7 +67,7 @@ class CMSEnergyFlowDefault(nn.Module):
         HCal: Hadronic calorimeter
         CalorimeterMerger: Combines ECal and HCal towers
         EFlowMerger: Creates particle flow candidates
-        
+
     Example:
         >>> cms = CMSEnergyFlowDefault(debug=False)
         >>> results = cms(stable_particles)
@@ -78,7 +77,7 @@ class CMSEnergyFlowDefault(nn.Module):
 
     def __init__(self, debug: bool = False) -> None:
         """Initialize the CMS detector simulation.
-        
+
         Args:
             debug: If True, return all intermediate processing stages
                 for validation. If False, return only final objects.
@@ -96,26 +95,16 @@ class CMSEnergyFlowDefault(nn.Module):
         )
 
         # TrackingEfficiency
-        self.ChargedHadronTrackingEfficiency = Efficiency(
-            efficiency_formula="charged_hadron_cms"
-        )
-        self.ElectronTrackingEfficiency = Efficiency(
-            efficiency_formula="electron_cms"
-        )
-        self.MuonTrackingEfficiency = Efficiency(
-            efficiency_formula="muon_cms"
-        )
+        self.ChargedHadronTrackingEfficiency = Efficiency(efficiency_formula="charged_hadron_cms")
+        self.ElectronTrackingEfficiency = Efficiency(efficiency_formula="electron_cms")
+        self.MuonTrackingEfficiency = Efficiency(efficiency_formula="muon_cms")
 
         # MomentumSmearing
         self.ChargedHadronMomentumSmearing = MomentumSmearing(
             resolution_formula="charged_hadron_cms"
         )
-        self.ElectronMomentumSmearing = MomentumSmearing(
-            resolution_formula="electron_cms"
-        )
-        self.MuonMomentumSmearing = MomentumSmearing(
-            resolution_formula="muon_cms"
-        )
+        self.ElectronMomentumSmearing = MomentumSmearing(resolution_formula="electron_cms")
+        self.MuonMomentumSmearing = MomentumSmearing(resolution_formula="muon_cms")
 
         # TrackMerger
         self.TrackMerger = Merger()
@@ -134,35 +123,35 @@ class CMSEnergyFlowDefault(nn.Module):
 
     def forward(self, stable_particles: torch.Tensor) -> dict[str, torch.Tensor]:
         """Apply the full CMS detector simulation to input particles.
-        
+
         Processes generator-level stable particles through the complete
         detector simulation chain: propagation, tracking, calorimetry,
         and particle flow reconstruction.
-        
+
         Args:
             stable_particles: Tensor of shape (N, N_FEATURES) containing
                 generator-level stable particles. Should be flattened
                 (not batched by event). Required columns include:
-                
+
                 - PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI
                 - X, Y, Z, T (production vertex)
                 - MASS, EVENT_NUMBER
-        
+
         Returns
         -------
             Dictionary mapping branch names to tensors. Contents depend on
             debug mode:
-            
+
             **Normal mode** (debug=False):
-            
+
             - 'Track': Merged tracks after smearing
             - 'Tower': Merged calorimeter towers
             - 'EFlowTrack': Tracks for particle flow
             - 'EFlowPhoton': Photon candidates from ECal
             - 'EFlowNeutralHadron': Neutral hadron candidates from HCal
-            
+
             **Debug mode** (debug=True): All of the above plus:
-            
+
             - 'ParticleBeforeProp', 'ParticleAfterProp'
             - 'ChargedHadron', 'Electron', 'Muon', 'NeutralParticle'
             - 'ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency'
@@ -176,7 +165,13 @@ class CMSEnergyFlowDefault(nn.Module):
         particles = stable_particles.reshape(-1, n_dim)
         if self.debug:
             particles_before_prop = particles.clone()
-        particles_propagated, neutrals_propagated, charged_hadrons_propagated, electrons_propagated, muons_propagated = self.ParticlePropagator(particles)
+        (
+            particles_propagated,
+            neutrals_propagated,
+            charged_hadrons_propagated,
+            electrons_propagated,
+            muons_propagated,
+        ) = self.ParticlePropagator(particles)
 
         # TrackingEfficiency
         charged_hadrons_eff = self.ChargedHadronTrackingEfficiency(charged_hadrons_propagated)
@@ -189,13 +184,19 @@ class CMSEnergyFlowDefault(nn.Module):
         muons_smeared = self.MuonMomentumSmearing(muons_eff)
 
         # TrackMerger
-        merged_tracks = self.TrackMerger([charged_hadrons_smeared, electrons_smeared, muons_smeared])
+        merged_tracks = self.TrackMerger([
+            charged_hadrons_smeared,
+            electrons_smeared,
+            muons_smeared,
+        ])
 
         # ECal
         ecal_tracks, ecal_towers, eflow_photons = self.ECal(particles_propagated, merged_tracks)
 
         # HCal
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(particles_propagated, ecal_tracks)
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(
+            particles_propagated, ecal_tracks
+        )
 
         # CalorimeterMerger
         merged_towers = self.CalorimeterMerger([ecal_towers, hcal_towers])
@@ -206,35 +207,27 @@ class CMSEnergyFlowDefault(nn.Module):
         if self.debug:
             return {
                 "ParticleBeforeProp": particles_before_prop,
-
                 "ParticleAfterProp": particles_propagated,
                 "ChargedHadron": charged_hadrons_propagated,
                 "Electron": electrons_propagated,
                 "Muon": muons_propagated,
                 "NeutralParticle": neutrals_propagated,
-
                 "ChargedHadronEfficiency": charged_hadrons_eff,
                 "ElectronEfficiency": electrons_eff,
                 "MuonEfficiency": muons_eff,
-
                 "ChargedHadronSmeared": charged_hadrons_smeared,
                 "ElectronSmeared": electrons_smeared,
                 "MuonSmeared": muons_smeared,
-
                 "Track": merged_tracks,
-
                 "ECal_EFlowTrack": ecal_tracks,
                 "ECalTower": ecal_towers,
                 "EFlowPhoton": eflow_photons,
-
                 "EFlowTrack": hcal_tracks,
                 "HCalTower": hcal_towers,
                 "EFlowNeutralHadron": eflow_neutral_hadrons,
-
                 "Tower": merged_towers,
-
                 "EFlowObject": eflow_objects,
-                }
+            }
         return {
             "Track": merged_tracks,
             "Tower": merged_towers,
@@ -246,21 +239,21 @@ class CMSEnergyFlowDefault(nn.Module):
 
     def _setup_ECal(self):
         energy_fractions = {
-            0: 0.0,        # default (hadrons) - no ECAL response
-            11: 1.0,       # electrons
-            22: 1.0,       # photons
-            111: 1.0,      # pi0
-            12: 0.0,       # neutrino (electron)
-            13: 0.0,       # muon
-            14: 0.0,       # neutrino (muon)
-            16: 0.0,       # neutrino (tau)
+            0: 0.0,  # default (hadrons) - no ECAL response
+            11: 1.0,  # electrons
+            22: 1.0,  # photons
+            111: 1.0,  # pi0
+            12: 0.0,  # neutrino (electron)
+            13: 0.0,  # muon
+            14: 0.0,  # neutrino (muon)
+            16: 0.0,  # neutrino (tau)
             1000022: 0.0,  # neutralino
             1000023: 0.0,  # neutralino
             1000025: 0.0,  # neutralino
             1000035: 0.0,  # neutralino
             1000045: 0.0,  # neutralino
-            310: 0.3,      # K0short
-            3122: 0.3,     # Lambda
+            310: 0.3,  # K0short
+            3122: 0.3,  # Lambda
         }
 
         # Create eta and phi bins from CMS card (delphes_card_CMS_5_0.tcl)
@@ -301,8 +294,31 @@ class CMSEnergyFlowDefault(nn.Module):
             eta_phi_map[eta].update(phi_bins_fine)
 
         # HF: specific eta values with coarse phi binning
-        hf_etas = [-5, -4.7, -4.525, -4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.958,
-                3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525, 4.7, 5]
+        hf_etas = [
+            -5,
+            -4.7,
+            -4.525,
+            -4.35,
+            -4.175,
+            -4,
+            -3.825,
+            -3.65,
+            -3.475,
+            -3.3,
+            -3.125,
+            -2.958,
+            3.125,
+            3.3,
+            3.475,
+            3.65,
+            3.825,
+            4,
+            4.175,
+            4.35,
+            4.525,
+            4.7,
+            5,
+        ]
         for eta in hf_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
@@ -320,36 +336,72 @@ class CMSEnergyFlowDefault(nn.Module):
             energy_fractions=energy_fractions,
             resolution_formula="ecal_cms",
             is_ecal=True,
-            smear_tower_center=True  # Match C++ Delphes: SmearTowerCenter true
+            smear_tower_center=True,  # Match C++ Delphes: SmearTowerCenter true
         )
 
     def _setup_HCal(self):
         energy_fractions = {
-            0: 1.0,        # default (hadrons) - full HCAL response
-            11: 0.0,       # electrons (no HCAL response - already absorbed by ECAL)
-            22: 0.0,       # photons (no HCAL response)
-            111: 0.0,      # pi0 (no HCAL response)
-            12: 0.0,       # neutrino (electron)
-            13: 0.0,       # muon
-            14: 0.0,       # neutrino (muon)
-            16: 0.0,       # neutrino (tau)
+            0: 1.0,  # default (hadrons) - full HCAL response
+            11: 0.0,  # electrons (no HCAL response - already absorbed by ECAL)
+            22: 0.0,  # photons (no HCAL response)
+            111: 0.0,  # pi0 (no HCAL response)
+            12: 0.0,  # neutrino (electron)
+            13: 0.0,  # muon
+            14: 0.0,  # neutrino (muon)
+            16: 0.0,  # neutrino (tau)
             1000022: 0.0,  # neutralino
             1000023: 0.0,  # neutralino
             1000025: 0.0,  # neutralino
             1000035: 0.0,  # neutralino
             1000045: 0.0,  # neutralino
-            310: 0.7,      # K0short (70% HCAL)
-            3122: 0.7,     # Lambda (70% HCAL)
+            310: 0.7,  # K0short (70% HCAL)
+            3122: 0.7,  # Lambda (70% HCAL)
         }
 
         eta_phi_map = {}  # eta -> set of phi bin edges
 
         # 5 degrees towers (barrel): phi bins -36 to 36 in steps of pi/36
         phi_bins_5deg = [i * np.pi / 36.0 for i in range(-36, 37)]
-        barrel_etas = [-1.566, -1.479, -1.392, -1.305, -1.218, -1.131, -1.044, -0.957, -0.87, -0.783,
-                    -0.696, -0.609, -0.522, -0.435, -0.348, -0.261, -0.174, -0.087, 0,
-                    0.087, 0.174, 0.261, 0.348, 0.435, 0.522, 0.609, 0.696, 0.783, 0.87,
-                    0.957, 1.044, 1.131, 1.218, 1.305, 1.392, 1.479, 1.566, 1.653]
+        barrel_etas = [
+            -1.566,
+            -1.479,
+            -1.392,
+            -1.305,
+            -1.218,
+            -1.131,
+            -1.044,
+            -0.957,
+            -0.87,
+            -0.783,
+            -0.696,
+            -0.609,
+            -0.522,
+            -0.435,
+            -0.348,
+            -0.261,
+            -0.174,
+            -0.087,
+            0,
+            0.087,
+            0.174,
+            0.261,
+            0.348,
+            0.435,
+            0.522,
+            0.609,
+            0.696,
+            0.783,
+            0.87,
+            0.957,
+            1.044,
+            1.131,
+            1.218,
+            1.305,
+            1.392,
+            1.479,
+            1.566,
+            1.653,
+        ]
         for eta in barrel_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
@@ -357,10 +409,46 @@ class CMSEnergyFlowDefault(nn.Module):
 
         # 10 degrees towers (endcap): phi bins -18 to 18 in steps of pi/18
         phi_bins_10deg = [i * np.pi / 18.0 for i in range(-18, 19)]
-        endcap_etas = [-4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.95, -2.868,
-                    -2.65, -2.5, -2.322, -2.172, -2.043, -1.93, -1.83, -1.74, -1.653,
-                    1.74, 1.83, 1.93, 2.043, 2.172, 2.322, 2.5, 2.65, 2.868, 2.95,
-                    3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525]
+        endcap_etas = [
+            -4.35,
+            -4.175,
+            -4,
+            -3.825,
+            -3.65,
+            -3.475,
+            -3.3,
+            -3.125,
+            -2.95,
+            -2.868,
+            -2.65,
+            -2.5,
+            -2.322,
+            -2.172,
+            -2.043,
+            -1.93,
+            -1.83,
+            -1.74,
+            -1.653,
+            1.74,
+            1.83,
+            1.93,
+            2.043,
+            2.172,
+            2.322,
+            2.5,
+            2.65,
+            2.868,
+            2.95,
+            3.125,
+            3.3,
+            3.475,
+            3.65,
+            3.825,
+            4,
+            4.175,
+            4.35,
+            4.525,
+        ]
         for eta in endcap_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
@@ -381,10 +469,10 @@ class CMSEnergyFlowDefault(nn.Module):
         self.HCal = SimpleCalorimeter(
             eta_bins=eta_bins,
             phi_bins=phi_bins_per_eta,
-            energy_min=1.0,          # HCal has higher threshold
-            energy_sig_min=1.0,      # HCal has lower significance threshold
+            energy_min=1.0,  # HCal has higher threshold
+            energy_sig_min=1.0,  # HCal has lower significance threshold
             energy_fractions=energy_fractions,
             resolution_formula="hcal_cms",
             is_ecal=False,
-            smear_tower_center=True
+            smear_tower_center=True,
         )

@@ -5,7 +5,7 @@ determines the probability that a particle is successfully reconstructed as a tr
 
 This module supports different efficiency formulas for:
 - Charged hadrons (pions, kaons, protons)
-- Electrons  
+- Electrons
 - Muons
 
 The efficiency is applied stochastically: particles pass with probability equal
@@ -27,27 +27,27 @@ from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 class Efficiency(nn.Module):
     """PyTorch implementation of Delphes Efficiency module.
-    
+
     Applies tracking efficiency based on particle kinematics. The efficiency
     formula takes (pT, η_outer) and returns a probability [0, 1]. Particles
     are then stochastically accepted or rejected based on this probability.
-    
+
     The module uses **position-based η (EtaOuter)** for the efficiency formula,
     matching the C++ Delphes behavior where the track position at the detector
     surface determines reconstruction efficiency.
-    
+
     Predefined efficiency formulas:
-    
+
     - **charged_hadron_cms**: CMS charged hadron tracking efficiency
-    - **electron_cms**: CMS electron tracking efficiency  
+    - **electron_cms**: CMS electron tracking efficiency
     - **muon_cms**: CMS muon tracking efficiency
-    
+
     Attributes
     ----------
         efficiency_formula: Name of formula or callable
         efficiency_func: The actual efficiency function
         pdg_filter_func: Optional PDG filter for particle selection
-        
+
     Example:
         >>> eff_module = Efficiency(efficiency_formula='charged_hadron_cms')
         >>> passed_particles = eff_module(charged_hadrons)
@@ -55,13 +55,14 @@ class Efficiency(nn.Module):
 
     def __init__(
         self,
-        efficiency_formula: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "charged_hadron_cms",
+        efficiency_formula: str
+        | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "charged_hadron_cms",
     ) -> None:
         """Initialize the Efficiency module.
-        
+
         Args:
             efficiency_formula: Either a string naming a predefined formula
-                ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a 
+                ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a
                 callable that takes (pt, eta_outer) tensors and returns
                 efficiency values in [0, 1].
         """
@@ -86,27 +87,27 @@ class Efficiency(nn.Module):
 
     def forward(self, particles: torch.Tensor) -> torch.Tensor:
         """Apply efficiency filter to particles.
-        
+
         Computes the efficiency probability for each particle based on its
         kinematics, then stochastically accepts or rejects particles.
-        
+
         Args:
             particles: Tensor of shape (N, N_FEATURES) containing particles.
                 Required columns:
-                
+
                 - PT (col 7): Transverse momentum in GeV
                 - ETA_OUTER (col 15): Position-based pseudorapidity at detector
-                
+
         Returns
         -------
             Filtered tensor of shape (M, N_FEATURES) where M ≤ N containing
             only particles that passed the efficiency cut.
         """
         # We want to compute effiency vector based on particles that satisfy:
-            # 1. particles that passed propagation (PASS_PROP == 1)
-            # 2. particles of the desired type
+        # 1. particles that passed propagation (PASS_PROP == 1)
+        # 2. particles of the desired type
 
-        pt = particles[:, CMAP["PT"]]   # PT (transverse momentum)
+        pt = particles[:, CMAP["PT"]]  # PT (transverse momentum)
         eta_outer = particles[:, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)
 
         # Compute efficiency for each particle
@@ -123,11 +124,11 @@ class Efficiency(nn.Module):
     @staticmethod
     def _charged_hadron_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """CMS charged hadron tracking efficiency formula.
-        
+
         Args:
             pt: transverse momentum (GeV)
             eta_outer: pseudorapidity
-            
+
         Returns
         -------
             efficiency: value between 0 and 1

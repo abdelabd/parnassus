@@ -12,19 +12,19 @@ from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
     """Filter charged hadrons based on PDG IDs.
-    
+
     Charged hadrons are defined as charged particles that are NOT electrons or muons.
     This includes: charged pions, kaons, protons, etc.
-    
+
     Args:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
-            
+
     Returns
     -------
         mask: Boolean tensor indicating charged hadrons
               Same shape as particles[..., 0]
-    
+
     Examples
     --------
         >>> particles = torch.randn(100, 25)
@@ -46,18 +46,18 @@ def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
 
 def electron_filter(particles: torch.Tensor) -> torch.Tensor:
     """Filter electrons based on PDG IDs.
-    
+
     Electrons and positrons have PDG ID = ±11.
-    
+
     Args:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
-            
+
     Returns
     -------
         mask: Boolean tensor indicating electrons/positrons
               Same shape as particles[..., 0]
-    
+
     Examples
     --------
         >>> particles = torch.randn(100, 25)
@@ -76,18 +76,18 @@ def electron_filter(particles: torch.Tensor) -> torch.Tensor:
 
 def muon_filter(particles: torch.Tensor) -> torch.Tensor:
     """Filter muons based on PDG IDs.
-    
+
     Muons and antimuons have PDG ID = ±13.
-    
+
     Args:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
-            
+
     Returns
     -------
         mask: Boolean tensor indicating muons/antimuons
               Same shape as particles[..., 0]
-    
+
     Examples
     --------
         >>> particles = torch.randn(100, 25)
@@ -106,19 +106,19 @@ def muon_filter(particles: torch.Tensor) -> torch.Tensor:
 
 def neutral_filter(particles: torch.Tensor) -> torch.Tensor:
     """Filter neutral particles based on charge.
-    
+
     Neutral particles have |charge| < 1e-9 (accounts for floating point precision).
     This includes: photons, neutrons, neutrinos, neutral kaons, etc.
-    
+
     Args:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain CHARGE column
-            
+
     Returns
     -------
         mask: Boolean tensor indicating neutral particles
               Same shape as particles[..., 0]
-    
+
     Examples
     --------
         >>> particles = torch.randn(100, 25)
@@ -136,14 +136,14 @@ def neutral_filter(particles: torch.Tensor) -> torch.Tensor:
 # Convenience function for getting multiple filters at once
 def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
     """Get all particle type masks at once.
-    
+
     This is more efficient than calling individual filter functions
     when you need multiple masks, as it computes shared quantities only once.
-    
+
     Args:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
-    
+
     Returns
     -------
         Dictionary containing masks for each particle type:
@@ -152,7 +152,7 @@ def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
             - 'muon': Muons and antimuons
             - 'neutral': Neutral particles
             - 'charged': All charged particles
-    
+
     Examples
     --------
         >>> particles = torch.randn(100, 25)
@@ -174,5 +174,5 @@ def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
         "electron": electron_mask,
         "muon": muon_mask,
         "neutral": neutral_mask,
-        "charged": is_charged
+        "charged": is_charged,
     }

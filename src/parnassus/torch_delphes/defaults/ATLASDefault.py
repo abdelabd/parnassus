@@ -6,7 +6,7 @@ jet clustering and physics analysis.
 
 Detector parameters:
 - Tracker radius: 1.15 m
-- Tracker half-length: 3.51 m  
+- Tracker half-length: 3.51 m
 - Magnetic field: 2.0 T
 
 Key differences from CMS:
@@ -27,7 +27,6 @@ Reference:
     C++ Delphes card: cards/delphes_card_ATLAS_6_1.tcl
 """
 
-
 import numpy as np
 import torch
 from torch import nn
@@ -42,26 +41,26 @@ from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
 
 class ATLASEnergyFlowDefault(nn.Module):
     """PyTorch implementation of the default ATLAS Delphes detector simulation.
-    
+
     Simulates the full ATLAS detector response chain including:
-    
+
     - **Tracking**: Particle propagation through 2.0T magnetic field,
       tracking efficiency, and momentum smearing
     - **Calorimetry**: ECal and HCal simulation with energy deposits,
       tower clustering, and energy resolution smearing
     - **Particle Flow**: Energy flow reconstruction combining tracks
       and calorimeter deposits
-      
+
     Key difference from CMS: The Tower branch includes muons in addition
     to ECal and HCal towers, matching the ATLAS TCL card configuration.
-      
+
     The module can operate in two modes controlled by the `debug` flag:
-    
+
     - **Normal mode** (debug=False): Returns only final reconstructed objects
       (Track, Tower, EFlowTrack, EFlowPhoton, EFlowNeutralHadron)
     - **Debug mode** (debug=True): Returns all intermediate objects for
       validation against C++ Delphes
-      
+
     Attributes
     ----------
         debug: If True, return all intermediate processing stages
@@ -77,7 +76,7 @@ class ATLASEnergyFlowDefault(nn.Module):
         HCal: Hadronic calorimeter
         CalorimeterMerger: Combines ECal towers, HCal towers, AND muons
         EFlowMerger: Creates particle flow candidates
-        
+
     Example:
         >>> atlas = ATLASEnergyFlowDefault(debug=False)
         >>> results = atlas(stable_particles)
@@ -87,7 +86,7 @@ class ATLASEnergyFlowDefault(nn.Module):
 
     def __init__(self, debug: bool = False) -> None:
         """Initialize the ATLAS detector simulation.
-        
+
         Args:
             debug: If True, return all intermediate processing stages
                 for validation. If False, return only final objects.
@@ -105,26 +104,16 @@ class ATLASEnergyFlowDefault(nn.Module):
         )
 
         # TrackingEfficiency
-        self.ChargedHadronTrackingEfficiency = Efficiency(
-            efficiency_formula="charged_hadron_cms"
-        )
-        self.ElectronTrackingEfficiency = Efficiency(
-            efficiency_formula="electron_cms"
-        )
-        self.MuonTrackingEfficiency = Efficiency(
-            efficiency_formula="muon_cms"
-        )
+        self.ChargedHadronTrackingEfficiency = Efficiency(efficiency_formula="charged_hadron_cms")
+        self.ElectronTrackingEfficiency = Efficiency(efficiency_formula="electron_cms")
+        self.MuonTrackingEfficiency = Efficiency(efficiency_formula="muon_cms")
 
         # MomentumSmearing
         self.ChargedHadronMomentumSmearing = MomentumSmearing(
             resolution_formula="charged_hadron_cms"
         )
-        self.ElectronMomentumSmearing = MomentumSmearing(
-            resolution_formula="electron_cms"
-        )
-        self.MuonMomentumSmearing = MomentumSmearing(
-            resolution_formula="muon_cms"
-        )
+        self.ElectronMomentumSmearing = MomentumSmearing(resolution_formula="electron_cms")
+        self.MuonMomentumSmearing = MomentumSmearing(resolution_formula="muon_cms")
 
         # TrackMerger
         self.TrackMerger = Merger()
@@ -143,38 +132,38 @@ class ATLASEnergyFlowDefault(nn.Module):
 
     def forward(self, stable_particles: torch.Tensor) -> dict[str, torch.Tensor]:
         """Apply the full ATLAS detector simulation to input particles.
-        
+
         Processes generator-level stable particles through the complete
         detector simulation chain: propagation, tracking, calorimetry,
         and particle flow reconstruction.
-        
+
         Note: Unlike CMS, the ATLAS Tower branch includes muons in addition
         to calorimeter towers.
-        
+
         Args:
             stable_particles: Tensor of shape (N, N_FEATURES) containing
                 generator-level stable particles. Should be flattened
                 (not batched by event). Required columns include:
-                
+
                 - PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI
                 - X, Y, Z, T (production vertex)
                 - MASS, EVENT_NUMBER
-        
+
         Returns
         -------
             Dictionary mapping branch names to tensors. Contents depend on
             debug mode:
-            
+
             **Normal mode** (debug=False):
-            
+
             - 'Track': Merged tracks after smearing
             - 'Tower': Merged calorimeter towers + muons
             - 'EFlowTrack': Tracks for particle flow
             - 'EFlowPhoton': Photon candidates from ECal
             - 'EFlowNeutralHadron': Neutral hadron candidates from HCal
-            
+
             **Debug mode** (debug=True): All of the above plus:
-            
+
             - 'ParticleBeforeProp', 'ParticleAfterProp'
             - 'ChargedHadron', 'Electron', 'Muon', 'NeutralParticle'
             - 'ChargedHadronEfficiency', 'ElectronEfficiency', 'MuonEfficiency'
@@ -188,7 +177,13 @@ class ATLASEnergyFlowDefault(nn.Module):
         particles = stable_particles.reshape(-1, n_dim)
         if self.debug:
             particles_before_prop = particles.clone()
-        particles_propagated, neutrals_propagated, charged_hadrons_propagated, electrons_propagated, muons_propagated = self.ParticlePropagator(particles)
+        (
+            particles_propagated,
+            neutrals_propagated,
+            charged_hadrons_propagated,
+            electrons_propagated,
+            muons_propagated,
+        ) = self.ParticlePropagator(particles)
 
         # TrackingEfficiency
         charged_hadrons_eff = self.ChargedHadronTrackingEfficiency(charged_hadrons_propagated)
@@ -201,13 +196,19 @@ class ATLASEnergyFlowDefault(nn.Module):
         muons_smeared = self.MuonMomentumSmearing(muons_eff)
 
         # TrackMerger
-        merged_tracks = self.TrackMerger([charged_hadrons_smeared, electrons_smeared, muons_smeared])
+        merged_tracks = self.TrackMerger([
+            charged_hadrons_smeared,
+            electrons_smeared,
+            muons_smeared,
+        ])
 
         # ECal
         ecal_tracks, ecal_towers, eflow_photons = self.ECal(particles_propagated, merged_tracks)
 
         # HCal
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(particles_propagated, ecal_tracks)
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(
+            particles_propagated, ecal_tracks
+        )
 
         # CalorimeterMerger
         merged_towers = self.CalorimeterMerger([ecal_towers, hcal_towers, muons_smeared])
@@ -218,35 +219,27 @@ class ATLASEnergyFlowDefault(nn.Module):
         if self.debug:
             return {
                 "ParticleBeforeProp": particles_before_prop,
-
                 "ParticleAfterProp": particles_propagated,
                 "ChargedHadron": charged_hadrons_propagated,
                 "Electron": electrons_propagated,
                 "Muon": muons_propagated,
                 "NeutralParticle": neutrals_propagated,
-
                 "ChargedHadronEfficiency": charged_hadrons_eff,
                 "ElectronEfficiency": electrons_eff,
                 "MuonEfficiency": muons_eff,
-
                 "ChargedHadronSmeared": charged_hadrons_smeared,
                 "ElectronSmeared": electrons_smeared,
                 "MuonSmeared": muons_smeared,
-
                 "Track": merged_tracks,
-
                 "ECal_EFlowTrack": ecal_tracks,
                 "ECalTower": ecal_towers,
                 "EFlowPhoton": eflow_photons,
-
                 "EFlowTrack": hcal_tracks,
                 "HCalTower": hcal_towers,
                 "EFlowNeutralHadron": eflow_neutral_hadrons,
-
                 "Tower": merged_towers,
-
                 "EFlowObject": eflow_objects,
-                }
+            }
         return {
             "Track": merged_tracks,
             "Tower": merged_towers,
@@ -258,21 +251,21 @@ class ATLASEnergyFlowDefault(nn.Module):
 
     def _setup_ECal(self):
         energy_fractions = {
-            0: 0.0,        # default (hadrons) - no ECAL response
-            11: 1.0,       # electrons
-            22: 1.0,       # photons
-            111: 1.0,      # pi0
-            12: 0.0,       # neutrino (electron)
-            13: 0.0,       # muon
-            14: 0.0,       # neutrino (muon)
-            16: 0.0,       # neutrino (tau)
+            0: 0.0,  # default (hadrons) - no ECAL response
+            11: 1.0,  # electrons
+            22: 1.0,  # photons
+            111: 1.0,  # pi0
+            12: 0.0,  # neutrino (electron)
+            13: 0.0,  # muon
+            14: 0.0,  # neutrino (muon)
+            16: 0.0,  # neutrino (tau)
             1000022: 0.0,  # neutralino
             1000023: 0.0,  # neutralino
             1000025: 0.0,  # neutralino
             1000035: 0.0,  # neutralino
             1000045: 0.0,  # neutralino
-            310: 0.3,      # K0short
-            3122: 0.3,     # Lambda
+            310: 0.3,  # K0short
+            3122: 0.3,  # Lambda
         }
 
         # Create eta and phi bins from CMS card (delphes_card_CMS_5_0.tcl)
@@ -313,8 +306,31 @@ class ATLASEnergyFlowDefault(nn.Module):
             eta_phi_map[eta].update(phi_bins_fine)
 
         # HF: specific eta values with coarse phi binning
-        hf_etas = [-5, -4.7, -4.525, -4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.958,
-                3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525, 4.7, 5]
+        hf_etas = [
+            -5,
+            -4.7,
+            -4.525,
+            -4.35,
+            -4.175,
+            -4,
+            -3.825,
+            -3.65,
+            -3.475,
+            -3.3,
+            -3.125,
+            -2.958,
+            3.125,
+            3.3,
+            3.475,
+            3.65,
+            3.825,
+            4,
+            4.175,
+            4.35,
+            4.525,
+            4.7,
+            5,
+        ]
         for eta in hf_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
@@ -332,38 +348,88 @@ class ATLASEnergyFlowDefault(nn.Module):
             energy_fractions=energy_fractions,
             resolution_formula="ecal_atlas",
             is_ecal=True,
-            smear_tower_center=True  # Match C++ Delphes: SmearTowerCenter true
+            smear_tower_center=True,  # Match C++ Delphes: SmearTowerCenter true
         )
 
     def _setup_HCal(self):
         energy_fractions = {
-            0: 1.0,        # default (hadrons) - full HCAL response
-            11: 0.0,       # electrons (no HCAL response - already absorbed by ECAL)
-            22: 0.0,       # photons (no HCAL response)
-            111: 0.0,      # pi0 (no HCAL response)
-            12: 0.0,       # neutrino (electron)
-            13: 0.0,       # muon
-            14: 0.0,       # neutrino (muon)
-            16: 0.0,       # neutrino (tau)
+            0: 1.0,  # default (hadrons) - full HCAL response
+            11: 0.0,  # electrons (no HCAL response - already absorbed by ECAL)
+            22: 0.0,  # photons (no HCAL response)
+            111: 0.0,  # pi0 (no HCAL response)
+            12: 0.0,  # neutrino (electron)
+            13: 0.0,  # muon
+            14: 0.0,  # neutrino (muon)
+            16: 0.0,  # neutrino (tau)
             1000022: 0.0,  # neutralino
             1000023: 0.0,  # neutralino
             1000025: 0.0,  # neutralino
             1000035: 0.0,  # neutralino
             1000045: 0.0,  # neutralino
-            310: 0.7,      # K0short (70% HCAL)
-            3122: 0.7,     # Lambda (70% HCAL)
+            310: 0.7,  # K0short (70% HCAL)
+            3122: 0.7,  # Lambda (70% HCAL)
         }
 
         eta_phi_map = {}  # eta -> set of phi bin edges
 
         # 5 degrees towers (barrel+endcap): phi bins -36 to 36 in steps of pi/36
         phi_bins_10deg = [i * np.pi / 18.0 for i in range(-18, 19)]
-        barrel_etas = [-3.2, -2.5, -2.4, -2.3, -2.2, -2.1, -2, -1.9, -1.8, -1.7,
-                        -1.6, -1.5, -1.4, -1.3, -1.2, -1.1, -1, -0.9, -0.8, -0.7,
-                          -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3,
-                            0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.3,
-                              1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2, 2.1, 2.2, 2.3,
-                                2.4, 2.5, 2.6, 3.3]
+        barrel_etas = [
+            -3.2,
+            -2.5,
+            -2.4,
+            -2.3,
+            -2.2,
+            -2.1,
+            -2,
+            -1.9,
+            -1.8,
+            -1.7,
+            -1.6,
+            -1.5,
+            -1.4,
+            -1.3,
+            -1.2,
+            -1.1,
+            -1,
+            -0.9,
+            -0.8,
+            -0.7,
+            -0.6,
+            -0.5,
+            -0.4,
+            -0.3,
+            -0.2,
+            -0.1,
+            0,
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            1,
+            1.1,
+            1.2,
+            1.3,
+            1.4,
+            1.5,
+            1.6,
+            1.7,
+            1.8,
+            1.9,
+            2,
+            2.1,
+            2.2,
+            2.3,
+            2.4,
+            2.5,
+            2.6,
+            3.3,
+        ]
         for eta in barrel_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
@@ -371,9 +437,31 @@ class ATLASEnergyFlowDefault(nn.Module):
 
         # 20 degrees towers (forward): phi bins -18 to 18 in steps of pi/18
         phi_bins_20deg = [i * np.pi / 9.0 for i in range(-9, 10)]
-        endcap_etas = [-4.9, -4.7, -4.5, -4.3, -4.1, -3.9, -3.7, -3.5, -3.3, -3,
-                        -2.8, -2.6, 2.8, 3, 3.2, 3.5, 3.7, 3.9, 4.1, 4.3,
-                          4.5, 4.7, 4.9]
+        endcap_etas = [
+            -4.9,
+            -4.7,
+            -4.5,
+            -4.3,
+            -4.1,
+            -3.9,
+            -3.7,
+            -3.5,
+            -3.3,
+            -3,
+            -2.8,
+            -2.6,
+            2.8,
+            3,
+            3.2,
+            3.5,
+            3.7,
+            3.9,
+            4.1,
+            4.3,
+            4.5,
+            4.7,
+            4.9,
+        ]
         for eta in endcap_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
@@ -386,10 +474,10 @@ class ATLASEnergyFlowDefault(nn.Module):
         self.HCal = SimpleCalorimeter(
             eta_bins=eta_bins,
             phi_bins=phi_bins_per_eta,
-            energy_min=1.0,          # HCal has higher threshold
-            energy_sig_min=2.0,      # HCal has lower significance threshold
+            energy_min=1.0,  # HCal has higher threshold
+            energy_sig_min=2.0,  # HCal has lower significance threshold
             energy_fractions=energy_fractions,
             resolution_formula="hcal_atlas",
             is_ecal=False,
-            smear_tower_center=True
+            smear_tower_center=True,
         )
