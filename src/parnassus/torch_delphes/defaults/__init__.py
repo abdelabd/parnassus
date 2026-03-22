@@ -1,5 +1,4 @@
-"""
-Default detector configurations for TorchDelphes.
+"""Default detector configurations for TorchDelphes.
 
 Provides pre-configured detector simulation modules that match the
 standard Delphes TCL cards for CMS and ATLAS detectors.
@@ -14,7 +13,7 @@ Example:
     >>> results = cms(particles)
 """
 
-from .CMSDefault import CMSEnergyFlowDefault
 from .ATLASDefault import ATLASEnergyFlowDefault
+from .CMSDefault import CMSEnergyFlowDefault
 
-__all__ = ["CMSEnergyFlowDefault", "ATLASEnergyFlowDefault"]
+__all__ = ["ATLASEnergyFlowDefault", "CMSEnergyFlowDefault"]

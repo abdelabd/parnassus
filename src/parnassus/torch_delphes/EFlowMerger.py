@@ -1,5 +1,4 @@
-"""
-PyTorch implementation of Energy Flow (Particle Flow) Merger module.
+"""PyTorch implementation of Energy Flow (Particle Flow) Merger module.
 
 Merges Track and Tower objects into a unified ParticleFlowCandidate format.
 This module applies the necessary transformations to ensure consistency between
@@ -18,19 +17,23 @@ Reference:
     See also: EFlowMerger.md for validation details
 """
 
+
 import torch
-import torch.nn as nn
-from typing import List
+from torch import nn
 
 from .tensor_utils import (
-    PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI, T, X, Y, Z,
-    ETA_OUTER, PHI_OUTER, EVENT_NUMBER
+    ETA,
+    ETA_OUTER,
+    PID,
+    T,
+    X,
+    Y,
+    Z,
 )
 
 
 class EFlowMerger(nn.Module):
-    """
-    Merges Track and Tower objects into ParticleFlowCandidate format.
+    """Merges Track and Tower objects into ParticleFlowCandidate format.
     
     This merger takes exactly three input streams and applies specific
     transformations to each before concatenating:
@@ -60,9 +63,8 @@ class EFlowMerger(nn.Module):
         """Initialize the EFlowMerger module (no parameters needed)."""
         super().__init__()
 
-    def forward(self, input_arrays: List[torch.Tensor]) -> torch.Tensor:
-        """
-        Merge Track and Tower objects into ParticleFlowCandidate format.
+    def forward(self, input_arrays: list[torch.Tensor]) -> torch.Tensor:
+        """Merge Track and Tower objects into ParticleFlowCandidate format.
 
         Args:
             input_arrays: List of exactly 3 tensors:
@@ -71,11 +73,13 @@ class EFlowMerger(nn.Module):
                 - [1] photons: (N_photons, N_FEATURES) - ECal tower objects
                 - [2] neutral_hadrons: (N_neutrals, N_FEATURES) - HCal tower objects
 
-        Returns:
+        Returns
+        -------
             Merged tensor of shape (N_total, N_FEATURES) containing all
             ParticleFlowCandidate objects with appropriate transformations applied.
             
-        Raises:
+        Raises
+        ------
             ValueError: If input_arrays does not contain exactly 3 tensors.
         """
         if len(input_arrays) != 3:
@@ -115,8 +119,7 @@ class EFlowMerger(nn.Module):
         return merged
 
     def _transform_tracks(self, tracks: torch.Tensor) -> torch.Tensor:
-        """
-        Transform Track objects for ParticleFlow representation.
+        """Transform Track objects for ParticleFlow representation.
 
         For ParticleFlow, the Eta field should be the position eta (EtaOuter),
         not the momentum eta. This ensures consistency with calorimeter towers.
@@ -124,7 +127,8 @@ class EFlowMerger(nn.Module):
         Args:
             tracks: (N, N_FEATURES) Track objects
 
-        Returns:
+        Returns
+        -------
             transformed: (N, N_FEATURES) Track objects with Eta set to EtaOuter
         """
         tracks = tracks.clone()
@@ -139,8 +143,7 @@ class EFlowMerger(nn.Module):
         return tracks
 
     def _transform_photons(self, photons: torch.Tensor) -> torch.Tensor:
-        """
-        Transform photon Tower objects for ParticleFlow representation.
+        """Transform photon Tower objects for ParticleFlow representation.
 
         Photons are electromagnetic calorimeter deposits. For ParticleFlow:
         - PID should be 22 (photon PDG code)
@@ -151,7 +154,8 @@ class EFlowMerger(nn.Module):
         Args:
             photons: (N, N_FEATURES) Tower objects from ECal
 
-        Returns:
+        Returns
+        -------
             transformed: (N, N_FEATURES) Tower objects with proper PID and position
         """
         photons = photons.clone()
@@ -171,8 +175,7 @@ class EFlowMerger(nn.Module):
         return photons
 
     def _transform_neutral_hadrons(self, neutral_hadrons: torch.Tensor) -> torch.Tensor:
-        """
-        Transform neutral hadron Tower objects for ParticleFlow representation.
+        """Transform neutral hadron Tower objects for ParticleFlow representation.
 
         Neutral hadrons are hadronic calorimeter deposits. For ParticleFlow:
         - PID should be 0 (neutral hadron - C++ Delphes convention)
@@ -183,7 +186,8 @@ class EFlowMerger(nn.Module):
         Args:
             neutral_hadrons: (N, N_FEATURES) Tower objects from HCal
 
-        Returns:
+        Returns
+        -------
             transformed: (N, N_FEATURES) Tower objects with proper PID and position
         """
         neutral_hadrons = neutral_hadrons.clone()
@@ -196,7 +200,6 @@ class EFlowMerger(nn.Module):
         neutral_hadrons[:, Y] = 0.0
         neutral_hadrons[:, Z] = 0.0
         neutral_hadrons[:, T] = 0.0
-
 
         # Note: Eem and Ehad are not stored in the tensor, they will be computed
         # during ROOT writing based on E and PID

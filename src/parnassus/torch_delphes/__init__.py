@@ -1,5 +1,4 @@
-"""
-TorchDelphes: PyTorch implementation of Delphes detector simulation.
+"""TorchDelphes: PyTorch implementation of Delphes detector simulation.
 
 This package provides differentiable PyTorch modules that replicate the
 functionality of the C++ Delphes fast detector simulation framework.
@@ -33,10 +32,9 @@ from .MomentumSmearing import MomentumSmearing
 from .ParticlePropagator import ParticlePropagator
 from .SimpleCalorimeter import SimpleCalorimeter
 
-
 __all__ = [
-    "Efficiency",
     "EFlowMerger",
+    "Efficiency",
     "Merger",
     "MomentumSmearing",
     "ParticlePropagator",

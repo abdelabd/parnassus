@@ -1,5 +1,4 @@
-"""
-PDG ID filtering utilities for TorchDelphes modules.
+"""PDG ID filtering utilities for TorchDelphes modules.
 
 Provides functions to filter particles based on their PDG IDs and charge.
 These functions are used by ParticlePropagator, Efficiency, and other modules
@@ -7,12 +6,12 @@ to separate particles into different categories.
 """
 
 import torch
+
 from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 
 def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
-    """
-    Filter charged hadrons based on PDG IDs.
+    """Filter charged hadrons based on PDG IDs.
     
     Charged hadrons are defined as charged particles that are NOT electrons or muons.
     This includes: charged pions, kaons, protons, etc.
@@ -21,11 +20,13 @@ def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
             
-    Returns:
+    Returns
+    -------
         mask: Boolean tensor indicating charged hadrons
               Same shape as particles[..., 0]
     
-    Examples:
+    Examples
+    --------
         >>> particles = torch.randn(100, 25)
         >>> mask = charged_hadron_filter(particles)
         >>> charged_hadrons = particles[mask]
@@ -34,18 +35,17 @@ def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
     q_final = particles[..., CMAP["CHARGE"]]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
-    
+
     # Exclude electrons (|PDG| = 11) and muons (|PDG| = 13)
     electron_mask = (abs_pid == 11) & is_charged
     muon_mask = (abs_pid == 13) & is_charged
     pid_mask = is_charged & ~electron_mask & ~muon_mask
-    
+
     return pid_mask
 
 
 def electron_filter(particles: torch.Tensor) -> torch.Tensor:
-    """
-    Filter electrons based on PDG IDs.
+    """Filter electrons based on PDG IDs.
     
     Electrons and positrons have PDG ID = ±11.
     
@@ -53,11 +53,13 @@ def electron_filter(particles: torch.Tensor) -> torch.Tensor:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
             
-    Returns:
+    Returns
+    -------
         mask: Boolean tensor indicating electrons/positrons
               Same shape as particles[..., 0]
     
-    Examples:
+    Examples
+    --------
         >>> particles = torch.randn(100, 25)
         >>> mask = electron_filter(particles)
         >>> electrons = particles[mask]
@@ -66,15 +68,14 @@ def electron_filter(particles: torch.Tensor) -> torch.Tensor:
     q_final = particles[..., CMAP["CHARGE"]]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
-    
+
     pid_mask = (abs_pid == 11) & is_charged
-    
+
     return pid_mask
 
 
 def muon_filter(particles: torch.Tensor) -> torch.Tensor:
-    """
-    Filter muons based on PDG IDs.
+    """Filter muons based on PDG IDs.
     
     Muons and antimuons have PDG ID = ±13.
     
@@ -82,11 +83,13 @@ def muon_filter(particles: torch.Tensor) -> torch.Tensor:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
             
-    Returns:
+    Returns
+    -------
         mask: Boolean tensor indicating muons/antimuons
               Same shape as particles[..., 0]
     
-    Examples:
+    Examples
+    --------
         >>> particles = torch.randn(100, 25)
         >>> mask = muon_filter(particles)
         >>> muons = particles[mask]
@@ -95,15 +98,14 @@ def muon_filter(particles: torch.Tensor) -> torch.Tensor:
     q_final = particles[..., CMAP["CHARGE"]]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
-    
+
     pid_mask = (abs_pid == 13) & is_charged
-    
+
     return pid_mask
 
 
 def neutral_filter(particles: torch.Tensor) -> torch.Tensor:
-    """
-    Filter neutral particles based on charge.
+    """Filter neutral particles based on charge.
     
     Neutral particles have |charge| < 1e-9 (accounts for floating point precision).
     This includes: photons, neutrons, neutrinos, neutral kaons, etc.
@@ -112,27 +114,28 @@ def neutral_filter(particles: torch.Tensor) -> torch.Tensor:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain CHARGE column
             
-    Returns:
+    Returns
+    -------
         mask: Boolean tensor indicating neutral particles
               Same shape as particles[..., 0]
     
-    Examples:
+    Examples
+    --------
         >>> particles = torch.randn(100, 25)
         >>> mask = neutral_filter(particles)
         >>> neutrals = particles[mask]
     """
     q_final = particles[..., CMAP["CHARGE"]]
     is_charged = torch.abs(q_final) > 1.0e-9
-    
+
     pid_mask = ~is_charged
-    
+
     return pid_mask
 
 
 # Convenience function for getting multiple filters at once
 def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
-    """
-    Get all particle type masks at once.
+    """Get all particle type masks at once.
     
     This is more efficient than calling individual filter functions
     when you need multiple masks, as it computes shared quantities only once.
@@ -141,7 +144,8 @@ def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
         particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
                   Must contain PID and CHARGE columns
     
-    Returns:
+    Returns
+    -------
         Dictionary containing masks for each particle type:
             - 'charged_hadron': Charged hadrons (not e/μ)
             - 'electron': Electrons and positrons
@@ -149,7 +153,8 @@ def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
             - 'neutral': Neutral particles
             - 'charged': All charged particles
     
-    Examples:
+    Examples
+    --------
         >>> particles = torch.randn(100, 25)
         >>> masks = get_particle_masks(particles)
         >>> print(f"Found {masks['electron'].sum()} electrons")
@@ -158,16 +163,16 @@ def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
     q_final = particles[..., CMAP["CHARGE"]]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
-    
+
     electron_mask = (abs_pid == 11) & is_charged
     muon_mask = (abs_pid == 13) & is_charged
     charged_hadron_mask = is_charged & ~electron_mask & ~muon_mask
     neutral_mask = ~is_charged
-    
+
     return {
-        'charged_hadron': charged_hadron_mask,
-        'electron': electron_mask,
-        'muon': muon_mask,
-        'neutral': neutral_mask,
-        'charged': is_charged
+        "charged_hadron": charged_hadron_mask,
+        "electron": electron_mask,
+        "muon": muon_mask,
+        "neutral": neutral_mask,
+        "charged": is_charged
     }

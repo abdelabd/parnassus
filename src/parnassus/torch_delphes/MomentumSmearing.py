@@ -1,5 +1,4 @@
-"""
-PyTorch implementation of Delphes MomentumSmearing module.
+"""PyTorch implementation of Delphes MomentumSmearing module.
 
 Applies momentum resolution smearing to charged particle tracks using a 
 log-normal distribution. The resolution depends on particle kinematics
@@ -14,17 +13,17 @@ Reference:
     CMS tracking resolution: arXiv:1405.6569
 """
 
-import torch
-import torch.nn as nn
-from typing import Callable, Union
+from collections.abc import Callable
 
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+import torch
+from torch import nn
+
 from parnassus.torch_delphes.stochastic_utils import log_normal_sample
+from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 
 
 class MomentumSmearing(nn.Module):
-    """
-    PyTorch implementation of Delphes MomentumSmearing module.
+    """PyTorch implementation of Delphes MomentumSmearing module.
     
     Applies momentum resolution smearing based on particle kinematics. The 
     resolution formula takes (pT, η_outer) and returns a relative resolution
@@ -48,20 +47,20 @@ class MomentumSmearing(nn.Module):
     - **electron_cms**: CMS electron momentum resolution
     - **muon_cms**: CMS muon momentum resolution
     
-    Attributes:
+    Attributes
+    ----------
         resolution_func: Function that computes resolution from (pt, eta_outer)
         
     Example:
         >>> smear = MomentumSmearing(resolution_formula='charged_hadron_cms')
         >>> smeared_tracks = smear(tracks)
     """
-    
+
     def __init__(
-        self, 
-        resolution_formula: Union[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = 'charged_hadron_cms',
+        self,
+        resolution_formula: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "charged_hadron_cms",
     ) -> None:
-        """
-        Initialize the MomentumSmearing module.
+        """Initialize the MomentumSmearing module.
         
         Args:
             resolution_formula: Either a string naming a predefined formula
@@ -70,22 +69,21 @@ class MomentumSmearing(nn.Module):
                 relative resolution values (e.g., 0.06 for 6%).
         """
         super().__init__()
-        
+
         # Load resolution formula
-        if resolution_formula == 'charged_hadron_cms':
+        if resolution_formula == "charged_hadron_cms":
             self.resolution_func = self._charged_hadron_cms_momentum_resolution
-        elif resolution_formula == 'electron_cms':
+        elif resolution_formula == "electron_cms":
             self.resolution_func = self._electron_cms_momentum_resolution
-        elif resolution_formula == 'muon_cms':
+        elif resolution_formula == "muon_cms":
             self.resolution_func = self._muon_cms_momentum_resolution
         elif callable(resolution_formula):
             self.resolution_func = resolution_formula
         else:
             raise ValueError(f"Unknown resolution formula: {resolution_formula}")
-    
+
     def forward(self, particles: torch.Tensor) -> torch.Tensor:
-        """
-        Apply momentum smearing to particles.
+        """Apply momentum smearing to particles.
         
         Computes the momentum resolution for each particle, then smears the pT
         using a log-normal distribution. All momentum components and energy
@@ -101,12 +99,12 @@ class MomentumSmearing(nn.Module):
                 - MASS (col 14): Particle mass in GeV
                 - ETA_OUTER (col 15): Position-based pseudorapidity
         
-        Returns:
+        Returns
+        -------
             Updated tensor of shape (N, N_FEATURES) with smeared momentum.
             Modified columns: PT, PX, PY, PZ, E, TRACK_RESOLUTION.
             Original η and φ are preserved.
         """
-
         pt = particles[:, CMAP["PT"]]   # Column 7: PT (transverse momentum)
         eta_outer = particles[:, CMAP["ETA_OUTER"]]  # Column 8: Eta (for resolution formula - typically position-based)
         mass = particles[:, CMAP["MASS"]]  # Column 14: Mass
@@ -118,15 +116,15 @@ class MomentumSmearing(nn.Module):
         # Resolution is relative (dimensionless, like 0.06 = 6%)
         resolution = self.resolution_func(pt, eta_outer)
         resolution = torch.clamp(resolution, max=1.0)
-        
+
         # Store the track resolution for use in SimpleCalorimeter
         particles[:, CMAP["TRACK_RESOLUTION"]] = resolution
-        
+
         # Apply smearing using log-normal distribution
         # C++ does: LogNormal(pt, res * pt) where res is relative resolution
         # So sigma = resolution * pt (absolute resolution in GeV)
         smeared_pt = log_normal_sample(pt, resolution * pt)
-        
+
         # Update PT, PX, PY, PZ, E
         particles[:, CMAP["PT"]] = smeared_pt
         particles[:, CMAP["PX"]] = smeared_pt * torch.cos(phi)  # Px
@@ -140,107 +138,107 @@ class MomentumSmearing(nn.Module):
 
     @staticmethod
     def _charged_hadron_cms_momentum_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        """
-        CMS charged hadron momentum resolution formula.
+        """CMS charged hadron momentum resolution formula.
         Based on arXiv:1405.6569
         
         Args:
             pt: transverse momentum (GeV)
             eta_outer: pseudorapidity
             
-        Returns:
+        Returns
+        -------
             resolution: relative momentum resolution (dimensionless, e.g., 0.06 = 6%)
                         To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
-        
+
         # Initialize with zeros
         res = torch.zeros_like(pt)
-        
+
         # Region 1: Central barrel (|eta_outer| <= 0.5, pt > 0.1)
         # Resolution = sqrt(0.06^2 + pt^2 * 1.3e-3^2)
         mask1 = (abs_eta_outer <= 0.5) & (pt > 0.1)
         res1 = torch.sqrt(0.06**2 + pt**2 * (1.3e-3)**2)
         res = torch.where(mask1, res1, res)
-        
+
         # Region 2: Intermediate (0.5 < |eta_outer| <= 1.5, pt > 0.1)
         # Resolution = sqrt(0.10^2 + pt^2 * 1.7e-3^2)
         mask2 = (abs_eta_outer > 0.5) & (abs_eta_outer <= 1.5) & (pt > 0.1)
         res2 = torch.sqrt(0.10**2 + pt**2 * (1.7e-3)**2)
         res = torch.where(mask2, res2, res)
-        
+
         # Region 3: Forward (1.5 < |eta_outer| <= 2.5, pt > 0.1)
         # Resolution = sqrt(0.25^2 + pt^2 * 3.1e-3^2)
         mask3 = (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5) & (pt > 0.1)
         res3 = torch.sqrt(0.25**2 + pt**2 * (3.1e-3)**2)
         res = torch.where(mask3, res3, res)
-        
+
         return res
-    
+
     @staticmethod
     def _electron_cms_momentum_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        """
-        CMS electron momentum resolution formula.
+        """CMS electron momentum resolution formula.
         Based on arXiv:1502.02701
         
         Args:
             pt: transverse momentum (GeV)
             eta_outer: pseudorapidity
             
-        Returns:
+        Returns
+        -------
             resolution: relative momentum resolution (dimensionless, e.g., 0.03 = 3%)
                         To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)
-        
+
         # Central barrel
         mask1 = (abs_eta_outer <= 0.5) & (pt > 0.1)
         res1 = torch.sqrt(0.03**2 + pt**2 * (1.3e-3)**2)
         res = torch.where(mask1, res1, res)
-        
+
         # Intermediate
         mask2 = (abs_eta_outer > 0.5) & (abs_eta_outer <= 1.5) & (pt > 0.1)
         res2 = torch.sqrt(0.05**2 + pt**2 * (1.7e-3)**2)
         res = torch.where(mask2, res2, res)
-        
+
         # Forward
         mask3 = (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5) & (pt > 0.1)
         res3 = torch.sqrt(0.15**2 + pt**2 * (3.1e-3)**2)
         res = torch.where(mask3, res3, res)
-        
+
         return res
-    
+
     @staticmethod
     def _muon_cms_momentum_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        """
-        CMS muon momentum resolution formula.
+        """CMS muon momentum resolution formula.
         Based on arXiv:1306.2016
         
         Args:
             pt: transverse momentum (GeV)
             eta_outer: pseudorapidity
             
-        Returns:
+        Returns
+        -------
             resolution: relative momentum resolution (dimensionless, e.g., 0.01 = 1%)
                         To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)
-        
+
         # Central barrel
         mask1 = (abs_eta_outer <= 0.5) & (pt > 0.1)
         res1 = torch.sqrt(0.01**2 + pt**2 * (1.0e-3)**2)
         res = torch.where(mask1, res1, res)
-        
+
         # Intermediate
         mask2 = (abs_eta_outer > 0.5) & (abs_eta_outer <= 1.5) & (pt > 0.1)
         res2 = torch.sqrt(0.02**2 + pt**2 * (1.3e-3)**2)
         res = torch.where(mask2, res2, res)
-        
+
         # Forward
         mask3 = (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5) & (pt > 0.1)
         res3 = torch.sqrt(0.10**2 + pt**2 * (2.0e-3)**2)
         res = torch.where(mask3, res3, res)
-        
+
         return res

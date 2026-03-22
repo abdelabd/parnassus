@@ -1,5 +1,4 @@
-"""
-PyTorch implementation of default CMS detector simulation.
+"""PyTorch implementation of default CMS detector simulation.
 
 Implements the CMS detector response chain from the Delphes TCL card
 (delphes_card_CMS_6_1.tcl), producing energy flow objects suitable for
@@ -22,24 +21,21 @@ Reference:
     C++ Delphes card: cards/delphes_card_CMS_6_1.tcl
 """
 
-import torch
-import torch.nn as nn
-import numpy as np
-from typing import Dict
 
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
-from parnassus.torch_delphes import pdg_filters
-from parnassus.torch_delphes.ParticlePropagator import ParticlePropagator
+import numpy as np
+import torch
+from torch import nn
+
 from parnassus.torch_delphes.Efficiency import Efficiency
-from parnassus.torch_delphes.MomentumSmearing import MomentumSmearing
-from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
-from parnassus.torch_delphes.Merger import Merger
 from parnassus.torch_delphes.EFlowMerger import EFlowMerger
+from parnassus.torch_delphes.Merger import Merger
+from parnassus.torch_delphes.MomentumSmearing import MomentumSmearing
+from parnassus.torch_delphes.ParticlePropagator import ParticlePropagator
+from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
 
 
 class CMSEnergyFlowDefault(nn.Module):
-    """
-    PyTorch implementation of the default CMS Delphes detector simulation.
+    """PyTorch implementation of the default CMS Delphes detector simulation.
     
     Simulates the full CMS detector response chain including:
     
@@ -57,7 +53,8 @@ class CMSEnergyFlowDefault(nn.Module):
     - **Debug mode** (debug=True): Returns all intermediate objects for
       validation against C++ Delphes
       
-    Attributes:
+    Attributes
+    ----------
         debug: If True, return all intermediate processing stages
         ParticlePropagator: Propagates particles to tracker surface
         ChargedHadronTrackingEfficiency: Tracking efficiency for hadrons
@@ -78,10 +75,9 @@ class CMSEnergyFlowDefault(nn.Module):
         >>> tracks = results['Track']
         >>> eflow_tracks = results['EFlowTrack']
     """
-    
+
     def __init__(self, debug: bool = False) -> None:
-        """
-        Initialize the CMS detector simulation.
+        """Initialize the CMS detector simulation.
         
         Args:
             debug: If True, return all intermediate processing stages
@@ -101,24 +97,24 @@ class CMSEnergyFlowDefault(nn.Module):
 
         # TrackingEfficiency
         self.ChargedHadronTrackingEfficiency = Efficiency(
-            efficiency_formula = 'charged_hadron_cms'
+            efficiency_formula="charged_hadron_cms"
         )
         self.ElectronTrackingEfficiency = Efficiency(
-            efficiency_formula = 'electron_cms'
+            efficiency_formula="electron_cms"
         )
         self.MuonTrackingEfficiency = Efficiency(
-            efficiency_formula = 'muon_cms'
+            efficiency_formula="muon_cms"
         )
 
         # MomentumSmearing
         self.ChargedHadronMomentumSmearing = MomentumSmearing(
-            resolution_formula = 'charged_hadron_cms'
+            resolution_formula="charged_hadron_cms"
         )
         self.ElectronMomentumSmearing = MomentumSmearing(
-            resolution_formula = 'electron_cms'
+            resolution_formula="electron_cms"
         )
         self.MuonMomentumSmearing = MomentumSmearing(
-            resolution_formula = 'muon_cms'
+            resolution_formula="muon_cms"
         )
 
         # TrackMerger
@@ -135,11 +131,9 @@ class CMSEnergyFlowDefault(nn.Module):
 
         # EFlowMerger
         self.EFlowMerger = EFlowMerger()
-        
 
-    def forward(self, stable_particles: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Apply the full CMS detector simulation to input particles.
+    def forward(self, stable_particles: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Apply the full CMS detector simulation to input particles.
         
         Processes generator-level stable particles through the complete
         detector simulation chain: propagation, tracking, calorimetry,
@@ -154,7 +148,8 @@ class CMSEnergyFlowDefault(nn.Module):
                 - X, Y, Z, T (production vertex)
                 - MASS, EVENT_NUMBER
         
-        Returns:
+        Returns
+        -------
             Dictionary mapping branch names to tensors. Contents depend on
             debug mode:
             
@@ -176,7 +171,7 @@ class CMSEnergyFlowDefault(nn.Module):
             - 'EFlowObject'
         """
         n_part, n_dim = stable_particles.shape
-        
+
         # ParticlePropagator
         particles = stable_particles.reshape(-1, n_dim)
         if self.debug:
@@ -240,15 +235,14 @@ class CMSEnergyFlowDefault(nn.Module):
 
                 "EFlowObject": eflow_objects,
                 }
-        else:
-            return {
-                "Track": merged_tracks,
-                "Tower": merged_towers,
-                "EFlowTrack": hcal_tracks,
-                "EFlowPhoton": eflow_photons, 
-                "EFlowNeutralHadron": eflow_neutral_hadrons,
-                "EFlowObject": eflow_objects,
-            }
+        return {
+            "Track": merged_tracks,
+            "Tower": merged_towers,
+            "EFlowTrack": hcal_tracks,
+            "EFlowPhoton": eflow_photons,
+            "EFlowNeutralHadron": eflow_neutral_hadrons,
+            "EFlowObject": eflow_objects,
+        }
 
     def _setup_ECal(self):
         energy_fractions = {
@@ -272,26 +266,26 @@ class CMSEnergyFlowDefault(nn.Module):
         # Create eta and phi bins from CMS card (delphes_card_CMS_5_0.tcl)
         # The card builds a map: eta_value -> set of phi bins
         # We need to replicate this exactly
-        
+
         # Fine phi bins for barrel and endcap (361 bins, -pi to pi in 1 degree steps)
         phi_bins_fine = [i * np.pi / 180.0 for i in range(-180, 181)]
-        
+
         # Coarse phi bins for HF (37 bins, -pi to pi in 10 degree steps)
         phi_bins_coarse = [i * np.pi / 18.0 for i in range(-18, 19)]
 
         # Build the eta bins and corresponding phi bins exactly as C++ Delphes does
         # The C++ code uses a map<double, set<double>> which gets sorted by eta
         # Then converts to parallel vectors: fEtaBins and fPhiBins[etaBin]
-        
+
         eta_phi_map = {}  # eta -> set of phi bin edges
-        
+
         # Barrel: 0.02 unit in eta from -85*0.0174 to 86*0.0174
         for i in range(-85, 87):
             eta = i * 0.0174
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
             eta_phi_map[eta].update(phi_bins_fine)
-        
+
         # Endcap negative: -2.958 + i*0.0174 for i in 1..84
         for i in range(1, 85):
             eta = -2.958 + i * 0.0174
@@ -305,7 +299,7 @@ class CMSEnergyFlowDefault(nn.Module):
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
             eta_phi_map[eta].update(phi_bins_fine)
-        
+
         # HF: specific eta values with coarse phi binning
         hf_etas = [-5, -4.7, -4.525, -4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.958,
                 3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525, 4.7, 5]
@@ -324,7 +318,7 @@ class CMSEnergyFlowDefault(nn.Module):
             energy_min=0.5,
             energy_sig_min=2.0,
             energy_fractions=energy_fractions,
-            resolution_formula='ecal_cms',
+            resolution_formula="ecal_cms",
             is_ecal=True,
             smear_tower_center=True  # Match C++ Delphes: SmearTowerCenter true
         )
@@ -347,32 +341,31 @@ class CMSEnergyFlowDefault(nn.Module):
             310: 0.7,      # K0short (70% HCAL)
             3122: 0.7,     # Lambda (70% HCAL)
         }
-        
-        
+
         eta_phi_map = {}  # eta -> set of phi bin edges
-        
+
         # 5 degrees towers (barrel): phi bins -36 to 36 in steps of pi/36
         phi_bins_5deg = [i * np.pi / 36.0 for i in range(-36, 37)]
-        barrel_etas = [-1.566, -1.479, -1.392, -1.305, -1.218, -1.131, -1.044, -0.957, -0.87, -0.783, 
-                    -0.696, -0.609, -0.522, -0.435, -0.348, -0.261, -0.174, -0.087, 0, 
-                    0.087, 0.174, 0.261, 0.348, 0.435, 0.522, 0.609, 0.696, 0.783, 0.87, 
+        barrel_etas = [-1.566, -1.479, -1.392, -1.305, -1.218, -1.131, -1.044, -0.957, -0.87, -0.783,
+                    -0.696, -0.609, -0.522, -0.435, -0.348, -0.261, -0.174, -0.087, 0,
+                    0.087, 0.174, 0.261, 0.348, 0.435, 0.522, 0.609, 0.696, 0.783, 0.87,
                     0.957, 1.044, 1.131, 1.218, 1.305, 1.392, 1.479, 1.566, 1.653]
         for eta in barrel_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
             eta_phi_map[eta].update(phi_bins_5deg)
-        
+
         # 10 degrees towers (endcap): phi bins -18 to 18 in steps of pi/18
         phi_bins_10deg = [i * np.pi / 18.0 for i in range(-18, 19)]
-        endcap_etas = [-4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.95, -2.868, 
-                    -2.65, -2.5, -2.322, -2.172, -2.043, -1.93, -1.83, -1.74, -1.653, 
-                    1.74, 1.83, 1.93, 2.043, 2.172, 2.322, 2.5, 2.65, 2.868, 2.95, 
+        endcap_etas = [-4.35, -4.175, -4, -3.825, -3.65, -3.475, -3.3, -3.125, -2.95, -2.868,
+                    -2.65, -2.5, -2.322, -2.172, -2.043, -1.93, -1.83, -1.74, -1.653,
+                    1.74, 1.83, 1.93, 2.043, 2.172, 2.322, 2.5, 2.65, 2.868, 2.95,
                     3.125, 3.3, 3.475, 3.65, 3.825, 4, 4.175, 4.35, 4.525]
         for eta in endcap_etas:
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
             eta_phi_map[eta].update(phi_bins_10deg)
-        
+
         # 20 degrees towers (forward): phi bins -9 to 9 in steps of pi/9
         phi_bins_20deg = [i * np.pi / 9.0 for i in range(-9, 10)]
         forward_etas = [-5, -4.7, -4.525, 4.7, 5]
@@ -380,7 +373,7 @@ class CMSEnergyFlowDefault(nn.Module):
             if eta not in eta_phi_map:
                 eta_phi_map[eta] = set()
             eta_phi_map[eta].update(phi_bins_20deg)
-        
+
         # Convert to sorted lists (matching C++ behavior)
         eta_bins = sorted(eta_phi_map.keys())
         phi_bins_per_eta = [sorted(eta_phi_map[eta]) for eta in eta_bins]
@@ -391,8 +384,7 @@ class CMSEnergyFlowDefault(nn.Module):
             energy_min=1.0,          # HCal has higher threshold
             energy_sig_min=1.0,      # HCal has lower significance threshold
             energy_fractions=energy_fractions,
-            resolution_formula='hcal_cms',
+            resolution_formula="hcal_cms",
             is_ecal=False,
             smear_tower_center=True
         )
-

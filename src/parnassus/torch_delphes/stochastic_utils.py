@@ -1,5 +1,4 @@
-"""
-Stochastic sampling utilities for TorchDelphes modules.
+"""Stochastic sampling utilities for TorchDelphes modules.
 
 Provides functions for sampling from probability distributions used in
 detector simulation, including log-normal sampling for resolution smearing.
@@ -10,8 +9,7 @@ import torch
 
 
 def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-    """
-    Sample from a log-normal distribution ensuring positive values.
+    """Sample from a log-normal distribution ensuring positive values.
     
     This function is used for momentum and energy resolution smearing throughout
     TorchDelphes. The log-normal distribution ensures that smeared values remain
@@ -35,12 +33,14 @@ def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         sigma: Standard deviation (resolution uncertainty)
                Shape: same as mean
                
-    Returns:
+    Returns
+    -------
         Sampled values from log-normal distribution
         Shape: same as input
         For invalid inputs (mean ≤ 0), returns zero
         
-    Examples:
+    Examples
+    --------
         >>> # Smear particle momenta
         >>> pt = torch.tensor([10.0, 50.0, 100.0])
         >>> resolution = torch.tensor([0.5, 1.0, 2.0])
@@ -59,7 +59,8 @@ def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         >>> loss.backward()
         >>> print(pt.grad)  # Gradient flows through!
         
-    Notes:
+    Notes
+    -----
         - Uses small epsilon (1e-10) to avoid log(0) errors
         - For mean ≤ 0, returns 0 (physically invalid values)
         - Fully differentiable for gradient-based optimization
@@ -73,19 +74,19 @@ def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
     """
     # Identify valid inputs (positive mean values)
     mask_positive = mean > 0.0
-    
+
     # Compute log-normal parameters for all elements
     # Add epsilon to avoid log(0) - torch.where will handle selection
     s_squared = torch.log(1.0 + (sigma / (mean + 1e-10))**2)
     s = torch.sqrt(s_squared)
     mu = torch.log(mean + 1e-10) - 0.5 * s_squared
-    
+
     # Sample from standard normal and transform to log-normal
     z = torch.randn_like(mean)
     sample = torch.exp(mu + s * z)
-    
+
     # Return sampled value for valid inputs, zero for invalid
     # Using torch.where maintains gradient flow through all operations
     result = torch.where(mask_positive, sample, torch.zeros_like(mean))
-    
+
     return result
