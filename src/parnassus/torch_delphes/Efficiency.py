@@ -22,7 +22,8 @@ import torch
 from torch import nn
 
 from parnassus.torch_delphes import pdg_filters
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+
+from .tensor_utils import ColumnMap
 
 
 class Efficiency(nn.Module):
@@ -107,8 +108,8 @@ class Efficiency(nn.Module):
         # 1. particles that passed propagation (PASS_PROP == 1)
         # 2. particles of the desired type
 
-        pt = particles[:, CMAP["PT"]]  # PT (transverse momentum)
-        eta_outer = particles[:, CMAP["ETA_OUTER"]]  # EtaOuter (pseudorapidity at outer position)
+        pt = particles[:, ColumnMap.PT]  # PT (transverse momentum)
+        eta_outer = particles[:, ColumnMap.ETA_OUTER]  # EtaOuter (pseudorapidity at outer position)
 
         # Compute efficiency for each particle
         efficiency = self.efficiency_func(pt, eta_outer)

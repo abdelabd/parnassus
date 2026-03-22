@@ -19,7 +19,8 @@ import torch
 from torch import nn
 
 from parnassus.torch_delphes.stochastic_utils import log_normal_sample
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+
+from .tensor_utils import ColumnMap
 
 
 class MomentumSmearing(nn.Module):
@@ -106,14 +107,14 @@ class MomentumSmearing(nn.Module):
             Modified columns: PT, PX, PY, PZ, E, TRACK_RESOLUTION.
             Original η and φ are preserved.
         """
-        pt = particles[:, CMAP["PT"]]  # Column 7: PT (transverse momentum)
+        pt = particles[:, ColumnMap.PT]  # Column 7: PT (transverse momentum)
         eta_outer = particles[
-            :, CMAP["ETA_OUTER"]
+            :, ColumnMap.ETA_OUTER
         ]  # Column 8: Eta (for resolution formula - typically position-based)
-        mass = particles[:, CMAP["MASS"]]  # Column 14: Mass
+        mass = particles[:, ColumnMap.MASS]  # Column 14: Mass
 
-        eta = particles[:, CMAP["ETA"]]  # atanh(pz/p) = asinh(pz/pt)
-        phi = particles[:, CMAP["PHI"]]
+        eta = particles[:, ColumnMap.ETA]  # atanh(pz/p) = asinh(pz/pt)
+        phi = particles[:, ColumnMap.PHI]
 
         # Compute resolution for each particle using eta_outer
         # Resolution is relative (dimensionless, like 0.06 = 6%)
@@ -121,7 +122,7 @@ class MomentumSmearing(nn.Module):
         resolution = torch.clamp(resolution, max=1.0)
 
         # Store the track resolution for use in SimpleCalorimeter
-        particles[:, CMAP["TRACK_RESOLUTION"]] = resolution
+        particles[:, ColumnMap.TRACK_RESOLUTION] = resolution
 
         # Apply smearing using log-normal distribution
         # C++ does: LogNormal(pt, res * pt) where res is relative resolution
@@ -129,17 +130,17 @@ class MomentumSmearing(nn.Module):
         smeared_pt = log_normal_sample(pt, resolution * pt)
 
         # Update PT, PX, PY, PZ, E
-        particles[:, CMAP["PT"]] = smeared_pt
-        particles[:, CMAP["PX"]] = smeared_pt * torch.cos(phi)  # Px
-        particles[:, CMAP["PY"]] = smeared_pt * torch.sin(phi)  # Py
-        particles[:, CMAP["PZ"]] = smeared_pt * torch.sinh(eta)  # Pz
+        particles[:, ColumnMap.PT] = smeared_pt
+        particles[:, ColumnMap.PX] = smeared_pt * torch.cos(phi)  # Px
+        particles[:, ColumnMap.PY] = smeared_pt * torch.sin(phi)  # Py
+        particles[:, ColumnMap.PZ] = smeared_pt * torch.sinh(eta)  # Pz
 
         p_squared = (
-            particles[:, CMAP["PX"]] ** 2
-            + particles[:, CMAP["PY"]] ** 2
-            + particles[:, CMAP["PZ"]] ** 2
+            particles[:, ColumnMap.PX] ** 2
+            + particles[:, ColumnMap.PY] ** 2
+            + particles[:, ColumnMap.PZ] ** 2
         )
-        particles[:, CMAP["E"]] = torch.sqrt(p_squared + mass**2)  # E
+        particles[:, ColumnMap.E] = torch.sqrt(p_squared + mass**2)  # E
 
         return particles
 
@@ -148,7 +149,7 @@ class MomentumSmearing(nn.Module):
         pt: torch.Tensor, eta_outer: torch.Tensor
     ) -> torch.Tensor:
         """CMS charged hadron momentum resolution formula.
-        Based on arXiv:1405.6569
+        Based on arXiv:1405.6569.
 
         Args:
             pt: transverse momentum (GeV)
@@ -189,7 +190,7 @@ class MomentumSmearing(nn.Module):
         pt: torch.Tensor, eta_outer: torch.Tensor
     ) -> torch.Tensor:
         """CMS electron momentum resolution formula.
-        Based on arXiv:1502.02701
+        Based on arXiv:1502.02701.
 
         Args:
             pt: transverse momentum (GeV)
@@ -223,7 +224,7 @@ class MomentumSmearing(nn.Module):
     @staticmethod
     def _muon_cms_momentum_resolution(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """CMS muon momentum resolution formula.
-        Based on arXiv:1306.2016
+        Based on arXiv:1306.2016.
 
         Args:
             pt: transverse momentum (GeV)

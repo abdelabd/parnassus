@@ -24,8 +24,9 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
-from parnassus.torch_delphes.tensor_utils import N_FEATURES
+from .tensor_utils import ColumnMap
+
+N_FEATURES = len(ColumnMap)
 
 
 class SimpleCalorimeter(nn.Module):
@@ -136,8 +137,8 @@ class SimpleCalorimeter(nn.Module):
         """
         # 0. Extract Event Indices ########
         # Get event numbers and map to compact indices [0, n_events)
-        particle_event_num = particles[:, CMAP["EVENT_NUMBER"]]
-        track_event_num = tracks[:, CMAP["EVENT_NUMBER"]]
+        particle_event_num = particles[:, ColumnMap.EVENT_NUMBER]
+        track_event_num = tracks[:, ColumnMap.EVENT_NUMBER]
 
         # Find unique events across both particles and tracks
         all_event_nums = torch.cat([particle_event_num, track_event_num])
@@ -151,8 +152,8 @@ class SimpleCalorimeter(nn.Module):
 
         # 1. Compute Energy Fractions ########
         # Get PDG IDs
-        particle_pids = particles[:, CMAP["PID"]]
-        track_pids = tracks[:, CMAP["PID"]]
+        particle_pids = particles[:, ColumnMap.PID]
+        track_pids = tracks[:, ColumnMap.PID]
 
         # Compute energy fractions based on PDG ID
         # This matches fTowerFractions and fTrackFractions in C++
@@ -163,8 +164,8 @@ class SimpleCalorimeter(nn.Module):
         # C++: if(fraction < 1.0E-9) continue;  // particles with zero fraction are skipped
         # Get particle positions (eta, phi from Position, not Momentum)
         # Use .contiguous() to avoid performance warning from searchsorted
-        particle_eta = particles[:, CMAP["ETA_OUTER"]].contiguous()  # Position-based eta
-        particle_phi = particles[:, CMAP["PHI_OUTER"]].contiguous()  # Position-based phi
+        particle_eta = particles[:, ColumnMap.ETA_OUTER].contiguous()  # Position-based eta
+        particle_phi = particles[:, ColumnMap.PHI_OUTER].contiguous()  # Position-based phi
 
         # Find eta bin for each particle
         particle_eta_bin = torch.searchsorted(self.eta_bins, particle_eta)
@@ -180,8 +181,8 @@ class SimpleCalorimeter(nn.Module):
         # Get track positions (eta and phi from outer position, set by ParticlePropagator)
         # C++ uses track->Position.Eta() and track->Position.Phi()
         # Use .contiguous() to avoid performance warning from searchsorted
-        track_eta = tracks[:, CMAP["ETA_OUTER"]].contiguous()  # Position-based eta
-        track_phi = tracks[:, CMAP["PHI_OUTER"]].contiguous()  # Position-based phi
+        track_eta = tracks[:, ColumnMap.ETA_OUTER].contiguous()  # Position-based eta
+        track_phi = tracks[:, ColumnMap.PHI_OUTER].contiguous()  # Position-based phi
 
         # Find eta bin for each track
         track_eta_bin = torch.searchsorted(self.eta_bins, track_eta)
@@ -199,8 +200,8 @@ class SimpleCalorimeter(nn.Module):
         #   - Time weighting is also done but we handle that separately
 
         # Get energies
-        particle_energy = particles[:, CMAP["E"]]
-        track_energy = tracks[:, CMAP["E"]]
+        particle_energy = particles[:, ColumnMap.E]
+        track_energy = tracks[:, ColumnMap.E]
 
         # Compute weighted energies (energy × fraction)
         particle_weighted_energy = particle_energy * particle_energy_fractions
@@ -293,7 +294,7 @@ class SimpleCalorimeter(nn.Module):
         # Note: The "energy" here is the weighted energy (E * fraction)
 
         # Get particle times
-        particle_time = particles[:, CMAP["T"]]
+        particle_time = particles[:, ColumnMap.T]
 
         # Compute E^2 weights for particles (weighted_energy^2)
         particle_time_weight = particle_weighted_energy**2
@@ -420,7 +421,7 @@ class SimpleCalorimeter(nn.Module):
         # NOTE: C++ uses fTowerEta (bin center) for resolution, not smeared position
 
         # Get track resolution from MomentumSmearing (stored in TRACK_RESOLUTION column)
-        track_momentum_resolution = tracks[:, CMAP["TRACK_RESOLUTION"]]
+        track_momentum_resolution = tracks[:, ColumnMap.TRACK_RESOLUTION]
         n_tracks = tracks.shape[0]
 
         # For valid tracks, get the tower eta CENTER using the track's tower assignment
@@ -605,35 +606,37 @@ class SimpleCalorimeter(nn.Module):
 
         # Apply rescale factor to tracks in rescale towers
         # PT is rescaled, then PX, PY, PZ, E are recomputed
-        original_pt = eflow_tracks[:, CMAP["PT"]]
+        original_pt = eflow_tracks[:, ColumnMap.PT]
         rescaled_pt = original_pt * track_rescale_factor
 
         # Only apply to tracks in rescale towers
-        eflow_tracks[:, CMAP["PT"]] = torch.where(track_in_rescale_tower, rescaled_pt, original_pt)
+        eflow_tracks[:, ColumnMap.PT] = torch.where(
+            track_in_rescale_tower, rescaled_pt, original_pt
+        )
 
         # Recompute PX, PY from rescaled PT
-        eta = eflow_tracks[:, CMAP["ETA"]]
-        phi = eflow_tracks[:, CMAP["PHI"]]
-        mass = eflow_tracks[:, CMAP["MASS"]]
+        eta = eflow_tracks[:, ColumnMap.ETA]
+        phi = eflow_tracks[:, ColumnMap.PHI]
+        mass = eflow_tracks[:, ColumnMap.MASS]
 
-        eflow_tracks[:, CMAP["PX"]] = torch.where(
-            track_in_rescale_tower, rescaled_pt * torch.cos(phi), eflow_tracks[:, CMAP["PX"]]
+        eflow_tracks[:, ColumnMap.PX] = torch.where(
+            track_in_rescale_tower, rescaled_pt * torch.cos(phi), eflow_tracks[:, ColumnMap.PX]
         )
-        eflow_tracks[:, CMAP["PY"]] = torch.where(
-            track_in_rescale_tower, rescaled_pt * torch.sin(phi), eflow_tracks[:, CMAP["PY"]]
+        eflow_tracks[:, ColumnMap.PY] = torch.where(
+            track_in_rescale_tower, rescaled_pt * torch.sin(phi), eflow_tracks[:, ColumnMap.PY]
         )
-        eflow_tracks[:, CMAP["PZ"]] = torch.where(
-            track_in_rescale_tower, rescaled_pt * torch.sinh(eta), eflow_tracks[:, CMAP["PZ"]]
+        eflow_tracks[:, ColumnMap.PZ] = torch.where(
+            track_in_rescale_tower, rescaled_pt * torch.sinh(eta), eflow_tracks[:, ColumnMap.PZ]
         )
 
         # Recompute E from P and mass
         p_sq = (
-            eflow_tracks[:, CMAP["PX"]] ** 2
-            + eflow_tracks[:, CMAP["PY"]] ** 2
-            + eflow_tracks[:, CMAP["PZ"]] ** 2
+            eflow_tracks[:, ColumnMap.PX] ** 2
+            + eflow_tracks[:, ColumnMap.PY] ** 2
+            + eflow_tracks[:, ColumnMap.PZ] ** 2
         )
-        eflow_tracks[:, CMAP["E"]] = torch.where(
-            track_in_rescale_tower, torch.sqrt(p_sq + mass**2), eflow_tracks[:, CMAP["E"]]
+        eflow_tracks[:, ColumnMap.E] = torch.where(
+            track_in_rescale_tower, torch.sqrt(p_sq + mass**2), eflow_tracks[:, ColumnMap.E]
         )
 
         # Filter to only EFlow tracks
@@ -654,35 +657,35 @@ class SimpleCalorimeter(nn.Module):
             valid_tower_event_num = tower_event_num[tower_has_energy]
 
             # Set tower properties
-            towers[:, CMAP["PID"]] = 22.0  # Photon for ECAL towers
-            towers[:, CMAP["STATUS"]] = 1.0
-            towers[:, CMAP["CHARGE"]] = 0.0
-            towers[:, CMAP["E"]] = valid_tower_energy
-            towers[:, CMAP["PT"]] = valid_tower_pt
-            towers[:, CMAP["ETA"]] = valid_tower_eta
-            towers[:, CMAP["PHI"]] = valid_tower_phi
+            towers[:, ColumnMap.PID] = 22.0  # Photon for ECAL towers
+            towers[:, ColumnMap.STATUS] = 1.0
+            towers[:, ColumnMap.CHARGE] = 0.0
+            towers[:, ColumnMap.E] = valid_tower_energy
+            towers[:, ColumnMap.PT] = valid_tower_pt
+            towers[:, ColumnMap.ETA] = valid_tower_eta
+            towers[:, ColumnMap.PHI] = valid_tower_phi
 
             # Compute PX, PY, PZ from PT, ETA, PHI (massless)
             cos_valid_tower_phi = torch.cos(valid_tower_phi)
             sin_valid_tower_phi = torch.sin(valid_tower_phi)
             sinh_valid_tower_eta = torch.sinh(valid_tower_eta)
-            towers[:, CMAP["PX"]] = valid_tower_pt * cos_valid_tower_phi
-            towers[:, CMAP["PY"]] = valid_tower_pt * sin_valid_tower_phi
-            towers[:, CMAP["PZ"]] = valid_tower_pt * sinh_valid_tower_eta
+            towers[:, ColumnMap.PX] = valid_tower_pt * cos_valid_tower_phi
+            towers[:, ColumnMap.PY] = valid_tower_pt * sin_valid_tower_phi
+            towers[:, ColumnMap.PZ] = valid_tower_pt * sinh_valid_tower_eta
 
             # Position (approximate at calorimeter surface)
-            towers[:, CMAP["X"]] = r_calo * cos_valid_tower_phi * 1000  # mm
-            towers[:, CMAP["Y"]] = r_calo * sin_valid_tower_phi * 1000  # mm
-            towers[:, CMAP["Z"]] = r_calo * sinh_valid_tower_eta * 1000  # mm
-            towers[:, CMAP["T"]] = tower_time[tower_has_energy]  # Time-weighted average
-            towers[:, CMAP["MASS"]] = 0.0
+            towers[:, ColumnMap.X] = r_calo * cos_valid_tower_phi * 1000  # mm
+            towers[:, ColumnMap.Y] = r_calo * sin_valid_tower_phi * 1000  # mm
+            towers[:, ColumnMap.Z] = r_calo * sinh_valid_tower_eta * 1000  # mm
+            towers[:, ColumnMap.T] = tower_time[tower_has_energy]  # Time-weighted average
+            towers[:, ColumnMap.MASS] = 0.0
 
             # Outer position same as momentum direction
-            towers[:, CMAP["ETA_OUTER"]] = valid_tower_eta
-            towers[:, CMAP["PHI_OUTER"]] = valid_tower_phi
+            towers[:, ColumnMap.ETA_OUTER] = valid_tower_eta
+            towers[:, ColumnMap.PHI_OUTER] = valid_tower_phi
 
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
-            towers[:, CMAP["EVENT_NUMBER"]] = valid_tower_event_num
+            towers[:, ColumnMap.EVENT_NUMBER] = valid_tower_event_num
 
         # ===== Create EFlowPhoton Tensor with COLUMN_MAP format =====
         # EFlowPhoton tensor: (n_eflow_towers, N_FEATURES)
@@ -696,37 +699,37 @@ class SimpleCalorimeter(nn.Module):
             eflow_tower_event_num = tower_event_num[significant_neutral]
 
             # Set eflow photon properties
-            eflow_excess_neutrals[:, CMAP["PID"]] = 22.0  # Photon
-            eflow_excess_neutrals[:, CMAP["STATUS"]] = 1.0
-            eflow_excess_neutrals[:, CMAP["CHARGE"]] = 0.0
-            eflow_excess_neutrals[:, CMAP["E"]] = eflow_tower_energy
-            eflow_excess_neutrals[:, CMAP["PT"]] = eflow_tower_pt
-            eflow_excess_neutrals[:, CMAP["ETA"]] = eflow_tower_eta
-            eflow_excess_neutrals[:, CMAP["PHI"]] = eflow_tower_phi
+            eflow_excess_neutrals[:, ColumnMap.PID] = 22.0  # Photon
+            eflow_excess_neutrals[:, ColumnMap.STATUS] = 1.0
+            eflow_excess_neutrals[:, ColumnMap.CHARGE] = 0.0
+            eflow_excess_neutrals[:, ColumnMap.E] = eflow_tower_energy
+            eflow_excess_neutrals[:, ColumnMap.PT] = eflow_tower_pt
+            eflow_excess_neutrals[:, ColumnMap.ETA] = eflow_tower_eta
+            eflow_excess_neutrals[:, ColumnMap.PHI] = eflow_tower_phi
 
             # Compute PX, PY, PZ from PT, ETA, PHI (massless)
             cos_eflow_tower_phi = torch.cos(eflow_tower_phi)
             sin_eflow_tower_phi = torch.sin(eflow_tower_phi)
             sinh_eflow_tower_eta = torch.sinh(eflow_tower_eta)
-            eflow_excess_neutrals[:, CMAP["PX"]] = eflow_tower_pt * cos_eflow_tower_phi
-            eflow_excess_neutrals[:, CMAP["PY"]] = eflow_tower_pt * sin_eflow_tower_phi
-            eflow_excess_neutrals[:, CMAP["PZ"]] = eflow_tower_pt * sinh_eflow_tower_eta
+            eflow_excess_neutrals[:, ColumnMap.PX] = eflow_tower_pt * cos_eflow_tower_phi
+            eflow_excess_neutrals[:, ColumnMap.PY] = eflow_tower_pt * sin_eflow_tower_phi
+            eflow_excess_neutrals[:, ColumnMap.PZ] = eflow_tower_pt * sinh_eflow_tower_eta
 
             # Position (approximate at calorimeter surface)
-            eflow_excess_neutrals[:, CMAP["X"]] = r_calo * cos_eflow_tower_phi * 1000  # mm
-            eflow_excess_neutrals[:, CMAP["Y"]] = r_calo * sin_eflow_tower_phi * 1000  # mm
-            eflow_excess_neutrals[:, CMAP["Z"]] = r_calo * sinh_eflow_tower_eta * 1000  # mm
-            eflow_excess_neutrals[:, CMAP["T"]] = eflow_tower_time  # Time-weighted average
-            eflow_excess_neutrals[:, CMAP["MASS"]] = 0.0
+            eflow_excess_neutrals[:, ColumnMap.X] = r_calo * cos_eflow_tower_phi * 1000  # mm
+            eflow_excess_neutrals[:, ColumnMap.Y] = r_calo * sin_eflow_tower_phi * 1000  # mm
+            eflow_excess_neutrals[:, ColumnMap.Z] = r_calo * sinh_eflow_tower_eta * 1000  # mm
+            eflow_excess_neutrals[:, ColumnMap.T] = eflow_tower_time  # Time-weighted average
+            eflow_excess_neutrals[:, ColumnMap.MASS] = 0.0
 
             # Outer position same as momentum direction
-            eflow_excess_neutrals[:, CMAP["ETA_OUTER"]] = eflow_tower_eta
-            eflow_excess_neutrals[:, CMAP["PHI_OUTER"]] = eflow_tower_phi
+            eflow_excess_neutrals[:, ColumnMap.ETA_OUTER] = eflow_tower_eta
+            eflow_excess_neutrals[:, ColumnMap.PHI_OUTER] = eflow_tower_phi
 
             # Set masks
 
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
-            eflow_excess_neutrals[:, CMAP["EVENT_NUMBER"]] = eflow_tower_event_num
+            eflow_excess_neutrals[:, ColumnMap.EVENT_NUMBER] = eflow_tower_event_num
 
         # Return results
         return eflow_tracks, towers, eflow_excess_neutrals
@@ -755,9 +758,6 @@ class SimpleCalorimeter(nn.Module):
         # Allow custom override
         if self._custom_compute_phi_bins_fn is not None:
             return self._custom_compute_phi_bins_fn(phi, eta_bin, self)
-
-        n = len(phi)
-        device = phi.device
 
         # Filter by valid eta bin first: [1, len(eta_bins) - 1]
         n_eta_bins = len(self.eta_bins)
@@ -805,7 +805,7 @@ class SimpleCalorimeter(nn.Module):
         Memory usage is ~8MB for max PDG ID of 1000045, which is negligible.
         """
         # Find the maximum PDG ID we need to handle
-        max_pdg_id = max(abs(pid) for pid in self.energy_fractions.keys())
+        max_pdg_id = max(abs(pid) for pid in self.energy_fractions)
 
         # Build fully dense LUT: lut[abs_pid] = fraction
         # All unspecified PDG IDs get the default fraction

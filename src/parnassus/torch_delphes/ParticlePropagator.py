@@ -26,7 +26,8 @@ import torch
 from torch import nn
 
 from parnassus.torch_delphes import pdg_filters
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+
+from .tensor_utils import ColumnMap
 
 
 class ParticlePropagator(nn.Module):
@@ -69,7 +70,9 @@ class ParticlePropagator(nn.Module):
         radius_max: float | None = None,  # Max radius for initial position check
         half_length_max: float | None = None,  # Max half-length for initial position check
     ) -> None:
-        """Args:
+        """Init.
+
+        Args:
         radius: Detector cylinder radius in meters (default: 1.29m for CMS)
         half_length: Detector cylinder half-length in meters (default: 3.0m)
         bz: Magnetic field strength in Tesla (default: 3.8T for CMS)
@@ -131,26 +134,23 @@ class ParticlePropagator(nn.Module):
         particles_before_prop = particles.clone()
 
         # Compute PT and Phi from raw momentum components (for all particles)
-        px = particles[:, CMAP["PX"]]  # Momentum components (GeV)
-        py = particles[:, CMAP["PY"]]
-        pz = particles[:, CMAP["PZ"]]
-        pt = particles[:, CMAP["PT"]]
-        eta = particles[:, CMAP["ETA"]]
-        phi = particles[:, CMAP["PHI"]]
+        px = particles[:, ColumnMap.PX]  # Momentum components (GeV)
+        py = particles[:, ColumnMap.PY]
+        pz = particles[:, ColumnMap.PZ]
+        pt = particles[:, ColumnMap.PT]
 
         # NOTE: EtaOuter and PhiOuter will be computed as POSITION-BASED eta after propagation
         # in _propagate_neutral and _propagate_charged methods
 
         # Extract positions (stored in cm, convert to m for calculations)
-        x_cm = particles[:, CMAP["X"]]  # X position in cm
-        y_cm = particles[:, CMAP["Y"]]  # Y position in cm
-        z_cm = particles[:, CMAP["Z"]]  # Z position in cm
+        x_cm = particles[:, ColumnMap.X]  # X position in cm
+        y_cm = particles[:, ColumnMap.Y]  # Y position in cm
+        z_cm = particles[:, ColumnMap.Z]  # Z position in cm
         x = x_cm * 1.0e-3  # Convert mm to m
         y = y_cm * 1.0e-3
         z = z_cm * 1.0e-3
-        t = particles[:, CMAP["T"]]  # Time
-        e = particles[:, CMAP["E"]]
-        q = particles[:, CMAP["CHARGE"]]  # Charge
+        e = particles[:, ColumnMap.E]  # Energy in GeV
+        q = particles[:, ColumnMap.CHARGE]  # Charge
 
         # Check if particles are within detector volume
         r = torch.sqrt(x**2 + y**2)
@@ -185,33 +185,33 @@ class ParticlePropagator(nn.Module):
         # ==================== COMPUTE ETA FOR "ALREADY OUTSIDE" PARTICLES ====================
         # Particles that were already outside tracker don't go through propagation
         # but still need position-based Eta computed at their current position
-        x_out = particles[already_outside_tracker, CMAP["X"]] * 1.0e-3  # mm to m
-        y_out = particles[already_outside_tracker, CMAP["Y"]] * 1.0e-3  # mm to m
-        z_out = particles[already_outside_tracker, CMAP["Z"]] * 1.0e-3  # mm to m
+        x_out = particles[already_outside_tracker, ColumnMap.X] * 1.0e-3  # mm to m
+        y_out = particles[already_outside_tracker, ColumnMap.Y] * 1.0e-3  # mm to m
+        z_out = particles[already_outside_tracker, ColumnMap.Z] * 1.0e-3  # mm to m
         r_xy_out = torch.sqrt(x_out**2 + y_out**2)
         eta_out = torch.asinh(z_out / (r_xy_out + 1e-10))
-        particles[already_outside_tracker, CMAP["ETA_OUTER"]] = eta_out
+        particles[already_outside_tracker, ColumnMap.ETA_OUTER] = eta_out
 
         # ==================== FILTER CHARGED PARTICLES THAT FAILED PROPAGATION ====================
         # C++ Delphes: for charged particles, only add to output if r_t > 0.0 (line 338)
         # For neutral particles, always add to output (no check after propagation)
         # The check is: did the charged particle successfully reach the detector?
         # We detect failure by checking if r_t is very small (position set to ~zero indicates failure)
-        final_x = particles[:, CMAP["X"]] * 1.0e-3  # mm to m
-        final_y = particles[:, CMAP["Y"]] * 1.0e-3
+        final_x = particles[:, ColumnMap.X] * 1.0e-3  # mm to m
+        final_y = particles[:, ColumnMap.Y] * 1.0e-3
         final_r = torch.sqrt(final_x**2 + final_y**2)
 
         # Charged particles with r_t ≈ 0 failed propagation (helix doesn't reach detector)
         # Neutral particles always succeed (straight line always reaches somewhere)
         # Particles already outside always succeed (pass through)
-        is_charged = torch.abs(particles[:, CMAP["CHARGE"]]) > 1.0e-9
+        is_charged = torch.abs(particles[:, ColumnMap.CHARGE]) > 1.0e-9
         charged_failed = is_charged & (final_r < 1.0e-6) & needs_propagation
 
         # Update mask: remove charged particles that failed propagation
         mask = mask & (~charged_failed)
 
         # Update the mask column
-        particles[:, CMAP["PASS_PROP"]] = mask.float()
+        particles[:, ColumnMap.PASS_PROP] = mask.float()
 
         # Collect the 4 branches/outputs
         # NOTE: Since we will use both the particles object and the specific branch objects, we instantiate the branches as clones
@@ -236,11 +236,11 @@ class ParticlePropagator(nn.Module):
         # NOTE: We purposely/manually leave their positions unchanged (i.e. leave it as production vertex)
         #       This is for consistency with C++ logic in order to help debugging
         # TODO: Remove this after debugging. Unnecessary and memory-intensive.
-        for var in ["X", "Y", "Z", "T"]:
-            charged_hadrons[:, CMAP[var]] = charged_hadrons_before_prop[:, CMAP[var]].clone()
-            electrons[:, CMAP[var]] = electrons_before_prop[:, CMAP[var]].clone()
-            muons[:, CMAP[var]] = muons_before_prop[:, CMAP[var]].clone()
-            neutrals[:, CMAP[var]] = neutrals_before_prop[:, CMAP[var]].clone()
+        for var in [ColumnMap.X, ColumnMap.Y, ColumnMap.Z, ColumnMap.T]:
+            charged_hadrons[:, var] = charged_hadrons_before_prop[:, var].clone()
+            electrons[:, var] = electrons_before_prop[:, var].clone()
+            muons[:, var] = muons_before_prop[:, var].clone()
+            neutrals[:, var] = neutrals_before_prop[:, var].clone()
 
         valid_particles_mask = mask
         particles = particles[valid_particles_mask].to(torch.float32).clone()
@@ -318,12 +318,6 @@ class ParticlePropagator(nn.Module):
         y_t = y_n + py_n * t
         z_t = z_n + pz_n * t
 
-        # Path length
-        dx = x_t - x_n
-        dy = y_t - y_n
-        dz = z_t - z_n
-        path_length = torch.sqrt(dx**2 + dy**2 + dz**2)
-
         # Compute position-based eta at final position (EtaOuter)
         r_t_xy = torch.sqrt(x_t**2 + y_t**2)
         eta_outer = torch.asinh(z_t / (r_t_xy + 1e-10))
@@ -332,21 +326,18 @@ class ParticlePropagator(nn.Module):
         # We need to map from masked indices to full particle array
         mask_indices = torch.where(mask)[0]
 
-        particles[mask_indices, CMAP["ETA_OUTER"]] = (
+        particles[mask_indices, ColumnMap.ETA_OUTER] = (
             eta_outer  # EtaOuter (position eta at final position)
         )
-        particles[mask_indices, CMAP["PHI_OUTER"]] = particles[
-            mask_indices, CMAP["PHI"]
+        particles[mask_indices, ColumnMap.PHI_OUTER] = particles[
+            mask_indices, ColumnMap.PHI
         ]  # PhiOuter (same as momentum phi for neutral)
-        particles[mask_indices, CMAP["X"]] = x_t * 1.0e3  # X
-        particles[mask_indices, CMAP["Y"]] = y_t * 1.0e3  # Y
-        particles[mask_indices, CMAP["Z"]] = z_t * 1.0e3  # Z
-        particles[mask_indices, CMAP["T"]] = (
-            particles[mask_indices, CMAP["T"]] + t * e_n * 1.0e3
+        particles[mask_indices, ColumnMap.X] = x_t * 1.0e3  # X
+        particles[mask_indices, ColumnMap.Y] = y_t * 1.0e3  # Y
+        particles[mask_indices, ColumnMap.Z] = z_t * 1.0e3  # Z
+        particles[mask_indices, ColumnMap.T] = (
+            particles[mask_indices, ColumnMap.T] + t * e_n * 1.0e3
         )  # T (time in mm/c)
-
-        # Store path length (could be stored in a new column if needed)
-        # For now we don't have a dedicated column for L in the 16-column format
 
         return particles
 
@@ -373,7 +364,7 @@ class ParticlePropagator(nn.Module):
         Key physics:
 
         - Helix radius: r = pt / (q * Bz) * c
-        - Gyration frequency: ω = q * Bz / (γm)
+        - Gyration frequency: ω = q * Bz / (ym)
         - z-velocity: vz = pz * c / E (constant along helix)
 
         The momentum direction (Px, Py, Phi) is updated to the value at the point
@@ -467,9 +458,6 @@ class ParticlePropagator(nn.Module):
         z_t = z_c + vz * t
         r_t = torch.sqrt(x_t**2 + y_t**2)
 
-        # Path length
-        path_length = torch.abs(t) * torch.sqrt(vz**2 + (r * omega) ** 2)
-
         # Only update particles that successfully reached detector
         valid = r_t > 0.0
 
@@ -477,10 +465,6 @@ class ParticlePropagator(nn.Module):
         # IMPORTANT: Momentum is updated at closest approach (phid), NOT at final position (phi_t)
         # This matches C++ Delphes behavior (line 295-296 in ParticlePropagator.cc)
         phid = phi_0 - omega * td
-
-        xd = x_center - r * torch.sin(phid)
-        yd = y_center + r * torch.cos(phid)
-        zd = z_c + vz * td
 
         # Update momentum direction at CLOSEST APPROACH (not final position)
         # Use the raw phid angle to compute Px, Py (matching C++ behavior)
@@ -501,28 +485,28 @@ class ParticlePropagator(nn.Module):
         mask_indices = torch.where(mask)[0]
         valid_indices = mask_indices[valid]
 
-        particles[valid_indices, CMAP["PX"]] = px_d[valid]  # Px (at closest approach)
-        particles[valid_indices, CMAP["PY"]] = py_d[valid]  # Py (at closest approach)
-        particles[valid_indices, CMAP["PHI"]] = phi_final[
+        particles[valid_indices, ColumnMap.PX] = px_d[valid]  # Px (at closest approach)
+        particles[valid_indices, ColumnMap.PY] = py_d[valid]  # Py (at closest approach)
+        particles[valid_indices, ColumnMap.PHI] = phi_final[
             valid
         ]  # Phi = atan2(Py, Px) for perfect consistency
-        particles[valid_indices, CMAP["ETA_OUTER"]] = (
+        particles[valid_indices, ColumnMap.ETA_OUTER] = (
             eta_outer  # EtaOuter (position eta at final position)
         )
-        particles[valid_indices, CMAP["PHI_OUTER"]] = phi_final[
+        particles[valid_indices, ColumnMap.PHI_OUTER] = phi_final[
             valid
         ]  # PhiOuter (same as momentum phi)
-        particles[valid_indices, CMAP["X"]] = x_t[valid] * 1.0e3  # X (m to mm) - final position
-        particles[valid_indices, CMAP["Y"]] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
-        particles[valid_indices, CMAP["Z"]] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
-        particles[valid_indices, CMAP["T"]] = (
-            particles[valid_indices, CMAP["T"]] + t[valid] * self.c_light * 1.0e3
+        particles[valid_indices, ColumnMap.X] = x_t[valid] * 1.0e3  # X (m to mm) - final position
+        particles[valid_indices, ColumnMap.Y] = y_t[valid] * 1.0e3  # Y (m to mm) - final position
+        particles[valid_indices, ColumnMap.Z] = z_t[valid] * 1.0e3  # Z (m to mm) - final position
+        particles[valid_indices, ColumnMap.T] = (
+            particles[valid_indices, ColumnMap.T] + t[valid] * self.c_light * 1.0e3
         )  # T
 
         # Mark invalid particles by setting position to zero
         invalid_indices = mask_indices[~valid]
-        particles[invalid_indices, CMAP["X"]] = 0.0
-        particles[invalid_indices, CMAP["Y"]] = 0.0
-        particles[invalid_indices, CMAP["Z"]] = 0.0
+        particles[invalid_indices, ColumnMap.X] = 0.0
+        particles[invalid_indices, ColumnMap.Y] = 0.0
+        particles[invalid_indices, ColumnMap.Z] = 0.0
 
         return particles

@@ -52,8 +52,8 @@ torch.manual_seed(42)
 
 from parnassus.pipelines.torch_delphes import write_torch_delphes_output
 from parnassus.torch_delphes.defaults import ATLASEnergyFlowDefault, CMSEnergyFlowDefault
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
 from parnassus.torch_delphes.tensor_utils import (
+    ColumnMap,
     hepmc_to_tensor,
 )
 
@@ -96,7 +96,7 @@ def main(
     stable_particles = stable_particles.to(DEVICE)
     all_particles = all_particles.to(DEVICE)
 
-    n_event = len(torch.unique(stable_particles[:, CMAP["EVENT_NUMBER"]]))
+    n_event = len(torch.unique(stable_particles[:, ColumnMap.EVENT_NUMBER]))
     n_part_total = stable_particles.shape[0]
     n_all_particles = all_particles.shape[0]
     print(f"Loaded {n_event} events from HepMC")
@@ -143,8 +143,8 @@ def main(
     print(f"\nWriting {output_file}...")
 
     # Concatenate batched results
-    for k in results:
-        results[k] = torch.cat(results[k], dim=0)
+    for k, v in results.items():
+        results[k] = torch.cat(v, dim=0)
 
     # Convert to ROOT format and write
     # tensor_to_root_dict expects List[Tensor], so wrap single tensors in a list

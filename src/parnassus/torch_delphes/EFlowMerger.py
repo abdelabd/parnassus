@@ -20,15 +20,7 @@ Reference:
 import torch
 from torch import nn
 
-from .tensor_utils import (
-    ETA,
-    ETA_OUTER,
-    PID,
-    T,
-    X,
-    Y,
-    Z,
-)
+from .tensor_utils import ColumnMap
 
 
 class EFlowMerger(nn.Module):
@@ -136,7 +128,7 @@ class EFlowMerger(nn.Module):
 
         # Set Eta to EtaOuter (position eta at calorimeter edge)
         # This is the key transformation for ParticleFlow consistency
-        tracks[:, ETA] = tracks[:, ETA_OUTER]
+        tracks[:, ColumnMap.ETA] = tracks[:, ColumnMap.ETA_OUTER]
 
         # Note: X, Y, Z should already be non-zero for tracks (from vertex position)
         # PID, Charge, E, PT, Phi, etc. remain unchanged
@@ -162,13 +154,13 @@ class EFlowMerger(nn.Module):
         photons = photons.clone()
 
         # Set PID to 22 (photon)
-        photons[:, PID] = 22
+        photons[:, ColumnMap.PID] = 22
 
         # Set vertex position to zero (towers don't have vertex position)
-        photons[:, X] = 0.0
-        photons[:, Y] = 0.0
-        photons[:, Z] = 0.0
-        photons[:, T] = 0.0
+        photons[:, ColumnMap.X] = 0.0
+        photons[:, ColumnMap.Y] = 0.0
+        photons[:, ColumnMap.Z] = 0.0
+        photons[:, ColumnMap.T] = 0.0
 
         # Note: Eem and Ehad are not stored in the tensor, they will be computed
         # during ROOT writing based on E and PID
@@ -194,13 +186,13 @@ class EFlowMerger(nn.Module):
         neutral_hadrons = neutral_hadrons.clone()
 
         # Set PID to 0 (neutral hadron - matches C++ Delphes convention)
-        neutral_hadrons[:, PID] = 0
+        neutral_hadrons[:, ColumnMap.PID] = 0
 
         # Set vertex position to zero (towers don't have vertex position)
-        neutral_hadrons[:, X] = 0.0
-        neutral_hadrons[:, Y] = 0.0
-        neutral_hadrons[:, Z] = 0.0
-        neutral_hadrons[:, T] = 0.0
+        neutral_hadrons[:, ColumnMap.X] = 0.0
+        neutral_hadrons[:, ColumnMap.Y] = 0.0
+        neutral_hadrons[:, ColumnMap.Z] = 0.0
+        neutral_hadrons[:, ColumnMap.T] = 0.0
 
         # Note: Eem and Ehad are not stored in the tensor, they will be computed
         # during ROOT writing based on E and PID

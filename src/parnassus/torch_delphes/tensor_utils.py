@@ -6,6 +6,8 @@ This module provides:
 - Tensor → ROOT conversion (for writing output files)
 """
 
+from enum import IntEnum
+
 import awkward as ak
 import numpy as np
 import pyhepmc
@@ -59,6 +61,34 @@ COLUMN_MAP = {
     "PASS_PROP": PASS_PROP,
     "TRACK_RESOLUTION": TRACK_RESOLUTION,
 }
+
+
+class ColumnMap(IntEnum):
+    """Enum for column indices in the particle tensor.
+    This provides a more readable way to access columns by name.
+    """
+
+    PID = 0
+    STATUS = 1
+    CHARGE = 2
+    E = 3
+    PX = 4
+    PY = 5
+    PZ = 6
+    PT = 7
+    ETA = 8
+    PHI = 9
+    T = 10
+    X = 11
+    Y = 12
+    Z = 13
+    MASS = 14
+    ETA_OUTER = 15
+    PHI_OUTER = 16
+    EVENT_NUMBER = 17
+    PASS_PROP = 18
+    TRACK_RESOLUTION = 19
+
 
 # Number of features per particle
 N_FEATURES = max(COLUMN_MAP.values()) + 1
@@ -257,7 +287,7 @@ def tensor_to_root_dict(
         # Single CPU transfer - do this once for all attributes
         all_particles = torch.cat([b for b in batch_tensors if b.shape[0] > 0], dim=0)
         all_particles_np = all_particles.cpu().numpy()
-        all_event_numbers = set(np.unique(all_particles_np[:, EVENT_NUMBER]).tolist())
+        all_event_numbers = set(np.unique(all_particles_np[:, ColumnMap.EVENT_NUMBER]).tolist())
 
     # Determine which event numbers to iterate over
     if expected_event_numbers is not None:
@@ -268,7 +298,7 @@ def tensor_to_root_dict(
     # Pre-group particles by event number for efficient access
     # This avoids repeated filtering per attribute
     if all_particles_np is not None and len(all_particles_np) > 0:
-        event_indices = all_particles_np[:, EVENT_NUMBER]
+        event_indices = all_particles_np[:, ColumnMap.EVENT_NUMBER]
         sort_indices = np.argsort(event_indices)
         sorted_particles = all_particles_np[sort_indices]
         sorted_event_nums = event_indices[sort_indices]
@@ -315,50 +345,50 @@ def tensor_to_root_dict(
         if is_eflow:
             # ParticleFlowCandidate-specific computations
             if attr == "P":
-                px = event_np[:, PX]
-                py = event_np[:, PY]
-                pz = event_np[:, PZ]
+                px = event_np[:, ColumnMap.PX]
+                py = event_np[:, ColumnMap.PY]
+                pz = event_np[:, ColumnMap.PZ]
                 return np.sqrt(px**2 + py**2 + pz**2)
             if attr == "Eta":
-                return event_np[:, ETA]
+                return event_np[:, ColumnMap.ETA]
             if attr == "Eem":
-                pid_vals = event_np[:, PID]
-                e_vals = event_np[:, E]
+                pid_vals = event_np[:, ColumnMap.PID]
+                e_vals = event_np[:, ColumnMap.E]
                 return np.where(pid_vals == 22, e_vals, 0.0)
             if attr == "Ehad":
-                pid_vals = event_np[:, PID]
-                e_vals = event_np[:, E]
+                pid_vals = event_np[:, ColumnMap.PID]
+                e_vals = event_np[:, ColumnMap.E]
                 return np.where(pid_vals == 0, e_vals, 0.0)
             if attr == "T":
-                return event_np[:, T] * 1e-3 / 299792458.0
+                return event_np[:, ColumnMap.T] * 1e-3 / 299792458.0
             if attr == "PID":
                 return event_np[:, column_map[attr]].astype(np.int32)
             return event_np[:, column_map[attr]]
         if is_tower:
             # Tower-specific computations
             if attr == "ET":
-                e = event_np[:, E]
-                eta = event_np[:, ETA]
+                e = event_np[:, ColumnMap.E]
+                eta = event_np[:, ColumnMap.ETA]
                 return e / np.cosh(eta)
             if attr == "T":
-                return event_np[:, T] * 1e-3 / 299792458.0
+                return event_np[:, ColumnMap.T] * 1e-3 / 299792458.0
             if attr in column_map and column_map[attr] is not None:
                 return event_np[:, column_map[attr]]
             return np.zeros(event_np.shape[0])
         # Track-specific computations
         if attr == "P":
-            px = event_np[:, PX]
-            py = event_np[:, PY]
-            pz = event_np[:, PZ]
+            px = event_np[:, ColumnMap.PX]
+            py = event_np[:, ColumnMap.PY]
+            pz = event_np[:, ColumnMap.PZ]
             return np.sqrt(px**2 + py**2 + pz**2)
         if attr == "Eta":
-            px = event_np[:, PX]
-            py = event_np[:, PY]
-            pz = event_np[:, PZ]
+            px = event_np[:, ColumnMap.PX]
+            py = event_np[:, ColumnMap.PY]
+            pz = event_np[:, ColumnMap.PZ]
             pt = np.sqrt(px**2 + py**2)
             return np.arcsinh(pz / (pt + 1e-10))
         if attr == "T":
-            return event_np[:, T] * 1e-3 / 299792458.0
+            return event_np[:, ColumnMap.T] * 1e-3 / 299792458.0
         if attr == "PID":
             return event_np[:, column_map[attr]].astype(np.int32)
         return event_np[:, column_map[attr]]
@@ -541,22 +571,22 @@ def _particles_to_tensor(
 
     # ===== BUILD TENSOR IN ONE SHOT =====
     particles = np.zeros((n_particles, N_FEATURES), dtype=np.float64)
-    particles[:, PID] = pids
-    particles[:, STATUS] = statuses
-    particles[:, CHARGE] = charges
-    particles[:, E] = e
-    particles[:, PX] = px
-    particles[:, PY] = py
-    particles[:, PZ] = pz
-    particles[:, PT] = pt
-    particles[:, ETA] = eta
-    particles[:, PHI] = phi
-    particles[:, T] = vertices[:, 3]
-    particles[:, X] = vertices[:, 0]
-    particles[:, Y] = vertices[:, 1]
-    particles[:, Z] = vertices[:, 2]
-    particles[:, MASS] = masses
-    particles[:, EVENT_NUMBER] = event_number
+    particles[:, ColumnMap.PID] = pids
+    particles[:, ColumnMap.STATUS] = statuses
+    particles[:, ColumnMap.CHARGE] = charges
+    particles[:, ColumnMap.E] = e
+    particles[:, ColumnMap.PX] = px
+    particles[:, ColumnMap.PY] = py
+    particles[:, ColumnMap.PZ] = pz
+    particles[:, ColumnMap.PT] = pt
+    particles[:, ColumnMap.ETA] = eta
+    particles[:, ColumnMap.PHI] = phi
+    particles[:, ColumnMap.T] = vertices[:, 3]
+    particles[:, ColumnMap.X] = vertices[:, 0]
+    particles[:, ColumnMap.Y] = vertices[:, 1]
+    particles[:, ColumnMap.Z] = vertices[:, 2]
+    particles[:, ColumnMap.MASS] = masses
+    particles[:, ColumnMap.EVENT_NUMBER] = event_number
     # ETA_OUTER, PHI_OUTER will be computed by ParticlePropagator
 
     return torch.from_numpy(particles)

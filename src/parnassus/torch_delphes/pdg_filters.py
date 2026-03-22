@@ -7,7 +7,7 @@ to separate particles into different categories.
 
 import torch
 
-from parnassus.torch_delphes.tensor_utils import COLUMN_MAP as CMAP
+from .tensor_utils import ColumnMap
 
 
 def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
@@ -31,8 +31,8 @@ def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
         >>> mask = charged_hadron_filter(particles)
         >>> charged_hadrons = particles[mask]
     """
-    pid = particles[..., CMAP["PID"]]
-    q_final = particles[..., CMAP["CHARGE"]]
+    pid = particles[..., ColumnMap.PID]
+    q_final = particles[..., ColumnMap.CHARGE]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
 
@@ -64,8 +64,8 @@ def electron_filter(particles: torch.Tensor) -> torch.Tensor:
         >>> mask = electron_filter(particles)
         >>> electrons = particles[mask]
     """
-    pid = particles[..., CMAP["PID"]]
-    q_final = particles[..., CMAP["CHARGE"]]
+    pid = particles[..., ColumnMap.PID]
+    q_final = particles[..., ColumnMap.CHARGE]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
 
@@ -94,8 +94,8 @@ def muon_filter(particles: torch.Tensor) -> torch.Tensor:
         >>> mask = muon_filter(particles)
         >>> muons = particles[mask]
     """
-    pid = particles[..., CMAP["PID"]]
-    q_final = particles[..., CMAP["CHARGE"]]
+    pid = particles[..., ColumnMap.PID]
+    q_final = particles[..., ColumnMap.CHARGE]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
 
@@ -125,7 +125,7 @@ def neutral_filter(particles: torch.Tensor) -> torch.Tensor:
         >>> mask = neutral_filter(particles)
         >>> neutrals = particles[mask]
     """
-    q_final = particles[..., CMAP["CHARGE"]]
+    q_final = particles[..., ColumnMap.CHARGE]
     is_charged = torch.abs(q_final) > 1.0e-9
 
     pid_mask = ~is_charged
@@ -159,8 +159,8 @@ def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
         >>> masks = get_particle_masks(particles)
         >>> print(f"Found {masks['electron'].sum()} electrons")
     """
-    pid = particles[..., CMAP["PID"]]
-    q_final = particles[..., CMAP["CHARGE"]]
+    pid = particles[..., ColumnMap.PID]
+    q_final = particles[..., ColumnMap.CHARGE]
     abs_pid = torch.abs(pid)
     is_charged = torch.abs(q_final) > 1.0e-9
 
