@@ -45,13 +45,17 @@ class Efficiency(nn.Module):
 
     Attributes
     ----------
-        efficiency_formula: Name of formula or callable
-        efficiency_func: The actual efficiency function
-        pdg_filter_func: Optional PDG filter for particle selection
+    efficiency_formula: str
+        Name of formula or callable
+    efficiency_func: Callable
+        The actual efficiency function
+    pdg_filter_func: Optional[Callable[[torch.Tensor], torch.Tensor]]
+        Optional PDG filter for particle selection
 
-    Example:
-        >>> eff_module = Efficiency(efficiency_formula='charged_hadron_cms')
-        >>> passed_particles = eff_module(charged_hadrons)
+    Examples
+    --------
+    >>> eff_module = Efficiency(efficiency_formula='charged_hadron_cms')
+    >>> passed_particles = eff_module(charged_hadrons)
     """
 
     def __init__(
@@ -61,11 +65,13 @@ class Efficiency(nn.Module):
     ) -> None:
         """Initialize the Efficiency module.
 
-        Args:
-            efficiency_formula: Either a string naming a predefined formula
-                ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a
-                callable that takes (pt, eta_outer) tensors and returns
-                efficiency values in [0, 1].
+        Parameters
+        ----------
+        efficiency_formula: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor], optional
+            Either a string naming a predefined formula
+            ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a
+            callable that takes (pt, eta_outer) tensors and returns
+            efficiency values in [0, 1].
         """
         super().__init__()
         self.efficiency_formula = efficiency_formula
@@ -92,15 +98,17 @@ class Efficiency(nn.Module):
         Computes the efficiency probability for each particle based on its
         kinematics, then stochastically accepts or rejects particles.
 
-        Args:
-            particles: Tensor of shape (N, N_FEATURES) containing particles.
-                Required columns:
-
-                - PT (col 7): Transverse momentum in GeV
-                - ETA_OUTER (col 15): Position-based pseudorapidity at detector
+        Parameters
+        ----------
+        particles: torch.Tensor
+            Tensor of shape (N, N_FEATURES) containing particles.
+            Required columns:
+            - PT (col 7): Transverse momentum in GeV
+            - ETA_OUTER (col 15): Position-based pseudorapidity at detector
 
         Returns
         -------
+        particles_out: torch.Tensor
             Filtered tensor of shape (M, N_FEATURES) where M ≤ N containing
             only particles that passed the efficiency cut.
         """
@@ -126,13 +134,17 @@ class Efficiency(nn.Module):
     def _charged_hadron_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
         """CMS charged hadron tracking efficiency formula.
 
-        Args:
-            pt: transverse momentum (GeV)
-            eta_outer: pseudorapidity
+        Parameters
+        ----------
+        pt: torch.Tensor
+            Transverse momentum (GeV)
+        eta_outer: torch.Tensor
+            Pseudorapidity
 
         Returns
         -------
-            efficiency: value between 0 and 1
+        efficiency: torch.Tensor
+            Value between 0 and 1
         """
         abs_eta_outer = torch.abs(eta_outer)
 
@@ -161,7 +173,20 @@ class Efficiency(nn.Module):
 
     @staticmethod
     def _electron_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        """CMS electron tracking efficiency formula."""
+        """CMS electron tracking efficiency formula.
+
+        Parameters
+        ----------
+        pt: torch.Tensor
+            Transverse momentum (GeV)
+        eta_outer: torch.Tensor
+            Pseudorapidity
+
+        Returns
+        -------
+        efficiency: torch.Tensor
+            Value between 0 and 1
+        """
         abs_eta_outer = torch.abs(eta_outer)
         eff = torch.zeros_like(pt)
 
@@ -189,7 +214,20 @@ class Efficiency(nn.Module):
 
     @staticmethod
     def _muon_cms_efficiency(pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        """CMS muon tracking efficiency formula."""
+        """CMS muon tracking efficiency formula.
+
+        Parameters
+        ----------
+        pt: torch.Tensor
+            Transverse momentum (GeV)
+        eta_outer: torch.Tensor
+            Pseudorapidity
+
+        Returns
+        -------
+        efficiency: torch.Tensor
+            Value between 0 and 1
+        """
         abs_eta_outer = torch.abs(eta_outer)
         eff = torch.zeros_like(pt)
 

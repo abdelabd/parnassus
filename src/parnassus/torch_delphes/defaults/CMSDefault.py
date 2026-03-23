@@ -54,33 +54,49 @@ class CMSEnergyFlowDefault(nn.Module):
 
     Attributes
     ----------
-        debug: If True, return all intermediate processing stages
-        ParticlePropagator: Propagates particles to tracker surface
-        ChargedHadronTrackingEfficiency: Tracking efficiency for hadrons
-        ElectronTrackingEfficiency: Tracking efficiency for electrons
-        MuonTrackingEfficiency: Tracking efficiency for muons
-        ChargedHadronMomentumSmearing: Momentum resolution for hadrons
-        ElectronMomentumSmearing: Momentum resolution for electrons
-        MuonMomentumSmearing: Momentum resolution for muons
-        TrackMerger: Combines all track types
-        ECal: Electromagnetic calorimeter
-        HCal: Hadronic calorimeter
-        CalorimeterMerger: Combines ECal and HCal towers
-        EFlowMerger: Creates particle flow candidates
+    debug: bool
+        If True, return all intermediate processing stages
+    ParticlePropagator: ParticlePropagator
+        Propagates particles to tracker surface
+    ChargedHadronTrackingEfficiency: Efficiency
+        Tracking efficiency for hadrons
+    ElectronTrackingEfficiency: Efficiency
+        Tracking efficiency for electrons
+    MuonTrackingEfficiency: Efficiency
+        Tracking efficiency for muons
+    ChargedHadronMomentumSmearing: MomentumSmearing
+        Momentum resolution for hadrons
+    ElectronMomentumSmearing: MomentumSmearing
+        Momentum resolution for electrons
+    MuonMomentumSmearing: MomentumSmearing
+        Momentum resolution for muons
+    TrackMerger: Merger
+        Combines all track types
+    ECal: SimpleCalorimeter
+        Electromagnetic calorimeter
+    HCal: SimpleCalorimeter
+        Hadronic calorimeter
+    CalorimeterMerger: Merger
+        Combines ECal and HCal towers
+    EFlowMerger: EFlowMerger
+        Creates particle flow candidates
 
-    Example:
-        >>> cms = CMSEnergyFlowDefault(debug=False)
-        >>> results = cms(stable_particles)
-        >>> tracks = results['Track']
-        >>> eflow_tracks = results['EFlowTrack']
+    Examples
+    --------
+    >>> cms = CMSEnergyFlowDefault(debug=False)
+    >>> results = cms(stable_particles)
+    >>> tracks = results['Track']
+    >>> eflow_tracks = results['EFlowTrack']
     """
 
     def __init__(self, debug: bool = False) -> None:
         """Initialize the CMS detector simulation.
 
-        Args:
-            debug: If True, return all intermediate processing stages
-                for validation. If False, return only final objects.
+        Parameters
+        ----------
+        debug: bool
+            If True, return all intermediate processing stages
+            for validation. If False, return only final objects.
         """
         super().__init__()
         self.debug = debug
@@ -128,17 +144,20 @@ class CMSEnergyFlowDefault(nn.Module):
         detector simulation chain: propagation, tracking, calorimetry,
         and particle flow reconstruction.
 
-        Args:
-            stable_particles: Tensor of shape (N, N_FEATURES) containing
-                generator-level stable particles. Should be flattened
-                (not batched by event). Required columns include:
+        Parameters
+        ----------
+        stable_particles: torch.Tensor
+            Tensor of shape (N, N_FEATURES) containing
+            generator-level stable particles. Should be flattened
+            (not batched by event). Required columns include:
 
-                - PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI
-                - X, Y, Z, T (production vertex)
-                - MASS, EVENT_NUMBER
+            - PID, CHARGE, E, PX, PY, PZ, PT, ETA, PHI
+            - X, Y, Z, T (production vertex)
+            - MASS, EVENT_NUMBER
 
         Returns
         -------
+        dict[str, torch.Tensor]
             Dictionary mapping branch names to tensors. Contents depend on
             debug mode:
 
@@ -163,8 +182,8 @@ class CMSEnergyFlowDefault(nn.Module):
 
         # ParticlePropagator
         particles = stable_particles.reshape(-1, n_dim)
-        if self.debug:
-            particles_before_prop = particles.clone()
+        particles_before_prop = particles.clone() if self.debug else torch.empty(0)
+
         (
             particles_propagated,
             neutrals_propagated,

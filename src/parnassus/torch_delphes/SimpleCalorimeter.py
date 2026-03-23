@@ -129,11 +129,21 @@ class SimpleCalorimeter(nn.Module):
         identified by their EVENT_NUMBER column. Towers are aggregated per-event using
         event-indexed tower keys to prevent cross-event mixing.
 
+        Parameters
+        ----------
+        particles: torch.Tensor
+            Tensor of shape (N_particles, N_FEATURES) containing stable particles after propagation.
+        tracks: torch.Tensor
+            Tensor of shape (N_tracks, N_FEATURES) containing merged tracks after momentum smearing.
+
         Returns
         -------
-            eflow_tracks: (N_eflow_tracks, N_FEATURES) - tracks for particle flow
-            towers: (N_towers, N_FEATURES) - calorimeter towers
-            eflow_excess_neutrals: (N_eflow_excess_neutrals, N_FEATURES) - neutral excess towers
+        eflow_tracks: torch.Tensor
+            (N_eflow_tracks, N_FEATURES) - tracks for particle flow
+        towers: torch.Tensor
+            (N_towers, N_FEATURES) - calorimeter towers
+        eflow_excess_neutrals: torch.Tensor
+            (N_eflow_excess_neutrals, N_FEATURES) - neutral excess towers
         """
         # 0. Extract Event Indices ########
         # Get event numbers and map to compact indices [0, n_events)
@@ -750,10 +760,19 @@ class SimpleCalorimeter(nn.Module):
             if(itPhiBin == phiBins->begin() || itPhiBin == phiBins->end()) continue;
             phiBin = distance(phiBins->begin(), itPhiBin);
 
+        Parameters
+        ----------
+        phi: torch.Tensor
+            (N,) tensor of phi values for particles/tracks
+        eta_bin: torch.Tensor
+            (N,) tensor of eta bin indices
+
         Returns
         -------
-            phi_bin: (N,) phi bin indices
-            valid: (N,) boolean mask for valid bins (eta and phi both in range)
+        phi_bin: torch.Tensor
+            (N,) phi bin indices
+        valid: torch.Tensor
+            (N,) boolean mask for valid bins (eta and phi both in range)
         """
         # Allow custom override
         if self._custom_compute_phi_bins_fn is not None:
@@ -827,12 +846,15 @@ class SimpleCalorimeter(nn.Module):
         1. Look up |PDG ID| in the fraction map
         2. If not found, use the default fraction (PDG=0)
 
-        Args:
-            pids: (N,) tensor of PDG IDs
+        Parameters
+        ----------
+        pids: torch.Tensor
+            (N,) tensor of PDG IDs
 
         Returns
         -------
-            fractions: (N,) tensor of energy fractions
+        fractions: torch.Tensor
+            (N,) tensor of energy fractions
         """
         abs_pids = torch.abs(pids).to(torch.int64)
 
@@ -852,6 +874,18 @@ class SimpleCalorimeter(nn.Module):
             |eta| <= 1.5: (1 + 0.64*eta^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
             1.5 < |eta| <= 2.5: (2.16 + 5.6*(|eta|-2)^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
             2.5 < |eta| <= 5.0: sqrt(E^2*0.107^2 + E*2.08^2)
+
+        Parameters
+        ----------
+        eta: torch.Tensor
+            (N,) tensor of eta values (tower centers)
+        energy: torch.Tensor
+            (N,) tensor of energy values (tower energies)
+
+        Returns
+        -------
+        sigma: torch.Tensor
+            (N,) tensor of energy resolution sigma values
         """
         abs_eta = torch.abs(eta)
 
@@ -882,12 +916,23 @@ class SimpleCalorimeter(nn.Module):
 
     @staticmethod
     def _ecal_atlas_resolution(eta: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
-        """ECAL resolution formula from delphes_card_CMS_5_0.tcl.
+        """ECAL resolution formula from delphes_card_ATLAS.tcl.
 
         Formula:
-            |eta| <= 1.5: (1 + 0.64*eta^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
-            1.5 < |eta| <= 2.5: (2.16 + 5.6*(|eta|-2)^2) * sqrt(E^2*0.008^2 + E*0.11^2 + 0.40^2)
-            2.5 < |eta| <= 5.0: sqrt(E^2*0.107^2 + E*2.08^2)
+            |eta| <= 3.2: sqrt(E^2*0.0017^2 + E*0.101^2)
+            3.2 < |eta| <= 4.9: sqrt(E^2*0.0350^2 + E*0.285^2)
+
+        Parameters
+        ----------
+        eta: torch.Tensor
+            (N,) tensor of eta values (tower centers)
+        energy: torch.Tensor
+            (N,) tensor of energy values (tower energies)
+
+        Returns
+        -------
+        sigma: torch.Tensor
+            (N,) tensor of energy resolution sigma values
         """
         energy = energy.to(torch.float64)
         abs_eta = torch.abs(eta)
@@ -914,6 +959,18 @@ class SimpleCalorimeter(nn.Module):
         Formula:
             |eta| <= 3.0: sqrt(E^2*0.050^2 + E*1.50^2)
             3.0 < |eta| <= 5.0: sqrt(E^2*0.130^2 + E*2.70^2)
+
+        Parameters
+        ----------
+        eta: torch.Tensor
+            (N,) tensor of eta values (tower centers)
+        energy: torch.Tensor
+            (N,) tensor of energy values (tower energies)
+
+        Returns
+        -------
+        sigma: torch.Tensor
+            (N,) tensor of energy resolution sigma values
         """
         abs_eta = torch.abs(eta)
 
@@ -937,8 +994,21 @@ class SimpleCalorimeter(nn.Module):
         """HCAL resolution formula from delphes_card_CMS_5_1.tcl.
 
         Formula:
-            |eta| <= 3.0: sqrt(E^2*0.050^2 + E*1.50^2)
-            3.0 < |eta| <= 5.0: sqrt(E^2*0.130^2 + E*2.70^2)
+            |eta| <= 1.7: sqrt(E^2*0.0302^2 + E*0.5205^2 + 1.59^2)
+            1.7 < |eta| <= 3.2: sqrt(E^2*0.0500^2 + E*0.706^2)
+            3.2 < |eta| <= 4.9: sqrt(E^2*0.09420^2 + E*1.00^2)
+
+        Parameters
+        ----------
+        eta: torch.Tensor
+            (N,) tensor of eta values (tower centers)
+        energy: torch.Tensor
+            (N,) tensor of energy values (tower energies)
+
+        Returns
+        -------
+        sigma: torch.Tensor
+            (N,) tensor of energy resolution sigma values
         """
         abs_eta = torch.abs(eta)
 
@@ -976,12 +1046,16 @@ class SimpleCalorimeter(nn.Module):
                 return 0.0;
             }
 
-        Args:
-            mean: Tower energy (before smearing)
-            sigma: Resolution sigma
+        Parameters
+        ----------
+        mean: torch.Tensor
+            Tower energy (before smearing)
+        sigma: torch.Tensor
+            Resolution sigma
 
         Returns
         -------
+        smeared: torch.Tensor
             Smeared energy values
         """
         # For mean > 0, apply log-normal

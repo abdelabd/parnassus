@@ -45,7 +45,8 @@ class EFlowMerger(nn.Module):
         The order of inputs matters! The transformations are applied based
         on position in the input list, not based on particle content.
 
-    Example:
+    Examples
+    --------
         >>> merger = EFlowMerger()
         >>> eflow = merger([tracks, photons, neutral_hadrons])
     """
@@ -57,15 +58,19 @@ class EFlowMerger(nn.Module):
     def forward(self, input_arrays: list[torch.Tensor]) -> torch.Tensor:
         """Merge Track and Tower objects into ParticleFlowCandidate format.
 
-        Args:
-            input_arrays: List of exactly 3 tensors:
-
-                - [0] tracks: (N_tracks, N_FEATURES) - Track objects
-                - [1] photons: (N_photons, N_FEATURES) - ECal tower objects
-                - [2] neutral_hadrons: (N_neutrals, N_FEATURES) - HCal tower objects
+        Parameters
+        ----------
+        input_arrays: list[torch.Tensor]
+            - [0] tracks: torch.Tensor
+                (N_tracks, N_FEATURES) - Track objects
+            - [1] photons: torch.Tensor
+                (N_photons, N_FEATURES) - ECal tower objects
+            - [2] neutral_hadrons: torch.Tensor
+                (N_neutrals, N_FEATURES) - HCal tower objects
 
         Returns
         -------
+        merged: torch.Tensor
             Merged tensor of shape (N_total, N_FEATURES) containing all
             ParticleFlowCandidate objects with appropriate transformations applied.
 
@@ -116,12 +121,15 @@ class EFlowMerger(nn.Module):
 
         Actually does nothing, except copying the input tensor.
 
-        Args:
-            tracks: (N, N_FEATURES) Track objects
+        Parameters
+        ----------
+        tracks: torch.Tensor
+            Track objects, shape (N, N_FEATURES).
 
         Returns
         -------
-            transformed: (N, N_FEATURES)
+        transformed: torch.Tensor
+            Track objects with proper transformations, shape (N, N_FEATURES).
         """
         tracks = tracks.clone()
 
@@ -139,12 +147,15 @@ class EFlowMerger(nn.Module):
         - Eem = E (all energy is electromagnetic)
         - Ehad = 0 (no hadronic energy)
 
-        Args:
-            photons: (N, N_FEATURES) Tower objects from ECal
+        Parameters
+        ----------
+        photons: torch.Tensor
+            Tower objects from ECal, shape (N, N_FEATURES).
 
         Returns
         -------
-            transformed: (N, N_FEATURES) Tower objects with proper PID and position
+        transformed: torch.Tensor
+            Tower objects with proper PID and position, shape (N, N_FEATURES).
         """
         photons = photons.clone()
 
@@ -171,12 +182,15 @@ class EFlowMerger(nn.Module):
         - Eem = 0 (no electromagnetic energy)
         - Ehad = E (all energy is hadronic)
 
-        Args:
-            neutral_hadrons: (N, N_FEATURES) Tower objects from HCal
+        Parameters
+        ----------
+        neutral_hadrons: torch.Tensor
+            Tower objects from HCal, shape (N, N_FEATURES).
 
         Returns
         -------
-            transformed: (N, N_FEATURES) Tower objects with proper PID and position
+        transformed: torch.Tensor
+            Tower objects with proper PID and position, shape (N, N_FEATURES).
         """
         neutral_hadrons = neutral_hadrons.clone()
 

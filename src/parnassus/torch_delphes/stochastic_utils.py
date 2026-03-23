@@ -18,59 +18,63 @@ def log_normal_sample(mean: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
 
 
     Mathematical background:
-    For a log-normal distribution with desired mean μ and std σ:
-    - Let Y ~ LogNormal(m, s²) where m and s are the log-space parameters
-    - Then: E[Y] = exp(m + s²/2) = μ
-    -       Var[Y] = (exp(s²) - 1) × exp(2m + s²) = σ²
-    - Solving: s² = ln(1 + (σ/μ)²)
-    -          m = ln(μ) - s²/2
-    - Sample: Y = exp(m + s × Z) where Z ~ N(0,1)
+    For a log-normal distribution with desired mean mu and std sigma:
+    - Let Y ~ LogNormal(m, s^2) where m and s are the log-space parameters
+    - Then: E[Y] = exp(m + s^2/2) = mu
+    -       Var[Y] = (exp(s^2) - 1) x exp(2m + s^2) = sigma^2
+    - Solving: s^2 = ln(1 + (sigma/mu)^2)
+    -          m = ln(mu) - s^2/2
+    - Sample: Y = exp(m + s x Z) where Z ~ N(0,1)
 
-    Args:
-        mean: Mean value (original PT or energy)
-              Shape: any tensor shape
-              Values should be positive for physical quantities
-        sigma: Standard deviation (resolution uncertainty)
-               Shape: same as mean
+    Parameters
+    ----------
+    mean: torch.Tensor
+        Mean value (original PT or energy).
+        Shape: any tensor shape.
+        Values should be positive for physical quantities.
+    sigma: torch.Tensor
+        Standard deviation (resolution uncertainty).
+        Shape: same as mean.
 
     Returns
     -------
+    sample: torch.Tensor
         Sampled values from log-normal distribution
         Shape: same as input
         For invalid inputs (mean ≤ 0), returns zero
 
     Examples
     --------
-        >>> # Smear particle momenta
-        >>> pt = torch.tensor([10.0, 50.0, 100.0])
-        >>> resolution = torch.tensor([0.5, 1.0, 2.0])
-        >>> smeared_pt = log_normal_sample(pt, resolution)
+    >>> # Smear particle momenta
+    >>> pt = torch.tensor([10.0, 50.0, 100.0])
+    >>> resolution = torch.tensor([0.5, 1.0, 2.0])
+    >>> smeared_pt = log_normal_sample(pt, resolution)
 
-        >>> # Works with batched data
-        >>> pt_batch = torch.rand(100, 500) * 100  # (batch, particles)
-        >>> res_batch = torch.rand(100, 500) * 5
-        >>> smeared = log_normal_sample(pt_batch, res_batch)
+    >>> # Works with batched data
+    >>> pt_batch = torch.rand(100, 500) * 100  # (batch, particles)
+    >>> res_batch = torch.rand(100, 500) * 5
+    >>> smeared = log_normal_sample(pt_batch, res_batch)
 
-        >>> # Maintains gradients
-        >>> pt = torch.tensor([10.0], requires_grad=True)
-        >>> sigma = torch.tensor([1.0])
-        >>> smeared = log_normal_sample(pt, sigma)
-        >>> loss = (smeared - 12.0)**2
-        >>> loss.backward()
-        >>> print(pt.grad)  # Gradient flows through!
+    >>> # Maintains gradients
+    >>> pt = torch.tensor([10.0], requires_grad=True)
+    >>> sigma = torch.tensor([1.0])
+    >>> smeared = log_normal_sample(pt, sigma)
+    >>> loss = (smeared - 12.0)**2
+    >>> loss.backward()
+    >>> print(pt.grad)  # Gradient flows through!
 
     Notes
     -----
-        - Uses small epsilon (1e-10) to avoid log(0) errors
-        - For mean ≤ 0, returns 0 (physically invalid values)
-        - Fully differentiable for gradient-based optimization
-        - Device-agnostic (works on CPU and GPU)
+    - Uses small epsilon (1e-10) to avoid log(0) errors
+    - For mean ≤ 0, returns 0 (physically invalid values)
+    - Fully differentiable for gradient-based optimization
+    - Device-agnostic (works on CPU and GPU)
 
     Used by:
-        - MomentumSmearing: PT resolution smearing
-        - SimpleCalorimeter.Tower: Energy resolution smearing
-        - SimpleCalorimeter.EFlowTrack: Energy flow resolution
-        - SimpleCalorimeter.EFlowPhoton: Photon energy resolution
+    - MomentumSmearing: PT resolution smearing
+    - SimpleCalorimeter.Tower: Energy resolution smearing
+    - SimpleCalorimeter.EFlowTrack: Energy flow resolution
+    - SimpleCalorimeter.EFlowPhoton: Photon energy resolution
     """
     # Identify valid inputs (positive mean values)
     mask_positive = mean > 0.0

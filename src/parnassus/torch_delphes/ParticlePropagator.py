@@ -50,16 +50,23 @@ class ParticlePropagator(nn.Module):
 
     Attributes
     ----------
-        radius: Detector cylinder radius in meters
-        half_length: Detector cylinder half-length in meters
-        bz: Magnetic field strength in Tesla (along z-axis)
-        radius_max: Maximum radius for valid particle origin
-        half_length_max: Maximum |z| for valid particle origin
-        c_light: Speed of light constant (m/s)
+    radius: float
+        Detector cylinder radius in meters
+    half_length: float
+        Detector cylinder half-length in meters
+    bz: float
+        Magnetic field strength in Tesla (along z-axis)
+    radius_max: float | None
+        Maximum radius for valid particle origin
+    half_length_max: float | None
+        Maximum |z| for valid particle origin
+    c_light: float
+        Speed of light constant (m/s)
 
-    Example:
-        >>> propagator = ParticlePropagator(radius=1.29, half_length=3.0, bz=3.8)
-        >>> particles_out, neutrals, charged_hadrons, electrons, muons = propagator(particles)
+    Examples
+    --------
+    >>> propagator = ParticlePropagator(radius=1.29, half_length=3.0, bz=3.8)
+    >>> particles_out, neutrals, charged_hadrons, electrons, muons = propagator(particles)
     """
 
     def __init__(
@@ -72,12 +79,18 @@ class ParticlePropagator(nn.Module):
     ) -> None:
         """Init.
 
-        Args:
-        radius: Detector cylinder radius in meters (default: 1.29m for CMS)
-        half_length: Detector cylinder half-length in meters (default: 3.0m)
-        bz: Magnetic field strength in Tesla (default: 3.8T for CMS)
-        radius_max: Maximum radius for particle origin (default: same as radius)
-        half_length_max: Maximum half-length for particle origin (default: same as half_length)
+        Parameters
+        ----------
+        radius: float
+            Detector cylinder radius in meters (default: 1.29m for CMS)
+        half_length: float
+            Detector cylinder half-length in meters (default: 3.0m)
+        bz: float
+            Magnetic field strength in Tesla (default: 3.8T for CMS)
+        radius_max: float | None
+            Maximum radius for particle origin (default: same as radius)
+        half_length_max: float | None
+            Maximum half-length for particle origin (default: same as half_length)
         """
         super().__init__()
         self.radius = radius
@@ -99,24 +112,26 @@ class ParticlePropagator(nn.Module):
         different particle categories. Each output tensor contains only the
         particles that passed propagation for that category.
 
-        Args:
-            particles: Tensor of shape (N, N_FEATURES) containing generator-level
-                particles. Must be flattened (not batched by event). Key columns:
-
-                - PID (col 0): PDG particle ID
-                - CHARGE (col 2): Electric charge
-                - E (col 3): Energy in GeV
-                - PX, PY, PZ (cols 4-6): Momentum components in GeV
-                - PT (col 7): Transverse momentum in GeV
-                - X, Y, Z (cols 11-13): Production vertex in mm
-                - T (col 10): Production time
+        Parameters
+        ----------
+        particles: torch.Tensor
+            Tensor of shape (N, N_FEATURES) containing generator-level
+            particles. Must be flattened (not batched by event). Key columns:
+            - PID (col 0): PDG particle ID
+            - CHARGE (col 2): Electric charge
+            - E (col 3): Energy in GeV
+            - PX, PY, PZ (cols 4-6): Momentum components in GeV
+            - PT (col 7): Transverse momentum in GeV
+            - X, Y, Z (cols 11-13): Production vertex in mm
+            - T (col 10): Production time in mm/c
 
         Returns
         -------
+        particles_propagated, neutrals, charged_hadrons, electrons, muons: torch.Tensor
             Tuple of 5 tensors, each of shape (N_i, N_FEATURES):
 
             - **particles_propagated**: All particles that passed propagation,
-              with updated positions (X, Y, Z, T) at detector surface
+                with updated positions (X, Y, Z, T) at detector surface
             - **neutrals**: Neutral particles (photons, neutral hadrons, etc.)
             - **charged_hadrons**: Charged hadrons (pions, kaons, protons, etc.)
             - **electrons**: Electrons and positrons (|PDG| = 11)
@@ -124,11 +139,12 @@ class ParticlePropagator(nn.Module):
 
             For the individual particle branches (neutrals, charged_hadrons,
             electrons, muons), the X, Y, Z, T values are reset to the
-            production vertex for consistency with C++ Delphes Track output.
+            production vertex for consistency with C++ Delphes Trac output.
 
-        Note:
-            Charged particles that fail to reach the detector (helix doesn't
-            intersect cylinder) are filtered out and not included in any output.
+        Notes
+        -----
+        Charged particles that fail to reach the detector (helix doesn't
+        intersect cylinder) are filtered out and not included in any output.
         """
         # TODO: Remove after debugging
         particles_before_prop = particles.clone()
@@ -196,7 +212,8 @@ class ParticlePropagator(nn.Module):
         # C++ Delphes: for charged particles, only add to output if r_t > 0.0 (line 338)
         # For neutral particles, always add to output (no check after propagation)
         # The check is: did the charged particle successfully reach the detector?
-        # We detect failure by checking if r_t is very small (position set to ~zero indicates failure)
+        # We detect failure by checking if r_t is very small
+        # (position set to ~zero indicates failure)
         final_x = particles[:, ColumnMap.X] * 1.0e-3  # mm to m
         final_y = particles[:, ColumnMap.Y] * 1.0e-3
         final_r = torch.sqrt(final_x**2 + final_y**2)
@@ -214,7 +231,8 @@ class ParticlePropagator(nn.Module):
         particles[:, ColumnMap.PASS_PROP] = mask.float()
 
         # Collect the 4 branches/outputs
-        # NOTE: Since we will use both the particles object and the specific branch objects, we instantiate the branches as clones
+        # NOTE: Since we will use both the particles object and the specific branch objects,
+        # we instantiate the branches as clones
         charged_hadron_pid_mask = mask * pdg_filters.charged_hadron_filter(particles)
         charged_hadrons = particles[charged_hadron_pid_mask > 0.5].to(torch.float32).clone()
         charged_hadrons_before_prop = particles_before_prop[charged_hadron_pid_mask > 0.5].to(
@@ -233,8 +251,9 @@ class ParticlePropagator(nn.Module):
         neutrals = particles[neutral_pid_mask > 0.5].to(torch.float32).clone()
         neutrals_before_prop = particles_before_prop[neutral_pid_mask > 0.5].to(torch.float32)
 
-        # NOTE: We purposely/manually leave their positions unchanged (i.e. leave it as production vertex)
-        #       This is for consistency with C++ logic in order to help debugging
+        # NOTE: We purposely/manually leave their positions unchanged
+        # (i.e. leave it as production vertex)
+        # This is for consistency with C++ logic in order to help debugging
         # TODO: Remove this after debugging. Unnecessary and memory-intensive.
         for var in [ColumnMap.X, ColumnMap.Y, ColumnMap.Z, ColumnMap.T]:
             charged_hadrons[:, var] = charged_hadrons_before_prop[:, var].clone()
@@ -269,16 +288,24 @@ class ParticlePropagator(nn.Module):
         The time T is updated as: T_new = T_old + t * E * 1e3
         where t is the propagation time and E is the energy (speed = c for neutrals).
 
-        Args:
-            particles: Full particle tensor to update in-place
-            mask: Boolean mask indicating which particles to propagate
-            x, y, z: Initial positions in meters
-            px, py, pz: Momentum components in GeV
-            pt: Transverse momentum in GeV
-            e: Energy in GeV
+        Parameters
+        ----------
+        particles: torch.Tensor
+            Full particle tensor to update in-place
+        mask: torch.Tensor
+            Boolean mask indicating which particles to propagate
+        x, y, z: torch.Tensor
+            Initial positions in meters
+        px, py, pz: torch.Tensor
+            Momentum components in GeV
+        pt: torch.Tensor
+            Transverse momentum in GeV
+        e: torch.Tensor
+            Energy in GeV
 
         Returns
         -------
+        particles: torch.Tensor
             Updated particles tensor with propagated positions for masked particles
         """
         # Convert mask to boolean if needed (it might be int64 from operations)
@@ -372,17 +399,25 @@ class ParticlePropagator(nn.Module):
 
         The time T is updated as: T_new = T_old + t * c_light * 1e3
 
-        Args:
-            particles: Full particle tensor to update in-place
-            mask: Boolean mask indicating which particles to propagate
-            x, y, z: Initial positions in meters
-            px, py, pz: Momentum components in GeV
-            pt: Transverse momentum in GeV
-            e: Energy in GeV
-            q: Electric charge
+        Parameters
+        ----------
+        particles: torch.Tensor
+            Full particle tensor to update in-place
+        mask: torch.Tensor
+            Boolean mask indicating which particles to propagate
+        x, y, z: torch.Tensor
+            Initial positions in meters
+        px, py, pz: torch.Tensor
+            Momentum components in GeV
+        pt: torch.Tensor
+            Transverse momentum in GeV
+        e: torch.Tensor
+            Energy in GeV
+        q: Electric charge
 
         Returns
         -------
+        particles: torch.Tensor
             Updated particles tensor. Particles that fail to reach the detector
             (helix doesn't intersect cylinder) have their positions set to zero.
         """

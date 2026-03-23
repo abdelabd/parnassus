@@ -50,11 +50,13 @@ class MomentumSmearing(nn.Module):
 
     Attributes
     ----------
-        resolution_func: Function that computes resolution from (pt, eta_outer)
+    resolution_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+        Function that computes resolution from (pt, eta_outer)
 
-    Example:
-        >>> smear = MomentumSmearing(resolution_formula='charged_hadron_cms')
-        >>> smeared_tracks = smear(tracks)
+    Examples
+    --------
+    >>> smear = MomentumSmearing(resolution_formula='charged_hadron_cms')
+    >>> smeared_tracks = smear(tracks)
     """
 
     def __init__(
@@ -64,11 +66,13 @@ class MomentumSmearing(nn.Module):
     ) -> None:
         """Initialize the MomentumSmearing module.
 
-        Args:
-            resolution_formula: Either a string naming a predefined formula
-                ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a
-                callable that takes (pt, eta_outer) tensors and returns
-                relative resolution values (e.g., 0.06 for 6%).
+        Parameters
+        ----------
+        resolution_formula: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor], optional
+            Either a string naming a predefined formula
+            ('charged_hadron_cms', 'electron_cms', 'muon_cms') or a
+            callable that takes (pt, eta_outer) tensors and returns
+            relative resolution values (e.g., 0.06 for 6%).
         """
         super().__init__()
 
@@ -91,21 +95,24 @@ class MomentumSmearing(nn.Module):
         using a log-normal distribution. All momentum components and energy
         are updated to be consistent with the smeared pT.
 
-        Args:
-            particles: Tensor of shape (N, N_FEATURES) containing tracks.
-                Required columns:
+        Parameters
+        ----------
+        particles: torch.Tensor
+            Tensor of shape (N, N_FEATURES) containing tracks.
+            Required columns:
 
-                - PT (col 7): Transverse momentum in GeV
-                - ETA (col 8): Momentum-based pseudorapidity
-                - PHI (col 9): Azimuthal angle
-                - MASS (col 14): Particle mass in GeV
-                - ETA_OUTER (col 15): Position-based pseudorapidity
+            - PT (col 7): Transverse momentum in GeV
+            - ETA (col 8): Momentum-based pseudorapidity
+            - PHI (col 9): Azimuthal angle
+            - MASS (col 14): Particle mass in GeV
+            - ETA_OUTER (col 15): Position-based pseudorapidity
 
         Returns
         -------
+        particles: torch.Tensor
             Updated tensor of shape (N, N_FEATURES) with smeared momentum.
             Modified columns: PT, PX, PY, PZ, E, TRACK_RESOLUTION.
-            Original η and φ are preserved.
+            Original eta and phi are preserved.
         """
         pt = particles[:, ColumnMap.PT]  # Column 7: PT (transverse momentum)
         eta_outer = particles[
@@ -151,14 +158,18 @@ class MomentumSmearing(nn.Module):
         """CMS charged hadron momentum resolution formula.
         Based on arXiv:1405.6569.
 
-        Args:
-            pt: transverse momentum (GeV)
-            eta_outer: pseudorapidity
+        Parameters
+        ----------
+        pt: torch.Tensor
+            Transverse momentum (GeV)
+        eta_outer: torch.Tensor
+            Pseudorapidity
 
         Returns
         -------
-            resolution: relative momentum resolution (dimensionless, e.g., 0.06 = 6%)
-                        To get absolute resolution in GeV, multiply by pt.
+        resolution: torch.Tensor
+            Relative momentum resolution (dimensionless, e.g., 0.06 = 6%)
+            To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
 
@@ -192,14 +203,18 @@ class MomentumSmearing(nn.Module):
         """CMS electron momentum resolution formula.
         Based on arXiv:1502.02701.
 
-        Args:
-            pt: transverse momentum (GeV)
-            eta_outer: pseudorapidity
+        Parameters
+        ----------
+        pt: torch.Tensor
+            Transverse momentum (GeV)
+        eta_outer: torch.Tensor
+            Pseudorapidity
 
         Returns
         -------
-            resolution: relative momentum resolution (dimensionless, e.g., 0.03 = 3%)
-                        To get absolute resolution in GeV, multiply by pt.
+        resolution: torch.Tensor
+            Relative momentum resolution (dimensionless, e.g., 0.03 = 3%)
+            To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)
@@ -226,14 +241,18 @@ class MomentumSmearing(nn.Module):
         """CMS muon momentum resolution formula.
         Based on arXiv:1306.2016.
 
-        Args:
-            pt: transverse momentum (GeV)
-            eta_outer: pseudorapidity
+        Parameters
+        ----------
+        pt: torch.Tensor
+            Transverse momentum (GeV)
+        eta_outer: torch.Tensor
+            Pseudorapidity
 
         Returns
         -------
-            resolution: relative momentum resolution (dimensionless, e.g., 0.01 = 1%)
-                        To get absolute resolution in GeV, multiply by pt.
+        resolution: torch.Tensor
+            Relative momentum resolution (dimensionless, e.g., 0.01 = 1%)
+            To get absolute resolution in GeV, multiply by pt.
         """
         abs_eta_outer = torch.abs(eta_outer)
         res = torch.zeros_like(pt)

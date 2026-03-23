@@ -16,20 +16,23 @@ def charged_hadron_filter(particles: torch.Tensor) -> torch.Tensor:
     Charged hadrons are defined as charged particles that are NOT electrons or muons.
     This includes: charged pions, kaons, protons, etc.
 
-    Args:
-        particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
-                  Must contain PID and CHARGE columns
+    Parameters
+    ----------
+    particles: torch.Tensor
+        Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
+        Must contain PID and CHARGE columns
 
     Returns
     -------
-        mask: Boolean tensor indicating charged hadrons
-              Same shape as particles[..., 0]
+    mask: torch.Tensor
+        Boolean tensor indicating charged hadrons
+        Same shape as particles[..., 0]
 
     Examples
     --------
-        >>> particles = torch.randn(100, 25)
-        >>> mask = charged_hadron_filter(particles)
-        >>> charged_hadrons = particles[mask]
+    >>> particles = torch.randn(100, 25)
+    >>> mask = charged_hadron_filter(particles)
+    >>> charged_hadrons = particles[mask]
     """
     pid = particles[..., ColumnMap.PID]
     q_final = particles[..., ColumnMap.CHARGE]
@@ -49,20 +52,23 @@ def electron_filter(particles: torch.Tensor) -> torch.Tensor:
 
     Electrons and positrons have PDG ID = ±11.
 
-    Args:
-        particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
-                  Must contain PID and CHARGE columns
+    Parameters
+    ----------
+    particles: torch.Tensor
+        Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
+        Must contain PID and CHARGE columns
 
     Returns
     -------
-        mask: Boolean tensor indicating electrons/positrons
-              Same shape as particles[..., 0]
+    mask: torch.Tensor
+            Boolean tensor indicating electrons/positrons
+            Same shape as particles[..., 0]
 
     Examples
     --------
-        >>> particles = torch.randn(100, 25)
-        >>> mask = electron_filter(particles)
-        >>> electrons = particles[mask]
+    >>> particles = torch.randn(100, 25)
+    >>> mask = electron_filter(particles)
+    >>> electrons = particles[mask]
     """
     pid = particles[..., ColumnMap.PID]
     q_final = particles[..., ColumnMap.CHARGE]
@@ -79,20 +85,23 @@ def muon_filter(particles: torch.Tensor) -> torch.Tensor:
 
     Muons and antimuons have PDG ID = ±13.
 
-    Args:
-        particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
-                  Must contain PID and CHARGE columns
+    Parameters
+    ----------
+    particles: torch.Tensor
+        Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
+        Must contain PID and CHARGE columns
 
     Returns
     -------
-        mask: Boolean tensor indicating muons/antimuons
-              Same shape as particles[..., 0]
+    mask: torch.Tensor
+        Boolean tensor indicating muons/antimuons
+        Same shape as particles[..., 0]
 
     Examples
     --------
-        >>> particles = torch.randn(100, 25)
-        >>> mask = muon_filter(particles)
-        >>> muons = particles[mask]
+    >>> particles = torch.randn(100, 25)
+    >>> mask = muon_filter(particles)
+    >>> muons = particles[mask]
     """
     pid = particles[..., ColumnMap.PID]
     q_final = particles[..., ColumnMap.CHARGE]
@@ -110,20 +119,23 @@ def neutral_filter(particles: torch.Tensor) -> torch.Tensor:
     Neutral particles have |charge| < 1e-9 (accounts for floating point precision).
     This includes: photons, neutrons, neutrinos, neutral kaons, etc.
 
-    Args:
-        particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
-                  Must contain CHARGE column
+    Parameters
+    ----------
+    particles: torch.Tensor
+        Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
+        Must contain CHARGE column.
 
     Returns
     -------
-        mask: Boolean tensor indicating neutral particles
-              Same shape as particles[..., 0]
+    mask: torch.Tensor
+        Boolean tensor indicating neutral particles
+        Same shape as particles[..., 0]
 
     Examples
     --------
-        >>> particles = torch.randn(100, 25)
-        >>> mask = neutral_filter(particles)
-        >>> neutrals = particles[mask]
+    >>> particles = torch.randn(100, 25)
+    >>> mask = neutral_filter(particles)
+    >>> neutrals = particles[mask]
     """
     q_final = particles[..., ColumnMap.CHARGE]
     is_charged = torch.abs(q_final) > 1.0e-9
@@ -140,24 +152,27 @@ def get_particle_masks(particles: torch.Tensor) -> dict[str, torch.Tensor]:
     This is more efficient than calling individual filter functions
     when you need multiple masks, as it computes shared quantities only once.
 
-    Args:
-        particles: Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
-                  Must contain PID and CHARGE columns
+    Parameters
+    ----------
+    particles: torch.Tensor
+        Tensor of shape (N, N_FEATURES) or (B, N, N_FEATURES)
+        Must contain PID and CHARGE columns
 
     Returns
     -------
+    dict[str, torch.Tensor]
         Dictionary containing masks for each particle type:
-            - 'charged_hadron': Charged hadrons (not e/μ)
-            - 'electron': Electrons and positrons
-            - 'muon': Muons and antimuons
-            - 'neutral': Neutral particles
-            - 'charged': All charged particles
+        - 'charged_hadron': Charged hadrons (not e/μ)
+        - 'electron': Electrons and positrons
+        - 'muon': Muons and antimuons
+        - 'neutral': Neutral particles
+        - 'charged': All charged particles
 
     Examples
     --------
-        >>> particles = torch.randn(100, 25)
-        >>> masks = get_particle_masks(particles)
-        >>> print(f"Found {masks['electron'].sum()} electrons")
+    >>> particles = torch.randn(100, 25)
+    >>> masks = get_particle_masks(particles)
+    >>> print(f"Found {masks['electron'].sum()} electrons")
     """
     pid = particles[..., ColumnMap.PID]
     q_final = particles[..., ColumnMap.CHARGE]

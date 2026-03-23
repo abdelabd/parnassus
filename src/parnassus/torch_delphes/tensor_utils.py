@@ -7,6 +7,7 @@ This module provides:
 """
 
 from enum import IntEnum
+from pathlib import Path
 
 import awkward as ak
 import numpy as np
@@ -115,13 +116,17 @@ MUON_MASS = 0.10566
 def compute_max_particles(event_tensors: list[torch.Tensor], scale: float = 1.2) -> int:
     """Compute max_particles for padding as scale * max particle count in dataset.
 
-    Args:
-        event_tensors: List of (N_i, N_FEATURES) tensors
-        scale: Scaling factor (default 1.2 = 20% buffer)
+    Parameters
+    ----------
+    event_tensors: list[torch.Tensor]
+        List of (N_i, N_FEATURES) tensors
+    scale: float
+        Scaling factor (default 1.2 = 20% buffer)
 
     Returns
     -------
-        max_particles: Integer max particles for padding
+    max_particles: int
+        Integer max particles for padding
     """
     if len(event_tensors) == 0:
         return 0
@@ -136,7 +141,8 @@ def tensor_to_root_dict(
 
     This creates the structure needed for writing to ROOT files with uproot.
 
-    Args:
+    Parameters
+    ----------
         batch_tensors: List of tensors, one per batch, each of shape (n_particles, N_FEATURES)
         branch_name: Name for the branch (e.g., "ChargedHadronEfficiency")
         expected_event_numbers: List of all expected event numbers. If provided, ensures
@@ -411,15 +417,21 @@ def tensor_to_root_dict(
 
 
 def write_root_file(
-    output_file: str, branches_dict: dict[str, dict[str, ak.Array]], tree_name: str = "Delphes"
+    output_file: str | Path,
+    branches_dict: dict[str, dict[str, ak.Array]],
+    tree_name: str = "Delphes",
 ):
     """Write multiple branches to a ROOT file.
 
-    Args:
-        output_file: Path to output ROOT file
-        branches_dict: Dictionary mapping branch names to their data dictionaries
-                      e.g., {"ChargedHadronEfficiency": {...}, "ElectronEfficiency": {...}}
-        tree_name: Name of the tree in ROOT file (default: "Delphes")
+    Parameters
+    ----------
+    output_file: str | Path
+        Path to output ROOT file
+    branches_dict: dict[str, dict[str, ak.Array]]
+        Dictionary mapping branch names to their data dictionaries
+        e.g., {"ChargedHadronEfficiency": {...}, "ElectronEfficiency": {...}}
+    tree_name: str
+        Name of the tree in ROOT file (default: "Delphes")
     """
     # Combine all branch dictionaries
     combined_dict = {}
@@ -431,22 +443,28 @@ def write_root_file(
         f[tree_name] = combined_dict
 
 
-def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> tuple[torch.Tensor, torch.Tensor]:
+def hepmc_to_tensor(
+    hepmc_file: str | Path, max_events: int | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert HepMC file to PyTorch tensors.
 
     Reads particles from HepMC events and converts to tensor format.
     Returns both stable particles (for detector simulation) and all particles
     (for truth-level studies).
 
-    Args:
-        hepmc_file: Path to HepMC file (.hepmc, .hepmc3, or .hepmc.gz)
-        max_events: Maximum number of events to process
+    Parameters
+    ----------
+    hepmc_file: str | Path
+        Path to HepMC file (.hepmc, .hepmc3, or .hepmc.gz)
+    max_events: int | None, optional
+        Maximum number of events to process, or None to process all events (default: None)
 
     Returns
     -------
-        Tuple of:
-            - stable_particles: Tensor of shape (n_stable_total, N_FEATURES) with status==1 particles
-            - all_particles: Tensor of shape (n_all_total, N_FEATURES) with all particles
+    stable_particles: torch.Tensor
+        Tensor of shape (n_stable_total, N_FEATURES) with status==1 particles
+    all_particles: torch.Tensor
+        Tensor of shape (n_all_total, N_FEATURES) with all particles
     """
     stable_event_tensors = []
     all_event_tensors = []
@@ -485,7 +503,7 @@ def hepmc_to_tensor(hepmc_file: str, max_events: int = None) -> tuple[torch.Tens
 
 
 def _particles_to_tensor(
-    particles_list: list, event_number: int, use_hepmc_mass: bool = True
+    particles_list: list[pyhepmc.GenParticle], event_number: int, use_hepmc_mass: bool = True
 ) -> torch.Tensor:
     """Convert a list of HepMC particles to a tensor.
 
@@ -495,14 +513,19 @@ def _particles_to_tensor(
     - Charge: Look up from PDG ID (HepMC doesn't store charge)
     - Eta: Use ±999.9 for particles with zero transverse momentum
 
-    Args:
-        particles_list: List of pyhepmc particle objects
-        event_number: Event number to assign to all particles
-        use_hepmc_mass: If True, read mass from HepMC generated_mass.
-                        If False, use PDG mass lookup. Default True to match C++ Delphes.
+    Parameters
+    ----------
+    particles_list: list[pyhepmc.GenParticle]
+        List of pyhepmc particle objects
+    event_number: int
+        Event number to assign to all particles
+    use_hepmc_mass: bool, optional
+        If True, read mass from HepMC generated_mass.
+        If False, use PDG mass lookup. Default True to match C++ Delphes.
 
     Returns
     -------
+    particles_tensor: torch.Tensor
         Tensor of shape (n_particles, N_FEATURES)
     """
     n_particles = len(particles_list)
@@ -603,7 +626,17 @@ def _get_pdg_charge(pid: int) -> float:
     """Get charge for a single PDG ID using the particle library.
     Matches C++ Delphes behavior:
     - Returns 0 for quarks and diquarks (fractional charge particles)
-    - Returns -999 for unknown particles
+    - Returns -999 for unknown particles.
+
+    Parameters
+    ----------
+    pid: int
+        PDG ID of the particle
+
+    Returns
+    -------
+    charge: float
+        Electric charge in units of e, or -999 for unknown particles
     """
     if pid in _PDG_CHARGE_CACHE:
         return _PDG_CHARGE_CACHE[pid]
@@ -627,7 +660,7 @@ def _get_pdg_charge(pid: int) -> float:
         n3 = (abs_pid // 10) % 10  # orbital L
         n2 = (abs_pid // 100) % 10  # second quark
         n1 = (abs_pid // 1000) % 10  # first quark
-        if n4 in (1, 3) and n3 == 0 and 1 <= n1 <= 6 and 1 <= n2 <= 6:
+        if n4 in {1, 3} and n3 == 0 and 1 <= n1 <= 6 and 1 <= n2 <= 6:
             _PDG_CHARGE_CACHE[pid] = 0
             return 0
 
@@ -649,11 +682,14 @@ def get_charge_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     Uses the particle library for comprehensive PDG coverage.
     Returns -999 for unknown particles (matching C++ Delphes behavior).
 
-    Args:
-        pids: NumPy array of PDG IDs
+    Parameters
+    ----------
+    pids: np.ndarray
+        NumPy array of PDG IDs
 
     Returns
     -------
+    charges: np.ndarray
         NumPy array of electric charges
     """
     # Get unique PIDs to minimize lookups
@@ -671,11 +707,14 @@ def get_charge_from_pdg_id(pids: np.ndarray) -> np.ndarray:
 def get_mass_from_pdg_id(pids: np.ndarray) -> np.ndarray:
     """Get particle masses for an array of PDG IDs (vectorized).
 
-    Args:
-        pids: NumPy array of PDG IDs
+    Parameters
+    ----------
+    pids: np.ndarray
+        NumPy array of PDG IDs
 
     Returns
     -------
+    masses: np.ndarray
         NumPy array of masses in GeV
     """
     abs_pids = np.abs(pids)

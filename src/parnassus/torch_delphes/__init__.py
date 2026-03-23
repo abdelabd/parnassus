@@ -17,12 +17,13 @@ Default configurations:
     CMSEnergyFlowDefault: Complete CMS detector simulation
     ATLASEnergyFlowDefault: Complete ATLAS detector simulation
 
-Example:
-    >>> from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
-    >>> detector = CMSEnergyFlowDefault(debug=False)
-    >>> results = detector(stable_particles)
-    >>> tracks = results['Track']
-    >>> eflow = results['EFlowTrack']
+Examples
+--------
+>>> from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+>>> detector = CMSEnergyFlowDefault(debug=False)
+>>> results = detector(stable_particles)
+>>> tracks = results['Track']
+>>> eflow = results['EFlowTrack']
 """
 
 from .Efficiency import Efficiency

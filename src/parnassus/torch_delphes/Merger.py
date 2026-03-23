@@ -26,10 +26,11 @@ class Merger(nn.Module):
     that need to transform particles (e.g., setting PID, zeroing positions),
     use EFlowMerger instead.
 
-    Example:
-        >>> merger = Merger()
-        >>> tracks = merger([charged_hadrons, electrons, muons])
-        >>> towers = merger([ecal_towers, hcal_towers])
+    Examples
+    --------
+    >>> merger = Merger()
+    >>> tracks = merger([charged_hadrons, electrons, muons])
+    >>> towers = merger([ecal_towers, hcal_towers])
     """
 
     def __init__(self) -> None:
@@ -39,13 +40,16 @@ class Merger(nn.Module):
     def forward(self, input_tensors: list[torch.Tensor]) -> torch.Tensor:
         """Concatenate multiple particle tensors.
 
-        Args:
-            input_tensors: List of tensors, each of shape (N_i, N_FEATURES).
-                All tensors must have the same number of features (columns).
-                Empty tensors (N_i = 0) are handled gracefully.
+        Parameters
+        ----------
+        input_tensors: list[torch.Tensor]
+            List of tensors, each of shape (N_i, N_FEATURES).
+            All tensors must have the same number of features (columns).
+            Empty tensors (N_i = 0) are handled gracefully.
 
         Returns
         -------
+        torch.Tensor
             Concatenated tensor of shape (sum(N_i), N_FEATURES) containing
             all particles from all input tensors.
         """

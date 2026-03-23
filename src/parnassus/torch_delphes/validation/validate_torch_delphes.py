@@ -79,7 +79,8 @@ def validate_against_benchmark(
     and kinematic variables. Histograms are saved as PNG files for visual
     inspection.
 
-    Args:
+    Parameters
+    ----------
         torch_output_file: Path to TorchDelphes output ROOT file
         benchmark_file: Path to C++ Delphes benchmark ROOT file
         output_dir: Directory to save validation plots
@@ -90,7 +91,8 @@ def validate_against_benchmark(
         validate_pid: If True, create PID-specific validation plots.
             Can be slow for datasets with many unique PIDs.
 
-    Outputs:
+    Notes
+    -----
         Creates PNG histogram files in output_dir:
         - kinematic_{branch}_{variable}.png: Per-variable histograms
         - validation_{branch}.png: Combined multi-variable plots
@@ -795,7 +797,8 @@ def main(
 ) -> None:
     """Main processing function.
 
-    Args:
+    Parameters
+    ----------
         input_file: Path to input HepMC file
         output_file: Path to output ROOT file
         benchmark_file: Path to benchmark ROOT file
@@ -1020,16 +1023,19 @@ if __name__ == "__main__":
         )
 
         # If --validate-event was specified, run single-event validation after full pipeline
-        if args.specific_event is not None:
-            if Path(args.output).exists() and Path(args.benchmark).exists():
-                validate_against_benchmark(
-                    output_fpath,
-                    benchmark_fpath,
-                    validation_dir,
-                    debug=args.debug,
-                    event_number=args.specific_event,
-                    validate_pid=args.validate_pid,
-                )
+        if (
+            args.specific_event is not None
+            and Path(args.output).exists()
+            and Path(args.benchmark).exists()
+        ):
+            validate_against_benchmark(
+                output_fpath,
+                benchmark_fpath,
+                validation_dir,
+                debug=args.debug,
+                event_number=args.specific_event,
+                validate_pid=args.validate_pid,
+            )
 
     toc = time.time()
     dur = toc - tic
