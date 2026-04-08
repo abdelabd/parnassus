@@ -1,10 +1,13 @@
 """Neural network-based event generator implementation."""
 
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
 from typing import Self, final
 
 import numpy as np
 import torch
+from rich.progress import Progress, TaskID
 
 from parnassus.configs.accessors import (
     Accessor,
@@ -13,9 +16,29 @@ from parnassus.configs.accessors import (
     AccessorTemplates,
 )
 from parnassus.configs.generators import NeuralGeneratorConfig
+from parnassus.configs.scheme import GenEvent, GenParticleCollection
 from parnassus.nn import ModelWrapper
 from parnassus.utils import Unscaler
+from parnassus.utils.logger import ProgressBar, update_task
 from parnassus.utils.typing import TensorDict
+
+
+@dataclass
+class _GenerationBuffers:
+    """Internal storage for accumulated batch outputs."""
+
+    truth_data: dict[str, np.ndarray]
+    pflow_data: dict[str, np.ndarray]
+    event_numbers: np.ndarray
+    count: int = 0
+
+    def trim(self) -> "_GenerationBuffers":
+        for key in self.truth_data:
+            self.truth_data[key] = self.truth_data[key][: self.count]
+        for key in self.pflow_data:
+            self.pflow_data[key] = self.pflow_data[key][: self.count]
+        self.event_numbers = self.event_numbers[: self.count]
+        return self
 
 
 @final
@@ -41,8 +64,8 @@ class NeuralEventGenerator:
         # Use the transform registry to get VarTransform instances
         self.var_transform_dict = config.transform_registry.to_var_transform_dict()
 
-        self.fs_npart_pos = config.event_model_config.variables_config.fs_vars.index("npflow")
-        self.fs_ht_pos = config.event_model_config.variables_config.fs_vars.index("pflow_ht")
+        self.fs_npart_pos = config.event_model_config.fs_vars.index("npflow")
+        self.fs_ht_pos = config.event_model_config.fs_vars.index("pflow_ht")
 
         self.ht_shift = self.var_transform_dict["ht"].shift
         self.ht_scale = self.var_transform_dict["ht"].scale
@@ -50,12 +73,24 @@ class NeuralEventGenerator:
 
         self.unscaler = Unscaler(
             transform_dict=self.var_transform_dict,
-            ctxt_vars=config.particle_model_config.variables_config.ctxt_vars,
-            fs_vars=config.particle_model_config.variables_config.fs_vars,
-            ctxt_global_vars=config.particle_model_config.variables_config.ctxt_global_vars,
+            ctxt_vars=config.variable_requirements.ctxt_vars,
+            fs_vars=config.particle_model_config.fs_vars,
+            ctxt_global_vars=config.variable_requirements.ctxt_global_vars,
         )
 
-    # EventGenerator protocol properties
+        # State managed across initialize / process_batch / get_events
+        self._buffers: _GenerationBuffers | None = None
+        self._exit_stack: ExitStack | None = None
+        self._progress_bar: Progress | None = None
+        self._total_gen_task: TaskID | None = None
+        self._evt_sampler_task: TaskID | None = None
+        self._part_sampler_task: TaskID | None = None
+        self._impact_sampler_task: TaskID | None = None
+
+    # ------------------------------------------------------------------ #
+    # Internal-use properties (not part of the public protocol)           #
+    # ------------------------------------------------------------------ #
+
     @property
     def has_impact_model(self) -> bool:
         return self.impact_model is not None
@@ -65,24 +100,20 @@ class NeuralEventGenerator:
         return self.config.max_particles
 
     @property
-    def truth_output_vars(self) -> list[str]:
-        return self.config.truth_output_vars
-
-    @property
-    def pflow_output_vars(self) -> list[str]:
-        return self.config.pflow_output_vars
-
-    @property
-    def event_sampler_steps(self) -> int | None:
+    def _event_sampler_steps(self) -> int | None:
         return self.event_model.sampler.n_steps
 
     @property
-    def particle_sampler_steps(self) -> int | None:
+    def _particle_sampler_steps(self) -> int | None:
         return self.particle_model.sampler.n_steps
 
     @property
-    def impact_sampler_steps(self) -> int | None:
+    def _impact_sampler_steps(self) -> int | None:
         return self.impact_model.sampler.n_steps if self.impact_model else None
+
+    # ------------------------------------------------------------------ #
+    # Accessor management                                                  #
+    # ------------------------------------------------------------------ #
 
     def _get_accessors_builder(
         self, collection: str, specs: Sequence[AccessorSpec], use_impact: bool = False
@@ -101,17 +132,14 @@ class NeuralEventGenerator:
             Dictionary mapping collection names to lists of accessors.
         """
         return {
-            # Truth accessors (all particle information)
             "Truth": self._get_accessors_builder(
                 collection="truth_particles", specs=AccessorTemplates.FULL_PARTICLE
             ).build(),
-            # Pflow accessors (may include impact parameters)
             "Pflow": self._get_accessors_builder(
                 collection="pflow_particles",
                 specs=AccessorTemplates.FULL_PARTICLE,
                 use_impact=self.has_impact_model,
             ).build(),
-            # Kinematics accessors for electrons and muons (may include impact parameters)
             "Electrons": self._get_accessors_builder(
                 collection="electrons",
                 specs=AccessorTemplates.KINEMATICS,
@@ -124,6 +152,10 @@ class NeuralEventGenerator:
             ).build(),
         }
 
+    # ------------------------------------------------------------------ #
+    # Device management                                                    #
+    # ------------------------------------------------------------------ #
+
     def to(self, device: torch.device) -> Self:
         self.event_model.to(device)
         self.particle_model.to(device)
@@ -132,14 +164,194 @@ class NeuralEventGenerator:
         self.device = device
         return self
 
-    def generate_batch(
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        # Close any open progress display (no-op if get_events() already did so)
+        if self._exit_stack is not None:
+            self._exit_stack.close()
+            self._exit_stack = None
+            self._progress_bar = None
+        # Move model weights back to CPU to free device memory
+        self.to(torch.device("cpu"))
+
+    # ------------------------------------------------------------------ #
+    # EventGenerator protocol                                              #
+    # ------------------------------------------------------------------ #
+
+    def initialize(self, n_events: int, n_batches: int) -> None:
+        """Pre-allocate buffers and set up progress tracking.
+
+        Parameters
+        ----------
+        n_events : int
+            Total number of events expected (for buffer pre-allocation).
+        n_batches : int
+            Total number of batches (for progress bar).
+        """
+        truth_vars = [*self.config.truth_output_vars, "ind"]
+        pflow_vars = [*self.config.pflow_output_vars, "ind"]
+
+        def _zeros(var_names: list[str]) -> dict[str, np.ndarray]:
+            return {
+                key.replace("ptrel", "pt"): np.zeros(
+                    (n_events, self.max_particles), dtype=np.float32
+                )
+                for key in var_names
+            }
+
+        self._buffers = _GenerationBuffers(
+            truth_data=_zeros(truth_vars),
+            pflow_data=_zeros(pflow_vars),
+            event_numbers=np.zeros(n_events, dtype=np.int32),
+        )
+
+        self._exit_stack = ExitStack()
+        self._progress_bar = self._exit_stack.enter_context(ProgressBar())
+        self._total_gen_task = self._progress_bar.add_task(
+            "[green]Generating data", total=n_batches
+        )
+        self._evt_sampler_task = None
+        if self._event_sampler_steps is not None:
+            self._evt_sampler_task = self._progress_bar.add_task(
+                "[green]Sampling event data", total=self._event_sampler_steps
+            )
+        self._part_sampler_task = None
+        if self._particle_sampler_steps is not None:
+            self._part_sampler_task = self._progress_bar.add_task(
+                "[green]Sampling particle data", total=self._particle_sampler_steps
+            )
+        self._impact_sampler_task = None
+        if self._impact_sampler_steps is not None:
+            self._impact_sampler_task = self._progress_bar.add_task(
+                "[green]Sampling impact data", total=self._impact_sampler_steps
+            )
+
+    def process_batch(self, batch: TensorDict) -> None:
+        """Sample one batch, accumulate into internal buffers, and update progress.
+
+        Parameters
+        ----------
+        batch : TensorDict
+            Input batch from the dataloader.
+        """
+        assert self._buffers is not None, "Call initialize() before process_batch()"
+        assert self._progress_bar is not None
+        assert self._total_gen_task is not None
+
+        if self._evt_sampler_task is not None:
+            self._progress_bar.reset(self._evt_sampler_task)
+        if self._part_sampler_task is not None:
+            self._progress_bar.reset(self._part_sampler_task)
+        if self._impact_sampler_task is not None:
+            self._progress_bar.reset(self._impact_sampler_task)
+
+        tr_data_dict, pf_data_dict, common_data_dict = self._sample_batch(
+            batch,
+            event_callback=update_task(self._progress_bar, self._evt_sampler_task)
+            if self._evt_sampler_task is not None
+            else None,
+            particle_callback=update_task(self._progress_bar, self._part_sampler_task)
+            if self._part_sampler_task is not None
+            else None,
+            impact_callback=update_task(self._progress_bar, self._impact_sampler_task)
+            if self._impact_sampler_task is not None
+            else None,
+        )
+
+        event_number = common_data_dict["event_number"]
+        tr_mask = common_data_dict["tr_mask"]
+        pf_mask = common_data_dict["fs_mask"]
+        gen_size = event_number.shape[0]
+        start = self._buffers.count
+        end = start + gen_size
+        for var_name, tr_data in tr_data_dict.items():
+            self._buffers.truth_data[var_name][start:end] = tr_data
+        for var_name, pf_data in pf_data_dict.items():
+            self._buffers.pflow_data[var_name][start:end] = pf_data
+        self._buffers.truth_data["ind"][start:end] = tr_mask
+        self._buffers.pflow_data["ind"][start:end] = pf_mask
+        self._buffers.event_numbers[start:end] = event_number[..., 0]
+        self._buffers.count = end
+
+        self._progress_bar.update(self._total_gen_task, advance=1)
+
+    def get_events(self) -> list[GenEvent]:
+        """Finalise, close progress bars, and convert buffers to GenEvent objects.
+
+        Returns
+        -------
+        list[GenEvent]
+            Generated events.
+        """
+        assert self._buffers is not None, "Call initialize() before get_events()"
+
+        if self._exit_stack is not None:
+            self._exit_stack.close()
+            self._exit_stack = None
+            self._progress_bar = None
+
+        buffers = self._buffers.trim()
+
+        event_list: list[GenEvent] = []
+        if buffers.count == 0:
+            return event_list
+
+        for i in range(buffers.count):
+            truth_ind = buffers.truth_data["ind"][i] > 0
+            truth_particles = GenParticleCollection(
+                name="truth",
+                pt=buffers.truth_data["pt"][i][truth_ind],
+                eta=buffers.truth_data["eta"][i][truth_ind],
+                phi=buffers.truth_data["phi"][i][truth_ind],
+                vx=buffers.truth_data["vx"][i][truth_ind],
+                vy=buffers.truth_data["vy"][i][truth_ind],
+                vz=buffers.truth_data["vz"][i][truth_ind],
+                class_id=buffers.truth_data["class"][i][truth_ind].astype(np.int32),
+            )
+            pflow_ind = (buffers.pflow_data["ind"][i] > 0) & (buffers.pflow_data["pt"][i] > 1)
+            impact_dict = {}
+            if self.has_impact_model:
+                impact_dict = {
+                    "d0": buffers.pflow_data["d0"][i][pflow_ind],
+                    "z0": buffers.pflow_data["z0"][i][pflow_ind],
+                    "d0_error": buffers.pflow_data["d0Error"][i][pflow_ind],
+                    "z0_error": buffers.pflow_data["z0Error"][i][pflow_ind],
+                }
+            pflow_particles = GenParticleCollection(
+                name="pflow",
+                pt=buffers.pflow_data["pt"][i][pflow_ind],
+                eta=buffers.pflow_data["eta"][i][pflow_ind],
+                phi=buffers.pflow_data["phi"][i][pflow_ind],
+                vx=buffers.pflow_data["vx"][i][pflow_ind],
+                vy=buffers.pflow_data["vy"][i][pflow_ind],
+                vz=buffers.pflow_data["vz"][i][pflow_ind],
+                class_id=buffers.pflow_data["class"][i][pflow_ind].astype(np.int32),
+                **impact_dict,
+            )
+            event_list.append(
+                GenEvent(
+                    event_number=buffers.event_numbers[i],
+                    truth_particles=truth_particles,
+                    pflow_particles=pflow_particles,
+                )
+            )
+
+        return event_list
+
+    # ------------------------------------------------------------------ #
+    # Internal sampling (renamed from generate_batch)                     #
+    # ------------------------------------------------------------------ #
+
+    def _sample_batch(
         self,
         data_dict: TensorDict,
         event_callback: Callable[[], None] | None = None,
         particle_callback: Callable[[], None] | None = None,
         impact_callback: Callable[[], None] | None = None,
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """Generate truth and pflow particles for a batch using neural networks.
+        """Run the neural sampling pipeline for one batch.
 
         Returns
         -------

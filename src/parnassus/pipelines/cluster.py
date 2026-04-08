@@ -156,7 +156,7 @@ def cluster_jets(
         particle_data["e"],
         user_indices=list(range(n_particles)),
     )
-    jets = cs.inclusive_jets(config.min_pt)
+    jets = cs.inclusive_jets(config.pt_min)
     jets = fj.sorted_by_pt(jets)
     jets = [Jet(j, config.dr, calc_substructure=True) for j in jets]
 
@@ -280,7 +280,8 @@ class JetClusteringPipeline(GenPipeline):
     def get_accessors(self) -> dict[str, list[Accessor]]:
         return {
             self.config.name: (
-                AccessorListBuilder.for_jets(self.config.name)
+                AccessorListBuilder
+                .for_jets(self.config.name)
                 .add_from_specs(AccessorTemplates.KINEMATICS)
                 .add_from_specs(AccessorTemplates.JET_SUBSTRUCTURE)
                 .build()

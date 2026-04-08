@@ -26,7 +26,7 @@ def test_get_cluster_sequence(mock_particle_collection: GenParticleCollection):
     four_vectors = mock_particle_collection.get4vecs_awkward()
     user_indices = list(range(len(mock_particle_collection)))
     # Extract numpy arrays from awkward array
-    px = np.array([v.px.item() for v in four_vectors])
+    px = np.array([v.px.item() for v in four_vectors])  # type: ignore
     py = np.array([v.py.item() for v in four_vectors])
     pz = np.array([v.pz.item() for v in four_vectors])
     E = np.array([v.E.item() for v in four_vectors])
@@ -42,7 +42,7 @@ def test_cluster_jets(mock_particle_collection: GenParticleCollection):
     from parnassus.pipelines.cluster import cluster_jets
 
     config = JetClusteringConfig(
-        name="test_cluster", algorithm="antikt", dr=0.4, nconst_min=2, min_pt=0
+        name="test_cluster", algorithm="antikt", dr=0.4, nconst_min=2, pt_min=0
     )
     # Convert GenParticleCollection to particle data dictionary
     four_vectors = mock_particle_collection.get4vecs_numpy()
@@ -91,7 +91,7 @@ def test_jet_init_basic(mock_fj_jet_cs):
     """Test basic Jet initialization without substructure calculation."""
     mock_fj_jet, _ = mock_fj_jet_cs
     jet = Jet(mock_fj_jet[0], dr=0.4, calc_substructure=False)
-    assert jet.dR == 0.4
+    assert jet.dR == 0.4  # noqa: RUF069
     assert jet.nconstituents == 3
     assert len(jet.constituents_pt) == 3
     assert len(jet.constituents_eta) == 3
@@ -154,7 +154,7 @@ def test_jet_clustering_batch(mock_particle_collection: GenParticleCollection):
     from parnassus.pipelines.cluster import cluster_jets_batch
 
     config = JetClusteringConfig(
-        name="test_cluster", algorithm="antikt", dr=0.4, nconst_min=2, min_pt=0
+        name="test_cluster", algorithm="antikt", dr=0.4, nconst_min=2, pt_min=0
     )
     # Convert GenParticleCollection to particle data dictionary
     four_vectors = mock_particle_collection.get4vecs_numpy()
@@ -185,7 +185,7 @@ def test_jet_clustering_pipeline(
         algorithm="antikt",
         dr=0.4,
         nconst_min=2,
-        min_pt=0,
+        pt_min=0,
         redirect_stdout=True,
         batch_size=50,
         num_processes=num_processes,

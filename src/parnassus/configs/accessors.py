@@ -40,7 +40,7 @@ class Accessor(ABC):
 @final
 @dataclass(frozen=True)
 class ParticleAccessor(Accessor):
-    """Accessor for particle collections."""
+    """Accessor for named particle collections on GenEvent (e.g. truth_particles, electrons)."""
 
     @override
     def get(self, event: GenEvent):
@@ -67,8 +67,28 @@ class ParticleAccessor(Accessor):
 
 @final
 @dataclass(frozen=True)
+class CollectionAccessor(Accessor):
+    """Accessor for generator-specific collections stored in GenEvent.collections."""
+
+    @override
+    def get(self, event: GenEvent):
+        try:
+            collection = event.collections[self.collection]
+        except KeyError as e:
+            raise AccessorError(f"Event has no entry '{self.collection}' in collections") from e
+
+        try:
+            return getattr(collection, self.name)
+        except AttributeError as e:
+            raise AccessorError(
+                f"Collection '{self.collection}' has no attribute '{self.name}'"
+            ) from e
+
+
+@final
+@dataclass(frozen=True)
 class JetAccessor(Accessor):
-    """Accessor for jet collections."""
+    """Accessor for jet collections stored in GenEvent.jets."""
 
     @override
     def get(self, event: GenEvent):
@@ -149,6 +169,20 @@ class AccessorListBuilder:
             AccessorListBuilder for chaining
         """
         return cls(collection, ParticleAccessor)
+
+    @classmethod
+    def for_collection(cls, collection: str) -> "AccessorListBuilder":
+        """Create builder for accessors targeting GenEvent.collections.
+
+        Parameters
+        ----------
+            collection: Key in GenEvent.collections
+
+        Returns
+        -------
+            AccessorListBuilder for chaining
+        """
+        return cls(collection, CollectionAccessor)
 
     @classmethod
     def for_jets(cls, collection: str) -> "AccessorListBuilder":
@@ -244,46 +278,46 @@ class AccessorTemplates:
 
     # Particle kinematics
     KINEMATICS: ClassVar = [
-        AccessorSpec("pt"),
-        AccessorSpec("eta"),
-        AccessorSpec("phi"),
+        AccessorSpec("pt", output_name="PT"),
+        AccessorSpec("eta", output_name="Eta"),
+        AccessorSpec("phi", output_name="Phi"),
     ]
 
     IMPACT_PARAMETERS: ClassVar = [
-        AccessorSpec("d0"),
-        AccessorSpec("z0"),
-        AccessorSpec("d0_error"),
-        AccessorSpec("z0_error"),
+        AccessorSpec("d0", output_name="D0"),
+        AccessorSpec("z0", output_name="Z0"),
+        AccessorSpec("d0_error", output_name="ErrorD0"),
+        AccessorSpec("z0_error", output_name="ErrorZ0"),
     ]
 
     # Full particle info
     FULL_PARTICLE: ClassVar = [
         *KINEMATICS,
-        AccessorSpec("vx"),
-        AccessorSpec("vy"),
-        AccessorSpec("vz"),
-        AccessorSpec("class_id", dtype="int32"),
-        AccessorSpec("pdg_id", dtype="int32"),
+        AccessorSpec("vx", output_name="X"),
+        AccessorSpec("vy", output_name="Y"),
+        AccessorSpec("vz", output_name="Z"),
+        AccessorSpec("class_id", output_name="ClassID", dtype="int32"),
+        AccessorSpec("pdg_id", output_name="PID", dtype="int32"),
     ]
 
     # Isolation variables
     ISOLATION: ClassVar = [
-        AccessorSpec("iso_var"),
-        AccessorSpec("sum_pt"),
-        AccessorSpec("sum_pt_ch"),
-        AccessorSpec("sum_pt_neut"),
+        AccessorSpec("iso_var", output_name="IsolationVar"),
+        AccessorSpec("sum_pt", output_name="SumPt"),
+        AccessorSpec("sum_pt_ch", output_name="SumPtCharged"),
+        AccessorSpec("sum_pt_neut", output_name="SumPtNeutral"),
     ]
 
     # Jet substructure
     JET_SUBSTRUCTURE: ClassVar = [
-        AccessorSpec("d2"),
-        AccessorSpec("c2"),
+        AccessorSpec("d2", output_name="D2"),
+        AccessorSpec("c2", output_name="C2"),
     ]
 
     # Particle classification
     CLASSIFICATION: ClassVar = [
-        AccessorSpec("class_id", dtype="int32"),
-        AccessorSpec("charge", dtype="int32"),
+        AccessorSpec("class_id", output_name="ClassID", dtype="int32"),
+        AccessorSpec("charge", output_name="Charge", dtype="int32"),
     ]
 
 

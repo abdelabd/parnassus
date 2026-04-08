@@ -8,7 +8,8 @@ class ParametricGeneratorConfig(GeneratorConfig):
     """Configuration for parametric event generator.
 
     This configuration manages parametric physics-based event generation,
-    using analytical models or lookup tables instead of neural networks.
+    routing input events through the torch_delphes fast detector simulation
+    instead of a neural network.
 
     Parameters
     ----------
@@ -16,29 +17,34 @@ class ParametricGeneratorConfig(GeneratorConfig):
         Name identifier for this generator configuration.
     max_particles : int
         Maximum number of particles per event.
+    card : str
+        Detector card name for the torch_delphes simulation. Supported values:
+        ``"cms"`` (CMS detector) and ``"atlas"`` (ATLAS detector).
     seed : int | None, optional
         Random seed for reproducible generation. Defaults to None.
     """
 
     type: str = field(default="parametric", init=False)
+    card: str  # "cms" or "atlas"
     max_particles: int = 100
     seed: int | None = None
+    debug: bool = False
 
-    # Truth and pflow output variable names
-    _truth_output_vars: list[str] = field(default_factory=lambda: ["pt", "eta", "phi", "class"])
-    _pflow_output_vars: list[str] = field(
-        default_factory=lambda: ["pt", "eta", "phi", "vx", "vy", "vz", "class"]
-    )
+    def update_from_dict(self, config_dict: dict) -> None:
+        """Update common generator parameters from a dict.
 
-    def get_output_vars(self) -> tuple[list[str], list[str]]:
-        """Get output variable names for parametric generator.
+        This method allows updating parameters like `seed` from a dict,
+        which is useful when loading from YAML or other sources.
 
-        Returns
-        -------
-        tuple[list[str], list[str]]
-            Tuple of (truth_output_vars, pflow_output_vars).
+        Parameters
+        ----------
+        config_dict : dict
+            Dictionary containing generator parameters to update.
         """
-        return self._truth_output_vars, self._pflow_output_vars
+        if "seed" in config_dict:
+            self.seed = config_dict["seed"]
+        if "debug" in config_dict:
+            self.debug = config_dict["debug"]
 
     def get_max_particles(self) -> int:
         """Get maximum particles for parametric generator.
@@ -50,34 +56,8 @@ class ParametricGeneratorConfig(GeneratorConfig):
         """
         return self.max_particles
 
-    @property
-    def truth_output_vars(self) -> list[str]:
-        """Truth-level output variable names (backward compatibility).
 
-        Returns
-        -------
-        list[str]
-            List of truth-level output variable names.
-        """
-        return self._truth_output_vars
-
-    @property
-    def pflow_output_vars(self) -> list[str]:
-        """Particle flow output variable names (backward compatibility).
-
-        Returns
-        -------
-        list[str]
-            List of particle flow output variable names.
-        """
-        return self._pflow_output_vars
-
-
-# Registry of available parametric generators
-# Example placeholder - to be implemented
-# >>> "simple_parametric_v1": ParametricGeneratorConfig(
-# ...     name="simple_parametric_v1",
-# ...     max_particles=100,
-# ...     seed=42,
-# ... ),
-PARAMETRIC_GENERATORS_REGISTRY: dict[str, GeneratorConfig] = {}
+PARAMETRIC_GENERATORS_REGISTRY: dict[str, ParametricGeneratorConfig] = {
+    "cms": ParametricGeneratorConfig(name="cms", card="cms"),
+    "atlas": ParametricGeneratorConfig(name="atlas", card="atlas"),
+}

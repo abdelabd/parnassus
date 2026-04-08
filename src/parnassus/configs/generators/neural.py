@@ -6,11 +6,11 @@ from typing import Self
 
 import yaml
 
+from parnassus.configs.variables import VariableRequirements
 from parnassus.utils import TransformRegistry, VarTransformConfig
-from parnassus.utils.typing import VarNameTuple
 
 from .base import GeneratorConfig
-from .model import ModelConfig, SamplerConfig, VariablesConfig
+from .model import ModelConfig, SamplerConfig
 
 
 @dataclass(slots=True)
@@ -41,7 +41,8 @@ class NeuralGeneratorConfig(GeneratorConfig):
     type: str = field(default="neural", init=False)
     max_particles: int
     transform_config_path: Path
-    truth_vars_to_load: VarNameTuple
+    variable_requirements: VariableRequirements
+
     event_model_config: ModelConfig
     particle_model_config: ModelConfig
     impact_model_config: ModelConfig | None = None
@@ -64,6 +65,21 @@ class NeuralGeneratorConfig(GeneratorConfig):
             raise FileNotFoundError(
                 f"Transform config file not found: {self.transform_config_path}"
             )
+
+    def update_from_dict(self, config_dict: dict) -> None:
+        """Update configuration parameters from a dictionary.
+
+        This method allows updating specific parameters of the generator
+        configuration at runtime, such as the number of sampling steps.
+
+        Parameters
+        ----------
+        config_dict : dict
+            Dictionary containing configuration parameters to update. Supported keys:
+            - "num_steps": int, number of sampling steps for all models.
+        """
+        if "num_steps" in config_dict:
+            self.set_num_steps(config_dict["num_steps"])
 
     def set_num_steps(self, num_steps: int) -> None:
         """Set the number of sampler steps for all models.
@@ -103,33 +119,6 @@ class NeuralGeneratorConfig(GeneratorConfig):
         """
         return self.transform_registry.transforms
 
-    def get_output_vars(self) -> tuple[list[str], list[str]]:
-        """Get output variable names for neural generator.
-
-        Returns
-        -------
-        tuple[list[str], list[str]]
-            Tuple of (truth_output_vars, pflow_output_vars).
-        """
-        truth_vars = [
-            var.replace("truth_", "")
-            for var in self.event_model_config.variables_config.truth_vars_to_load
-        ]
-
-        pflow_vars = [
-            var.replace("pflow_", "")
-            for var in (
-                *self.particle_model_config.variables_config.fs_vars,
-                *(
-                    self.impact_model_config.variables_config.fs_vars
-                    if self.impact_model_config
-                    else []
-                ),
-            )
-        ]
-
-        return truth_vars, pflow_vars
-
     def get_max_particles(self) -> int:
         """Get maximum particles for neural generator.
 
@@ -141,17 +130,6 @@ class NeuralGeneratorConfig(GeneratorConfig):
         return self.max_particles
 
     @property
-    def pflow_output_vars(self) -> list[str]:
-        """Particle flow output variable names (backward compatibility).
-
-        Returns
-        -------
-        list[str]
-            List of particle flow output variable names.
-        """
-        return self.get_output_vars()[1]
-
-    @property
     def truth_output_vars(self) -> list[str]:
         """Truth-level output variable names (backward compatibility).
 
@@ -160,7 +138,21 @@ class NeuralGeneratorConfig(GeneratorConfig):
         list[str]
             List of truth-level output variable names.
         """
-        return self.get_output_vars()[0]
+        return self.variable_requirements.ctxt_vars_stripped
+
+    @property
+    def pflow_output_vars(self) -> list[str]:
+        """Particle flow output variable names (backward compatibility).
+
+        Returns
+        -------
+        list[str]
+            List of particle flow output variable names.
+        """
+        return [
+            *self.particle_model_config.fs_vars_stripped,
+            *(self.impact_model_config.fs_vars_stripped if self.impact_model_config else []),
+        ]
 
     @classmethod
     def load_from_metadata(cls, metadata_path: Path) -> Self:
@@ -190,27 +182,32 @@ class NeuralGeneratorConfig(GeneratorConfig):
         impact_model_config: ModelConfig | None = None
 
         for key, value in metadata["models"].items():
-            variables_config = VariablesConfig(**value["variables"])
             sampler_config = SamplerConfig(**value.get("sampler", {}))
             if key == "event":
                 event_model_config = ModelConfig(
                     name="event",
                     file_path=top_path / value["file_name"],
-                    variables_config=variables_config,
+                    fs_vars=value["fs_vars"],
+                    version=value["version"],
+                    timestamp=value["timestamp"],
                     sampler_config=sampler_config,
                 )
             elif key == "particle":
                 particle_model_config = ModelConfig(
                     name="particle",
                     file_path=top_path / value["file_name"],
-                    variables_config=variables_config,
+                    fs_vars=value["fs_vars"],
+                    version=value["version"],
+                    timestamp=value["timestamp"],
                     sampler_config=sampler_config,
                 )
             elif key == "impact":
                 impact_model_config = ModelConfig(
                     name="impact",
                     file_path=top_path / value["file_name"],
-                    variables_config=variables_config,
+                    fs_vars=value["fs_vars"],
+                    version=value["version"],
+                    timestamp=value["timestamp"],
                     sampler_config=sampler_config,
                 )
             else:
@@ -219,11 +216,12 @@ class NeuralGeneratorConfig(GeneratorConfig):
         if event_model_config is None or particle_model_config is None:
             raise ValueError("Both event and particle models must be defined in metadata.")
 
+        variable_requirements = VariableRequirements.from_dict(metadata.get("variables", {}))
         return cls(
             name=metadata["name"],
             max_particles=metadata["max_particles"],
             transform_config_path=top_path / "var_transform.yaml",
-            truth_vars_to_load=event_model_config.variables_config.truth_vars_to_load,
+            variable_requirements=variable_requirements,
             event_model_config=event_model_config,
             particle_model_config=particle_model_config,
             impact_model_config=impact_model_config,

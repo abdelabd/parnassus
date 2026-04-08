@@ -61,9 +61,12 @@ def suppress_stdout_stderr():
 
 
 def compare_four_vectors(
-    v_c: pyhepmc.FourVector, v_py: pyhepmc.FourVector, rel_tol: float = 1e-6, abs_tol: float = 1e-9
+    v_c: pyhepmc.FourVector,
+    v_py: pyhepmc.FourVector,
+    rel_tol: float = 1e-6,
+    abs_tol: float = 1e-9,
 ) -> tuple[bool, str]:
-    """Compare two four-vectors with tolerance."""  # noqa: DOC201
+    """Compare two four-vectors with tolerance."""
     for attr in ["x", "y", "z", "t"]:
         val_c = getattr(v_c, attr)
         val_py = getattr(v_py, attr)
@@ -87,7 +90,7 @@ def compare_particles(
     abs_tol: float = 1e-9,
     ignore_id: bool = False,
 ) -> tuple[bool, str]:
-    """Compare two particles for equivalence."""  # noqa: DOC201
+    """Compare two particles for equivalence."""
     # Check PDG ID
     if particle_c.pid != particle_py.pid:
         return (
@@ -99,8 +102,10 @@ def compare_particles(
     if particle_c.status != particle_py.status:
         return (
             False,
-            f"Particle {particle_idx}: "
-            f"Status mismatch: {particle_c.status} vs {particle_py.status}",
+            (
+                f"Particle {particle_idx}: "
+                f"Status mismatch: {particle_c.status} vs {particle_py.status}"
+            ),
         )
 
     # Check momentum
@@ -110,17 +115,25 @@ def compare_particles(
 
     # Check generated mass
     if not math.isclose(
-        particle_c.generated_mass, particle_py.generated_mass, rel_tol=rel_tol, abs_tol=abs_tol
+        particle_c.generated_mass,
+        particle_py.generated_mass,
+        rel_tol=rel_tol,
+        abs_tol=abs_tol,
     ):
         return (
             False,
-            f"Particle {particle_idx}: "
-            f"Mass mismatch: {particle_c.generated_mass} vs {particle_py.generated_mass}",
+            (
+                f"Particle {particle_idx}: "
+                f"Mass mismatch: {particle_c.generated_mass} vs {particle_py.generated_mass}"
+            ),
         )
 
     # Check particle ID (if not ignoring)
     if not ignore_id and particle_c.id != particle_py.id:
-        return False, f"Particle {particle_idx}: ID mismatch: {particle_c.id} vs {particle_py.id}"
+        return (
+            False,
+            f"Particle {particle_idx}: ID mismatch: {particle_c.id} vs {particle_py.id}",
+        )
 
     return True, ""
 
@@ -264,7 +277,8 @@ def compare_events(
 
             if not found_particle_match:
                 # Skip detached or non-stable particles
-                # (pyhepmc bindings don't allow us to add these on Python side; but not relevant to physics)
+                # pyhepmc bindings don't allow us to add these on Python side;
+                # but not relevant to physics
                 if exclude_detached and particle_c.status == 42:
                     n_particles_mismatch -= 1
                     continue
@@ -284,8 +298,11 @@ def compare_events(
     # Check that vertices/topology match #######################
     # Build particle map by physics properties for vertex comparison
     def get_particle_signature(p: pyhepmc.GenParticle) -> str:
-        """Create a unique signature for a particle based on physics properties."""  # noqa: DOC201
-        return f"{p.pid}_{p.status}_{p.momentum.x:.6e}_{p.momentum.y:.6e}_{p.momentum.z:.6e}_{p.momentum.t:.6e}"
+        """Create a unique signature for a particle based on physics properties."""
+        return (
+            f"{p.pid}_{p.status}_{p.momentum.x:.6e}_{p.momentum.y:.6e}"
+            f"_{p.momentum.z:.6e}_{p.momentum.t:.6e}"
+        )
 
     # Check that vertices have equivalent connections
     vertices_c_list = list(evt_c.vertices)
@@ -314,13 +331,15 @@ def compare_events(
 
         if not found_vertex_match:
             # Skip detached or non-stable particles
-            # (pyhepmc bindings don't allow us to add these on Python side; but not relevant to physics)
+            # pyhepmc bindings don't allow us to add these on Python side;
+            # but not relevant to physics
             if exclude_detached and len(v_c.particles_in) == 1 and v_c.particles_in[0].status == 42:
                 n_vertices_mismatch -= 1
                 continue
             event_match = False
             mismatch_messages.append(
-                f"Vertex {i} with {len(v_c.particles_in)} in, {len(v_c.particles_out)} out has no match in python event"
+                f"Vertex {i} with {len(v_c.particles_in)} in, {len(v_c.particles_out)} out "
+                "has no match in python event"
             )
 
     # Check other event-level info (if present) #######################
@@ -330,10 +349,13 @@ def compare_events(
     #     pdf_c = evt_c.pdf_info
     #     pdf_py = evt_py.pdf_info
 
-    #     if pdf_c.parton_id1[0] != pdf_py.parton_id1[0] or pdf_c.parton_id2[1] != pdf_py.parton_id2[1]:
+    #     if (
+    #         pdf_c.parton_id1[0] != pdf_py.parton_id1[0]
+    #         or pdf_c.parton_id2[1] != pdf_py.parton_id2[1]
+    #     ):
     #         return False, f"PDF parton ID mismatch: {pdf_c.parton_id} vs {pdf_py.parton_id}"
 
-    #     for attr in ['x', 'scale', 'xf']:
+    #     for attr in ["x", "scale", "xf"]:
     #         val_c = getattr(pdf_c, attr)
     #         val_py = getattr(pdf_py, attr)
     #         if isinstance(val_c, (list, tuple)):
@@ -355,7 +377,8 @@ def compare_events(
     # Event weights: TODO
     # if len(evt_c.weights) != len(evt_py.weights):
     #     event_match = False
-    #     mismatch_messages.append(f"Number of weights mismatch: {len(evt_c.weights)} vs {len(evt_py.weights)}")
+    #     mismatch_messages.append("Number of weights mismatch: "
+    #       f"{len(evt_c.weights)} vs {len(evt_py.weights)}")
 
     # for i, (w_c, w_py) in enumerate(zip(evt_c.weights, evt_py.weights)):
     #     if not math.isclose(w_c, w_py, rel_tol=rel_tol, abs_tol=abs_tol):
@@ -456,17 +479,18 @@ def test_pythia8_to_hepmc3():
     # ._topological_sort_vertices()
     # ._check_if_free_particle()
     # ._store_event_info()
-    # This leaves Pythia8ToHepMC3._add_color(), which is currently broken due to HepMC3 Python bindings limitations
+    # This leaves Pythia8ToHepMC3._add_color(),
+    # which is currently broken due to HepMC3 Python bindings limitations
 
     # Generate events with our interface #############
     with suppress_stdout_stderr():
         pythia = pythia8mc.Pythia()
 
         # Check version number to select benchmark file
-        pythia_version = pythia.settings.parm("Pythia:versionNumber")
-        if pythia_version == 8.316:
+        pythia_version = str(pythia.settings.parm("Pythia:versionNumber"))
+        if pythia_version == "8.316":
             fpath_benchmark = f"src/parnassus/tests/expected_results/HZZ4l_{N_EVENTS}_8316.hepmc"
-        elif pythia_version == 8.315:
+        elif pythia_version == "8.315":
             fpath_benchmark = f"src/parnassus/tests/expected_results/HZZ4l_{N_EVENTS}_8315.hepmc"
         else:
             raise NotImplementedError(
@@ -497,8 +521,8 @@ def test_pythia8_to_hepmc3():
             if not pythia.next():
                 continue  # event failed, try again
 
-            hepmcEvent = converter.fill_next_event(pythia, idx_event)
-            writer.write_event(hepmcEvent)
+            hepmc_event = converter.fill_next_event(pythia, idx_event)
+            writer.write_event(hepmc_event)
             n_written += 1
             idx_event += 1
 
