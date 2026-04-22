@@ -52,6 +52,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
+import subprocess
 from pathlib import Path
 from tqdm import tqdm
 
@@ -59,12 +62,101 @@ import awkward as ak
 import numpy as np
 import torch
 import uproot
+
 from torch import nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.nn.functional import all_reduce as diff_all_reduce
 
 from parnassus.data.particle_io import N_FEATURES, ColumnMap
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
-from parnassus.torch_delphes.tuning import histogram_mse_loss
+from parnassus.torch_delphes.tuning import histogram_mse_loss, soft_histogram
 from parnassus.utils import class_to_pid_vectorized
+
+# =============================================================================
+# Distributed (DDP) bootstrap
+# =============================================================================
+#
+# Designed to be launched with ``srun`` on SLURM:
+#
+#     srun python -m parnassus.torch_delphes.tune_cms_fullsim ...
+#
+# Each ``srun`` task becomes one DDP rank. We pin one GPU per rank using
+# ``SLURM_LOCALID`` (the within-node rank), which gives the requested
+# ``NxN/4x4`` mapping (4 tasks per node, 4 GPUs per node) automatically.
+#
+# When SLURM env vars are absent the script falls back to single-process
+# execution, so plain ``python -m ...`` invocations keep working.
+
+
+def _init_distributed() -> tuple[int, int, int, torch.device]:
+    """Initialize the torch.distributed process group from SLURM env vars.
+
+    Returns
+    -------
+    (rank, world_size, local_rank, device)
+        ``rank`` and ``world_size`` are global; ``local_rank`` is the
+        within-node rank used to pick the CUDA device. ``device`` is
+        ``cuda:local_rank`` if CUDA is available, else ``cpu``.
+    """
+    if "SLURM_PROCID" in os.environ and int(os.environ.get("SLURM_NTASKS", "1")) > 1:
+        rank = int(os.environ["SLURM_PROCID"])
+        world_size = int(os.environ["SLURM_NTASKS"])
+        local_rank = int(os.environ.get("SLURM_LOCALID", "0"))
+
+        # Pick a master address from the SLURM nodelist (first node).
+        if "MASTER_ADDR" not in os.environ:
+            nodelist = os.environ.get("SLURM_NODELIST", socket.gethostname())
+            try:
+                hosts = (
+                    subprocess.check_output(["scontrol", "show", "hostnames", nodelist])
+                    .decode()
+                    .splitlines()
+                )
+                os.environ["MASTER_ADDR"] = hosts[0] if hosts else socket.gethostname()
+            except Exception:
+                os.environ["MASTER_ADDR"] = socket.gethostname()
+        os.environ.setdefault("MASTER_PORT", "29500")
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            backend = "nccl"
+            device = torch.device(f"cuda:{local_rank}")
+        else:
+            backend = "gloo"
+            device = torch.device("cpu")
+
+        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        return rank, world_size, local_rank, device
+
+    # Single-process fallback.
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    return 0, 1, 0, device
+
+
+def _is_dist() -> bool:
+    """True if a process group has been initialized."""
+    return dist.is_available() and dist.is_initialized()
+
+
+def _is_main(rank: int) -> bool:
+    """True on rank 0 (the only rank that prints / writes files)."""
+    return rank == 0
+
+
+def _barrier() -> None:
+    """No-op when not running under DDP."""
+    if _is_dist():
+        dist.barrier()
+
+
+def _cleanup_distributed() -> None:
+    """Tear down the process group."""
+    if _is_dist():
+        dist.destroy_process_group()
 
 # =============================================================================
 # ROOT I/O
@@ -81,23 +173,13 @@ def load_cms_flow_root(
     path: Path,
     n_events: int,
     tree_name: str = "event_tree",
+    entry_start: int = 0,
 ) -> dict[str, np.ndarray]:
-    """Load ``n_events`` from a cms-flow-format ROOT file into numpy arrays.
+    """Load up to ``n_events`` events from a cms-flow-format ROOT file.
 
-    Parameters
-    ----------
-    path : Path
-        ROOT file path.
-    n_events : int
-        Number of leading events to read (``entry_stop=n_events``).
-    tree_name : str
-        Name of the TTree to read. Defaults to ``"event_tree"``.
-
-    Returns
-    -------
-    dict[str, numpy.ndarray]
-        Mapping from branch name to a 1-D object array of jagged per-event
-        arrays. Contains both truth and pflow branches.
+    Reads the contiguous event range ``[entry_start, entry_start + n_events)``.
+    This is used by the DDP code path to give each rank a disjoint shard
+    of the file without re-reading the whole tree on every rank.
     """
     with uproot.open(str(path)) as f:
         if tree_name not in f:
@@ -109,7 +191,8 @@ def load_cms_flow_root(
         arrays = tree.arrays(
             list(TRUTH_BRANCHES + PFLOW_BRANCHES),
             library="np",
-            entry_stop=n_events,
+            entry_start=entry_start,
+            entry_stop=entry_start + n_events,
         )
     return arrays
 
@@ -421,13 +504,82 @@ def multi_observable_loss(
     return total
 
 
+def multi_observable_loss_distributed(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    bin_edges: dict[str, torch.Tensor],
+    beta: float = 0.15,
+    weights: dict[str, float] | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """DDP-aware multi-observable soft-histogram MSE loss.
+
+    Each rank computes its local *unnormalized* soft histogram for both
+    pred and target. We then all-reduce-SUM both histograms across ranks
+    (differentiably for the pred side, via
+    ``torch.distributed.nn.functional.all_reduce``), normalize, and
+    compute the MSE. The result is mathematically identical to running
+    :func:`multi_observable_loss` on the union of every rank's events.
+
+    Falls back to :func:`multi_observable_loss` when no process group is
+    initialized (single-process / plain ``python`` runs).
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss; gradients propagate through the all-reduce back to
+        the learnable parameters on the local rank.
+    """
+    if not _is_dist():
+        return multi_observable_loss(pred, target, bin_edges, beta=beta, weights=weights)
+
+    total = torch.zeros((), dtype=torch.float64, device=pred["pt"].device if pred else None)
+    for key in bin_edges.keys():
+        edges = bin_edges[key]
+        pred_vals = pred.get(key)
+        tgt_vals = target.get(key)
+        if pred_vals is None or tgt_vals is None:
+            continue
+
+        # Local histograms (zero-length tensors give zero histograms,
+        # which is exactly what we want for ranks that happen to have
+        # an empty shard for this observable).
+        if pred_vals.numel() > 0:
+            pred_hist_local = soft_histogram(pred_vals, edges, beta=beta)
+        else:
+            pred_hist_local = torch.zeros(
+                edges.numel() - 1, dtype=edges.dtype, device=edges.device
+            )
+        if tgt_vals.numel() > 0:
+            tgt_hist_local = soft_histogram(tgt_vals.detach(), edges, beta=beta)
+        else:
+            tgt_hist_local = torch.zeros(
+                edges.numel() - 1, dtype=edges.dtype, device=edges.device
+            )
+
+        # Differentiable all-reduce on the pred side keeps gradients
+        # connected; the target side is detached so a plain (non-diff)
+        # all-reduce is fine.
+        pred_hist = diff_all_reduce(pred_hist_local, op=dist.ReduceOp.SUM)
+        tgt_hist = tgt_hist_local.clone()
+        dist.all_reduce(tgt_hist, op=dist.ReduceOp.SUM)
+
+        pred_norm = pred_hist / (pred_hist.sum() + eps)
+        tgt_norm = tgt_hist / (tgt_hist.sum() + eps)
+        loss_key = ((pred_norm - tgt_norm) ** 2).mean()
+
+        w = (weights or {}).get(key, 1.0)
+        total = total + w * loss_key
+    return total
+
+
 # =============================================================================
 # Fit loop
 # =============================================================================
 
 
 def fit_card_to_fullsim(
-    card: CMSEnergyFlowDefault,
+    card: CMSEnergyFlowDefault | DDP,
     truth_particles: torch.Tensor,
     target_observables: dict[str, torch.Tensor],
     n_events: int,
@@ -444,6 +596,7 @@ def fit_card_to_fullsim(
     lr_efficiency: float = _DEFAULT_LR_EFFICIENCY,
     lr_fractions: float = _DEFAULT_LR_FRACTIONS,
     snapshot_parameters: bool = False,
+    rank: int = 0,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match ``target_observables``.
 
@@ -491,8 +644,11 @@ def fit_card_to_fullsim(
             }
         ]
     else:
+        # Always group on the underlying (unwrapped) card so the
+        # parameter-name suffix matching works regardless of DDP wrapping.
+        underlying = card.module if isinstance(card, DDP) else card
         param_groups = build_parameter_groups(
-            card,
+            underlying,
             lr_scales=lr_scales,
             lr_resolution=lr_resolution,
             lr_efficiency=lr_efficiency,
@@ -504,6 +660,8 @@ def fit_card_to_fullsim(
     history: dict[str, list] = {"step": [], "loss": []}
     if snapshot_parameters:
         history["parameters"] = []
+
+    underlying_for_snap = card.module if isinstance(card, DDP) else card
 
     def _snapshot() -> dict[str, float]:
         """Record the current post-transform value of every parameter.
@@ -519,7 +677,7 @@ def fit_card_to_fullsim(
             component of every ``nn.Parameter`` on the card.
         """
         snap: dict[str, float] = {}
-        for name, p in card.named_parameters():
+        for name, p in underlying_for_snap.named_parameters():
             if name.endswith(".scale_raw"):
                 val = 1.0 + 0.3 * torch.tanh(p)
             elif name.endswith((".eff_logits", "_logit")):
@@ -536,25 +694,62 @@ def fit_card_to_fullsim(
                 snap[f"{name}[{i}]" if val.ndim else name] = float(vv)
         return snap
 
-    for step in tqdm(range(n_steps)):
+    pbar = tqdm(
+        range(n_steps),
+        disable=not _is_main(rank),
+        desc="tune",
+        unit="step",
+        dynamic_ncols=True,
+    )
+    for step in pbar:
         opt.zero_grad()
-        loss_acc = torch.zeros((), dtype=torch.float64)
+        loss_acc = torch.zeros(
+            (), dtype=torch.float64, device=truth_particles.device
+        )
         for _ in range(n_passes_per_step):
             out = card(truth_particles)
             pred = trainee_observables(out, n_events=n_events)
-            loss_acc = loss_acc + multi_observable_loss(
+            loss_acc = loss_acc + multi_observable_loss_distributed(
                 pred, target_observables, edges, beta=beta, weights=weights
             )
         loss = loss_acc / max(n_passes_per_step, 1)
         loss.backward()
+
+        # Manual gradient sync across DDP ranks. We don't wrap the card in
+        # ``DistributedDataParallel`` because the loss is already a global
+        # function of all ranks' data (via the differentiable all-reduce
+        # on the soft histograms), so each rank's autograd produces only
+        # the *local* contribution to ∂L/∂θ. Summing those across ranks
+        # gives the true full-data gradient. (DDP would *average* them,
+        # which would be off by 1/world_size.) All ranks start from the
+        # same seed and apply identical optimizer steps to identical
+        # summed gradients, so the parameters stay perfectly in sync.
+        #
+        # Critical: every rank MUST issue the same number of collectives
+        # in the same order, or NCCL will deadlock. With small per-rank
+        # event budgets some particle classes can be absent on some
+        # ranks, leaving ``p.grad is None`` for class-specific parameters
+        # only on those ranks. We therefore materialize missing grads
+        # as zeros so the collective count stays in lock-step.
+        if _is_dist():
+            params_iter = (
+                card.module.parameters() if isinstance(card, DDP) else card.parameters()
+            )
+            for p in params_iter:
+                if p.grad is None:
+                    p.grad = torch.zeros_like(p)
+                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+
         opt.step()
 
         history["step"].append(step)
         history["loss"].append(float(loss))
         if snapshot_parameters:
             history["parameters"].append(_snapshot())
-        if log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
-            print(f"  step {step:3d}/{n_steps}  loss = {float(loss):.4e}")
+        if _is_main(rank):
+            pbar.set_postfix(loss=f"{float(loss):.4e}", refresh=False)
+        if _is_main(rank) and log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
+            tqdm.write(f"  step {step:3d}/{n_steps}  loss = {float(loss):.4e}")
 
     return history
 
@@ -782,47 +977,95 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------
+    # DDP bootstrap (no-op for plain ``python -m ...`` invocations).
+    # ------------------------------------------------------------------
+    rank, world_size, local_rank, device = _init_distributed()
+
+    def log(msg: str) -> None:
+        """Print only on rank 0 to keep stdout readable under srun."""
+        if _is_main(rank):
+            print(msg)
+
+    if world_size > 1:
+        log(
+            f"[DDP] running on {world_size} ranks "
+            f"(local_rank={local_rank} on host {socket.gethostname()})"
+        )
+
     # Resolve the input file: use the real file if it exists, otherwise
     # generate a synthetic fixture so the demo is always runnable.
+    # Only rank 0 writes the fixture; everyone else waits at a barrier.
     root_file: Path
     if args.root_file is not None and args.root_file.exists():
         root_file = args.root_file
-        print(f"Loading full-simulation events from {root_file}")
+        log(f"Loading full-simulation events from {root_file}")
     else:
         if args.root_file is not None:
-            print(f"WARNING: {args.root_file} does not exist; falling back to fixture.")
-        print(
+            log(f"WARNING: {args.root_file} does not exist; falling back to fixture.")
+        log(
             "No real ROOT file provided. Generating synthetic fixture at "
             f"{args.fixture_path} (same schema as Zenodo record 11389651)..."
         )
-        write_synthetic_fixture(
-            args.fixture_path,
-            n_events=args.n_events,
-            particles_per_event=60,
-            seed=args.seed,
-        )
+        if _is_main(rank):
+            write_synthetic_fixture(
+                args.fixture_path,
+                n_events=args.n_events,
+                particles_per_event=60,
+                seed=args.seed,
+            )
+        _barrier()
         root_file = args.fixture_path
-        print(
+        log(
             "To fit against the real sample, download e.g. "
             "https://zenodo.org/records/11389651 and rerun with --root-file."
         )
 
-    arrays = load_cms_flow_root(root_file, n_events=args.n_events)
-    truth_tensor = truth_to_particle_tensor(arrays, n_events=args.n_events)
-    target = pflow_target_observables(arrays, n_events=args.n_events)
+    # ------------------------------------------------------------------
+    # Per-rank data sharding.
+    # ``args.n_events`` is the *global* event budget; we split it
+    # contiguously across ranks. Each rank reads only its own slice
+    # from the ROOT file. The "local" event count is what gets passed
+    # to the trainee/target observable builders so that scatter-add
+    # buffers are sized correctly per rank.
+    # ------------------------------------------------------------------
+    base = args.n_events // world_size
+    extra = args.n_events % world_size
+    local_n_events = base + (1 if rank < extra else 0)
+    entry_start = rank * base + min(rank, extra)
+    log(
+        f"[DDP] global n_events={args.n_events}; rank {rank} reads "
+        f"events [{entry_start}, {entry_start + local_n_events})"
+    )
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
+    arrays = load_cms_flow_root(
+        root_file, n_events=local_n_events, entry_start=entry_start
+    )
+    truth_tensor = truth_to_particle_tensor(arrays, n_events=local_n_events)
+    target = pflow_target_observables(arrays, n_events=local_n_events)
 
     truth_tensor = truth_tensor.to(device)
     target = {k: v.to(device) for k, v in target.items()}
     bin_edges = {k: v.to(device) for k, v in DEFAULT_BIN_EDGES.items()}
 
-    print(
-        f"Loaded {args.n_events} events, {truth_tensor.shape[0]} truth particles, "
-        f"{target['pt'].numel()} PFlow target particles."
+    # Use a *globally* reduced count of target particles for the print.
+    n_target_local = target["pt"].numel()
+    if _is_dist():
+        tmp = torch.tensor([n_target_local], dtype=torch.long, device=device)
+        dist.all_reduce(tmp, op=dist.ReduceOp.SUM)
+        n_target_global = int(tmp.item())
+    else:
+        n_target_global = n_target_local
+
+    log(
+        f"Loaded {args.n_events} events globally ({local_n_events} on rank {rank}), "
+        f"{truth_tensor.shape[0]} truth particles (local), "
+        f"{n_target_global} PFlow target particles (global)."
     )
 
+    # All ranks must use the *same* initial parameters for the manual-
+    # gradient-sync scheme to keep them in sync; ``torch.manual_seed``
+    # with the user seed (not seed+rank!) handles that.
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
 
@@ -837,10 +1080,11 @@ def main() -> None:
         else:  # resolution_only
             params_to_train = [chad_res.a_raw, chad_res.b_raw]
 
-    print(
+    print_msg = (
         f"Training {'all 66' if params_to_train is None else len(params_to_train)} "
         f"learnable params for {args.n_steps} Adam steps..."
     )
+    log(print_msg)
 
     def _averaged_loss(n: int = 6) -> float:
         """Average the soft-histogram loss over ``n`` fresh forward passes.
@@ -848,6 +1092,10 @@ def main() -> None:
         Single-pass losses fluctuate by several tens of percent due to the
         log-normal smearing and the Gumbel-ST sampling, so a fair
         "before vs after" comparison has to average over samples.
+
+        Under DDP the loss is computed via the differentiable all-reduce
+        helper, so the returned value is the *global* loss (identical
+        on every rank).
 
         Returns
         -------
@@ -858,9 +1106,9 @@ def main() -> None:
         with torch.no_grad():
             for _ in range(n):
                 out = trainee(truth_tensor)
-                pred = trainee_observables(out, n_events=args.n_events)
+                pred = trainee_observables(out, n_events=local_n_events)
                 acc += float(
-                    multi_observable_loss(
+                    multi_observable_loss_distributed(
                         pred,
                         target,
                         bin_edges,
@@ -871,13 +1119,13 @@ def main() -> None:
         return acc / n
 
     loss_before = _averaged_loss()
-    print(f"Averaged loss at init (6 passes): {loss_before:.4e}")
+    log(f"Averaged loss at init (6 passes): {loss_before:.4e}")
 
     history = fit_card_to_fullsim(
         trainee,
         truth_tensor,
         target,
-        n_events=args.n_events,
+        n_events=local_n_events,
         n_steps=args.n_steps,
         lr=args.lr,
         n_passes_per_step=args.n_passes_per_step,
@@ -890,9 +1138,10 @@ def main() -> None:
         lr_efficiency=args.lr_efficiency,
         lr_fractions=args.lr_fractions,
         snapshot_parameters=args.history_path is not None,
+        rank=rank,
     )
 
-    if args.history_path is not None:
+    if args.history_path is not None and _is_main(rank):
         args.history_path.parent.mkdir(parents=True, exist_ok=True)
         with args.history_path.open("w") as f:
             json.dump(
@@ -907,16 +1156,17 @@ def main() -> None:
                     "lr_efficiency": args.lr_efficiency,
                     "lr_fractions": args.lr_fractions,
                     "train_what": args.train_what,
+                    "world_size": world_size,
                 },
                 f,
                 indent=2,
             )
-        print(f"Wrote training history to {args.history_path}")
+        log(f"Wrote training history to {args.history_path}")
 
     loss_after = _averaged_loss()
-    print(f"Averaged loss after training (6 passes): {loss_after:.4e}")
+    log(f"Averaged loss after training (6 passes): {loss_after:.4e}")
     rel = 100.0 * (loss_before - loss_after) / max(loss_before, 1e-30)
-    print(f"  relative improvement: {rel:+.1f}%")
+    log(f"  relative improvement: {rel:+.1f}%")
 
     # Print the learned charged-hadron scale and ECal scale for a quick
     # sanity check. On the synthetic fixture the expected target is
@@ -934,11 +1184,13 @@ def main() -> None:
         .detach()
         .tolist()
     )
-    print()
-    print(f"Final charged-hadron scale (3 eta regions): {chad_scales}")
-    print(f"Final ECal scale            (3 eta regions): {ecal_scale_vals}")
+    log("")
+    log(f"Final charged-hadron scale (3 eta regions): {chad_scales}")
+    log(f"Final ECal scale            (3 eta regions): {ecal_scale_vals}")
     if root_file == args.fixture_path:
-        print("(on synthetic fixture: target values are 1.25 and 1.20 respectively)")
+        log("(on synthetic fixture: target values are 1.25 and 1.20 respectively)")
+
+    _cleanup_distributed()
 
 
 if __name__ == "__main__":
