@@ -36,7 +36,7 @@ python validate_torch_delphes.py --det=CMS --process=HZZ4l
 
 To validate all intermediate products, pass the `--debug` flag:
 ```
-python validate_torch_delphes.py --det=CMS --process=HZZ4l --det
+python validate_torch_delphes.py --det=CMS --process=HZZ4l --debug
 ```
 
 ### 4. Inspect validation plots at `validation_plots`/
