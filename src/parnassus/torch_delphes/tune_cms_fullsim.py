@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from tqdm import tqdm
 
 import awkward as ak
 import numpy as np
@@ -535,7 +536,7 @@ def fit_card_to_fullsim(
                 snap[f"{name}[{i}]" if val.ndim else name] = float(vv)
         return snap
 
-    for step in range(n_steps):
+    for step in tqdm(range(n_steps)):
         opt.zero_grad()
         loss_acc = torch.zeros((), dtype=torch.float64)
         for _ in range(n_passes_per_step):
@@ -809,13 +810,21 @@ def main() -> None:
     arrays = load_cms_flow_root(root_file, n_events=args.n_events)
     truth_tensor = truth_to_particle_tensor(arrays, n_events=args.n_events)
     target = pflow_target_observables(arrays, n_events=args.n_events)
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+
+    truth_tensor = truth_tensor.to(device)
+    target = {k: v.to(device) for k, v in target.items()}
+    bin_edges = {k: v.to(device) for k, v in DEFAULT_BIN_EDGES.items()}
+
     print(
         f"Loaded {args.n_events} events, {truth_tensor.shape[0]} truth particles, "
         f"{target['pt'].numel()} PFlow target particles."
     )
 
     torch.manual_seed(args.seed)
-    trainee = CMSEnergyFlowDefault(debug=False, learnable=True)
+    trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
 
     # Pick the parameter subset to train.
     if args.train_what == "all":
@@ -854,7 +863,7 @@ def main() -> None:
                     multi_observable_loss(
                         pred,
                         target,
-                        DEFAULT_BIN_EDGES,
+                        bin_edges,
                         beta=args.beta,
                         weights=DEFAULT_OBS_WEIGHTS,
                     )
@@ -875,6 +884,7 @@ def main() -> None:
         beta=args.beta,
         log_every=max(1, args.n_steps // 10),
         parameters_to_train=params_to_train,
+        bin_edges=bin_edges,
         lr_scales=args.lr_scales,
         lr_resolution=args.lr_resolution,
         lr_efficiency=args.lr_efficiency,
