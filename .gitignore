@@ -89,3 +89,6 @@ src/parnassus/torch_delphes/validation/logs/
 
 # MacOS
 .DS_Store
+
+*.png
+doc/fit_results/*.json
