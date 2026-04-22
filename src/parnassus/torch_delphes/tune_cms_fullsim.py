@@ -742,14 +742,15 @@ def fit_card_to_fullsim(
 
         opt.step()
 
+        print_loss = float(loss.detach())
         history["step"].append(step)
-        history["loss"].append(float(loss))
+        history["loss"].append(print_loss)
         if snapshot_parameters:
             history["parameters"].append(_snapshot())
         if _is_main(rank):
-            pbar.set_postfix(loss=f"{float(loss):.4e}", refresh=False)
+            pbar.set_postfix(loss=f"{print_loss:.4e}", refresh=False)
         if _is_main(rank) and log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
-            tqdm.write(f"  step {step:3d}/{n_steps}  loss = {float(loss):.4e}")
+            tqdm.write(f"  step {step:3d}/{n_steps}  loss = {print_loss:.4e}")
 
     return history
 
