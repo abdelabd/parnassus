@@ -126,7 +126,15 @@ def _init_distributed() -> tuple[int, int, int, torch.device]:
             backend = "gloo"
             device = torch.device("cpu")
 
-        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        # Passing ``device_id`` explicitly silences NCCL's "Guessing device
+        # ID based on global rank" warning (which can actually hang when
+        # rank-to-GPU mapping is heterogeneous, e.g. multi-node SLURM with
+        # ``--gpu-bind``) and lets NCCL eagerly bind the communicator to
+        # the correct GPU on this rank.
+        pg_kwargs: dict = {"backend": backend, "rank": rank, "world_size": world_size}
+        if backend == "nccl":
+            pg_kwargs["device_id"] = device
+        dist.init_process_group(**pg_kwargs)
         return rank, world_size, local_rank, device
 
     # Single-process fallback.
