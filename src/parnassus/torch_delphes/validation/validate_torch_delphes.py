@@ -1092,7 +1092,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _get_paths(args, script_dir: Path) -> tuple[Path, Path, Path, Path]:
-    data_process_dir = script_dir / "data/Delphes_350/" / args.process
+    data_process_dir = script_dir / "data" / args.process
     data_detector_dir = data_process_dir / args.detector
 
     validation_dir = script_dir / "validation_plots" / args.process / args.detector

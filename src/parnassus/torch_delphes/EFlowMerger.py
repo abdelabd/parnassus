@@ -135,7 +135,6 @@ class EFlowMerger(nn.Module):
 
         # Note: X, Y, Z should already be non-zero for tracks (from vertex position)
         # PID, Charge, E, PT, Phi, etc. remain unchanged
-        tracks[:, ColumnMap.ETA] = tracks[:, ColumnMap.ETA_OUTER]
 
         return tracks
 
