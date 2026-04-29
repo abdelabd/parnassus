@@ -39,6 +39,7 @@ _CARD_REGISTRY: dict[str, type[DelphesBaseCard]] = {
 # No impact parameters (those require the neural impact model).
 _PARTICLE_SPECS: list[AccessorSpec] = [
     AccessorSpec("pt", output_name="PT"),
+    AccessorSpec("p", output_name="P"),
     AccessorSpec("eta", output_name="Eta"),
     AccessorSpec("phi", output_name="Phi"),
     AccessorSpec("mass", output_name="Mass"),

@@ -42,6 +42,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import uproot
+from PIL import Image
 from torch.utils.data import DataLoader
 
 from parnassus.configs.accessors import AccessorStore
@@ -65,6 +66,119 @@ TORCH_MAP_DICT = {
     "Tower": "Tower",
     "EFlowObject": "Pflow",
 }
+
+
+def _stitch_pngs_horizontally(
+    image_paths: list[Path],
+    output_path: Path,
+    title: str | None = None,
+    title_height: int = 60,
+    title_fontsize: int = 22,
+    background: tuple[int, int, int] = (255, 255, 255),
+    ncols: int = 2,
+) -> bool:
+    """Combine multiple PNG files into a grid.
+
+    Despite the legacy name, this function arranges inputs into a grid with
+    ``ncols`` columns (default 2 → 2x2 for four inputs). Within each row, all
+    images are vertically resized to a common height (preserving aspect
+    ratio). Each row's width is independently determined; rows are padded to
+    the widest row so the output is rectangular. An optional title bar is
+    rendered on top.
+
+    Parameters
+    ----------
+    image_paths : list[Path]
+        Paths of PNGs to combine, in row-major order. Missing paths are
+        silently skipped.
+    output_path : Path
+        Where to save the stitched PNG.
+    title : str, optional
+        Centered title rendered above the grid. Skipped if ``None``.
+    title_height : int
+        Pixel height of the title bar.
+    title_fontsize : int
+        Font size for the title.
+    background : tuple of int
+        RGB background colour.
+    ncols : int
+        Number of columns in the grid.
+
+    Returns
+    -------
+    bool
+        ``True`` if a stitched image was written, ``False`` if no input files
+        existed.
+    """
+    existing = [p for p in image_paths if p.exists()]
+    if not existing:
+        return False
+
+    images = [Image.open(p).convert("RGB") for p in existing]
+
+    # Chunk images into rows of `ncols`
+    rows: list[list[Image.Image]] = [
+        images[i : i + ncols] for i in range(0, len(images), ncols)
+    ]
+
+    # For each row, resize all images to the row's max height
+    rendered_rows: list[Image.Image] = []
+    for row in rows:
+        row_max_h = max(im.height for im in row)
+        resized = []
+        for im in row:
+            if im.height == row_max_h:
+                resized.append(im)
+            else:
+                new_w = int(round(im.width * row_max_h / im.height))
+                resized.append(im.resize((new_w, row_max_h), Image.LANCZOS))
+        row_w = sum(im.width for im in resized)
+        row_canvas = Image.new("RGB", (row_w, row_max_h), background)
+        x = 0
+        for im in resized:
+            row_canvas.paste(im, (x, 0))
+            x += im.width
+        rendered_rows.append(row_canvas)
+
+    total_w = max(r.width for r in rendered_rows)
+    grid_h = sum(r.height for r in rendered_rows)
+    title_h = title_height if title else 0
+    canvas = Image.new("RGB", (total_w, grid_h + title_h), background)
+
+    y = title_h
+    for r in rendered_rows:
+        # Center each row horizontally if narrower than total_w
+        x = (total_w - r.width) // 2
+        canvas.paste(r, (x, y))
+        y += r.height
+
+    if title:
+        # Render the title via matplotlib (so we don't need a system TTF font)
+        fig = plt.figure(figsize=(total_w / 100, title_h / 100), dpi=100)
+        fig.patch.set_facecolor(
+            (background[0] / 255, background[1] / 255, background[2] / 255)
+        )
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        ax.text(
+            0.5,
+            0.5,
+            title,
+            ha="center",
+            va="center",
+            fontsize=title_fontsize,
+            fontweight="bold",
+        )
+        title_png = output_path.with_suffix(".title.png")
+        fig.savefig(title_png, dpi=100, bbox_inches=None, pad_inches=0)
+        plt.close(fig)
+
+        title_img = Image.open(title_png).convert("RGB").resize((total_w, title_h))
+        canvas.paste(title_img, (0, 0))
+        title_png.unlink(missing_ok=True)
+
+    canvas.save(output_path)
+    return True
 
 
 def validate_against_benchmark(
@@ -318,7 +432,7 @@ def validate_against_benchmark(
                         x - width / 2,
                         benchmark_counts,
                         width,
-                        label="C++ Delphes",
+                        label=f"C++ Delphes, {len(benchmark_np)} particles",
                         color="orange",
                         alpha=0.7,
                     )
@@ -326,7 +440,7 @@ def validate_against_benchmark(
                         x + width / 2,
                         torch_counts,
                         width,
-                        label="Parnassus.TorchDelphes",
+                        label=f"Parnassus.TorchDelphes, {len(torch_np)} particles",
                         color="blue",
                         alpha=0.7,
                     )
@@ -373,7 +487,7 @@ def validate_against_benchmark(
                         x - width / 2,
                         benchmark_counts,
                         width,
-                        label="C++ Delphes",
+                        label=f"C++ Delphes, {len(benchmark_np)} particles",
                         color="orange",
                         alpha=0.7,
                     )
@@ -381,7 +495,7 @@ def validate_against_benchmark(
                         x + width / 2,
                         torch_counts,
                         width,
-                        label="Parnassus.TorchDelphes",
+                        label=f"Parnassus.TorchDelphes, {len(torch_np)} particles",
                         color="blue",
                         alpha=0.7,
                     )
@@ -425,7 +539,7 @@ def validate_against_benchmark(
                         color="orange",
                         alpha=0.5,
                         linewidth=2,
-                        label="C++ Delphes",
+                        label=f"C++ Delphes, {len(benchmark_np)} particles",
                         density=False,
                     )
                     torch_hist = ax_hist.hist(
@@ -434,7 +548,7 @@ def validate_against_benchmark(
                         histtype="step",
                         color="blue",
                         linewidth=2,
-                        label="Parnassus.TorchDelphes",
+                        label=f"Parnassus.TorchDelphes, {len(torch_np)} particles",
                         density=False,
                     )
                     benchmark_counts = np.asarray(benchmark_hist[0])
@@ -456,9 +570,9 @@ def validate_against_benchmark(
                     ax_ratio.set_ylim(0.9 * min(ratio), 1.1 * max(ratio))  # Focus on ±20% range
 
                 ax_hist.set_ylabel("Counts", fontsize=12)
-                title = f"{branch_name}: {var}"
+                title = f"{var}"
                 if event_number is not None:
-                    title = f"Event {event_number}: {title}"
+                    title = f"{title}; event {event_number}"
                 ax_hist.set_title(title, fontsize=14, fontweight="bold")
                 ax_hist.legend(fontsize=11)
                 ax_hist.grid(True, alpha=0.3)
@@ -468,22 +582,6 @@ def validate_against_benchmark(
                 ax_ratio.set_xlabel(var, fontsize=12)
                 ax_ratio.set_ylabel("Torch / C++", fontsize=10)
                 ax_ratio.grid(True, alpha=0.3)
-
-                # Add statistics text
-                stats_text = (
-                    f"PyTorch: {len(torch_np)} particles\n"
-                    f"C++ Delphes: {len(benchmark_np)} particles"
-                )
-                ax_hist.text(
-                    0.95,
-                    0.95,
-                    stats_text,
-                    transform=ax_hist.transAxes,
-                    fontsize=10,
-                    verticalalignment="top",
-                    horizontalalignment="right",
-                    bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
-                )
 
                 # Save plot
                 plot_file = branch_dir / f"{var}.png"
@@ -501,143 +599,59 @@ def validate_against_benchmark(
                 continue
 
         # 2. Combined plot with key kinematic variables
+        # Built by stitching together the per-variable PNGs we just saved.
         # For GenParticle: Eta, Phi, PT, E
         # For tracks: Eta, Phi, PT, P
         # For towers: Eta, Phi, E, ET
         if branch_name == "Particle":
             combined_vars = ["Eta", "Phi", "PT", "E"]
-            print("\n  Creating combined kinematic plot (Eta, Phi, PT, E)...")
         elif "P" in kinematic_vars and "E" not in kinematic_vars:
             combined_vars = ["Eta", "Phi", "PT", "P"]
-            print("\n  Creating combined kinematic plot (Eta, Phi, PT, P)...")
         elif "E" in kinematic_vars and "P" not in kinematic_vars:
             combined_vars = ["Eta", "Phi", "E", "ET"]
-            print("\n  Creating combined kinematic plot (Eta, Phi, E, ET)...")
         elif "P" in kinematic_vars and "E" in kinematic_vars:
-            # EFlow or GenParticle - has both P and E
-            combined_vars = ["Eta", "Phi", "PT", "E"]
-            print("\n  Creating combined kinematic plot (Eta, Phi, PT, E)...")
+            # EFlow-style branches that carry both P and E: prefer P for
+            # consistency with the track-type branches.
+            combined_vars = ["Eta", "Phi", "PT", "P"]
         else:
             combined_vars = kinematic_vars[:4]  # Take first 4 variables
-            print(f"\n  Creating combined kinematic plot ({', '.join(combined_vars)})...")
+        print(f"\n  Creating combined kinematic plot ({', '.join(combined_vars)})...")
 
-        # Create figure with 2 rows (histogram + ratio) and 4 columns (one per variable)
-        fig = plt.figure(figsize=(30, 6))
+        # Stitch the previously-saved per-variable PNGs into a single figure
+        per_var_pngs = [branch_dir / f"{var}.png" for var in combined_vars]
+        suptitle = ""
+        if "CMS" in str(benchmark_file):
+            suptitle += "CMS"
+        elif "ATLAS" in str(benchmark_file):
+            suptitle += "ATLAS"
 
-        for idx, var in enumerate(combined_vars):
-            torch_key = f"{branch_name}/{branch_name}.{var}"
-            benchmark_key = f"{branch_name}/{branch_name}.{var}"
+        if "HZZ4l" in str(benchmark_file):
+            suptitle += " HZZ4l"
+        elif "ttbarW" in str(benchmark_file):
+            suptitle += " ttbarW"
 
-            if torch_key not in torch_tree or benchmark_key not in benchmark_tree:
-                continue
+        suptitle += f"; {branch_name}"
 
-            try:
-                # Load data
-                torch_data_events = torch_tree[torch_key].array()  # pyright: ignore[reportAttributeAccessIssue]
-                benchmark_data_events = benchmark_tree[benchmark_key].array()  # pyright: ignore[reportAttributeAccessIssue]
-
-                # Handle single-event vs all-events mode
-                if event_number is not None:
-                    torch_data = torch_data_events[event_number]
-                    benchmark_data = benchmark_data_events[event_number]
-                else:
-                    torch_data = ak.flatten(torch_data_events)
-                    benchmark_data = ak.flatten(benchmark_data_events)
-
-                # Convert to numpy
-                torch_np = np.asarray(torch_data)
-                benchmark_np = np.asarray(benchmark_data)
-
-                # Create subplot with histogram on top, ratio below
-                # Use 4 rows to match the 3:1 height ratio, columns for each variable
-                gs = plt.GridSpec(  # pyright: ignore[reportPrivateImportUsage]
-                    4,
-                    4,
-                    figure=fig,
-                    hspace=0.05,
-                    wspace=0.3,
-                    height_ratios=[3, 1, 0, 0],
-                )
-
-                # Column position (0-3 for Eta, Phi, PT, P)
-                col = idx
-
-                # Histogram subplot (row 0, takes 3 units of height)
-                ax_hist = fig.add_subplot(gs[0, col])
-                # Ratio subplot (row 1, takes 1 unit of height)
-                ax_ratio = fig.add_subplot(gs[1, col], sharex=ax_hist)
-
-                # Determine bin range
-                all_data = np.concatenate([torch_np, benchmark_np])
-                if len(all_data) > 0:
-                    bins = list(
-                        np.linspace(np.percentile(all_data, 1), np.percentile(all_data, 99), 40)
-                    )
-                else:
-                    bins = 40
-
-                # Plot histograms
-                benchmark_hist = ax_hist.hist(
-                    benchmark_np,
-                    bins=bins,
-                    histtype="stepfilled",
-                    color="orange",
-                    alpha=0.5,
-                    linewidth=2,
-                    label=f"C++ Delphes: {len(benchmark_np)} particles",
-                    density=False,
-                )
-                torch_hist = ax_hist.hist(
-                    torch_np,
-                    bins=bins,
-                    histtype="step",
-                    color="blue",
-                    linewidth=2,
-                    label=f"Parnassus.TorchDelphes: {len(torch_np)} particles",
-                    density=False,
-                )
-                benchmark_counts = np.asarray(benchmark_hist[0])
-                bin_edges = np.asarray(benchmark_hist[1])
-                torch_counts = np.asarray(torch_hist[0])
-
-                ax_hist.set_ylabel("Counts", fontsize=11)
-                ax_hist.set_title(f"{var}", fontsize=13, fontweight="bold")
-                if idx == 0:  # Only show legend on first subplot
-                    ax_hist.legend(fontsize=10)
-                ax_hist.grid(True, alpha=0.3)
-                ax_hist.tick_params(labelbottom=False)
-
-                # Plot ratio
-                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                ratio = np.divide(
-                    torch_counts,
-                    benchmark_counts,
-                    out=np.ones_like(torch_counts),
-                    where=benchmark_counts > 0,
-                )
-
-                ax_ratio.axhline(y=1.0, color="orange", linewidth=2)
-                ax_ratio.plot(bin_centers, ratio, color="blue", markersize=3, linewidth=2)
-                ax_ratio.set_xlabel(var, fontsize=11)
-                ax_ratio.set_ylabel("Torch/C++", fontsize=9)
-                ax_ratio.set_ylim(0.9 * min(ratio), 1.1 * max(ratio))
-                ax_ratio.grid(True, alpha=0.3)
-
-            except Exception as e:  # noqa: BLE001
-                print(f"    ✗ Error plotting {var} in combined plot: {e}")
-                continue
-
-        # Add overall title
-        suptitle = f"{branch_name}"
         if event_number is not None:
-            suptitle = f"Event {event_number}: {suptitle}"
-        fig.suptitle(suptitle, fontsize=16, fontweight="bold", y=0.98)
+            suptitle += f"; event {event_number}"
 
-        # Save combined figure
         combined_plot_file = branch_dir / "all.png"
-        plt.savefig(combined_plot_file, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"  ✓ Combined plot saved → {combined_plot_file.name}")
+        wrote = _stitch_pngs_horizontally(
+            image_paths=per_var_pngs,
+            output_path=combined_plot_file,
+            title=suptitle,
+        )
+        if wrote:
+            present = [p.name for p in per_var_pngs if p.exists()]
+            missing = [p.name for p in per_var_pngs if not p.exists()]
+            msg = f"  ✓ Combined plot saved → {combined_plot_file.name} (from {present})"
+            if missing:
+                msg += f"; missing per-var PNGs skipped: {missing}"
+            print(msg)
+        else:
+            print(
+                f"  ⚠ Combined plot skipped → no per-variable PNGs found in {branch_dir}"
+            )
 
         # 3. PID-specific combined plots (only for branches with PID field)
         # Skip if --validate-pid not specified
@@ -791,7 +805,7 @@ def validate_against_benchmark(
                 # Add overall title with PID
                 suptitle = f"{branch_name} (PID={pid_int})"
                 if event_number is not None:
-                    suptitle = f"Event {event_number}: {suptitle}"
+                    suptitle = f"{suptitle}; event {event_number}"
                 fig.suptitle(suptitle, fontsize=16, fontweight="bold", y=0.98)
 
                 # Save PID-specific combined figure

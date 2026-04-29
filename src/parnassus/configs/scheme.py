@@ -121,6 +121,15 @@ class GenParticleCollection:
     def __repr__(self) -> str:
         return f"{self.name}"
 
+    @property
+    def p(self) -> FloatArray:
+        """Total momentum magnitude, ``|p| = pt * cosh(eta)``.
+
+        Independent of mass — matches the C++ Delphes ``Track.P`` / ``Particle.P``
+        convention which stores the momentum magnitude rather than the energy.
+        """
+        return self.pt * np.cosh(self.eta)
+
     def get4vecs_numpy(self) -> FloatArray:
         mass = np.zeros_like(self.pt) if self.mass is None else self.mass
         return np.stack(
