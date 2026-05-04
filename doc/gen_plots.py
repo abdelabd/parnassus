@@ -203,14 +203,34 @@ def main() -> None:
     print("  wrote observable_phi.png")
 
     plot_observable(
-        target["multiplicity"],
-        pred_init["multiplicity"],
-        pred_final["multiplicity"],
-        edges=np.linspace(0.0, 600.0, 61),
-        xlabel=r"PF objects per event",
-        output_path=args.output_dir / "observable_multiplicity.png",
+        target["E"],
+        pred_init["E"],
+        pred_final["E"],
+        edges=np.linspace(0.0, 400.0, 41),
+        xlabel=r"PF object $E$ [GeV]",
+        output_path=args.output_dir / "observable_E.png",
     )
-    print("  wrote observable_multiplicity.png")
+    print("  wrote observable_E.png")
+
+    plot_observable(
+        target["log_pt"],
+        pred_init["log_pt"],
+        pred_final["log_pt"],
+        edges=np.linspace(-1.0, 6.0, 41),
+        xlabel=r"PF object $\log p_T$ [GeV]",
+        output_path=args.output_dir / "observable_log_pt.png",
+    )
+    print("  wrote observable_log_pt.png")
+
+    # plot_observable(
+    #     target["multiplicity"],
+    #     pred_init["multiplicity"],
+    #     pred_final["multiplicity"],
+    #     edges=np.linspace(0.0, 600.0, 61),
+    #     xlabel=r"PF objects per event",
+    #     output_path=args.output_dir / "observable_multiplicity.png",
+    # )
+    # print("  wrote observable_multiplicity.png")
 
     n_png = len(list(args.output_dir.glob("*.png")))
     print(f"[gen_plots] Done. Found {n_png} PNG(s) in {args.output_dir}.")

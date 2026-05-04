@@ -287,6 +287,7 @@ def truth_to_particle_tensor(
 def pflow_target_observables(
     arrays: dict[str, np.ndarray],
     n_events: int,
+    log_pt_floor: float = -1,
 ) -> dict[str, torch.Tensor]:
     """Build target observable tensors from the ``pflow_*`` branches.
 
@@ -294,35 +295,68 @@ def pflow_target_observables(
     full-simulation CMS PF reco in the ROOT file, they do not depend on
     any learnable parameters and are computed once per call.
 
+    The ROOT schema does not store ``pflow_e``, so the per-particle
+    energy is reconstructed analytically from ``(pt, eta, phi, class)``
+    using the same PDG-mass assignment as
+    :func:`truth_to_particle_tensor` (electrons / muons get their PDG
+    masses, everything else uses the charged-pion mass). This is the
+    same convention the trainee card applies internally, so the two
+    energy distributions are directly comparable.
+
+    Parameters
+    ----------
+    log_pt_floor : float
+        ``pflow_pt`` values below this threshold are clipped before
+        taking the logarithm. Real PF objects sit well above 0.1 GeV,
+        so this only affects pathological zero entries.
+
     Returns
     -------
     dict[str, torch.Tensor]
-        ``"pt"``, ``"eta"`` and ``"phi"`` are per-particle 1-D tensors.
-        ``"multiplicity"`` is per-event (``n_events``) and ``"ht"`` is
-        the per-event scalar-pT sum.
+        Per-particle 1-D tensors: ``"pt"``, ``"eta"``, ``"phi"``,
+        ``"E"``, ``"log_pt"``. Per-event tensors of length
+        ``n_events``: ``"multiplicity"`` and ``"ht"`` (scalar-pT sum).
     """
     all_pt: list[np.ndarray] = []
     all_eta: list[np.ndarray] = []
     all_phi: list[np.ndarray] = []
+    all_e: list[np.ndarray] = []
     per_event_mult = np.zeros(n_events, dtype=np.float64)
     per_event_ht = np.zeros(n_events, dtype=np.float64)
     for i in range(n_events):
         pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
         phi = np.asarray(arrays["pflow_phi"][i], dtype=np.float64)
+        cls = np.asarray(arrays["pflow_class"][i], dtype=np.int64)
+        # Reconstruct per-particle energy: E = sqrt(p^2 + m^2) with
+        # |p| = pt * cosh(eta) and m from the class -> PDG -> mass map.
+        pids = class_to_pid_vectorized(cls) if pt.size else np.empty(0, dtype=np.int64)
+        abs_pid = np.abs(pids)
+        mass = np.where(
+            abs_pid == 11,
+            0.000511,
+            np.where(abs_pid == 13, 0.10566, 0.13957),
+        ).astype(np.float64)
+        p_mag = pt * np.cosh(eta)
+        e = np.sqrt(p_mag * p_mag + mass * mass)
         all_pt.append(pt)
         all_eta.append(eta)
         all_phi.append(phi)
+        all_e.append(e)
         per_event_mult[i] = float(pt.shape[0])
         per_event_ht[i] = float(pt.sum())
     pt_cat = np.concatenate(all_pt) if all_pt else np.empty(0, dtype=np.float64)
     eta_cat = np.concatenate(all_eta) if all_eta else np.empty(0, dtype=np.float64)
     phi_cat = np.concatenate(all_phi) if all_phi else np.empty(0, dtype=np.float64)
+    e_cat = np.concatenate(all_e) if all_e else np.empty(0, dtype=np.float64)
+    log_pt_cat = np.log(np.maximum(pt_cat, log_pt_floor))
     return {
         "pt": torch.from_numpy(pt_cat),
         "eta": torch.from_numpy(eta_cat),
         "phi": torch.from_numpy(phi_cat),
-        "multiplicity": torch.from_numpy(per_event_mult),
+        "E": torch.from_numpy(e_cat),
+        "log_pt": torch.from_numpy(log_pt_cat),
+        # "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
     }
 
@@ -341,6 +375,12 @@ def trainee_observables(
     mask on values only, not on gradients, so it does not break
     backprop.
 
+    The energy column is read directly from ``EFlowObject`` (the
+    smearing modules update it in-place). ``log_pt`` is taken on the
+    already-filtered (strictly positive) ``pt_kept`` so the logarithm
+    is always well-defined and its gradient propagates back to the
+    learnable smearing parameters.
+
     Returns
     -------
     dict[str, torch.Tensor]
@@ -351,12 +391,15 @@ def trainee_observables(
     pt_all = eflow[:, ColumnMap.PT]
     eta_all = eflow[:, ColumnMap.ETA]
     phi_all = eflow[:, ColumnMap.PHI]
+    e_all = eflow[:, ColumnMap.E]
     event_all = eflow[:, ColumnMap.EVENT_NUMBER]
 
     valid = pt_all > min_pt
     pt_kept = pt_all[valid]
     eta_kept = eta_all[valid]
     phi_kept = phi_all[valid]
+    e_kept = e_all[valid]
+    log_pt_kept = torch.log(pt_kept)
     ev_kept = event_all[valid].long()
 
     # Per-event multiplicity and HT via scatter-add. Using
@@ -374,7 +417,9 @@ def trainee_observables(
         "pt": pt_kept,
         "eta": eta_kept,
         "phi": phi_kept,
-        "multiplicity": mult,
+        "E": e_kept,
+        "log_pt": log_pt_kept,
+        # "multiplicity": mult,
         "ht": ht,
     }
 
@@ -386,7 +431,14 @@ DEFAULT_BIN_EDGES: dict[str, torch.Tensor] = {
     "pt": torch.linspace(0.0, 200.0, 41, dtype=torch.float64),
     "eta": torch.linspace(-5.0, 5.0, 41, dtype=torch.float64),
     "phi": torch.linspace(-np.pi, np.pi, 41, dtype=torch.float64),
-    "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
+    # E ranges higher than pt since E = pt * cosh(eta) >= pt for the
+    # reconstructed particles; widen the upper edge accordingly.
+    "E": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
+    # log(pt) bin spanning ~0.37 GeV (e^-1) to ~403 GeV (e^6); linear in
+    # log space gives Adam much better gradient signal in the high-pT
+    # tail than the linear pt histogram does.
+    "log_pt": torch.linspace(-1.0, 6.0, 41, dtype=torch.float64),
+    # "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
     "ht": torch.linspace(0.0, 2000.0, 41, dtype=torch.float64),
 }
 
@@ -394,11 +446,20 @@ DEFAULT_BIN_EDGES: dict[str, torch.Tensor] = {
 # are far less noisy than the per-event scalars (multiplicity, ht) because
 # they have O(N_particles) rather than O(N_events) samples, so we upweight
 # them and put a small tie-breaking weight on the per-event pair.
+#
+# E and log_pt are also particle-level. log_pt is highly correlated with pt
+# (it's a monotone reparametrization), so we down-weight it slightly to
+# avoid double-counting; its main role is to give Adam a non-vanishing
+# gradient on the high-pT tail where the linear-pt histogram bins are
+# nearly empty. E adds genuinely new information through the eta-dependent
+# pt -> p_total mapping (it probes the forward calo scales).
 DEFAULT_OBS_WEIGHTS: dict[str, float] = {
     "pt": 1.0,
     "eta": 1.0,
     "phi": 1.0,
-    "multiplicity": 0.1,
+    "E": 1.0,
+    "log_pt": 0.5,
+    # "multiplicity": 0.1,
     "ht": 0.1,
 }
 
