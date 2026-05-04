@@ -28,6 +28,7 @@ from parnassus.torch_delphes.plot_fit_results import (
     plot_loss,
     plot_observable,
     plot_param_drift,
+    plot_top_param_drift,
 )
 from parnassus.torch_delphes.tune_cms_fullsim import (
     load_cms_flow_root,
@@ -134,6 +135,19 @@ def main() -> None:
         title="Resolution / efficiency / fraction drift during Adam fit",
     )
     print("  wrote param_drift_other.png")
+
+    # 3b) Top-N parameters by relative drift over the run (data-driven; no
+    # ground-truth target line — uses the initial value as the dashed
+    # reference). Useful when training against real data where the
+    # pseudodata target perturbations don't apply.
+    top = plot_top_param_drift(
+        history,
+        args.output_dir / "top_param_drift.png",
+        n_top=5,
+    )
+    print("  wrote top_param_drift.png")
+    for key, rel in top:
+        print(f"    {key}: |Δ|/|init| = {rel:.3g}")
 
     if args.history_only:
         print("[gen_plots] --history-only requested; skipped observable plots.")

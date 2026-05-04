@@ -130,6 +130,69 @@ def plot_param_drift(
     plt.close(fig)
 
 
+def plot_top_param_drift(
+    history: dict,
+    output_path: Path,
+    n_top: int = 5,
+    eps_denom: float = 1e-3,
+    title: str = "Top parameters by relative drift",
+) -> list[tuple[str, float]]:
+    """Plot the top-``n_top`` parameters ranked by relative drift.
+
+    Relative drift for a key with snapshot trajectory ``v[0..T]`` is
+    ``|v[-1] - v[0]| / max(|v[0]|, eps_denom)``. The ``eps_denom`` floor
+    prevents parameters whose initial value is essentially zero (e.g. the
+    charged-hadron ECal fraction at ``sigmoid(logit(1e-6)) ~ 1e-6``) from
+    dominating the ranking with a meaningless ratio.
+
+    The dashed horizontal line for each trajectory is the **initial** value
+    (not a ground-truth target), since this plot is intended for training
+    runs against real data where no per-parameter target exists.
+
+    Returns
+    -------
+    list[tuple[str, float]]
+        The ``(key, rel_change)`` pairs that were plotted, in descending
+        order of relative change. Useful for logging.
+    """
+    if not history.get("parameters"):
+        raise ValueError("history dict has no 'parameters' snapshots")
+    snapshots = history["parameters"]
+    steps = history["step"]
+    if len(snapshots) < 2:
+        raise ValueError("Need at least 2 parameter snapshots to compute drift")
+
+    initial = snapshots[0]
+    final = snapshots[-1]
+
+    rel_changes: list[tuple[str, float]] = []
+    for key, v0 in initial.items():
+        if key not in final:
+            continue
+        v1 = final[key]
+        denom = max(abs(v0), eps_denom)
+        rel_changes.append((key, abs(v1 - v0) / denom))
+
+    rel_changes.sort(key=lambda kv: kv[1], reverse=True)
+    top = rel_changes[:n_top]
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.5))
+    for key, rel in top:
+        trajectory = [snap[key] for snap in snapshots]
+        v0 = trajectory[0]
+        (line,) = ax.plot(steps, trajectory, label=f"{key}  (Δ/|init|={rel:.2g})")
+        ax.axhline(v0, color=line.get_color(), linestyle="--", alpha=0.4)
+    ax.set_xlabel("Adam step")
+    ax.set_ylabel("post-transform parameter value")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return top
+
+
 # ---------------------------------------------------------------------------
 # Observable histograms: target vs trainee-init vs trainee-final
 # ---------------------------------------------------------------------------
