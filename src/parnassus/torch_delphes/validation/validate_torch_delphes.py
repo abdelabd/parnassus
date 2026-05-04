@@ -67,13 +67,88 @@ TORCH_MAP_DICT = {
     "EFlowObject": "Pflow",
 }
 
+# Pretty (LaTeX) display labels for kinematic variables. Used only for plot
+# titles / axis labels — branch keys and PNG filenames keep their plain names.
+TITLE_LABELS: dict[str, str] = {
+    "Eta": r"$\eta$",
+    "Phi": r"$\phi$",
+    "PT": r"$p_T$",
+    "ET": r"$E_T$",
+    "P": r"$p$",
+    "E": r"$E$",
+}
+def _title_label(var: str) -> str:
+    """Return a LaTeX-formatted display label for ``var`` if available."""
+    return TITLE_LABELS.get(var, var)
 
-def _stitch_pngs_horizontally(
+AXIS_LABELS: dict[str, str] = {
+    "Eta": r"$\eta$",
+    "Phi": r"$\phi$",
+    "PT": r"$p_T$ [GeV]",
+    "ET": r"$E_T$ [GeV]",
+    "P": r"$p$ [GeV]",
+    "E": r"$E$ [GeV]",
+}
+def _axis_label(var: str) -> str:
+    """Return a LaTeX-formatted axis label for ``var`` if available."""
+    return AXIS_LABELS.get(var, var)
+
+def _axis_scale(ax: plt.axes, var: str) -> None:
+    """Apply variable-specific axis scaling (log scale, etc.) if desired."""
+    if var in {"PT", "ET", "P", "E"}:
+        ax.set_yscale("log")
+
+PROCESS_LABELS: dict[str, str] = {
+    "HZZ4l": r"$H \to ZZ \to 4\ell$",
+    "ttbarW": r"$t\bar{t} \to W$",
+}
+def _process_label(process: str) -> str:
+    """Return a LaTeX-formatted display label for ``process`` if available."""
+    return PROCESS_LABELS.get(process, process)
+
+def _get_suptitle(
+    benchmark_file: Path,
+    branch_name: str,
+    num_events: int | None = None,
+    event_number: int | None = None,
+) -> str:
+    """Generate a descriptive suptitle for a validation plot."""
+    suptitle = ""
+
+    if "HZZ4l" in str(benchmark_file):
+        suptitle += f"Process: {_process_label('HZZ4l')}"
+    elif "ttbarW" in str(benchmark_file):
+        suptitle += f"Process: {_process_label('ttbarW')}"
+
+    if "CMS" in str(benchmark_file):
+        suptitle += "\nDetector: CMS"
+    elif "ATLAS" in str(benchmark_file):
+        suptitle += "\nDetector: ATLAS"
+
+    if branch_name=="ParticleAfterProp":
+        suptitle += f"\nOutput: PropagatedParticle"
+    else:
+        suptitle += f"\nOutput: {branch_name}"
+
+    if event_number is not None:
+        suptitle += f"\nEvent #{event_number}"
+    else:
+        if num_events==10_000:
+            suptitle += f"\n10,000 events"
+        else:
+            suptitle += f"\n{num_events} events"
+
+    return suptitle
+
+def _stitch_pngs(
     image_paths: list[Path],
     output_path: Path,
     title: str | None = None,
-    title_height: int = 60,
+    title_height: int | None = None,
     title_fontsize: int = 22,
+    title_line_spacing: float = 1.6,
+    title_pad: int = 20,
+    title_align: str = "center",
     background: tuple[int, int, int] = (255, 255, 255),
     ncols: int = 2,
 ) -> bool:
@@ -95,10 +170,25 @@ def _stitch_pngs_horizontally(
         Where to save the stitched PNG.
     title : str, optional
         Centered title rendered above the grid. Skipped if ``None``.
-    title_height : int
-        Pixel height of the title bar.
+        May contain ``\\n`` for multi-line titles; the title bar will grow
+        automatically unless ``title_height`` is explicitly provided.
+    title_height : int, optional
+        Pixel height of the title bar. If ``None`` (default), auto-sized
+        from the number of lines in ``title``, ``title_fontsize``, and
+        ``title_line_spacing``.
     title_fontsize : int
         Font size for the title.
+    title_line_spacing : float
+        Multiplier on ``title_fontsize`` (in points) used to estimate the
+        rendered height of one line of title text. Only used when
+        ``title_height`` is ``None``.
+    title_pad : int
+        Extra vertical padding (pixels) added above and below the title
+        text when auto-sizing.
+    title_align : str
+        Horizontal alignment of each line of the title within the title
+        bar. One of ``"left"``, ``"center"``, ``"right"``. Default
+        ``"center"``.
     background : tuple of int
         RGB background colour.
     ncols : int
@@ -142,7 +232,27 @@ def _stitch_pngs_horizontally(
 
     total_w = max(r.width for r in rendered_rows)
     grid_h = sum(r.height for r in rendered_rows)
-    title_h = title_height if title else 0
+
+    # Auto-size the title bar to fit all lines if title_height wasn't given.
+    # Matplotlib renders \n as a real line break, so we just need enough
+    # vertical room. 1 pt ≈ 100/72 px at dpi=100, then scaled by line spacing.
+    #
+    # ↓↓↓ Change this number to adjust the gap between the suptitle and the
+    # top row of plots (in pixels). ↓↓↓
+    title_pad_bottom_px = 0
+    if title:
+        title = title.strip("\n")  # drop leading/trailing blank lines
+        n_lines = title.count("\n") + 1
+        line_px = int(round(title_fontsize * (100 / 72) * title_line_spacing))
+        text_block_px = n_lines * line_px
+        if title_height is None:
+            title_h = text_block_px + title_pad + title_pad_bottom_px
+        else:
+            title_h = title_height
+    else:
+        title_h = 0
+        text_block_px = 0
+
     canvas = Image.new("RGB", (total_w, grid_h + title_h), background)
 
     y = title_h
@@ -159,13 +269,31 @@ def _stitch_pngs_horizontally(
             (background[0] / 255, background[1] / 255, background[2] / 255)
         )
         ax = fig.add_subplot(111)
+        # Make the axes fill the whole figure so axes-fraction coords map
+        # directly onto pixels — needed to control the bottom gap exactly.
+        ax.set_position((0.0, 0.0, 1.0, 1.0))
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
         ax.axis("off")
+        # `ha` anchors the text block within the axes; `multialignment`
+        # controls how individual lines align relative to *each other*.
+        # A small inset (0.01 / 0.99) keeps text from touching the edge.
+        if title_align == "left":
+            x_anchor, ha = 0.44, "left"
+        elif title_align == "right":
+            x_anchor, ha = 0.99, "right"
+        else:
+            x_anchor, ha = 0.5, "center"
+        # Put the bottom of the text block exactly `title_pad_bottom_px`
+        # above the bottom of the title strip.
+        y_anchor = title_pad_bottom_px / title_h
         ax.text(
-            0.5,
-            0.5,
+            x_anchor,
+            y_anchor,
             title,
-            ha="center",
-            va="center",
+            ha=ha,
+            va="bottom",
+            multialignment=title_align,
             fontsize=title_fontsize,
             fontweight="bold",
         )
@@ -173,7 +301,9 @@ def _stitch_pngs_horizontally(
         fig.savefig(title_png, dpi=100, bbox_inches=None, pad_inches=0)
         plt.close(fig)
 
-        title_img = Image.open(title_png).convert("RGB").resize((total_w, title_h))
+        title_img = Image.open(title_png).convert("RGB")
+        if title_img.size != (total_w, title_h):
+            title_img = title_img.resize((total_w, title_h), Image.LANCZOS)
         canvas.paste(title_img, (0, 0))
         title_png.unlink(missing_ok=True)
 
@@ -186,6 +316,7 @@ def validate_against_benchmark(
     benchmark_file: str | Path,
     output_dir: str | Path,
     debug: bool = False,
+    num_events: int | None = None,
     event_number: int | None = None,
     validate_pid: bool = False,
 ) -> None:
@@ -539,7 +670,7 @@ def validate_against_benchmark(
                         color="orange",
                         alpha=0.5,
                         linewidth=2,
-                        label=f"C++ Delphes, {len(benchmark_np)} particles",
+                        label=f"C++ Delphes: {len(benchmark_np)} particles",
                         density=False,
                     )
                     torch_hist = ax_hist.hist(
@@ -548,7 +679,7 @@ def validate_against_benchmark(
                         histtype="step",
                         color="blue",
                         linewidth=2,
-                        label=f"Parnassus.TorchDelphes, {len(torch_np)} particles",
+                        label=f"Parnassus.TorchDelphes: {len(torch_np)} particles",
                         density=False,
                     )
                     benchmark_counts = np.asarray(benchmark_hist[0])
@@ -570,16 +701,16 @@ def validate_against_benchmark(
                     ax_ratio.set_ylim(0.9 * min(ratio), 1.1 * max(ratio))  # Focus on ±20% range
 
                 ax_hist.set_ylabel("Counts", fontsize=12)
-                title = f"{var}"
-                if event_number is not None:
-                    title = f"{title}; event {event_number}"
+                title = f"{_title_label(var)}"
                 ax_hist.set_title(title, fontsize=14, fontweight="bold")
-                ax_hist.legend(fontsize=11)
+                if var=="Eta":
+                    ax_hist.legend(bbox_to_anchor=(0.0, 1.15), loc='upper left', borderaxespad=0.)
                 ax_hist.grid(True, alpha=0.3)
                 if var not in {"PID", "Charge", "Status"}:
                     ax_hist.tick_params(labelbottom=False)  # Hide x-axis labels for top plot
+                    _axis_scale(ax_hist, var)
 
-                ax_ratio.set_xlabel(var, fontsize=12)
+                ax_ratio.set_xlabel(_axis_label(var), fontsize=12)
                 ax_ratio.set_ylabel("Torch / C++", fontsize=10)
                 ax_ratio.grid(True, alpha=0.3)
 
@@ -619,27 +750,13 @@ def validate_against_benchmark(
 
         # Stitch the previously-saved per-variable PNGs into a single figure
         per_var_pngs = [branch_dir / f"{var}.png" for var in combined_vars]
-        suptitle = ""
-        if "CMS" in str(benchmark_file):
-            suptitle += "CMS"
-        elif "ATLAS" in str(benchmark_file):
-            suptitle += "ATLAS"
-
-        if "HZZ4l" in str(benchmark_file):
-            suptitle += " HZZ4l"
-        elif "ttbarW" in str(benchmark_file):
-            suptitle += " ttbarW"
-
-        suptitle += f"; {branch_name}"
-
-        if event_number is not None:
-            suptitle += f"; event {event_number}"
-
+        suptitle = _get_suptitle(benchmark_file, branch_name, num_events, event_number)
         combined_plot_file = branch_dir / "all.png"
-        wrote = _stitch_pngs_horizontally(
+        wrote = _stitch_pngs(
             image_paths=per_var_pngs,
             output_path=combined_plot_file,
             title=suptitle,
+            title_align="left",
         )
         if wrote:
             present = [p.name for p in per_var_pngs if p.exists()]
@@ -780,11 +897,12 @@ def validate_against_benchmark(
                     torch_counts = np.asarray(torch_hist[0])
 
                     ax_hist.set_ylabel("Counts", fontsize=11)
-                    ax_hist.set_title(f"{var}", fontsize=13, fontweight="bold")
+                    ax_hist.set_title(f"{_title_label(var)}", fontsize=13, fontweight="bold")
                     if idx == 0:  # Only show legend on first subplot
                         ax_hist.legend(fontsize=10)
                     ax_hist.grid(True, alpha=0.3)
                     ax_hist.tick_params(labelbottom=False)
+                    _axis_scale(ax_hist, var)
 
                     # Plot ratio
                     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
@@ -797,15 +915,13 @@ def validate_against_benchmark(
 
                     ax_ratio.axhline(y=1.0, color="orange", linewidth=2)
                     ax_ratio.plot(bin_centers, ratio, color="blue", markersize=3, linewidth=2)
-                    ax_ratio.set_xlabel(var, fontsize=11)
+                    ax_ratio.set_xlabel(_axis_label(var), fontsize=11)
                     ax_ratio.set_ylabel("Torch/C++", fontsize=9)
                     ax_ratio.set_ylim(0.9 * min(ratio), 1.1 * max(ratio))
                     ax_ratio.grid(True, alpha=0.3)
 
                 # Add overall title with PID
                 suptitle = f"{branch_name} (PID={pid_int})"
-                if event_number is not None:
-                    suptitle = f"{suptitle}; event {event_number}"
                 fig.suptitle(suptitle, fontsize=16, fontweight="bold", y=0.98)
 
                 # Save PID-specific combined figure
@@ -899,7 +1015,7 @@ def main(
     if Path(benchmark_file).exists():
         log.info(f"Benchmark file: {benchmark_file}")
         log.info(f"Validation directory: {validation_dir}")
-        validate_against_benchmark(output_file, benchmark_file, validation_dir, debug=debug)
+        validate_against_benchmark(output_file, benchmark_file, validation_dir, num_events=max_events, debug=debug)
     else:
         log.warning(f"Benchmark file not found: {benchmark_file} — skipping validation.")
 
@@ -1019,6 +1135,7 @@ if __name__ == "__main__":
                 benchmark_fpath,
                 validation_dir,
                 debug=args.debug,
+                num_events=args.num_events,
                 event_number=args.specific_event,
                 validate_pid=args.validate_pid,
             )
