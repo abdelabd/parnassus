@@ -192,15 +192,15 @@ def main() -> None:
     )
     print("  wrote observable_eta.png")
 
-    plot_observable(
-        target["phi"],
-        pred_init["phi"],
-        pred_final["phi"],
-        edges=np.linspace(-np.pi, np.pi, 51),
-        xlabel=r"PF object $\phi",
-        output_path=args.output_dir / "observable_phi.png",
-    )
-    print("  wrote observable_phi.png")
+    # plot_observable(
+    #     target["phi"],
+    #     pred_init["phi"],
+    #     pred_final["phi"],
+    #     edges=np.linspace(-np.pi, np.pi, 51),
+    #     xlabel=r"PF object $\phi",
+    #     output_path=args.output_dir / "observable_phi.png",
+    # )
+    # print("  wrote observable_phi.png")
 
     plot_observable(
         target["E"],

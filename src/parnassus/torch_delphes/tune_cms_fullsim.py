@@ -319,14 +319,14 @@ def pflow_target_observables(
     """
     all_pt: list[np.ndarray] = []
     all_eta: list[np.ndarray] = []
-    all_phi: list[np.ndarray] = []
+    # all_phi: list[np.ndarray] = [] # phi doesn't contribute to gradient
     all_e: list[np.ndarray] = []
     per_event_mult = np.zeros(n_events, dtype=np.float64)
     per_event_ht = np.zeros(n_events, dtype=np.float64)
     for i in range(n_events):
         pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
-        phi = np.asarray(arrays["pflow_phi"][i], dtype=np.float64)
+        # phi = np.asarray(arrays["pflow_phi"][i], dtype=np.float64)
         cls = np.asarray(arrays["pflow_class"][i], dtype=np.int64)
         # Reconstruct per-particle energy: E = sqrt(p^2 + m^2) with
         # |p| = pt * cosh(eta) and m from the class -> PDG -> mass map.
@@ -341,19 +341,19 @@ def pflow_target_observables(
         e = np.sqrt(p_mag * p_mag + mass * mass)
         all_pt.append(pt)
         all_eta.append(eta)
-        all_phi.append(phi)
+        # all_phi.append(phi)
         all_e.append(e)
         per_event_mult[i] = float(pt.shape[0])
         per_event_ht[i] = float(pt.sum())
     pt_cat = np.concatenate(all_pt) if all_pt else np.empty(0, dtype=np.float64)
     eta_cat = np.concatenate(all_eta) if all_eta else np.empty(0, dtype=np.float64)
-    phi_cat = np.concatenate(all_phi) if all_phi else np.empty(0, dtype=np.float64)
+    # phi_cat = np.concatenate(all_phi) if all_phi else np.empty(0, dtype=np.float64)
     e_cat = np.concatenate(all_e) if all_e else np.empty(0, dtype=np.float64)
     log_pt_cat = np.log(np.maximum(pt_cat, log_pt_floor))
     return {
         "pt": torch.from_numpy(pt_cat),
         "eta": torch.from_numpy(eta_cat),
-        "phi": torch.from_numpy(phi_cat),
+        # "phi": torch.from_numpy(phi_cat),
         "E": torch.from_numpy(e_cat),
         "log_pt": torch.from_numpy(log_pt_cat),
         # "multiplicity": torch.from_numpy(per_event_mult),
@@ -390,14 +390,14 @@ def trainee_observables(
     eflow = card_out["EFlowObject"]
     pt_all = eflow[:, ColumnMap.PT]
     eta_all = eflow[:, ColumnMap.ETA]
-    phi_all = eflow[:, ColumnMap.PHI]
+    # phi_all = eflow[:, ColumnMap.PHI] # phi doesn't contribute to gradient
     e_all = eflow[:, ColumnMap.E]
     event_all = eflow[:, ColumnMap.EVENT_NUMBER]
 
     valid = pt_all > min_pt
     pt_kept = pt_all[valid]
     eta_kept = eta_all[valid]
-    phi_kept = phi_all[valid]
+    # phi_kept = phi_all[valid]
     e_kept = e_all[valid]
     log_pt_kept = torch.log(pt_kept)
     ev_kept = event_all[valid].long()
@@ -416,7 +416,7 @@ def trainee_observables(
     return {
         "pt": pt_kept,
         "eta": eta_kept,
-        "phi": phi_kept,
+        # "phi": phi_kept,
         "E": e_kept,
         "log_pt": log_pt_kept,
         # "multiplicity": mult,
@@ -430,7 +430,7 @@ def trainee_observables(
 DEFAULT_BIN_EDGES: dict[str, torch.Tensor] = {
     "pt": torch.linspace(0.0, 200.0, 41, dtype=torch.float64),
     "eta": torch.linspace(-5.0, 5.0, 41, dtype=torch.float64),
-    "phi": torch.linspace(-np.pi, np.pi, 41, dtype=torch.float64),
+    # "phi": torch.linspace(-np.pi, np.pi, 41, dtype=torch.float64),
     # E ranges higher than pt since E = pt * cosh(eta) >= pt for the
     # reconstructed particles; widen the upper edge accordingly.
     "E": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
@@ -456,10 +456,10 @@ DEFAULT_BIN_EDGES: dict[str, torch.Tensor] = {
 DEFAULT_OBS_WEIGHTS: dict[str, float] = {
     "pt": 1.0,
     "eta": 1.0,
-    "phi": 1.0,
+    # "phi": 1.0,
     "E": 1.0,
     "log_pt": 0.5,
-    # "multiplicity": 0.1,
+    "multiplicity": 0.1,
     "ht": 0.1,
 }
 
