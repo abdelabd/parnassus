@@ -189,6 +189,9 @@ def plot_top_param_drift(
     ax.set_title(title)
     fig.tight_layout()
     fig.savefig(output_path)
+
+    ax.set_yscale("log")
+    fig.savefig(output_path.with_stem(output_path.stem + "_logy"))
     plt.close(fig)
     return top
 
