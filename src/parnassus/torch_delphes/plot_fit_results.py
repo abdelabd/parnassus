@@ -406,15 +406,15 @@ def main() -> None:
     )
     print("  wrote observable_eta.pdf")
 
-    plot_observable(
-        target["multiplicity"],
-        pred_init["multiplicity"],
-        pred_final["multiplicity"],
-        edges=np.linspace(0.0, 600.0, 61),
-        xlabel=r"PF objects per event",
-        output_path=args.output_dir / "observable_multiplicity.pdf",
-    )
-    print("  wrote observable_multiplicity.pdf")
+    # plot_observable(
+    #     target["multiplicity"],
+    #     pred_init["multiplicity"],
+    #     pred_final["multiplicity"],
+    #     edges=np.linspace(0.0, 600.0, 61),
+    #     xlabel=r"PF objects per event",
+    #     output_path=args.output_dir / "observable_multiplicity.pdf",
+    # )
+    # print("  wrote observable_multiplicity.pdf")
 
     print(f"Done. {len(list(args.output_dir.glob('*.pdf')))} figures in {args.output_dir}.")
 
