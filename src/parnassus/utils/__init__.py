@@ -28,6 +28,8 @@ def pid_to_class(pid: int) -> int:
         return 1
     if abs(pid) == 13:
         return 2
+    if pid == 0:  # neutral-hadron calorimeter tower (Delphes convention)
+        return 3
     p = PDGID(pid)
     if p.is_hadron:
         if p.charge != 0:

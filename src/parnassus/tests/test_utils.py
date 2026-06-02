@@ -24,6 +24,8 @@ from parnassus.utils import class_to_pid, class_to_pid_vectorized, pid_to_class,
         (111, 3),  # π0
         (311, 3),  # K0
         (2112, 3),  # neutron
+        # Neutral-hadron calorimeter tower (Delphes PID=0 convention)
+        (0, 3),
         # Other particles (class 4)
         (22, 4),  # photon
         (12, 4),  # electron neutrino
