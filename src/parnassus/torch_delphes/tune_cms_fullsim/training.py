@@ -31,7 +31,7 @@ from .config import (
     _FRACTION_FRAGMENTS,
     _SCALE_SUFFIXES,
 )
-from .data import trainee_observables
+from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_dist, _is_main
 from .loss import multi_observable_loss_distributed
 
@@ -125,12 +125,10 @@ def build_parameter_groups(
 
 def fit_card_to_fullsim(
     card: CMSEnergyFlowDefault | DDP,
-    truth_particles: torch.Tensor,
-    target_observables: dict[str, torch.Tensor],
-    n_events: int,
+    train_dataloader: torch.utils.data.DataLoader,
+    val_dataloader: torch.utils.data.DataLoader,
     n_steps: int = 100,
     lr: float | None = None,
-    n_passes_per_step: int = 2,
     beta: float = 0.15,
     log_every: int = 10,
     parameters_to_train: list[nn.Parameter] | None = None,
@@ -142,6 +140,7 @@ def fit_card_to_fullsim(
     lr_fractions: float = _DEFAULT_LR_FRACTIONS,
     snapshot_parameters: bool = False,
     rank: int = 0,
+    device: torch.device = torch.device("cpu"),
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match ``target_observables``.
 
@@ -199,7 +198,10 @@ def fit_card_to_fullsim(
             lr_efficiency=lr_efficiency,
             lr_fractions=lr_fractions,
         )
+
     opt = torch.optim.Adam(param_groups)
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=5, verbose=True)
+
     edges = bin_edges if bin_edges is not None else DEFAULT_BIN_EDGES
     weights = observable_weights if observable_weights is not None else DEFAULT_OBS_WEIGHTS
     history: dict[str, list] = {"step": [], "loss": []}
@@ -246,46 +248,48 @@ def fit_card_to_fullsim(
         unit="step",
         dynamic_ncols=True,
     )
+
+    min_loss = float("inf")
+    patience_counter = 0
+    patience = 10  # Number of steps to wait for improvement before early stopping
+
+    if snapshot_parameters:
+        history["parameters"].append(_snapshot())
+
     for step in pbar:
-        opt.zero_grad()
         loss_acc = torch.zeros(
-            (), dtype=torch.float64, device=truth_particles.device
+            (), dtype=torch.float64, device=device
         )
-        for _ in range(n_passes_per_step):
-            out = card(truth_particles)
-            pred = trainee_observables(out, n_events=n_events)
-            loss_acc = loss_acc + multi_observable_loss_distributed(
-                pred, target_observables, edges, beta=beta, weights=weights
-            )
-        loss = loss_acc / max(n_passes_per_step, 1)
-        loss.backward()
+        for batch in train_dataloader:
 
-        # Manual gradient sync across DDP ranks. We don't wrap the card in
-        # ``DistributedDataParallel`` because the loss is already a global
-        # function of all ranks' data (via the differentiable all-reduce
-        # on the soft histograms), so each rank's autograd produces only
-        # the *local* contribution to ∂L/∂θ. Summing those across ranks
-        # gives the true full-data gradient. (DDP would *average* them,
-        # which would be off by 1/world_size.) All ranks start from the
-        # same seed and apply identical optimizer steps to identical
-        # summed gradients, so the parameters stay perfectly in sync.
-        #
-        # Critical: every rank MUST issue the same number of collectives
-        # in the same order, or NCCL will deadlock. With small per-rank
-        # event budgets some particle classes can be absent on some
-        # ranks, leaving ``p.grad is None`` for class-specific parameters
-        # only on those ranks. We therefore materialize missing grads
-        # as zeros so the collective count stays in lock-step.
-        if _is_dist():
-            params_iter = (
-                card.module.parameters() if isinstance(card, DDP) else card.parameters()
-            )
-            for p in params_iter:
-                if p.grad is None:
-                    p.grad = torch.zeros_like(p)
-                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+            opt.zero_grad()
+            truth_particles = batch["truth_particles"] # shape is (batch_size, n_particles, n_features)
+            # remove the padded particles where all features are zero
+            mask = torch.any(truth_particles != 0, dim=-1) # shape is (batch_size, n_particles)
+            truth_particles_nonpadded = truth_particles[mask]
+            
+            # out["EFlowObject"] has shape (all objects, 20 features)
+            out = card(truth_particles_nonpadded)
 
-        opt.step()
+            # first restore the (events, objects, features) shape by grouping with event number
+            eflow_objects = out["EFlowObject"]
+            eflow_objects_restored = restore_event_format(eflow_objects, mask)
+            # Then extract the observables from predicted objects
+            pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
+
+            # get the target from batch
+            target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+            # pred = trainee_observables(out)
+            loss = multi_observable_loss_distributed(
+                pred_observables, target_observables, edges, beta=beta, weights=weights
+            )
+
+            loss.backward()
+            opt.step()
+
+            loss_acc += loss.detach()
+
+        loss_acc /= len(train_dataloader)
 
         print_loss = float(loss.detach())
         history["step"].append(step)
@@ -296,5 +300,45 @@ def fit_card_to_fullsim(
             pbar.set_postfix(loss=f"{print_loss:.4e}", refresh=False)
         if _is_main(rank) and log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
             tqdm.write(f"  step {step:3d}/{n_steps}  loss = {print_loss:.4e}")
+
+        # validation loop --- no grad, no step, just logging
+        with torch.no_grad():
+            card.eval()
+            val_loss_acc = torch.zeros(
+                (), dtype=torch.float64, device=device
+            )
+            for batch in val_dataloader:
+                truth_particles = batch["truth_particles"] # shape is (batch_size, n_particles, n_features)
+                # remove the padded particles where all features are zero
+                mask = torch.any(truth_particles != 0, dim=-1) # shape is (batch_size, n_particles)
+                truth_particles_nonpadded = truth_particles[mask]
+                
+                out = card(truth_particles_nonpadded)
+
+                eflow_objects = out["EFlowObject"]
+                eflow_objects_restored = restore_event_format(eflow_objects, mask)
+                pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
+
+                target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+                val_loss = multi_observable_loss_distributed(
+                    pred_observables, target_observables, edges, beta=beta, weights=weights
+                )
+                val_loss_acc += val_loss.detach()
+            val_loss_acc /= len(val_dataloader)
+            print_val_loss = float(val_loss_acc)
+            tqdm.write(f"  step {step:3d}/{n_steps}  val_loss = {print_val_loss:.4e}")
+
+        # lr scheduler step
+        lr_scheduler.step(val_loss_acc)
+        # early stopping check
+        if val_loss_acc < min_loss:
+            min_loss = val_loss_acc
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                if _is_main(rank):
+                    tqdm.write(f"Early stopping at step {step} with val_loss {print_val_loss:.4e}")
+                break
 
     return history

@@ -56,32 +56,19 @@ def load_cms_flow_root(
     return arrays
 
 
-def truth_to_particle_tensor(
-    arrays: dict[str, np.ndarray],
-    n_events: int,
-) -> torch.Tensor:
-    """Convert per-event truth jagged arrays into a flat particle tensor.
+# =============================================================================
+# Constructing inputs
+# =============================================================================
 
-    Each truth particle becomes one row of an ``(N_total, N_FEATURES)``
-    tensor suitable to be fed directly into
-    :class:`CMSEnergyFlowDefault.forward`. ``EVENT_NUMBER`` is set to the
-    (0-indexed) event so that the calorimeter's per-event tower
-    aggregation treats events independently.
-
-    Particle class is mapped to PDG via
-    :func:`parnassus.utils.class_to_pid_vectorized`. Electrons / muons
-    are given small masses from the PDG table; everything else gets the
-    charged-pion mass (0.14 GeV), which matches what the Parnassus
-    pipeline does for minimum-bias-like particles.
-
-    Returns
-    -------
-    torch.Tensor
-        Tensor of shape ``(N_total, N_FEATURES)`` ready for
-        :class:`CMSEnergyFlowDefault.forward`.
+def load_truth_events(arrays: dict[str, np.ndarray],):
+    """
+    This task will pick truth particles from the input array, then it will
+    pad the objects in each event to the max number of particles across events, and finally
+    the output has shape (n_events, max_n_particles, n_features) in tensor form.
     """
     rows_list: list[np.ndarray] = []
-    for i in range(n_events):
+    key_0 = arrays.keys().__iter__().__next__()
+    for i in range(len(arrays[key_0])):
         pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
         phi = np.asarray(arrays["truth_phi"][i], dtype=np.float64)
@@ -127,47 +114,87 @@ def truth_to_particle_tensor(
         rows_list.append(row)
     if not rows_list:
         return torch.zeros((0, N_FEATURES), dtype=torch.float64)
-    return torch.from_numpy(np.concatenate(rows_list, axis=0))
+
+    # rows_list has shape (n_events, n_particles, n_features)
+    # n_particles can vary across events
+    # pad to the max n_particles across events and stack into a single tensor of shape (n_events, max_n_particles, n_features)
+    max_n_particles = max(row.shape[0] for row in rows_list)
+    padded_rows = []
+    for row in rows_list:
+        n_particles = row.shape[0]
+        if n_particles < max_n_particles:
+            padding = np.zeros((max_n_particles - n_particles, N_FEATURES), dtype=np.float64)
+            padded_row = np.vstack([row, padding])
+        else:
+            padded_row = row
+        padded_rows.append(padded_row)
+    stacked_rows = np.stack(padded_rows, axis=0)
+    
+    return torch.from_numpy(stacked_rows)
 
 
-# =============================================================================
-# Observables
-# =============================================================================
+def restore_event_format(
+    eflow_objects: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Regroup the flat ``EFlowObject`` tensor back into per-event format.
 
+    The input ``eflow_objects`` has shape ``(all_objects, n_features)`` with each
+    object's source event index stored in the ``EVENT_NUMBER`` column. The output
+    has shape ``(n_events, max_n_objects, n_features)``.
 
-def pflow_target_observables(
-    arrays: dict[str, np.ndarray],
-    n_events: int,
-    log_pt_floor: float = -1,
-) -> dict[str, torch.Tensor]:
-    """Build target observable tensors from the ``pflow_*`` branches.
-
-    These are the fitting target. Because they come straight from the
-    full-simulation CMS PF reco in the ROOT file, they do not depend on
-    any learnable parameters and are computed once per call.
-
-    The ROOT schema does not store ``pflow_e``, so the per-particle
-    energy is reconstructed analytically from ``(pt, eta, phi, class)``
-    using the same PDG-mass assignment as
-    :func:`truth_to_particle_tensor` (electrons / muons get their PDG
-    masses, everything else uses the charged-pion mass). This is the
-    same convention the trainee card applies internally, so the two
-    energy distributions are directly comparable.
-
-    Parameters
-    ----------
-    log_pt_floor : float
-        ``pflow_pt`` values below this threshold are clipped before
-        taking the logarithm. Real PF objects sit well above 0.1 GeV,
-        so this only affects pathological zero entries.
-
-    Returns
-    -------
-    dict[str, torch.Tensor]
-        Per-particle 1-D tensors: ``"pt"``, ``"eta"``, ``"phi"``,
-        ``"E"``, ``"log_pt"``. Per-event tensors of length
-        ``n_events``: ``"multiplicity"`` and ``"ht"`` (scalar-pT sum).
+    ``mask`` is the ``(n_events, n_particles)`` truth-particle validity mask; only
+    its first dim is used, to recover ``n_events`` (the batch size). Event numbers
+    inside a batch are shuffled/global and non-contiguous, so they are remapped to
+    dense ids; events that produced zero objects are absent from the input and end
+    up as all-zero rows. The op is fully vectorized (no loop) and
+    differentiable w.r.t. the ``eflow_objects`` values.
     """
+    device = eflow_objects.device
+    n_events = mask.shape[0]  # batch size, including events with zero objects
+    n_objects, n_features = eflow_objects.shape
+
+    if n_objects == 0:  # nothing reconstructed this batch
+        return torch.zeros(
+            (n_events, 0, n_features), dtype=eflow_objects.dtype, device=device
+        )
+
+    event_numbers = eflow_objects[:, ColumnMap.EVENT_NUMBER].long()
+    # Map the shuffled/global event numbers to dense ids in [0, n_unique). Events
+    # with no objects are absent here and stay all-zero in the padded output.
+    _, local_event = torch.unique(event_numbers, sorted=True, return_inverse=True)
+
+    counts = torch.bincount(local_event, minlength=n_events)  # objects per event
+    max_n_objects = int(counts.max().item())
+
+    # Within-event slot for each object, no loop: sort objects by event, then the
+    # slot is "global sorted position - start offset of that event".
+    offsets = torch.cumsum(counts, dim=0) - counts  # start index of each event
+    order = torch.argsort(local_event, stable=True)
+    slot = torch.empty(n_objects, dtype=torch.long, device=device)
+    slot[order] = torch.arange(n_objects, device=device) - offsets[local_event[order]]
+
+    out = torch.zeros(
+        (n_events, max_n_objects, n_features), dtype=eflow_objects.dtype, device=device
+    )
+    out[local_event, slot] = eflow_objects  # differentiable index_put
+    return out
+
+
+# =============================================================================
+# Constructing targets
+# =============================================================================
+
+def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
+    """
+    This task will pick the pflow objects from the input array, then it will
+    pad the objects in each event to the max number of particles across events, and finally
+    the output is a dict of tensors, each with shape (n_events, max_n_particles) except for multiplicity and ht which have shape (n_events,).
+    """
+    # get num of events
+    key_0 = arrays.keys().__iter__().__next__()
+    n_events = len(arrays[key_0])
+
     all_pt: list[np.ndarray] = []
     all_eta: list[np.ndarray] = []
     # all_phi: list[np.ndarray] = [] # phi doesn't contribute to gradient
@@ -196,80 +223,169 @@ def pflow_target_observables(
         all_e.append(e)
         per_event_mult[i] = float(pt.shape[0])
         per_event_ht[i] = float(pt.sum())
-    pt_cat = np.concatenate(all_pt) if all_pt else np.empty(0, dtype=np.float64)
-    eta_cat = np.concatenate(all_eta) if all_eta else np.empty(0, dtype=np.float64)
-    # phi_cat = np.concatenate(all_phi) if all_phi else np.empty(0, dtype=np.float64)
-    e_cat = np.concatenate(all_e) if all_e else np.empty(0, dtype=np.float64)
-    log_pt_cat = np.log(np.maximum(pt_cat, log_pt_floor))
+
+    # shape of all_pt, all_eta, all_e is (num_events, num_particles_in_event); num_particles_in_event can vary across events
+    # pad to the max num_particles across events and stack into a single tensor of shape (num_events, max_num_particles)
+    max_n_particles = max(pt.shape[0] for pt in all_pt)
+
+    # pad the last dimension (num_particles_in_event) with zeros to max_n_particles
+    # and build a boolean mask so downstream code can ignore the padded slots
+    # (padded pt=0 would otherwise corrupt log_pt and the per-bin multiplicity).
+    def _pad_stack(arrays: list[np.ndarray]) -> np.ndarray:
+        out = np.zeros((n_events, max_n_particles), dtype=np.float64)
+        for i, arr in enumerate(arrays):
+            out[i, : arr.shape[0]] = arr
+        return out
+
+    pt_pad = _pad_stack(all_pt)
+    eta_pad = _pad_stack(all_eta)
+    # phi_pad = _pad_stack(all_phi)  # phi doesn't contribute to gradient
+    e_pad = _pad_stack(all_e)
+
+    # True where a real particle exists, False for padding.
+    mask = np.zeros((n_events, max_n_particles), dtype=bool)
+    for i, arr in enumerate(all_pt):
+        mask[i, : arr.shape[0]] = True
+
+    # log(pt) only where valid; padded slots are left at 0 and excluded by the mask.
+    log_pt_pad = np.zeros_like(pt_pad)
+    log_pt_pad[mask] = np.log(np.maximum(pt_pad[mask], log_pt_floor))
+
     return {
-        "pt": torch.from_numpy(pt_cat),
-        "eta": torch.from_numpy(eta_cat),
-        # "phi": torch.from_numpy(phi_cat),
-        "E": torch.from_numpy(e_cat),
-        "log_pt": torch.from_numpy(log_pt_cat),
-        # "multiplicity": torch.from_numpy(per_event_mult),
+        "pt": torch.from_numpy(pt_pad),
+        "eta": torch.from_numpy(eta_pad),
+        # "phi": torch.from_numpy(phi_pad),
+        "E": torch.from_numpy(e_pad),
+        "log_pt": torch.from_numpy(log_pt_pad),
+        "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
     }
 
 
-def trainee_observables(
-    card_out: dict[str, torch.Tensor],
-    n_events: int,
-    min_pt: float = 1e-6,
-) -> dict[str, torch.Tensor]:
-    """Build the same observable dict from the trainee card's output.
+def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -1):
+    """Build the per-observable dict from a padded ``EFlowObject`` tensor.
 
-    Operates on the ``EFlowObject`` branch of the card output, which is
-    the PF-like final collection. Zero-pT ghost tracks (a byproduct of
-    the Gumbel-ST efficiency mask; see ``learnable.py``) are filtered
-    out before any statistic is computed; the filter is a hard boolean
-    mask on values only, not on gradients, so it does not break
-    backprop.
+    The differentiable counterpart of :func:`load_pflow_targets`: it operates
+    on the trainee card's output instead of a numpy ROOT dict, so gradients
+    flow back to the learnable card parameters.
 
-    The energy column is read directly from ``EFlowObject`` (the
-    smearing modules update it in-place). ``log_pt`` is taken on the
-    already-filtered (strictly positive) ``pt_kept`` so the logarithm
-    is always well-defined and its gradient propagates back to the
-    learnable smearing parameters.
+    The input has shape ``(n_events, max_n_objects, N_FEATURES)`` with two kinds
+    of empty slots that must be excluded:
+
+    - genuine zero-padding rows added by :func:`restore_event_format`, and
+    - efficiency-killed "ghost" rows, where ``LearnableEfficiency`` has zeroed
+      ``(PT, PX, PY, PZ, E)`` via a Gumbel-ST mask but left the row in place
+      with nonzero ``ETA`` / ``PID``.
+
+    Both are caught by a single ``pt != 0`` test (a real reconstructed object
+    always has ``pt > 0``), which matches the target side's ``pflow_pt > 1e-6``
+    cut. The output stays on ``arrays``'s device and dtype and is fully
+    differentiable wrt ``arrays``.
 
     Returns
     -------
     dict[str, torch.Tensor]
-        Same keys as :func:`pflow_target_observables`. All tensors
-        carry gradients back to the learnable parameters.
+        ``"pt"``, ``"eta"``, ``"E"``, ``"log_pt"`` of shape
+        ``(n_events, max_n_objects)`` (zero on invalid slots), and
+        ``"multiplicity"``, ``"ht"`` of shape ``(n_events,)``.
     """
-    eflow = card_out["EFlowObject"]
-    pt_all = eflow[:, ColumnMap.PT]
-    eta_all = eflow[:, ColumnMap.ETA]
-    # phi_all = eflow[:, ColumnMap.PHI] # phi doesn't contribute to gradient
-    e_all = eflow[:, ColumnMap.E]
-    event_all = eflow[:, ColumnMap.EVENT_NUMBER]
+    pt = arrays[..., ColumnMap.PT]  # (n_events, max_n_objects)
+    eta = arrays[..., ColumnMap.ETA]
+    pid = arrays[..., ColumnMap.PID]
 
-    valid = pt_all > min_pt
-    pt_kept = pt_all[valid]
-    eta_kept = eta_all[valid]
-    # phi_kept = phi_all[valid]
-    e_kept = e_all[valid]
-    log_pt_kept = torch.log(pt_kept)
-    ev_kept = event_all[valid].long()
+    # Real particle <=> nonzero pt (drops padding and efficiency-killed ghosts).
+    valid = pt != 0
 
-    # Per-event multiplicity and HT via scatter-add. Using
-    # torch.zeros(..., dtype=pt.dtype) on the same device as pt so the
-    # accumulation stays in the autograd graph.
-    device = pt_all.device
-    dtype = pt_all.dtype
-    mult = torch.zeros(n_events, dtype=dtype, device=device)
-    ht = torch.zeros(n_events, dtype=dtype, device=device)
-    if ev_kept.numel() > 0:
-        mult.scatter_add_(0, ev_kept, torch.ones_like(pt_kept))
-        ht.scatter_add_(0, ev_kept, pt_kept)
+    # Reconstruct E = sqrt((pt * cosh(eta))^2 + m^2) with the mass derived from
+    # the signed PDG in the PID column (211/11/13/22/0), mirroring
+    # load_pflow_targets. PID is discrete bookkeeping, so detach it: the mass is
+    # a per-row constant and must not be a gradient path.
+    abs_pid = pid.detach().abs()
+    mass = torch.where(
+        abs_pid == 11,
+        torch.full_like(pt, 0.000511),
+        torch.where(
+            abs_pid == 13,
+            torch.full_like(pt, 0.10566),
+            torch.full_like(pt, 0.13957),
+        ),
+    )
+    p_mag = pt * torch.cosh(eta)
+    e = torch.sqrt(p_mag * p_mag + mass * mass)
+    e = torch.where(valid, e, torch.zeros_like(e))
+
+    # log(pt) on valid slots only. Clamp the log ARGUMENT to a positive value
+    # before taking the log so the backward (1/arg) stays finite on the pt == 0
+    # slots; a plain torch.where(valid, log(pt), 0) would still backprop
+    # log(0)'s -inf derivative through the masked branch and poison the
+    # gradient. (log_pt_floor is a no-op for pt >= 0, mirroring the reference;
+    # it is kept in the signature for parity.)
+    pt_safe = torch.where(valid, pt, torch.ones_like(pt))  # 1.0 on invalid slots
+    log_pt = torch.where(valid, torch.log(pt_safe), torch.zeros_like(pt))
+
+    pt_out = torch.where(valid, pt, torch.zeros_like(pt))
+    eta_out = torch.where(valid, eta, torch.zeros_like(eta))
+
+    valid_f = valid.to(pt.dtype)
+    multiplicity = valid_f.sum(dim=1)  # (n_events,) -- a count (no gradient)
+    ht = (pt * valid_f).sum(dim=1)  # (n_events,) -- differentiable
 
     return {
-        "pt": pt_kept,
-        "eta": eta_kept,
-        # "phi": phi_kept,
-        "E": e_kept,
-        "log_pt": log_pt_kept,
-        # "multiplicity": mult,
+        "pt": pt_out,
+        "eta": eta_out,
+        "E": e,
+        "log_pt": log_pt,
+        "multiplicity": multiplicity,
         "ht": ht,
     }
+
+
+# =============================================================================
+# Train validation splitting
+# =============================================================================
+
+def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.8, seed: int = 42):
+    """Split the truth tensor into train and validation parts along the event axis.
+
+    The split is deterministic based on the provided random seed. The same split
+    is applied to all events, so the train and validation sets are disjoint at
+    the event level (no event is partially in train and partially in val).
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        The train and validation truth tensors, each with shape
+        ``(n_events_subset, max_n_particles, n_features)``.
+    """
+    n_events = truth_tensor.shape[0]
+    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
+    split_idx = int(train_fraction * n_events)
+    train_indices = indices[:split_idx]
+    val_indices = indices[split_idx:]
+    train_tensor = truth_tensor[train_indices]
+    val_tensor = truth_tensor[val_indices]
+    return train_tensor, val_tensor
+
+
+def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float = 0.8, seed: int = 42):
+    """Split the target dict into train and validation parts along the event axis.
+
+    The split is deterministic based on the provided random seed. The same split
+    is applied to all observables, so the train and validation sets are disjoint
+    at the event level (no event is partially in train and partially in val).
+
+    Returns
+    -------
+    dict[str, torch.Tensor], dict[str, torch.Tensor]
+        The train and validation target dicts, each with the same keys as the
+        input and tensors with shape ``(n_events_subset, ...)``.
+    """
+    n_events = next(iter(target.values())).shape[0]  # number of events from any observable
+    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
+    split_idx = int(train_fraction * n_events)
+    train_indices = indices[:split_idx]
+    val_indices = indices[split_idx:]
+
+    train_target = {k: v[train_indices] for k, v in target.items()}
+    val_target = {k: v[val_indices] for k, v in target.items()}
+    return train_target, val_target

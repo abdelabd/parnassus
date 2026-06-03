@@ -27,9 +27,6 @@ from .cli import main
 from .config import DEFAULT_BIN_EDGES, DEFAULT_OBS_WEIGHTS, PFLOW_BRANCHES, TRUTH_BRANCHES
 from .data import (
     load_cms_flow_root,
-    pflow_target_observables,
-    trainee_observables,
-    truth_to_particle_tensor,
 )
 from .fixture import write_synthetic_fixture
 from .loss import multi_observable_loss, multi_observable_loss_distributed

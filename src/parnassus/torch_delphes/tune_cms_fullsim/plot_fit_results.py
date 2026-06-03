@@ -29,7 +29,7 @@ Usage
 -----
 .. code-block:: shell
 
-    uv run python -m parnassus.torch_delphes.plot_fit_results \
+    uv run python -m parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results \
         --history doc/fit_results/all66_history.json \
         --root-file src/parnassus/tests/benchmark_data/cms_pseudodata.root \
         --output-dir doc/figures
@@ -58,11 +58,13 @@ from parnassus.torch_delphes.generate_pseudodata import (
     TARGET_HCAL_SCALE,
     TARGET_K0S_ECAL_FRAC,
 )
-from parnassus.torch_delphes.tune_cms_fullsim import (
+
+from .data import (
     load_cms_flow_root,
-    pflow_target_observables,
-    trainee_observables,
-    truth_to_particle_tensor,
+    load_pflow_targets,
+    load_pflow_targets_from_tensor,
+    load_truth_events,
+    restore_event_format,
 )
 
 # Mild styling so the figures are legible in both light and dark themes.
@@ -240,6 +242,37 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
             p.copy_(raw.reshape(p.shape).to(p.dtype))
 
 
+def _trainee_observables(card: CMSEnergyFlowDefault, truth_tensor: torch.Tensor) -> dict:
+    """Run the trainee card on padded truth events -> predicted observable dict.
+
+    Mirrors the fit loop in :mod:`tune_cms_fullsim.training`: drop the padded
+    truth particles, run the card (which expects a flat
+    ``(n_particles, n_features)`` tensor), regroup the flat ``EFlowObject``
+    output back into per-event format, then extract the observable dict. The
+    caller seeds the RNG before calling, since the card's momentum smearing /
+    Gumbel-ST efficiency is stochastic.
+    """
+    mask = torch.any(truth_tensor != 0, dim=-1)
+    with torch.no_grad():
+        out = card(truth_tensor[mask])
+    eflow_restored = restore_event_format(out["EFlowObject"], mask)
+    return load_pflow_targets_from_tensor(eflow_restored)
+
+
+def _obs_values(obs: dict, key: str) -> torch.Tensor:
+    """Flatten an observable to 1-D for histogramming, dropping padding/ghosts.
+
+    Per-particle observables are 2-D ``(n_events, max_n_objects)`` zero-padded;
+    the same ``pt != 0`` cut the loss uses removes padding and efficiency-killed
+    ghost slots (``eta == 0`` and ``log_pt == 0`` are valid values, so they can
+    not be masked per-observable). Per-event observables (1-D) pass through.
+    """
+    v = obs[key]
+    if v.ndim >= 2:
+        return v[obs["pt"] != 0]
+    return v.reshape(-1)
+
+
 def _density_histogram(values: torch.Tensor, edges: np.ndarray) -> np.ndarray:
     """Normalised histogram counts (density, summing to 1).
 
@@ -292,7 +325,7 @@ def plot_observable(
 
 
 def main() -> None:
-    """Entry point for ``python -m parnassus.torch_delphes.plot_fit_results``."""
+    """Entry point for ``python -m parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results``."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history", type=Path, required=True)
     parser.add_argument(
@@ -369,26 +402,22 @@ def main() -> None:
 
     # ----- 4. Observable histograms (target vs init vs final) -----
     arrays = load_cms_flow_root(args.root_file, n_events=args.n_events_for_plots)
-    truth_tensor = truth_to_particle_tensor(arrays, n_events=args.n_events_for_plots)
-    target = pflow_target_observables(arrays, n_events=args.n_events_for_plots)
+    truth_tensor = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
 
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True)
-    with torch.no_grad():
-        out_init = trainee(truth_tensor)
-    pred_init = trainee_observables(out_init, n_events=args.n_events_for_plots)
+    pred_init = _trainee_observables(trainee, truth_tensor)
 
     # Restore the *final* parameter snapshot and re-run.
     _set_trainee_from_snapshot(trainee, history["parameters"][-1])
     torch.manual_seed(args.seed)
-    with torch.no_grad():
-        out_final = trainee(truth_tensor)
-    pred_final = trainee_observables(out_final, n_events=args.n_events_for_plots)
+    pred_final = _trainee_observables(trainee, truth_tensor)
 
     plot_observable(
-        target["pt"],
-        pred_init["pt"],
-        pred_final["pt"],
+        _obs_values(target, "pt"),
+        _obs_values(pred_init, "pt"),
+        _obs_values(pred_final, "pt"),
         edges=np.linspace(0.0, 100.0, 51),
         xlabel=r"PF object $p_\mathrm{T}$ [GeV]",
         output_path=args.output_dir / "observable_pt.pdf",
@@ -397,9 +426,9 @@ def main() -> None:
     print("  wrote observable_pt.pdf")
 
     plot_observable(
-        target["eta"],
-        pred_init["eta"],
-        pred_final["eta"],
+        _obs_values(target, "eta"),
+        _obs_values(pred_init, "eta"),
+        _obs_values(pred_final, "eta"),
         edges=np.linspace(-5.0, 5.0, 51),
         xlabel=r"PF object $\eta$",
         output_path=args.output_dir / "observable_eta.pdf",
@@ -407,9 +436,9 @@ def main() -> None:
     print("  wrote observable_eta.pdf")
 
     # plot_observable(
-    #     target["multiplicity"],
-    #     pred_init["multiplicity"],
-    #     pred_final["multiplicity"],
+    #     _obs_values(target, "multiplicity"),
+    #     _obs_values(pred_init, "multiplicity"),
+    #     _obs_values(pred_final, "multiplicity"),
     #     edges=np.linspace(0.0, 600.0, 61),
     #     xlabel=r"PF objects per event",
     #     output_path=args.output_dir / "observable_multiplicity.pdf",

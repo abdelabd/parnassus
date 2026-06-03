@@ -48,7 +48,7 @@ DEFAULT_BIN_EDGES: dict[str, torch.Tensor] = {
     # log space gives Adam much better gradient signal in the high-pT
     # tail than the linear pt histogram does.
     "log_pt": torch.linspace(-1.0, 6.0, 41, dtype=torch.float64),
-    # "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
+    "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
     "ht": torch.linspace(0.0, 2000.0, 41, dtype=torch.float64),
 }
 
@@ -69,8 +69,8 @@ DEFAULT_OBS_WEIGHTS: dict[str, float] = {
     # "phi": 1.0,
     "E": 1.0,
     "log_pt": 0.5,
-    "multiplicity": 0.1,
-    "ht": 0.1,
+    # "multiplicity": 0.1,
+    # "ht": 0.1,
 }
 
 

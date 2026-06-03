@@ -70,11 +70,11 @@ from .config import (
     _DEFAULT_LR_SCALES,
 )
 from .data import (
-    load_cms_flow_root,
-    pflow_target_observables,
-    trainee_observables,
-    truth_to_particle_tensor,
-)
+    load_cms_flow_root, load_truth_events, load_pflow_targets, split_truth_objects, split_pflow_targets,
+)    
+
+from .dataloader import DelphesDataSet, DelphesDataLoader
+
 from .distributed import (
     _barrier,
     _cleanup_distributed,
@@ -212,27 +212,21 @@ def main() -> None:
     arrays = load_cms_flow_root(
         root_file, n_events=local_n_events, entry_start=entry_start
     )
-    truth_tensor = truth_to_particle_tensor(arrays, n_events=local_n_events)
-    target = pflow_target_observables(arrays, n_events=local_n_events)
+    truth_tensor = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
 
-    truth_tensor = truth_tensor.to(device)
-    target = {k: v.to(device) for k, v in target.items()}
+    train_truth_tensor, val_truth_tensor = split_truth_objects(truth_tensor, train_fraction=0.8, seed=args.seed)
+    train_target, val_target = split_pflow_targets(target, train_fraction=0.8, seed=args.seed)
+
+    train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
+    val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
+
+    train_dataloader = DelphesDataLoader(train_dataset, batch_size=512, shuffle=True)
+    val_dataloader = DelphesDataLoader(val_dataset, batch_size=512, shuffle=False)
+
+    # truth_tensor = truth_tensor.to(device)
+    # target = {k: v.to(device) for k, v in target.items()}
     bin_edges = {k: v.to(device) for k, v in DEFAULT_BIN_EDGES.items()}
-
-    # Use a *globally* reduced count of target particles for the print.
-    n_target_local = target["pt"].numel()
-    if _is_dist():
-        tmp = torch.tensor([n_target_local], dtype=torch.long, device=device)
-        dist.all_reduce(tmp, op=dist.ReduceOp.SUM)
-        n_target_global = int(tmp.item())
-    else:
-        n_target_global = n_target_local
-
-    log(
-        f"Loaded {args.n_events} events globally ({local_n_events} on rank {rank}), "
-        f"{truth_tensor.shape[0]} truth particles (local), "
-        f"{n_target_global} PFlow target particles (global)."
-    )
 
     # All ranks must use the *same* initial parameters for the manual-
     # gradient-sync scheme to keep them in sync; ``torch.manual_seed``
@@ -257,49 +251,14 @@ def main() -> None:
     )
     log(print_msg)
 
-    def _averaged_loss(n: int = 6) -> float:
-        """Average the soft-histogram loss over ``n`` fresh forward passes.
-
-        Single-pass losses fluctuate by several tens of percent due to the
-        log-normal smearing and the Gumbel-ST sampling, so a fair
-        "before vs after" comparison has to average over samples.
-
-        Under DDP the loss is computed via the differentiable all-reduce
-        helper, so the returned value is the *global* loss (identical
-        on every rank).
-
-        Returns
-        -------
-        float
-            Mean loss value over the ``n`` passes.
-        """
-        acc = 0.0
-        with torch.no_grad():
-            for _ in range(n):
-                out = trainee(truth_tensor)
-                pred = trainee_observables(out, n_events=local_n_events)
-                acc += float(
-                    multi_observable_loss_distributed(
-                        pred,
-                        target,
-                        bin_edges,
-                        beta=args.beta,
-                        weights=DEFAULT_OBS_WEIGHTS,
-                    )
-                )
-        return acc / n
-
-    loss_before = _averaged_loss()
-    log(f"Averaged loss at init (6 passes): {loss_before:.4e}")
 
     history = fit_card_to_fullsim(
         trainee,
-        truth_tensor,
-        target,
-        n_events=local_n_events,
+        train_dataloader,
+        val_dataloader,
+        # n_events=local_n_events,
         n_steps=args.n_steps,
         lr=args.lr,
-        n_passes_per_step=args.n_passes_per_step,
         beta=args.beta,
         log_every=max(1, args.n_steps // 10),
         parameters_to_train=params_to_train,
@@ -310,6 +269,7 @@ def main() -> None:
         lr_fractions=args.lr_fractions,
         snapshot_parameters=args.history_path is not None,
         rank=rank,
+        device=device,
     )
 
     if args.history_path is not None and _is_main(rank):
@@ -334,10 +294,10 @@ def main() -> None:
             )
         log(f"Wrote training history to {args.history_path}")
 
-    loss_after = _averaged_loss()
-    log(f"Averaged loss after training (6 passes): {loss_after:.4e}")
-    rel = 100.0 * (loss_before - loss_after) / max(loss_before, 1e-30)
-    log(f"  relative improvement: {rel:+.1f}%")
+    # loss_after = _averaged_loss()
+    # log(f"Averaged loss after training (6 passes): {loss_after:.4e}")
+    # rel = 100.0 * (loss_before - loss_after) / max(loss_before, 1e-30)
+    # log(f"  relative improvement: {rel:+.1f}%")
 
     # Print the learned charged-hadron scale and ECal scale for a quick
     # sanity check. On the synthetic fixture the expected target is

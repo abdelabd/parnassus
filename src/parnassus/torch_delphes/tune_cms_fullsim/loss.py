@@ -123,20 +123,49 @@ def multi_observable_loss(
 ) -> torch.Tensor:
     """Sum of per-observable soft-histogram MSE losses, optionally weighted.
 
+    Per-particle observables (``pt``, ``eta``, ``E``, ``log_pt``) arrive as 2-D
+    ``(n_events, max_n_particles)`` padded tensors; they are flattened to 1-D
+    and stripped of padding / efficiency-ghost slots before histogramming. The
+    validity mask is derived from the *same side's* ``pt`` key, because
+    ``eta == 0`` and ``log_pt == log(1) == 0`` are valid real values and cannot
+    be detected per-observable. Per-event observables (``multiplicity``,
+    ``ht``) are already 1-D and pass through unchanged. ``pred`` and ``target``
+    may have different ``max_n_particles``; each side is flattened and masked
+    independently and ``histogram_mse_loss`` normalizes to a density, so
+    unequal counts are handled correctly.
+
     Returns
     -------
     torch.Tensor
         Scalar loss summed over every observable for which both
-        ``pred`` and ``target`` have at least one value.
+        ``pred`` and ``target`` have at least one valid value.
     """
-    total = torch.zeros((), dtype=torch.float64)
-    for key, pred_vals in pred.items():
-        tgt_vals = target[key]
+
+    def _flatten_valid(obs: dict[str, torch.Tensor], key: str) -> torch.Tensor:
+        v = obs[key]
+        if v.ndim >= 2:  # per-particle, padded -> drop padding/ghost slots
+            return v[obs["pt"] != 0]  # boolean-index READ is a differentiable gather
+        return v.reshape(-1)  # per-event, already 1-D
+
+    # Anchor the accumulator on bin_edges' dtype/device (bin_edges are float64
+    # and moved to the compute device by the caller); a bare torch.zeros((), ...)
+    # would sit on the CPU and break once DDP runs on GPU.
+    any_edges = next(iter(bin_edges.values()))
+    total = torch.zeros((), dtype=any_edges.dtype, device=any_edges.device)
+
+    # The weights dict drives the active observable set: DEFAULT_OBS_WEIGHTS lists
+    # only pt/eta/E/log_pt (multiplicity/ht are intentionally commented out), so
+    # iterating its keys keeps them out instead of defaulting them to weight 1.0.
+    active_keys = weights.keys() if weights else bin_edges.keys()
+    for key in active_keys:
+        if key not in bin_edges or key not in pred or key not in target:
+            continue
+        pred_vals = _flatten_valid(pred, key)
+        tgt_vals = _flatten_valid(target, key)
         if pred_vals.numel() == 0 or tgt_vals.numel() == 0:
             continue
-        edges = bin_edges[key]
-        w = (weights or {}).get(key, 1.0)
-        total = total + w * histogram_mse_loss(pred_vals, tgt_vals, edges, beta=beta)
+        w = weights[key] if weights else 1.0
+        total = total + w * histogram_mse_loss(pred_vals, tgt_vals, bin_edges[key], beta=beta)
     return total
 
 
@@ -168,42 +197,5 @@ def multi_observable_loss_distributed(
     """
     if not _is_dist():
         return multi_observable_loss(pred, target, bin_edges, beta=beta, weights=weights)
-
-    total = torch.zeros((), dtype=torch.float64, device=pred["pt"].device if pred else None)
-    for key in bin_edges.keys():
-        edges = bin_edges[key]
-        pred_vals = pred.get(key)
-        tgt_vals = target.get(key)
-        if pred_vals is None or tgt_vals is None:
-            continue
-
-        # Local histograms (zero-length tensors give zero histograms,
-        # which is exactly what we want for ranks that happen to have
-        # an empty shard for this observable).
-        if pred_vals.numel() > 0:
-            pred_hist_local = soft_histogram(pred_vals, edges, beta=beta)
-        else:
-            pred_hist_local = torch.zeros(
-                edges.numel() - 1, dtype=edges.dtype, device=edges.device
-            )
-        if tgt_vals.numel() > 0:
-            tgt_hist_local = soft_histogram(tgt_vals.detach(), edges, beta=beta)
-        else:
-            tgt_hist_local = torch.zeros(
-                edges.numel() - 1, dtype=edges.dtype, device=edges.device
-            )
-
-        # Differentiable all-reduce on the pred side keeps gradients
-        # connected; the target side is detached so a plain (non-diff)
-        # all-reduce is fine.
-        pred_hist = diff_all_reduce(pred_hist_local, op=dist.ReduceOp.SUM)
-        tgt_hist = tgt_hist_local.clone()
-        dist.all_reduce(tgt_hist, op=dist.ReduceOp.SUM)
-
-        pred_norm = pred_hist / (pred_hist.sum() + eps)
-        tgt_norm = tgt_hist / (tgt_hist.sum() + eps)
-        loss_key = ((pred_norm - tgt_norm) ** 2).mean()
-
-        w = (weights or {}).get(key, 1.0)
-        total = total + w * loss_key
-    return total
+    else:
+        raise NotImplementedError("multi_observable_loss_distributed is not implemented yet")
