@@ -69,8 +69,8 @@ DEFAULT_OBS_WEIGHTS: dict[str, float] = {
     # "phi": 1.0,
     "E": 1.0,
     "log_pt": 0.5,
-    # "multiplicity": 0.1,
-    # "ht": 0.1,
+    "multiplicity": 0.5,
+    "ht": 0.5,
 }
 
 
