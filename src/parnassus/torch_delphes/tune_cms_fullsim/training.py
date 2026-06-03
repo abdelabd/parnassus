@@ -23,6 +23,7 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from .config import (
     DEFAULT_BIN_EDGES,
     DEFAULT_OBS_WEIGHTS,
+    _DEFAULT_LR,
     _DEFAULT_LR_EFFICIENCY,
     _DEFAULT_LR_FRACTIONS,
     _DEFAULT_LR_RESOLUTION,
@@ -40,25 +41,30 @@ from .loss import multi_observable_loss_distributed
 # =============================================================================
 #
 # The 66 learnable parameters live in parameter spaces with very different
-# natural scales, so a single global Adam learning rate is a poor fit:
+# natural scales, so a single global Adam learning rate is a poor fit. We
+# instead set each group's Adam learning rate to ``base_lr * ratio_group``,
+# where ``base_lr`` is the global ``--lr`` magnitude and ``ratio_group`` is a
+# dimensionless per-group ratio (``--lr-<group>``). The default ratios are
+# ``scales : efficiency : fractions : resolution = 1 : 1 : 1 : 0.1`` because:
 #
 # - Resolution coefficients ``a_raw, b_raw, c_E, c_S, c_N`` are softplus-
 #   wrapped positive scalars whose post-softplus values range from ~1e-3 to
-#   ~3. An Adam step of 5e-2 on the raw parameter can blow up a tiny
-#   coefficient by orders of magnitude in one step.
-# - Region scales ``scale_raw`` sit at 0 in the raw space and are bounded
-#   to [-1, +1] via ``tanh``; an Adam step of 5e-2 moves the bounded
-#   output by at most ~1.5%, which is safe and responsive.
-# - Efficiency logits ``eff_logits`` map to probabilities via sigmoid and
-#   sit at finite values like ``logit(0.95)=2.94``. Stepping the logit by
-#   5e-2 moves the probability by less than 0.01, which is the right
-#   magnitude for PF efficiency fits.
-# - Hadron-fraction logits behave like efficiency logits.
+#   ~3. A raw Adam step can blow up a tiny coefficient by orders of magnitude
+#   in one step, so they step ~10x slower (ratio 0.1).
+# - Region scales ``scale_raw`` sit at 0 in the raw space and are bounded via
+#   ``tanh``; a raw step moves the bounded output only mildly, which is safe
+#   and responsive (ratio 1).
+# - Efficiency logits ``eff_logits`` map to probabilities via sigmoid and sit
+#   at finite values like ``logit(0.95)=2.94``; a raw step moves the
+#   probability only slightly, the right magnitude for PF efficiency fits
+#   (ratio 1).
+# - Hadron-fraction logits behave like efficiency logits (ratio 1).
 #
 # The function below maps each named parameter in a learnable card to one
 # of the four groups so that :func:`fit_card_to_fullsim` can build a
-# ``torch.optim.Adam`` with per-group learning rates.
-# (The suffix/fragment matchers and the default LRs live in ``config.py``.)
+# ``torch.optim.Adam`` with per-group learning rates ``base_lr * ratio_group``.
+# (The suffix/fragment matchers, ``base_lr`` and the default ratios live in
+# ``config.py``.)
 
 
 def _classify_parameter(name: str) -> str:
@@ -81,12 +87,19 @@ def _classify_parameter(name: str) -> str:
 
 def build_parameter_groups(
     card: CMSEnergyFlowDefault,
+    lr: float = _DEFAULT_LR,
     lr_scales: float = _DEFAULT_LR_SCALES,
     lr_resolution: float = _DEFAULT_LR_RESOLUTION,
     lr_efficiency: float = _DEFAULT_LR_EFFICIENCY,
     lr_fractions: float = _DEFAULT_LR_FRACTIONS,
 ) -> list[dict]:
     """Split ``card.parameters()`` into Adam parameter groups by type.
+
+    The effective Adam learning rate of each group is ``lr * ratio_group``:
+    ``lr`` is the global magnitude (``--lr``) and the four ``lr_<group>``
+    arguments are dimensionless per-group *ratios* (``--lr-<group>``). With
+    the default ratios (1 / 1 / 1 / 0.1) and ``lr = 1e-3``, the effective LRs
+    are scales/efficiency/fractions = 1e-3 and resolution = 1e-4.
 
     Returns
     -------
@@ -104,7 +117,7 @@ def build_parameter_groups(
     }
     for name, p in card.named_parameters():
         buckets[_classify_parameter(name)].append(p)
-    lrs = {
+    ratios = {
         "scales": lr_scales,
         "resolution": lr_resolution,
         "efficiency": lr_efficiency,
@@ -114,7 +127,7 @@ def build_parameter_groups(
     for key, params in buckets.items():
         if not params:
             continue
-        groups.append({"params": params, "lr": lrs[key], "name": key})
+        groups.append({"params": params, "lr": lr * ratios[key], "name": key})
     return groups
 
 
@@ -144,26 +157,27 @@ def fit_card_to_fullsim(
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match ``target_observables``.
 
-    The trainee is run ``n_passes_per_step`` times per step, with losses
-    averaged, to beat down the stochastic-smearing / Gumbel-ST noise in
-    the trainee observables. The target observables are read from the
-    ROOT file once and re-used on every step.
+    Each step runs the trainee once over every training batch and steps
+    Adam per batch. The target observables are read from the ROOT file
+    once (into the dataloaders) and re-used on every step.
 
     When ``parameters_to_train`` is ``None`` this function automatically
     builds four parameter groups (scales, resolution, efficiency,
-    fractions) with independent learning rates, because the four
-    groups have very different natural step sizes. Pass a non-None
-    ``parameters_to_train`` list to get a single group at the global
-    ``lr`` value (backwards-compatible with earlier callers that
+    fractions) whose effective learning rates are ``lr * ratio_group``
+    (the global magnitude ``lr`` times the per-group ratio ``lr_*``),
+    because the four groups have very different natural step sizes. Pass a
+    non-None ``parameters_to_train`` list to get a single group at the
+    global ``lr`` value (backwards-compatible with earlier callers that
     fit a small focused subset).
 
     Parameters
     ----------
     lr : float | None
-        Only used when ``parameters_to_train`` is provided (single
-        group). If ``None`` in that case, falls back to
-        ``_DEFAULT_LR_SCALES``. When ``parameters_to_train`` is
-        ``None``, the four ``lr_*`` arguments are used instead.
+        Global learning-rate magnitude. When ``parameters_to_train`` is
+        ``None`` the four parameter groups get ``lr * lr_<group>``; when a
+        ``parameters_to_train`` list is given, the single group uses ``lr``
+        directly (the caller is expected to have folded in any per-group
+        ratio). Falls back to ``_DEFAULT_LR`` when ``None``.
     snapshot_parameters : bool
         If True, the history dict will additionally contain a
         ``"parameters"`` list whose i-th entry is a ``{name: float}``
@@ -179,11 +193,12 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
+    base_lr = lr if lr is not None else _DEFAULT_LR
     if parameters_to_train is not None:
         param_groups: list[dict] = [
             {
                 "params": list(parameters_to_train),
-                "lr": lr if lr is not None else _DEFAULT_LR_SCALES,
+                "lr": base_lr,
                 "name": "user",
             }
         ]
@@ -193,6 +208,7 @@ def fit_card_to_fullsim(
         underlying = card.module if isinstance(card, DDP) else card
         param_groups = build_parameter_groups(
             underlying,
+            lr=base_lr,
             lr_scales=lr_scales,
             lr_resolution=lr_resolution,
             lr_efficiency=lr_efficiency,
@@ -200,7 +216,13 @@ def fit_card_to_fullsim(
         )
 
     opt = torch.optim.Adam(param_groups)
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=5, verbose=True)
+    if _is_main(rank):
+        for g in param_groups:
+            print(
+                f"  param group {g['name']!r}: effective lr = {g['lr']:.3e} "
+                f"({len(g['params'])} tensors)"
+            )
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=5)
 
     edges = bin_edges if bin_edges is not None else DEFAULT_BIN_EDGES
     weights = observable_weights if observable_weights is not None else DEFAULT_OBS_WEIGHTS
@@ -254,6 +276,10 @@ def fit_card_to_fullsim(
     patience = 10  # Number of steps to wait for improvement before early stopping
 
     for step in pbar:
+        # Re-enter train mode each step: the validation block below leaves the
+        # card in eval(). The current card has no train/eval-dependent layers,
+        # but this keeps the train forward correct if one is ever added.
+        card.train()
         loss_acc = torch.zeros(
             (), dtype=torch.float64, device=device
         )
@@ -288,7 +314,9 @@ def fit_card_to_fullsim(
 
         loss_acc /= len(train_dataloader)
 
-        print_loss = float(loss.detach())
+        # Record the per-step MEAN over all train batches (mirrors the val
+        # side's averaged val_loss_acc), not the noisy last-batch loss.
+        print_loss = float(loss_acc)
         history["step"].append(step)
         history["loss"].append(print_loss)
         if snapshot_parameters:

@@ -64,6 +64,7 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from .config import (
     DEFAULT_BIN_EDGES,
     DEFAULT_OBS_WEIGHTS,
+    _DEFAULT_LR,
     _DEFAULT_LR_EFFICIENCY,
     _DEFAULT_LR_FRACTIONS,
     _DEFAULT_LR_RESOLUTION,
@@ -109,19 +110,31 @@ def main() -> None:
     parser.add_argument(
         "--lr",
         type=float,
-        default=None,
+        default=_DEFAULT_LR,
         help=(
-            "Global learning rate. Only used when --train-what is a strict "
-            "subset (scale_only, resolution_only). With --train-what=all the "
-            "four --lr-* flags are used instead, because the four parameter "
-            "groups have very different natural step sizes."
+            "Global learning-rate magnitude. Each parameter group's effective "
+            "Adam learning rate is --lr times its --lr-<group> ratio, so this "
+            "is the single knob for sweeping the overall step size. For a "
+            "strict --train-what subset it is multiplied by that subset's "
+            "ratio (--lr-scales or --lr-resolution)."
         ),
     )
-    parser.add_argument("--lr-scales", type=float, default=_DEFAULT_LR_SCALES)
-    parser.add_argument("--lr-resolution", type=float, default=_DEFAULT_LR_RESOLUTION)
-    parser.add_argument("--lr-efficiency", type=float, default=_DEFAULT_LR_EFFICIENCY)
-    parser.add_argument("--lr-fractions", type=float, default=_DEFAULT_LR_FRACTIONS)
-    parser.add_argument("--n-passes-per-step", type=int, default=2)
+    parser.add_argument(
+        "--lr-scales", type=float, default=_DEFAULT_LR_SCALES,
+        help="Relative LR ratio for the scales group (effective lr = --lr * this).",
+    )
+    parser.add_argument(
+        "--lr-resolution", type=float, default=_DEFAULT_LR_RESOLUTION,
+        help="Relative LR ratio for the resolution group (effective lr = --lr * this).",
+    )
+    parser.add_argument(
+        "--lr-efficiency", type=float, default=_DEFAULT_LR_EFFICIENCY,
+        help="Relative LR ratio for the efficiency group (effective lr = --lr * this).",
+    )
+    parser.add_argument(
+        "--lr-fractions", type=float, default=_DEFAULT_LR_FRACTIONS,
+        help="Relative LR ratio for the fractions group (effective lr = --lr * this).",
+    )
     parser.add_argument("--beta", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -234,16 +247,23 @@ def main() -> None:
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
 
-    # Pick the parameter subset to train.
+    # Pick the parameter subset to train. ``lr_for_fit`` is the value handed to
+    # fit_card_to_fullsim's ``lr`` arg: for --train-what=all it is the base
+    # magnitude (build_parameter_groups applies the per-group ratios); for a
+    # strict subset we fold in that group's ratio here so the subset steps at
+    # the same effective rate it would inside the "all" run.
     if args.train_what == "all":
         params_to_train: list[nn.Parameter] | None = None
+        lr_for_fit = args.lr
     else:
         chad_res = trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
         ecal_scale = trainee.ECal.scale_module  # type: ignore[union-attr]
         if args.train_what == "scale_only":
             params_to_train = [chad_res.scale_raw, ecal_scale.scale_raw]
+            lr_for_fit = args.lr * args.lr_scales
         else:  # resolution_only
             params_to_train = [chad_res.a_raw, chad_res.b_raw]
+            lr_for_fit = args.lr * args.lr_resolution
 
     print_msg = (
         f"Training {'all 66' if params_to_train is None else len(params_to_train)} "
@@ -258,7 +278,7 @@ def main() -> None:
         val_dataloader,
         # n_events=local_n_events,
         n_steps=args.n_steps,
-        lr=args.lr,
+        lr=lr_for_fit,
         beta=args.beta,
         log_every=max(1, args.n_steps // 10),
         parameters_to_train=params_to_train,
@@ -282,10 +302,19 @@ def main() -> None:
                     "parameters": history.get("parameters", []),
                     "n_events": args.n_events,
                     "n_steps": args.n_steps,
+                    # --lr is the global magnitude; lr_* are per-group ratios;
+                    # effective_lr[group] = lr * lr_<group> is what Adam used.
+                    "lr": args.lr,
                     "lr_scales": args.lr_scales,
                     "lr_resolution": args.lr_resolution,
                     "lr_efficiency": args.lr_efficiency,
                     "lr_fractions": args.lr_fractions,
+                    "effective_lr": {
+                        "scales": args.lr * args.lr_scales,
+                        "resolution": args.lr * args.lr_resolution,
+                        "efficiency": args.lr * args.lr_efficiency,
+                        "fractions": args.lr * args.lr_fractions,
+                    },
                     "train_what": args.train_what,
                     "world_size": world_size,
                 },
@@ -293,11 +322,6 @@ def main() -> None:
                 indent=2,
             )
         log(f"Wrote training history to {args.history_path}")
-
-    # loss_after = _averaged_loss()
-    # log(f"Averaged loss after training (6 passes): {loss_after:.4e}")
-    # rel = 100.0 * (loss_before - loss_after) / max(loss_before, 1e-30)
-    # log(f"  relative improvement: {rel:+.1f}%")
 
     # Print the learned charged-hadron scale and ECal scale for a quick
     # sanity check. On the synthetic fixture the expected target is

@@ -92,7 +92,22 @@ _FRACTION_FRAGMENTS = ("HadronFractions",)
 # Everything else on a learnable card that has an ``nn.Parameter`` is a
 # resolution coefficient (softplus-wrapped positive number).
 
-_DEFAULT_LR_SCALES: float = 5e-2
-_DEFAULT_LR_EFFICIENCY: float = 5e-2
-_DEFAULT_LR_FRACTIONS: float = 5e-2
-_DEFAULT_LR_RESOLUTION: float = 5e-3
+# Learning-rate model: a single global magnitude (``_DEFAULT_LR``) times a
+# per-group *relative ratio*. The effective Adam learning rate of a group is
+#
+#     effective_lr = lr * lr_<group>
+#
+# where ``lr`` is the global ``--lr`` and ``lr_<group>`` is the dimensionless
+# ``--lr-<group>`` ratio below. This lets the user sweep the overall step size
+# with one knob (``--lr``) while keeping the physically-motivated ratios
+# between groups fixed. The default ratios encode "resolution coefficients
+# step 10x slower than everything else" (1 : 1 : 1 : 0.1), because the
+# softplus-wrapped resolution coefficients are far more sensitive to a raw
+# Adam step than the tanh/sigmoid-wrapped scale/efficiency/fraction params
+# (see the rationale comment in ``training.py`` above ``_classify_parameter``).
+_DEFAULT_LR: float = 1e-3
+
+_DEFAULT_LR_SCALES: float = 1.0
+_DEFAULT_LR_EFFICIENCY: float = 1.0
+_DEFAULT_LR_FRACTIONS: float = 1.0
+_DEFAULT_LR_RESOLUTION: float = 0.1
