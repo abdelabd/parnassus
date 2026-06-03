@@ -253,9 +253,6 @@ def fit_card_to_fullsim(
     patience_counter = 0
     patience = 10  # Number of steps to wait for improvement before early stopping
 
-    if snapshot_parameters:
-        history["parameters"].append(_snapshot())
-
     for step in pbar:
         loss_acc = torch.zeros(
             (), dtype=torch.float64, device=device
