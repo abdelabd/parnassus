@@ -149,9 +149,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--train-what",
-        choices=("all", "scale_only", "resolution_only"),
+        choices=("all", "scales_only", "resolution_only"),
         default="all",
-        help="Which parameter subset to optimize.",
+        help=(
+            "Which parameter subset to optimize. "
+            "'all' = all 66 learnable params. "
+            "'scales_only' = chad track + ECal + HCal energy/momentum scales "
+            "(3 tensors), the exact knobs perturbed by generate_pseudodata.py. "
+            "'resolution_only' = chad track resolution a/b."
+        ),
     )
     parser.add_argument(
         "--fixture-path",
@@ -241,8 +247,10 @@ def main() -> None:
     else:
         chad_res = trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
         ecal_scale = trainee.ECal.scale_module  # type: ignore[union-attr]
-        if args.train_what == "scale_only":
-            params_to_train = [chad_res.scale_raw, ecal_scale.scale_raw]
+        if args.train_what == "scales_only":
+            # The three scale knobs perturbed by generate_pseudodata.make_target_card.
+            hcal_scale = trainee.HCal.scale_module  # type: ignore[union-attr]
+            params_to_train = [chad_res.scale_raw, ecal_scale.scale_raw, hcal_scale.scale_raw]
             lr_for_fit = args.lr * args.lr_scales
         else:  # resolution_only
             params_to_train = [chad_res.a_raw, chad_res.b_raw]
@@ -305,9 +313,8 @@ def main() -> None:
             )
         log(f"Wrote training history to {args.history_path}")
 
-    # Print the learned charged-hadron scale and ECal scale for a quick
-    # sanity check. On the synthetic fixture the expected target is
-    # chad_scale=1.2 and ecal_scale=1.1 in every region.
+    # Print the learned charged-hadron / ECal / HCal scales for a quick sanity
+    # check against the generate_pseudodata.py TARGET_*_SCALE values.
     chad_res = trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
     chad_scales = (1.0 + 0.3 * torch.tanh(chad_res.scale_raw)).detach().tolist()
     ecal_scale_vals = (
@@ -321,8 +328,20 @@ def main() -> None:
         .detach()
         .tolist()
     )
+    hcal_scale_vals = (
+        (
+            1.0
+            + 0.3
+            * torch.tanh(
+                trainee.HCal.scale_module.scale_raw  # type: ignore[union-attr]
+            )
+        )
+        .detach()
+        .tolist()
+    )
     log("")
     log(f"Final charged-hadron scale (3 eta regions): {chad_scales}")
     log(f"Final ECal scale            (3 eta regions): {ecal_scale_vals}")
+    log(f"Final HCal scale            (2 eta regions): {hcal_scale_vals}")
 
     _cleanup_distributed()
