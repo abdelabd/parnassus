@@ -243,7 +243,7 @@ def fit_card_to_fullsim(
                 f"  param group {g['name']!r}: effective lr = {g['lr']:.3e} "
                 f"({len(g['params'])} tensors)"
             )
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=2)
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4)
 
     edges = bin_edges if bin_edges is not None else DEFAULT_BIN_EDGES
     weights = observable_weights if observable_weights is not None else DEFAULT_OBS_WEIGHTS
