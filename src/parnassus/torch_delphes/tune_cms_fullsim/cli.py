@@ -284,29 +284,72 @@ def main() -> None:
 
     if args.history_path is not None and _is_main(rank):
         args.history_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Pull the index-aligned per-epoch lists returned by the fit loop.
+        steps = history["step"]
+        losses = history["loss"]
+        val_losses = history.get("val_loss", [])
+        params_list = history.get("parameters", [])
+
+        # Metadata: the run-level scalars (unchanged values, now grouped).
+        # --lr is the global magnitude; lr_* are per-group ratios;
+        # effective_lr[group] = lr * lr_<group> is what Adam used.
+        metadata = {
+            "n_events": args.n_events,
+            "n_steps": args.n_steps,
+            "lr": args.lr,
+            "lr_scales": args.lr_scales,
+            "lr_resolution": args.lr_resolution,
+            "lr_efficiency": args.lr_efficiency,
+            "lr_fractions": args.lr_fractions,
+            "effective_lr": {
+                "scales": args.lr * args.lr_scales,
+                "resolution": args.lr * args.lr_resolution,
+                "efficiency": args.lr * args.lr_efficiency,
+                "fractions": args.lr * args.lr_fractions,
+            },
+            "train_what": args.train_what,
+            "world_size": world_size,
+        }
+
+        # Per-epoch history keyed "epoch_{step}". Each step here is a full
+        # pass over the train dataloader, so "epoch" is accurate.
+        history_dict = {
+            f"epoch_{steps[i]}": {
+                "step": steps[i],
+                "train_loss": losses[i],
+                "val_loss": val_losses[i] if i < len(val_losses) else None,
+                "parameters": params_list[i] if i < len(params_list) else {},
+            }
+            for i in range(len(steps))
+        }
+
+        # Best epoch = minimum validation loss; fall back to the last epoch
+        # when no val loss was recorded.
+        if val_losses:
+            best_i = min(range(len(val_losses)), key=lambda i: val_losses[i])
+        elif steps:
+            best_i = len(steps) - 1
+        else:
+            best_i = None
+
+        if best_i is None:
+            best_result: dict = {}
+        else:
+            best_result = {
+                "epoch": f"epoch_{steps[best_i]}",
+                "step": steps[best_i],
+                "train_loss": losses[best_i],
+                "val_loss": val_losses[best_i] if best_i < len(val_losses) else None,
+                "parameters": params_list[best_i] if best_i < len(params_list) else {},
+            }
+
         with args.history_path.open("w") as f:
             json.dump(
                 {
-                    "loss": history["loss"],
-                    "step": history["step"],
-                    "parameters": history.get("parameters", []),
-                    "n_events": args.n_events,
-                    "n_steps": args.n_steps,
-                    # --lr is the global magnitude; lr_* are per-group ratios;
-                    # effective_lr[group] = lr * lr_<group> is what Adam used.
-                    "lr": args.lr,
-                    "lr_scales": args.lr_scales,
-                    "lr_resolution": args.lr_resolution,
-                    "lr_efficiency": args.lr_efficiency,
-                    "lr_fractions": args.lr_fractions,
-                    "effective_lr": {
-                        "scales": args.lr * args.lr_scales,
-                        "resolution": args.lr * args.lr_resolution,
-                        "efficiency": args.lr * args.lr_efficiency,
-                        "fractions": args.lr * args.lr_fractions,
-                    },
-                    "train_what": args.train_what,
-                    "world_size": world_size,
+                    "metadata": metadata,
+                    "history": history_dict,
+                    "best_result": best_result,
                 },
                 f,
                 indent=2,

@@ -188,7 +188,8 @@ def fit_card_to_fullsim(
     Returns
     -------
     dict[str, list]
-        ``"step"`` and ``"loss"`` always present. If
+        ``"step"``, ``"loss"`` (mean train loss) and ``"val_loss"``
+        always present, one entry per epoch and index-aligned. If
         ``snapshot_parameters`` is True, also contains
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
@@ -226,7 +227,7 @@ def fit_card_to_fullsim(
 
     edges = bin_edges if bin_edges is not None else DEFAULT_BIN_EDGES
     weights = observable_weights if observable_weights is not None else DEFAULT_OBS_WEIGHTS
-    history: dict[str, list] = {"step": [], "loss": []}
+    history: dict[str, list] = {"step": [], "loss": [], "val_loss": []}
     if snapshot_parameters:
         history["parameters"] = []
 
@@ -352,6 +353,11 @@ def fit_card_to_fullsim(
             val_loss_acc /= len(val_dataloader)
             print_val_loss = float(val_loss_acc)
             tqdm.write(f"  step {step:3d}/{n_steps}  val_loss = {print_val_loss:.4e}")
+
+        # Record the per-step val loss aligned with step/loss/parameters above
+        # (all appended before any early-stopping break, so index i refers to
+        # the same epoch across every list).
+        history["val_loss"].append(print_val_loss)
 
         # lr scheduler step
         lr_scheduler.step(val_loss_acc)

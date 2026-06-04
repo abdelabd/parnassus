@@ -80,12 +80,65 @@ plt.rcParams.update({
 })
 
 
+def _load_history(path: Path) -> dict:
+    """Load a training-history JSON and normalize it for the plot helpers.
+
+    Accepts ONLY the current nested schema written by
+    ``tune_cms_fullsim`` (``{"metadata", "history", "best_result"}``).
+    Old flat-format files (top-level ``"loss"``/``"step"``/``"parameters"``)
+    are rejected with a clear error because they lack the per-epoch
+    validation loss needed to pick the best (min-val-loss) epoch.
+
+    Returns a dict exposing the parallel-list keys the existing plot
+    helpers consume — ``"step"``, ``"loss"`` (train loss), ``"parameters"``
+    (per-epoch snapshots) — plus ``"val_loss"``, ``"metadata"`` and
+    ``"best_result"``. Epochs are returned in ascending ``step`` order.
+    """
+    with path.open() as f:
+        raw = json.load(f)
+
+    if "history" not in raw or "metadata" not in raw:
+        raise SystemExit(
+            f"{path} is in the old flat history format. Re-run training with "
+            "the updated --history-path to produce the new "
+            "{metadata, history, best_result} schema (the old format has no "
+            "per-epoch validation loss, so the best epoch cannot be selected)."
+        )
+
+    entries = sorted(raw["history"].values(), key=lambda e: e["step"])
+    return {
+        "step": [e["step"] for e in entries],
+        "loss": [e["train_loss"] for e in entries],
+        "val_loss": [e.get("val_loss") for e in entries],
+        "parameters": [e.get("parameters", {}) for e in entries],
+        "metadata": raw["metadata"],
+        "best_result": raw.get("best_result", {}),
+    }
+
+
 def plot_loss(history: dict, output_path: Path) -> None:
-    """Plot the loss trajectory on a log-y axis."""
+    """Plot the train/val loss trajectory on a log-y axis.
+
+    Marks the best (min-validation-loss) epoch with a vertical line so it
+    is visually clear why it can differ from the last epoch (early stopping
+    keeps training for ``patience`` extra steps after the best).
+    """
     steps = history["step"]
     loss = history["loss"]
+    val_loss = history.get("val_loss") or []
     fig, ax = plt.subplots(figsize=(5.5, 4.0))
     ax.semilogy(steps, loss, color="tab:blue", label="training loss")
+    if any(v is not None for v in val_loss):
+        ax.semilogy(steps, val_loss, color="tab:orange", label="validation loss")
+    best_step = history.get("best_result", {}).get("step")
+    if best_step is not None:
+        ax.axvline(
+            best_step,
+            color="tab:green",
+            linestyle="--",
+            alpha=0.6,
+            label=f"best (min val) @ step {best_step}",
+        )
     ax.set_xlabel("Adam step")
     ax.set_ylabel("soft-histogram MSE loss")
     ax.set_title("Loss trajectory")
@@ -340,8 +393,7 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    with args.history.open() as f:
-        history = json.load(f)
+    history = _load_history(args.history)
 
     print(f"Writing figures to {args.output_dir}")
 
@@ -409,8 +461,18 @@ def main() -> None:
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True)
     pred_init = _trainee_observables(trainee, truth_tensor)
 
-    # Restore the *final* parameter snapshot and re-run.
-    _set_trainee_from_snapshot(trainee, history["parameters"][-1])
+    # Restore the *best* (min-validation-loss) parameter snapshot and re-run.
+    # Early stopping keeps training past the best epoch, so the last snapshot
+    # is over-trained; best_result holds the snapshot we actually want to show.
+    best_params = history["best_result"].get("parameters") or (
+        history["parameters"][-1] if history.get("parameters") else None
+    )
+    if not best_params:
+        raise SystemExit(
+            "History has no parameter snapshots, cannot plot trainee observables. "
+            "Re-run training with --history-path (snapshots are enabled there)."
+        )
+    _set_trainee_from_snapshot(trainee, best_params)
     torch.manual_seed(args.seed)
     pred_final = _trainee_observables(trainee, truth_tensor)
 
