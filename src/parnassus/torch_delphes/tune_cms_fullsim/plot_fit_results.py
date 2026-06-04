@@ -49,14 +49,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
-from parnassus.torch_delphes.generate_pseudodata import (
-    TARGET_CHAD_EFF_BARREL_LOWPT,
-    TARGET_CHAD_RES_A_BARREL_FACTOR,
-    TARGET_CHAD_SCALE,
-    TARGET_ECAL_SCALE,
-    TARGET_HCAL_SCALE,
-    TARGET_K0S_ECAL_FRAC,
+
+# The truth reference lines on the parameter-drift plots come from the same
+# param config used to generate the sample (its physical ``value`` fields).
+_DEFAULT_PARAM_CONFIG = (
+    Path(pc.__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
 )
 
 from .data import (
@@ -389,11 +388,25 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("doc/figures"))
     parser.add_argument("--n-events-for-plots", type=int, default=400)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--param-config",
+        type=Path,
+        default=_DEFAULT_PARAM_CONFIG,
+        help=(
+            "Param config whose physical 'value' fields are drawn as the truth "
+            "reference lines on the parameter-drift plots. Use the same config "
+            "that generated the sample. Defaults to cms_target_default.yaml."
+        ),
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     history = _load_history(args.history)
+
+    # Ground-truth physical value of every scalar, keyed by the same name[i]
+    # form the history snapshots use.
+    truth = {k: spec["value"] for k, spec in pc.load_param_config(args.param_config).items()}
 
     print(f"Writing figures to {args.output_dir}")
 
@@ -402,18 +415,22 @@ def main() -> None:
     print("  wrote loss_trajectory.pdf")
 
     # ----- 2. Scale parameter drift -----
-    # The committed pseudodata has uniform targets across eta regions
-    # for the three scale types (chad pT, ECal E, HCal E).
+    # Truth values are read from the param config (per eta region).
     scale_members: dict[str, list[tuple[str, float]]] = {
         "charged-hadron pT scale": [
-            (f"ChargedHadronMomentumSmearing.resolution_module.scale_raw[{i}]", TARGET_CHAD_SCALE)
-            for i in range(3)
+            (k, truth[k])
+            for k in (
+                f"ChargedHadronMomentumSmearing.resolution_module.scale_raw[{i}]"
+                for i in range(3)
+            )
         ],
         "ECal energy scale": [
-            (f"ECal.scale_module.scale_raw[{i}]", TARGET_ECAL_SCALE) for i in range(3)
+            (f"ECal.scale_module.scale_raw[{i}]", truth[f"ECal.scale_module.scale_raw[{i}]"])
+            for i in range(3)
         ],
         "HCal energy scale": [
-            (f"HCal.scale_module.scale_raw[{i}]", TARGET_HCAL_SCALE) for i in range(2)
+            (f"HCal.scale_module.scale_raw[{i}]", truth[f"HCal.scale_module.scale_raw[{i}]"])
+            for i in range(2)
         ],
     }
     plot_param_drift(
@@ -424,24 +441,16 @@ def main() -> None:
     )
     print("  wrote param_drift_scales.pdf")
 
-    # ----- 3. Other perturbed parameters -----
-    # Default values: chad a barrel 0.06, chad barrel low-pt eff 0.70,
-    # K0S ECal fraction 0.30.
+    # ----- 3. Other representative parameters (truth from the config) -----
     other_members: dict[str, list[tuple[str, float]]] = {
         "chad res. a (barrel)": [
-            (
-                "ChargedHadronMomentumSmearing.resolution_module.a_raw[0]",
-                0.06 * TARGET_CHAD_RES_A_BARREL_FACTOR,
-            ),
+            (k := "ChargedHadronMomentumSmearing.resolution_module.a_raw[0]", truth[k]),
         ],
         "chad eff. (barrel, low-pT)": [
-            (
-                "ChargedHadronTrackingEfficiency.eff_logits[0]",
-                TARGET_CHAD_EFF_BARREL_LOWPT,
-            ),
+            (k := "ChargedHadronTrackingEfficiency.eff_logits[0]", truth[k]),
         ],
         "K0-short ECal fraction": [
-            ("HadronFractions.k0s_logit", TARGET_K0S_ECAL_FRAC),
+            (k := "HadronFractions.k0s_logit", truth[k]),
         ],
     }
     plot_param_drift(

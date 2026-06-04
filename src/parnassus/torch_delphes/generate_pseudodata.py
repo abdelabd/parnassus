@@ -26,12 +26,15 @@ Event generation
 
    - A **default** (non-learnable) card which gives us the truth
      particles themselves as the ``truth_*`` branches.
-   - A **perturbed learnable** card which plays the role of "CMS full
-     simulation" for the fitting target: its
-     charged-hadron momentum scale is set to 1.25, its ECal energy
-     scale is set to 1.20. This is exactly the ground-truth
-     perturbation that Adam should recover when we fit the trainee
-     against the ``pflow_*`` branches.
+   - A **learnable card initialized from a parameter config** which
+     plays the role of "CMS full simulation" for the fitting target.
+     The config (``--param-config``, see
+     :mod:`parnassus.torch_delphes.param_config`) sets every one of the
+     66 learnable parameters to a physical ground-truth value; the
+     shipped default perturbs the three energy/momentum scales (CHAD
+     1.25, ECal 1.20, HCal 0.90). These values are exactly what Adam
+     should recover when we fit the trainee against the ``pflow_*``
+     branches.
 
 Output schema
 -------------
@@ -79,32 +82,19 @@ import torch
 import uproot
 
 from parnassus.data.particle_io import ColumnMap, pythia_particles_to_tensor
+from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.utils import pid_to_class
 
-# Perturbations applied to the "target" (fake full-sim) card. These are the
-# numbers we want Adam to recover when we run tune_cms_fullsim against the
-# output of this script. The perturbation spans multiple *types* of
-# parameters -- scales, resolutions, efficiencies, and fractions -- so that
-# the harness is tested on a genuinely multi-knob identifiability problem
-# rather than a single trivial offset.
-TARGET_CHAD_SCALE: float = 1.25  # all 3 eta regions
-TARGET_ECAL_SCALE: float = 1.20  # all 3 eta regions
-TARGET_HCAL_SCALE: float = 0.90  # all 2 eta regions (a *downward* shift)
-
-# Multiply the charged-hadron resolution constant-term `a` in the barrel
-# region by this factor, so default 0.06 becomes 0.09 (50% worse barrel
-# tracking resolution). Gives the fit a nonzero resolution-parameter target.
-TARGET_CHAD_RES_A_BARREL_FACTOR: float = 1.5
-
-# Shift the charged-hadron tracking efficiency in the barrel low-pT bin
-# from the default 0.70 down to this value. Exercises the Gumbel-ST
-# efficiency parameter gradient.
-TARGET_CHAD_EFF_BARREL_LOWPT: float = 0.60
-
-# Shift the K0S ECal fraction from the default 0.30 to this value. The
-# fit's HadronFractions param should move toward it.
-TARGET_K0S_ECAL_FRAC: float = 0.50
+# The "target" (fake full-sim) card's parameters are taken verbatim from a
+# declarative parameter config (see parnassus.torch_delphes.param_config). The
+# shipped default sets the three energy/momentum scales to reachable
+# ground-truth values (CHAD 1.25, ECal 1.20, HCal 0.90) and leaves everything
+# else at its model default. Point --param-config at a different file to change
+# which knobs the generated sample perturbs.
+_DEFAULT_PARAM_CONFIG: Path = (
+    Path(__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
+)
 
 
 def build_pythia(pt_hat_min: float, seed: int) -> object:
@@ -139,86 +129,31 @@ def build_pythia(pt_hat_min: float, seed: int) -> object:
     return pythia
 
 
-def make_target_card(seed: int = 0) -> CMSEnergyFlowDefault:
-    """Build a learnable CMS card with a *multi-knob* perturbation.
+def make_target_card(
+    param_config: str | Path = _DEFAULT_PARAM_CONFIG,
+) -> CMSEnergyFlowDefault:
+    """Build a learnable CMS card initialized from a parameter config.
 
-    Six distinct parameter types are perturbed, giving the fitting
-    harness a non-trivial multi-knob identifiability problem:
+    Every one of the card's 66 learnable parameters is set to the physical
+    ``value`` of the matching entry in ``param_config`` (see
+    :mod:`parnassus.torch_delphes.param_config`), then the card is frozen and
+    put in eval mode. These values play the role of the ground-truth detector
+    response that the tuning harness should recover.
 
-    - ``chad`` track-pT scale: 1.0 -> :data:`TARGET_CHAD_SCALE` (all 3 eta regions)
-    - ECal energy scale:       1.0 -> :data:`TARGET_ECAL_SCALE` (all 3 regions)
-    - HCal energy scale:       1.0 -> :data:`TARGET_HCAL_SCALE` (both regions;
-      note this is a *downward* shift, testing bidirectional gradients)
-    - Chad momentum resolution barrel constant ``a``:
-      default 0.06 -> 0.06 * :data:`TARGET_CHAD_RES_A_BARREL_FACTOR`
-    - Chad tracking efficiency in the barrel low-pT bin:
-      default 0.70 -> :data:`TARGET_CHAD_EFF_BARREL_LOWPT`
-    - K0-short ECal/HCal fraction split (learnable hadron-fraction knob):
-      default 0.30/0.70 -> :data:`TARGET_K0S_ECAL_FRAC`/(1-..)
+    Parameters
+    ----------
+    param_config : str | Path
+        Path to a YAML parameter config. Defaults to the shipped
+        ``param_configs/cms_target_default.yaml``.
 
     Returns
     -------
     CMSEnergyFlowDefault
-        A frozen learnable card whose parameters match the published
-        target values.
+        A frozen learnable card whose parameters match the config values.
     """
-    torch.manual_seed(seed)
     card = CMSEnergyFlowDefault(debug=False, learnable=True)
-
-    def raw_for_scale(s: float) -> float:
-        """Inverse of the ``1 + 0.3 tanh(raw)`` scale parameterization.
-
-        Returns
-        -------
-        float
-            The raw parameter value whose post-transform is ``s``.
-        """
-        return float(np.arctanh((s - 1.0) / 0.3))
-
-    def softplus_inv(x: float) -> float:
-        """Inverse of ``softplus``, matching ``learnable._softplus_inv``.
-
-        Returns
-        -------
-        float
-            Raw scalar ``y`` satisfying ``softplus(y) == max(x, 1e-12)``.
-        """
-        return float(np.log(np.expm1(max(x, 1e-12))))
-
-    def logit(p: float) -> float:
-        """Logit of a probability, clipped away from the open interval ends.
-
-        Returns
-        -------
-        float
-            ``log(p_clipped / (1 - p_clipped))`` with
-            ``p_clipped = clip(p, 1e-6, 1 - 1e-6)``.
-        """
-        p = min(max(p, 1e-6), 1.0 - 1e-6)
-        return float(np.log(p / (1.0 - p)))
-
-    with torch.no_grad():
-        # --- Scales ---
-        chad_res = card.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
-        chad_res.scale_raw.fill_(raw_for_scale(TARGET_CHAD_SCALE))
-
-        ecal_scale = card.ECal.scale_module  # type: ignore[union-attr]
-        ecal_scale.scale_raw.fill_(raw_for_scale(TARGET_ECAL_SCALE))
-
-        hcal_scale = card.HCal.scale_module  # type: ignore[union-attr]
-        hcal_scale.scale_raw.fill_(raw_for_scale(TARGET_HCAL_SCALE))
-
-        # --- Resolution: barrel ``a`` for charged hadrons ---
-        # a[0] (barrel) default is 0.06; lift it via softplus_inv.
-        chad_res.a_raw[0] = softplus_inv(0.06 * TARGET_CHAD_RES_A_BARREL_FACTOR)
-
-        # --- Efficiency: charged-hadron barrel low-pt logit ---
-        chad_eff = card.ChargedHadronTrackingEfficiency  # type: ignore[union-attr]
-        chad_eff.eff_logits[0] = logit(TARGET_CHAD_EFF_BARREL_LOWPT)
-
-        # --- Hadron fraction: K0-short ECal split ---
-        card.HadronFractions.k0s_logit.fill_(logit(TARGET_K0S_ECAL_FRAC))  # type: ignore[union-attr]
-
+    cfg = pc.load_param_config(param_config)
+    pc.apply_param_config(card, cfg)
     for p in card.parameters():
         p.requires_grad_(False)
     card.eval()
@@ -408,6 +343,7 @@ def generate(
     batch_size: int = 200,
     max_events: int = 100_000,
     seed: int = 1,
+    param_config: str | Path = _DEFAULT_PARAM_CONFIG,
 ) -> int:
     """Generate the pseudodataset and write it to ``output_path``.
 
@@ -419,7 +355,7 @@ def generate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     pythia = build_pythia(pt_hat_min=pt_hat_min, seed=seed)
-    target_card = make_target_card(seed=seed)
+    target_card = make_target_card(param_config=param_config)
 
     accumulated: dict[str, list[np.ndarray]] = {
         b: []
@@ -472,11 +408,22 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--max-events", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--param-config",
+        type=Path,
+        default=_DEFAULT_PARAM_CONFIG,
+        help=(
+            "Path to a YAML parameter config whose physical 'value' fields define "
+            "the ground-truth detector response written into the pflow_* branches. "
+            "Defaults to the shipped param_configs/cms_target_default.yaml."
+        ),
+    )
     args = parser.parse_args()
 
     print(
         f"Generating pseudodata -> {args.output}\n"
-        f"  pTHatMin={args.pt_hat_min}  target={args.target_size_mb} MB  seed={args.seed}"
+        f"  pTHatMin={args.pt_hat_min}  target={args.target_size_mb} MB  seed={args.seed}\n"
+        f"  param-config={args.param_config}"
     )
     n = generate(
         args.output,
@@ -485,6 +432,7 @@ def main() -> None:
         batch_size=args.batch_size,
         max_events=args.max_events,
         seed=args.seed,
+        param_config=args.param_config,
     )
     size_mb = args.output.stat().st_size / (1024 * 1024)
     print(f"Wrote {n} events, {size_mb:.2f} MB, to {args.output}")

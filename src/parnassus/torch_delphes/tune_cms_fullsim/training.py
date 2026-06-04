@@ -21,6 +21,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+from parnassus.torch_delphes.param_config import to_physical
 
 from .config import (
     DEFAULT_BIN_EDGES,
@@ -147,6 +148,7 @@ def fit_card_to_fullsim(
     beta: float = 0.15,
     log_every: int = 10,
     parameters_to_train: list[nn.Parameter] | None = None,
+    param_groups: list[dict] | None = None,
     bin_edges: dict[str, torch.Tensor] | None = None,
     observable_weights: dict[str, float] | None = None,
     lr_scales: float = _DEFAULT_LR_SCALES,
@@ -209,8 +211,12 @@ def fit_card_to_fullsim(
         plotting of the per-parameter trajectory.
     """
     base_lr = lr if lr is not None else _DEFAULT_LR
-    if parameters_to_train is not None:
-        param_groups: list[dict] = [
+    if param_groups is not None:
+        # Caller supplied ready-made Adam groups (e.g. cli builds them from the
+        # per-parameter lr_scale in a param config). Use them verbatim.
+        pass
+    elif parameters_to_train is not None:
+        param_groups = [
             {
                 "params": list(parameters_to_train),
                 "lr": base_lr,
@@ -301,17 +307,9 @@ def fit_card_to_fullsim(
         """
         snap: dict[str, float] = {}
         for name, p in underlying_for_snap.named_parameters():
-            if name.endswith(".scale_raw"):
-                val = 1.0 + 0.3 * torch.tanh(p)
-            elif name.endswith((".eff_logits", "_logit")):
-                val = torch.sigmoid(p)
-            elif name.endswith((".rate_raw", ".a_raw", ".b_raw")) or name.startswith((
-                "ECal.resolution_func",
-                "HCal.resolution_func",
-            )):
-                val = torch.nn.functional.softplus(p)
-            else:
-                val = p
+            # Shared with param_config so snapshots, configs and plots all use
+            # the same interpretable (post-transform) values.
+            val = to_physical(name, p)
             vflat = val.detach().flatten().tolist() if val.ndim else [float(val.detach())]
             for i, vv in enumerate(vflat):
                 snap[f"{name}[{i}]" if val.ndim else name] = float(vv)

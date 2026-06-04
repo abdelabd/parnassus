@@ -17,6 +17,7 @@ import torch
 import uproot
 
 from parnassus.data.particle_io import N_FEATURES, ColumnMap
+from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.utils import class_to_pid_vectorized
 
@@ -119,11 +120,20 @@ def write_synthetic_fixture(
     torch.manual_seed(seed)
     target_card = CMSEnergyFlowDefault(debug=False, learnable=True)
     with torch.no_grad():
+        # Range-guarded scale -> raw via the shared param_config transform.
         chad_res = target_card.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
-        # scale = 1 + 0.3*tanh(raw) -> raw = atanh((s-1)/0.3)
-        chad_res.scale_raw.fill_(float(np.arctanh((1.25 - 1.0) / 0.3)))
+        chad_name = "ChargedHadronMomentumSmearing.resolution_module.scale_raw"
+        chad_res.scale_raw.copy_(
+            pc.to_raw(chad_name, [1.25] * chad_res.scale_raw.numel()).reshape(
+                chad_res.scale_raw.shape
+            )
+        )
         ecal_scale = target_card.ECal.scale_module  # type: ignore[union-attr]
-        ecal_scale.scale_raw.fill_(float(np.arctanh((1.20 - 1.0) / 0.3)))
+        ecal_scale.scale_raw.copy_(
+            pc.to_raw("ECal.scale_module.scale_raw", [1.20] * ecal_scale.scale_raw.numel()).reshape(
+                ecal_scale.scale_raw.shape
+            )
+        )
     for p in target_card.parameters():
         p.requires_grad_(False)
     target_card.eval()

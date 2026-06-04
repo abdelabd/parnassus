@@ -57,19 +57,11 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from torch import nn
 
+from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
-from .config import (
-    DEFAULT_BIN_EDGES,
-    DEFAULT_OBS_WEIGHTS,
-    _DEFAULT_LR,
-    _DEFAULT_LR_EFFICIENCY,
-    _DEFAULT_LR_FRACTIONS,
-    _DEFAULT_LR_RESOLUTION,
-    _DEFAULT_LR_SCALES,
-)
+from .config import DEFAULT_BIN_EDGES, _DEFAULT_LR
 from .data import (
     load_cms_flow_root, load_truth_events, load_pflow_targets, split_truth_objects, split_pflow_targets,
 )    
@@ -112,28 +104,24 @@ def main() -> None:
         type=float,
         default=_DEFAULT_LR,
         help=(
-            "Global learning-rate magnitude. Each parameter group's effective "
-            "Adam learning rate is --lr times its --lr-<group> ratio, so this "
-            "is the single knob for sweeping the overall step size. For a "
-            "strict --train-what subset it is multiplied by that subset's "
-            "ratio (--lr-scales or --lr-resolution)."
+            "Global learning-rate magnitude. Each parameter's effective Adam "
+            "learning rate is --lr times its per-parameter 'lr_scale' from the "
+            "--param-config file, so this is the single knob for sweeping the "
+            "overall step size."
         ),
     )
     parser.add_argument(
-        "--lr-scales", type=float, default=_DEFAULT_LR_SCALES,
-        help="Relative LR ratio for the scales group (effective lr = --lr * this).",
-    )
-    parser.add_argument(
-        "--lr-resolution", type=float, default=_DEFAULT_LR_RESOLUTION,
-        help="Relative LR ratio for the resolution group (effective lr = --lr * this).",
-    )
-    parser.add_argument(
-        "--lr-efficiency", type=float, default=_DEFAULT_LR_EFFICIENCY,
-        help="Relative LR ratio for the efficiency group (effective lr = --lr * this).",
-    )
-    parser.add_argument(
-        "--lr-fractions", type=float, default=_DEFAULT_LR_FRACTIONS,
-        help="Relative LR ratio for the fractions group (effective lr = --lr * this).",
+        "--param-config",
+        type=Path,
+        required=True,
+        help=(
+            "Path to a YAML parameter config (see "
+            "parnassus.torch_delphes.param_config). Its 'value' fields "
+            "initialize every learnable parameter, 'trainable' selects the "
+            "optimized subset (per-element), and 'lr_scale' sets each "
+            "parameter's effective Adam lr = --lr * lr_scale. Shipped configs "
+            "live under parnassus/torch_delphes/param_configs/."
+        ),
     )
     parser.add_argument("--beta", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
@@ -145,18 +133,6 @@ def main() -> None:
             "If set, write the full training history (loss trajectory and "
             "per-step parameter snapshots) to this path as JSON. Used by "
             "the plotting scripts and by the JINST-paper figures."
-        ),
-    )
-    parser.add_argument(
-        "--train-what",
-        choices=("all", "scales_only", "resolution_only"),
-        default="all",
-        help=(
-            "Which parameter subset to optimize. "
-            "'all' = all 66 learnable params. "
-            "'scales_only' = chad track + ECal + HCal energy/momentum scales "
-            "(3 tensors), the exact knobs perturbed by generate_pseudodata.py. "
-            "'resolution_only' = chad track resolution a/b."
         ),
     )
     parser.add_argument(
@@ -259,47 +235,37 @@ def main() -> None:
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
 
-    # Pick the parameter subset to train. ``lr_for_fit`` is the value handed to
-    # fit_card_to_fullsim's ``lr`` arg: for --train-what=all it is the base
-    # magnitude (build_parameter_groups applies the per-group ratios); for a
-    # strict subset we fold in that group's ratio here so the subset steps at
-    # the same effective rate it would inside the "all" run.
-    if args.train_what == "all":
-        params_to_train: list[nn.Parameter] | None = None
-        lr_for_fit = args.lr
-    else:
-        chad_res = trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
-        ecal_scale = trainee.ECal.scale_module  # type: ignore[union-attr]
-        if args.train_what == "scales_only":
-            # The three scale knobs perturbed by generate_pseudodata.make_target_card.
-            hcal_scale = trainee.HCal.scale_module  # type: ignore[union-attr]
-            params_to_train = [chad_res.scale_raw, ecal_scale.scale_raw, hcal_scale.scale_raw]
-            lr_for_fit = args.lr * args.lr_scales
-        else:  # resolution_only
-            params_to_train = [chad_res.a_raw, chad_res.b_raw]
-            lr_for_fit = args.lr * args.lr_resolution
+    # The param config drives everything: ``value`` initializes every learnable
+    # parameter, ``trainable`` selects the optimized subset (per element, with a
+    # gradient mask for partially-trainable tensors), and ``lr_scale`` sets each
+    # parameter's effective Adam lr = ``args.lr * lr_scale`` (used to build the
+    # optimizer's parameter groups).
+    param_cfg = pc.load_param_config(args.param_config)
+    pc.apply_param_config(trainee, param_cfg)
+    params_to_train, param_groups = pc.select_trainable(trainee, param_cfg, global_lr=args.lr)
+    if not params_to_train:
+        raise SystemExit(
+            f"--param-config {args.param_config} marks no parameter as trainable; "
+            "nothing to optimize."
+        )
 
-    print_msg = (
-        f"Training {'all 66' if params_to_train is None else len(params_to_train)} "
-        f"learnable params for {args.n_steps} Adam steps..."
+    n_trainable_scalars = sum(1 for spec in param_cfg.values() if spec["trainable"])
+    log(
+        f"Training {n_trainable_scalars} scalar(s) across {len(params_to_train)} "
+        f"tensor(s) from {args.param_config} for {args.n_steps} Adam steps..."
     )
-    log(print_msg)
-
 
     history = fit_card_to_fullsim(
         trainee,
         train_dataloader,
         val_dataloader,
         n_steps=args.n_steps,
-        lr=lr_for_fit,
+        lr=args.lr,
         beta=args.beta,
         log_every=max(1, args.n_steps // 10),
         parameters_to_train=params_to_train,
+        param_groups=param_groups,
         bin_edges=bin_edges,
-        lr_scales=args.lr_scales,
-        lr_resolution=args.lr_resolution,
-        lr_efficiency=args.lr_efficiency,
-        lr_fractions=args.lr_fractions,
         snapshot_parameters=args.history_path is not None,
         rank=rank,
         device=device,
@@ -316,24 +282,16 @@ def main() -> None:
         val_losses = history.get("val_loss", [])
         params_list = history.get("parameters", [])
 
-        # Metadata: the run-level scalars (unchanged values, now grouped).
-        # --lr is the global magnitude; lr_* are per-group ratios;
-        # effective_lr[group] = lr * lr_<group> is what Adam used.
+        # Metadata: the run-level scalars. --lr is the global magnitude; each
+        # parameter's effective Adam lr is --lr * its config lr_scale, recorded
+        # as the distinct optimizer-group lrs that were actually used.
         metadata = {
             "n_events": args.n_events,
             "n_steps": args.n_steps,
             "lr": args.lr,
-            "lr_scales": args.lr_scales,
-            "lr_resolution": args.lr_resolution,
-            "lr_efficiency": args.lr_efficiency,
-            "lr_fractions": args.lr_fractions,
-            "effective_lr": {
-                "scales": args.lr * args.lr_scales,
-                "resolution": args.lr * args.lr_resolution,
-                "efficiency": args.lr * args.lr_efficiency,
-                "fractions": args.lr * args.lr_fractions,
-            },
-            "train_what": args.train_what,
+            "param_config": str(args.param_config),
+            "param_group_lrs": sorted({g["lr"] for g in param_groups}),
+            "trainable_params": sorted(k for k, spec in param_cfg.items() if spec["trainable"]),
             "world_size": world_size,
         }
 
