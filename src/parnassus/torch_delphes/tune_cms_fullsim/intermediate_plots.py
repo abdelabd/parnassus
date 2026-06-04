@@ -37,22 +37,25 @@ import torch
 from .loss import histogram_mse_loss
 from .plot_fit_results import _density_histogram
 
-# Order of pages in the per-epoch PDF: the four loss-active particle-level
-# observables first, then the two per-event scalars (weight 0 by default).
-_PANEL_ORDER: tuple[str, ...] = ("pt", "eta", "E", "log_pt", "ht", "multiplicity")
+# Order of pages in the per-epoch PDF: the particle-level observables first,
+# then the per-event scalars. Keys missing from a run's obs dict are skipped.
+_PANEL_ORDER: tuple[str, ...] = (
+    "pt", "eta", "log_pt", "log_E", "ht", "log_ht", "multiplicity"
+)
 
 # Axis labels (the pt/eta/ht/multiplicity ones mirror plot_fit_results.main).
 _XLABELS: dict[str, str] = {
     "pt": r"PF object $p_\mathrm{T}$ [GeV]",
     "eta": r"PF object $\eta$",
-    "E": r"PF object $E$ [GeV]",
     "log_pt": r"PF object $\log\,p_\mathrm{T}$",
+    "log_E": r"PF object $\log\,E$ [GeV]",
     "ht": r"PF scalar $H_\mathrm{T}$ [GeV]",
+    "log_ht": r"PF scalar $\log\,H_\mathrm{T}$",
     "multiplicity": r"PF objects per event",
 }
 
 # Observables drawn on a log-y scale (wide dynamic range / steep tails).
-_LOG_Y: frozenset[str] = frozenset({"pt", "E"})
+_LOG_Y: frozenset[str] = frozenset({"pt"})
 
 
 def save_intermediate_observable_plots(

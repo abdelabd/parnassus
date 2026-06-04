@@ -253,14 +253,23 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
     log_pt_pad = np.zeros_like(pt_pad)
     log_pt_pad[mask] = np.log(np.maximum(pt_pad[mask], log_pt_floor))
 
+    # log(E) only where valid; padded slots are left at 0 and excluded by the mask.
+    log_E_pad = np.zeros_like(e_pad)
+    log_E_pad[mask] = np.log(np.maximum(e_pad[mask], 1e-6))
+
+    # log(HT); floor guards log(0) on the rare empty event (mirrors log_E).
+    per_event_log_ht = np.log(np.maximum(per_event_ht, 1e-6))
+
     return {
         "pt": torch.from_numpy(pt_pad),
         "eta": torch.from_numpy(eta_pad),
         # "phi": torch.from_numpy(phi_pad),
-        "E": torch.from_numpy(e_pad),
+        # "E": torch.from_numpy(e_pad),
         "log_pt": torch.from_numpy(log_pt_pad),
+        "log_E": torch.from_numpy(log_E_pad),
         "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
+        "log_ht": torch.from_numpy(per_event_log_ht),
     }
 
 
@@ -287,9 +296,9 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
     Returns
     -------
     dict[str, torch.Tensor]
-        ``"pt"``, ``"eta"``, ``"E"``, ``"log_pt"`` of shape
+        ``"pt"``, ``"eta"``, ``"log_pt"``, ``"log_E"`` of shape
         ``(n_events, max_n_objects)`` (zero on invalid slots), and
-        ``"multiplicity"``, ``"ht"`` of shape ``(n_events,)``.
+        ``"multiplicity"``, ``"ht"``, ``"log_ht"`` of shape ``(n_events,)``.
     """
     pt = arrays[..., ColumnMap.PT]  # (n_events, max_n_objects)
     eta = arrays[..., ColumnMap.ETA]
@@ -325,20 +334,33 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
     pt_safe = torch.where(valid, pt, torch.ones_like(pt))  # 1.0 on invalid slots
     log_pt = torch.where(valid, torch.log(pt_safe), torch.zeros_like(pt))
 
+    # Same gradient-safety as log_pt: e was zeroed on invalid slots above, so a
+    # plain torch.where(valid, log(e), 0) would backprop log(0)'s -inf derivative
+    # through the masked branch (0 * inf = NaN). Clamp the log argument to 1.0 on
+    # invalid slots before taking the log.
+    e_safe = torch.where(valid, e, torch.ones_like(e))  # 1.0 on invalid slots
+    log_E = torch.where(valid, torch.log(e_safe), torch.zeros_like(e))
+
     pt_out = torch.where(valid, pt, torch.zeros_like(pt))
     eta_out = torch.where(valid, eta, torch.zeros_like(eta))
 
     valid_f = valid.to(pt.dtype)
     multiplicity = valid_f.sum(dim=1)  # (n_events,) -- a count (no gradient)
     ht = (pt * valid_f).sum(dim=1)  # (n_events,) -- differentiable
+    # log(HT): clamp keeps the forward value positive so 1/value stays finite
+    # in the backward (and the clamp grad is 0 below the floor) -- no NaN on the
+    # rare empty event. Floor matches the target side.
+    log_ht = torch.log(torch.clamp(ht, min=1e-6))
 
     return {
         "pt": pt_out,
         "eta": eta_out,
-        "E": e,
+        "log_E": log_E,
+        # "E": e,
         "log_pt": log_pt,
         "multiplicity": multiplicity,
         "ht": ht,
+        "log_ht": log_ht,
     }
 
 

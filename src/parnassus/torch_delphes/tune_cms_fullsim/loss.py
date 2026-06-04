@@ -123,13 +123,13 @@ def multi_observable_loss(
 ) -> torch.Tensor:
     """Sum of per-observable soft-histogram MSE losses, optionally weighted.
 
-    Per-particle observables (``pt``, ``eta``, ``E``, ``log_pt``) arrive as 2-D
-    ``(n_events, max_n_particles)`` padded tensors; they are flattened to 1-D
+    Per-particle observables (``pt``, ``eta``, ``log_pt``, ``log_E``) arrive as
+    2-D ``(n_events, max_n_particles)`` padded tensors; they are flattened to 1-D
     and stripped of padding / efficiency-ghost slots before histogramming. The
     validity mask is derived from the *same side's* ``pt`` key, because
     ``eta == 0`` and ``log_pt == log(1) == 0`` are valid real values and cannot
     be detected per-observable. Per-event observables (``multiplicity``,
-    ``ht``) are already 1-D and pass through unchanged. ``pred`` and ``target``
+    ``ht``, ``log_ht``) are already 1-D and pass through unchanged. ``pred`` and ``target``
     may have different ``max_n_particles``; each side is flattened and masked
     independently and ``histogram_mse_loss`` normalizes to a density, so
     unequal counts are handled correctly.
@@ -154,8 +154,9 @@ def multi_observable_loss(
     total = torch.zeros((), dtype=any_edges.dtype, device=any_edges.device)
 
     # The weights dict drives the active observable set: DEFAULT_OBS_WEIGHTS lists
-    # only pt/eta/E/log_pt (multiplicity/ht are intentionally commented out), so
-    # iterating its keys keeps them out instead of defaulting them to weight 1.0.
+    # the active observables (e.g. eta/log_pt/log_E/log_ht; linear pt/ht are kept
+    # at weight 0), so iterating its keys honors those weights -- including the
+    # weight-0 ones -- instead of defaulting every bin_edges key to weight 1.0.
     active_keys = weights.keys() if weights else bin_edges.keys()
     for key in active_keys:
         if key not in bin_edges or key not in pred or key not in target:

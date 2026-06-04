@@ -530,6 +530,18 @@ def main() -> None:
     )
     print("  wrote observable_ht.pdf")
 
+    # log(HT) -- the per-event scalar actually in the loss. Keep these edges in
+    # sync with DEFAULT_BIN_EDGES["log_ht"] in config.py.
+    plot_observable(
+        _obs_values(target, "log_ht"),
+        _obs_values(pred_init, "log_ht"),
+        _obs_values(pred_final, "log_ht"),
+        edges=np.linspace(4.5, 7.5, 51),
+        xlabel=r"PF scalar $\log\,H_\mathrm{T}$",
+        output_path=args.output_dir / "observable_log_ht.pdf",
+    )
+    print("  wrote observable_log_ht.pdf")
+
     plot_observable(
         _obs_values(target, "multiplicity"),
         _obs_values(pred_init, "multiplicity"),
