@@ -133,15 +133,34 @@ def test_select_trainable_rejects_mixed_lr_scale(tmp_path: Path) -> None:
     "name", ["cms_target_default.yaml", "debug_train_chad_scale_barrel.yaml"]
 )
 def test_shipped_configs_load_and_apply(name: str) -> None:
-    """The shipped configs cover the card exactly and apply cleanly."""
+    """The shipped configs cover the card exactly, apply, and select cleanly.
+
+    Asserted at the *mechanism* level (apply reproduces every config value;
+    select_trainable returns exactly the tensors with a trainable element), so
+    the test is robust to editing which parameter a debug config trains.
+    """
     flat = pc.load_param_config(_PARAM_CONFIG_DIR / name)
     card = _fresh_card()
     pc.apply_param_config(card, flat)  # raises if coverage/shape/range is wrong
+
+    def keys_for(pname: str, p: torch.Tensor) -> list[str]:
+        return [pname] if p.ndim == 0 else [f"{pname}[{i}]" for i in range(p.numel())]
+
+    # apply set every scalar to its config physical value.
+    for pname, p in card.named_parameters():
+        phys = pc.to_physical(pname, p.detach()).flatten().tolist()
+        for key, v in zip(keys_for(pname, p), phys):
+            assert v == pytest.approx(flat[key]["value"], abs=1e-6)
+
+    # select_trainable returns exactly the tensors with >=1 trainable element.
     params, groups = pc.select_trainable(card, flat, global_lr=0.05)
-    if name == "debug_train_chad_scale_barrel.yaml":
-        chad = dict(card.named_parameters())[_CHAD_SCALE]
-        assert params == [chad]
-        # Barrel starts off-truth at 1.0; the pinned siblings are at 1.25.
-        scales = pc.to_physical(_CHAD_SCALE, chad.detach()).tolist()
-        assert scales[0] == pytest.approx(1.0, abs=1e-9)
-        assert scales[1] == pytest.approx(1.25, abs=1e-9)
+    param_ids = {id(p) for p in params}
+    expected = {
+        pname
+        for pname, p in card.named_parameters()
+        if any(flat[k]["trainable"] for k in keys_for(pname, p))
+    }
+    got = {pname for pname, p in card.named_parameters() if id(p) in param_ids}
+    assert got == expected
+    if expected:
+        assert groups  # at least one optimizer group when something trains
