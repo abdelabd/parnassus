@@ -76,7 +76,6 @@ from .distributed import (
     _is_main,
 )
 from .fixture import write_synthetic_fixture
-from .loss import multi_observable_loss_distributed
 from .training import fit_card_to_fullsim
 
 # =============================================================================

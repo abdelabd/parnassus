@@ -29,7 +29,7 @@ from .data import (
     load_cms_flow_root,
 )
 from .fixture import write_synthetic_fixture
-from .loss import multi_observable_loss, multi_observable_loss_distributed
+from .loss import multi_observable_loss
 from .training import build_parameter_groups, fit_card_to_fullsim
 
 __all__ = [
@@ -42,7 +42,6 @@ __all__ = [
     "load_cms_flow_root",
     "main",
     "multi_observable_loss",
-    "multi_observable_loss_distributed",
     "pflow_target_observables",
     "trainee_observables",
     "truth_to_particle_tensor",

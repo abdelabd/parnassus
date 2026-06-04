@@ -139,7 +139,7 @@ def plot_loss(history: dict, output_path: Path) -> None:
             label=f"best (min val) @ step {best_step}",
         )
     ax.set_xlabel("Adam step")
-    ax.set_ylabel("soft-histogram MSE loss")
+    ax.set_ylabel("loss")
     ax.set_title("Loss trajectory")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(loc="upper right")

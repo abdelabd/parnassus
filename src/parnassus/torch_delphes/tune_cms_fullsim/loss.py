@@ -1,4 +1,4 @@
-"""Differentiable soft-histogram losses for ``tune_cms_fullsim``.
+"""Differentiable distribution-matching losses for ``tune_cms_fullsim``.
 
 This module is the package's self-contained loss layer:
 
@@ -7,18 +7,21 @@ This module is the package's self-contained loss layer:
   same-named functions in :mod:`parnassus.torch_delphes.tuning` so that this
   package does not depend on ``tuning`` at all. (The ``tuning`` module keeps
   its own copies for its standalone demo / tests; keep the two in sync if you
-  ever change the soft-histogram math.)
-- :func:`multi_observable_loss` sums the per-observable histogram MSEs.
-- :func:`multi_observable_loss_distributed` is the DDP-aware version that
-  all-reduces the histograms across ranks; it falls back to
-  :func:`multi_observable_loss` when no process group is initialized.
+  ever change the soft-histogram math.) They are kept here as reference
+  primitives; the active loss path now uses the Wasserstein distance below.
+- :func:`wasserstein_1d_loss` is the exact 1-D Wasserstein (Earth-Mover)
+  distance between two empirical distributions, implemented in pure torch so
+  it stays fully differentiable w.r.t. the predicted sample positions and adds
+  no external optimal-transport dependency.
+- :func:`multi_observable_loss` sums the per-observable Wasserstein distances,
+  each normalized by its target spread so the terms are comparable.
+- :func:`multi_observable_loss_distributed` is the DDP-aware version; it falls
+  back to :func:`multi_observable_loss` when no process group is initialized.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
-from torch.distributed.nn.functional import all_reduce as diff_all_reduce
 
 from .distributed import _is_dist
 
@@ -110,6 +113,88 @@ def histogram_mse_loss(
 
 
 # =============================================================================
+# Exact 1-D Wasserstein (Earth-Mover) loss
+# =============================================================================
+
+
+def wasserstein_1d_loss(
+    pred_values: torch.Tensor,  # shape (n_object_0,)
+    target_values: torch.Tensor,  # shape (n_object_1,)
+    p: int = 1,
+) -> torch.Tensor:
+    r"""Exact 1-D :math:`p`-Wasserstein distance between two empirical distributions.
+
+    For two univariate empirical distributions with *uniform* sample weights,
+    the :math:`p`-Wasserstein distance has the closed form
+
+    .. math::
+
+        W_p^p = \int_0^1 \bigl| F_\text{pred}^{-1}(q) - F_\text{tgt}^{-1}(q) \bigr|^p \, dq,
+
+    i.e. the integral of the gap between the two inverse CDFs (quantile
+    functions). It is evaluated exactly here by sorting each side, taking the
+    union of the two empirical-CDF breakpoints, and summing the per-segment
+    contribution. Unlike a histogram MSE, the gradient w.r.t. ``pred_values``
+    does not vanish when the two distributions barely overlap, which gives Adam
+    a useful signal early in a fit.
+
+    This is implemented in pure torch (no ``ot``/POT dependency): gradients flow
+    to ``pred_values`` through the ``sort`` and the inverse-CDF gather, while
+    ``target_values`` is detached so only the trainee is updated. The two clouds
+    may have different sizes (``n_object_0 != n_object_1``); "sliced" random
+    projections are unnecessary in 1-D.
+
+    Parameters
+    ----------
+    pred_values : torch.Tensor
+        1-D tensor of predicted observable values, shape ``(n_object_0,)``.
+        Carries gradients back to the learnable detector parameters.
+    target_values : torch.Tensor
+        1-D tensor of target observable values, shape ``(n_object_1,)``.
+        Detached internally.
+    p : int
+        Order of the Wasserstein distance. ``p = 1`` is the Earth-Mover
+        distance (robust to long tails); ``p = 2`` penalizes large quantile
+        gaps more strongly.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar :math:`W_p^p` (``== W_1`` for the default ``p = 1``), on
+        ``pred_values``' device and dtype.
+    """
+    pred = pred_values.reshape(-1)
+    tgt = target_values.detach().reshape(-1).to(device=pred.device, dtype=pred.dtype)
+
+    u, _ = torch.sort(pred)
+    v, _ = torch.sort(tgt)
+    n, m = u.numel(), v.numel()
+
+    # Empirical-CDF levels: F jumps to k/N at the k-th smallest sample.
+    u_cw = torch.arange(1, n + 1, device=u.device, dtype=u.dtype) / n
+    v_cw = torch.arange(1, m + 1, device=v.device, dtype=v.dtype) / m
+
+    # The union of both sets of CDF levels partitions the quantile axis [0, 1]
+    # into segments on which both inverse CDFs are constant.
+    qs, _ = torch.sort(torch.cat([u_cw, v_cw]))
+
+    # Inverse CDF at each breakpoint: F^{-1}(q) = smallest sample whose CDF >= q,
+    # i.e. searchsorted(cw, q, right=False). The clamp guards q == 1.0 (and any
+    # float round-off) from indexing past the last sample. This is a plain gather
+    # into the sorted values, so its gradient flows to pred (via `u`).
+    u_q = u[torch.searchsorted(u_cw, qs).clamp(max=n - 1)]
+    v_q = v[torch.searchsorted(v_cw, qs).clamp(max=m - 1)]
+
+    # Segment widths in quantile space (depend only on the uniform weights, so
+    # they are constants and carry no gradient).
+    qs0 = torch.cat([qs.new_zeros(1), qs])
+    delta = qs0[1:] - qs0[:-1]
+
+    diff = (u_q - v_q).abs()
+    return (delta * diff.pow(p)).sum()
+
+
+# =============================================================================
 # Multi-observable losses
 # =============================================================================
 
@@ -118,21 +203,34 @@ def multi_observable_loss(
     pred: dict[str, torch.Tensor],
     target: dict[str, torch.Tensor],
     bin_edges: dict[str, torch.Tensor],
-    beta: float = 0.15,
     weights: dict[str, float] | None = None,
+    p: int = 1,
+    eps: float = 1e-8,
 ) -> torch.Tensor:
-    """Sum of per-observable soft-histogram MSE losses, optionally weighted.
+    """Weighted sum of per-observable 1-D Wasserstein distances.
 
     Per-particle observables (``pt``, ``eta``, ``log_pt``, ``log_E``) arrive as
     2-D ``(n_events, max_n_particles)`` padded tensors; they are flattened to 1-D
-    and stripped of padding / efficiency-ghost slots before histogramming. The
+    and stripped of padding / efficiency-ghost slots before the distance. The
     validity mask is derived from the *same side's* ``pt`` key, because
     ``eta == 0`` and ``log_pt == log(1) == 0`` are valid real values and cannot
     be detected per-observable. Per-event observables (``multiplicity``,
     ``ht``, ``log_ht``) are already 1-D and pass through unchanged. ``pred`` and ``target``
     may have different ``max_n_particles``; each side is flattened and masked
-    independently and ``histogram_mse_loss`` normalizes to a density, so
-    unequal counts are handled correctly.
+    independently and :func:`wasserstein_1d_loss` accepts unequal counts, so
+    differing sizes are handled correctly.
+
+    A Wasserstein distance is in the *units of its observable*, so the raw
+    per-observable distances are not comparable (e.g. ``multiplicity`` spans
+    0-400 while ``eta`` spans ~+-5). Each term is therefore divided by the
+    detached target spread ``std(target)**p`` to make it dimensionless and
+    O(1), which keeps the per-observable ``weights`` -- tuned against the old
+    unit-free histogram MSE -- meaningful.
+
+    ``bin_edges`` is no longer used to histogram; it is retained only to anchor
+    the accumulator's dtype/device and (when ``weights`` is None) to enumerate
+    the observable set. ``beta`` is unused on this Wasserstein path and kept only
+    for call-signature compatibility with the soft-histogram primitives.
 
     Returns
     -------
@@ -166,37 +264,8 @@ def multi_observable_loss(
         if pred_vals.numel() == 0 or tgt_vals.numel() == 0:
             continue
         w = weights[key] if weights else 1.0
-        total = total + w * histogram_mse_loss(pred_vals, tgt_vals, bin_edges[key], beta=beta)
+        # Normalize by the target spread (detached, so the scale carries no
+        # gradient) raised to p, so W_p**p / std**p is dimensionless for any p.
+        scale = tgt_vals.detach().std(unbiased=False).clamp(min=eps)
+        total = total + w * wasserstein_1d_loss(pred_vals, tgt_vals, p=p) / scale.pow(p)
     return total
-
-
-def multi_observable_loss_distributed(
-    pred: dict[str, torch.Tensor],
-    target: dict[str, torch.Tensor],
-    bin_edges: dict[str, torch.Tensor],
-    beta: float = 0.15,
-    weights: dict[str, float] | None = None,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """DDP-aware multi-observable soft-histogram MSE loss.
-
-    Each rank computes its local *unnormalized* soft histogram for both
-    pred and target. We then all-reduce-SUM both histograms across ranks
-    (differentiably for the pred side, via
-    ``torch.distributed.nn.functional.all_reduce``), normalize, and
-    compute the MSE. The result is mathematically identical to running
-    :func:`multi_observable_loss` on the union of every rank's events.
-
-    Falls back to :func:`multi_observable_loss` when no process group is
-    initialized (single-process / plain ``python`` runs).
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar loss; gradients propagate through the all-reduce back to
-        the learnable parameters on the local rank.
-    """
-    if not _is_dist():
-        return multi_observable_loss(pred, target, bin_edges, beta=beta, weights=weights)
-    else:
-        raise NotImplementedError("multi_observable_loss_distributed is not implemented yet")

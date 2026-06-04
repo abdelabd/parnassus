@@ -37,7 +37,7 @@ from .config import (
 )
 from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_dist, _is_main
-from .loss import multi_observable_loss_distributed
+from .loss import multi_observable_loss
 
 # =============================================================================
 # Parameter groups for per-group learning rates
@@ -355,8 +355,8 @@ def fit_card_to_fullsim(
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
             # pred = trainee_observables(out)
-            loss = multi_observable_loss_distributed(
-                pred_observables, target_observables, edges, beta=beta, weights=weights
+            loss = multi_observable_loss(
+                pred_observables, target_observables, edges, weights=weights
             )
 
             loss.backward()
@@ -406,8 +406,8 @@ def fit_card_to_fullsim(
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-                val_loss = multi_observable_loss_distributed(
-                    pred_observables, target_observables, edges, beta=beta, weights=weights
+                val_loss = multi_observable_loss(
+                    pred_observables, target_observables, edges, weights=weights
                 )
                 val_loss_acc += val_loss.detach()
 
