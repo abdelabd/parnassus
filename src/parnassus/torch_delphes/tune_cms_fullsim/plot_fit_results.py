@@ -440,7 +440,7 @@ def main() -> None:
         _obs_values(pred_init, "ht"),
         _obs_values(pred_final, "ht"),
         edges=np.linspace(0.0, 1000.0, 51),
-        xlabel=r"PF objects per event",
+        xlabel=r"PF scalar $H_\mathrm{T}$ [GeV]",
         output_path=args.output_dir / "observable_ht.pdf",
     )
     print("  wrote observable_ht.pdf")
