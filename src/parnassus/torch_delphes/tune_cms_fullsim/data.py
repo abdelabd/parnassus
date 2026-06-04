@@ -47,6 +47,8 @@ def load_cms_flow_root(
                 f"Available keys: {list(f.keys())[:10]}"
             )
         tree = f[tree_name]
+        if n_events < 0: # load all events from entry_start to the end of the tree
+            n_events = tree.num_entries - entry_start
         arrays = tree.arrays(
             list(TRUTH_BRANCHES + PFLOW_BRANCHES),
             library="np",

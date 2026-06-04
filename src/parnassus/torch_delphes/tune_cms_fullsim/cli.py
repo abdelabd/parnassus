@@ -105,8 +105,8 @@ def main() -> None:
             "fixture is generated under /tmp."
         ),
     )
-    parser.add_argument("--n-events", type=int, default=200)
-    parser.add_argument("--n-steps", type=int, default=50)
+    parser.add_argument("--n-events", type=int, default=-1)
+    parser.add_argument("--n-steps", type=int, default=200)
     parser.add_argument(
         "--lr",
         type=float,
@@ -205,25 +205,8 @@ def main() -> None:
             "https://zenodo.org/records/11389651 and rerun with --root-file."
         )
 
-    # ------------------------------------------------------------------
-    # Per-rank data sharding.
-    # ``args.n_events`` is the *global* event budget; we split it
-    # contiguously across ranks. Each rank reads only its own slice
-    # from the ROOT file. The "local" event count is what gets passed
-    # to the trainee/target observable builders so that scatter-add
-    # buffers are sized correctly per rank.
-    # ------------------------------------------------------------------
-    base = args.n_events // world_size
-    extra = args.n_events % world_size
-    local_n_events = base + (1 if rank < extra else 0)
-    entry_start = rank * base + min(rank, extra)
-    log(
-        f"[DDP] global n_events={args.n_events}; rank {rank} reads "
-        f"events [{entry_start}, {entry_start + local_n_events})"
-    )
-
     arrays = load_cms_flow_root(
-        root_file, n_events=local_n_events, entry_start=entry_start
+        root_file, n_events=args.n_events
     )
     truth_tensor = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
@@ -276,7 +259,6 @@ def main() -> None:
         trainee,
         train_dataloader,
         val_dataloader,
-        # n_events=local_n_events,
         n_steps=args.n_steps,
         lr=lr_for_fit,
         beta=args.beta,
@@ -342,7 +324,5 @@ def main() -> None:
     log("")
     log(f"Final charged-hadron scale (3 eta regions): {chad_scales}")
     log(f"Final ECal scale            (3 eta regions): {ecal_scale_vals}")
-    if root_file == args.fixture_path:
-        log("(on synthetic fixture: target values are 1.25 and 1.20 respectively)")
 
     _cleanup_distributed()
