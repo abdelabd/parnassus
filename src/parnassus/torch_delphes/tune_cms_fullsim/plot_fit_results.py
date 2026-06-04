@@ -389,13 +389,16 @@ def main() -> None:
     parser.add_argument("--n-events-for-plots", type=int, default=400)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--param-config",
+        "--truth-config",
         type=Path,
         default=_DEFAULT_PARAM_CONFIG,
         help=(
-            "Param config whose physical 'value' fields are drawn as the truth "
-            "reference lines on the parameter-drift plots. Use the same config "
-            "that generated the sample. Defaults to cms_target_default.yaml."
+            "The GENERATION/truth config that made the ROOT file -- its physical "
+            "'value' fields are drawn as the truth reference lines on the "
+            "parameter-drift plots. Do NOT pass a training config: a trained "
+            "parameter's 'value' there is its off-truth STARTING point, not its "
+            "truth, so the reference line would be wrong. Defaults to "
+            "cms_target_default.yaml."
         ),
     )
     args = parser.parse_args()
@@ -405,8 +408,19 @@ def main() -> None:
     history = _load_history(args.history)
 
     # Ground-truth physical value of every scalar, keyed by the same name[i]
-    # form the history snapshots use.
-    truth = {k: spec["value"] for k, spec in pc.load_param_config(args.param_config).items()}
+    # form the history snapshots use. These come from the GENERATION config; a
+    # training config would give a trained param's start value, not its truth.
+    flat_truth_cfg = pc.load_param_config(args.truth_config)
+    n_trainable = sum(1 for spec in flat_truth_cfg.values() if spec["trainable"])
+    if n_trainable:
+        print(
+            f"WARNING: {args.truth_config} marks {n_trainable} parameter(s) trainable -- "
+            "it looks like a TRAINING config, not the generation/truth config. Truth "
+            "reference lines for those params will show their START value, not the truth. "
+            "Pass the generation config (e.g. param_configs/cms_target_default.yaml) "
+            "to --truth-config instead."
+        )
+    truth = {k: spec["value"] for k, spec in flat_truth_cfg.items()}
 
     print(f"Writing figures to {args.output_dir}")
 
