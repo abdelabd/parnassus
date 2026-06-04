@@ -84,6 +84,7 @@ import uproot
 from parnassus.data.particle_io import ColumnMap, pythia_particles_to_tensor
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+from parnassus.torch_delphes.tune_cms_fullsim.data import load_truth_events
 from parnassus.utils import pid_to_class
 
 # The "target" (fake full-sim) card's parameters are taken verbatim from a
@@ -294,29 +295,36 @@ def _flush_batch(
     if n_generated == 0:
         return {}, 0
 
-    # Flatten all events in the batch into a single tensor for card.forward.
+    # Flatten all events in the batch into a single tensor.
     batch_truth = torch.cat(batch_truth_rows, dim=0)
 
-    # Only the final-state, finite-eta particles reach the detector; this
-    # mirrors what the truth_tensor_to_class_arrays helper keeps for the
-    # truth_* branches.
-    status = batch_truth[:, ColumnMap.STATUS]
-    pid = batch_truth[:, ColumnMap.PID].abs()
-    eta = batch_truth[:, ColumnMap.ETA].abs()
-    detector_mask = (
-        (status == 1)
-        & ~torch.isin(pid, torch.tensor([12.0, 14.0, 16.0], dtype=pid.dtype))
-        & (eta < 10.0)
-    )
-    detector_input = batch_truth[detector_mask]
-
-    with torch.no_grad():
-        out = target_card(detector_input)
-    eflow = out["EFlowObject"]
-
+    # The truth_* branches (status==1, non-neutrino, |eta|<10, PID->class) are
+    # the ONLY thing the trainee gets to see. Build them first, then feed the
+    # target card the SAME class-based reconstruction the trainee will rebuild
+    # from those branches via load_truth_events. This keeps generation-input
+    # identical to trainee-input (representative PID, pi-mass, derived charge,
+    # zero vertex, recomputed E), so the fit can recover the truth parameters;
+    # otherwise the full-Pythia species (real PID/mass) make the target
+    # unreachable from the class-only truth. See
+    # doc truth_input_fidelity_issue.md.
     truth_pt, truth_eta, truth_phi, truth_class = truth_tensor_to_class_arrays(
         batch_truth, n_events=n_generated
     )
+    truth_tensor = load_truth_events(
+        {
+            "truth_pt": truth_pt,
+            "truth_eta": truth_eta,
+            "truth_phi": truth_phi,
+            "truth_class": truth_class,
+        }
+    )  # padded (n_events, max_n_particles, N_FEATURES)
+    # Flatten back to (N, N_FEATURES) and drop the zero-padding rows.
+    reco_input = truth_tensor[torch.any(truth_tensor != 0, dim=-1)]
+
+    with torch.no_grad():
+        out = target_card(reco_input)
+    eflow = out["EFlowObject"]
+
     pflow_pt, pflow_eta, pflow_phi, pflow_class = eflow_to_class_arrays(
         eflow, eflow[:, ColumnMap.EVENT_NUMBER], n_events=n_generated
     )
