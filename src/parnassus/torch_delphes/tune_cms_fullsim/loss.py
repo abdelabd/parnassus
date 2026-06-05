@@ -21,6 +21,7 @@ This module is the package's self-contained loss layer:
 
 from __future__ import annotations
 
+import ot
 import torch
 
 from .distributed import _is_dist
@@ -259,3 +260,95 @@ def multi_observable_loss(
         scale = tgt_vals.detach().std(unbiased=False).clamp(min=eps)
         total = total + w * wasserstein_1d_loss(pred_vals, tgt_vals, p=p) / scale.pow(p)
     return total
+
+
+def per_event_wasserstein_loss(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    observales: list[str],
+) -> torch.Tensor:
+    
+    object_level_observables = ["log_E", "log_pt", "eta", "pid"]
+
+    pred_particles = torch.stack([pred[k] for k in object_level_observables], dim=-1) # shape (n_events, max_n_particles, n_observables)
+    target_particles = torch.stack([target[k] for k in object_level_observables], dim=-1)
+
+    def get_object_groups(input_tensor: torch.Tensor) -> dict[int, torch.Tensor]:
+        """Flatten ``(n_events, max_n_particles, n_obs)`` -> ``(N, n_obs)``, drop
+        padding / efficiency-killed slots (``pid == 0``), and group the valid
+        particles by integer ``pid``.
+
+        The last column is ``pid`` (discrete, off the autograd graph); columns
+        ``0:3`` are the differentiable features ``[log_E, log_pt, eta]``. Boolean-
+        mask indexing is a differentiable gather, so on the pred side the returned
+        feature tensors keep the gradient back to the learnable detector params.
+
+        Returns ``dict`` pid -> ``(num_objects_with_that_pid, 3)`` feature tensor.
+        """
+        flat = input_tensor.reshape(-1, input_tensor.shape[-1])  # (N, n_obs)
+        pid_col = flat[..., -1]  # (N,) pid, no grad
+        valid = pid_col != 0  # padding/ghost -> pid == 0
+        flat = flat[valid]  # differentiable gather
+        pid_valid = pid_col[valid]
+
+        groups: dict[int, torch.Tensor] = {}
+        for pid in torch.unique(pid_valid).tolist():
+            sel = pid_valid == pid
+            groups[int(pid)] = flat[sel][:, :3]  # [log_E, log_pt, eta], keeps grad
+        return groups
+
+    # Group both sides across the whole batch. Pred keeps its graph; the target is a
+    # fixed reference, so detach it (mirrors multi_observable_loss / wasserstein_1d_loss).
+    pred_groups = get_object_groups(pred_particles)
+    target_groups = get_object_groups(target_particles.detach())
+
+    def sliced_sw2(x_pred: torch.Tensor, y_tgt: torch.Tensor) -> torch.Tensor:
+        """SW_2 between a differentiable pred cloud ``x_pred`` (n_pred, d) and a
+        reference target cloud ``y_tgt`` (n_tgt, d).
+
+        Each feature is standardized by the detached target std so no axis
+        dominates the random 1-D projections (the scale is a gradient-free
+        constant). Returns a scalar SW_2 distance that keeps the gradient back to
+        ``x_pred``. Works for the (n, 3) object clouds and the (n, 1) per-event
+        clouds alike; SW on 1-D data is exact.
+        """
+        y = y_tgt.detach().to(device=x_pred.device, dtype=x_pred.dtype)
+        scale = y.std(dim=0, unbiased=False).clamp(min=1e-8)  # (d,)
+        return ot.sliced_wasserstein_distance(
+            x_pred / scale, y / scale, n_projections=100, p=2, seed=0
+        )
+
+    # Object-level term: one SW_2 per pid present on BOTH sides, over the 3
+    # standardized kinematic features [log_E, log_pt, eta].
+    object_wasserstein_distance: dict[int, torch.Tensor] = {}
+    for pid in sorted(set(pred_groups) & set(target_groups)):
+        x = pred_groups[pid]  # (n_pred, 3), differentiable
+        y = target_groups[pid]  # (n_tgt, 3), reference (detached inside sliced_sw2)
+        if x.shape[0] == 0 or y.shape[0] == 0:  # nothing to match on one side
+            continue
+        object_wasserstein_distance[int(pid)] = sliced_sw2(x, y)
+
+    # Event-level term: SW_2 on the per-event log(HT) distribution, (n_events,) ->
+    # (n_events, 1). log_ht is differentiable (built from pt). multiplicity is
+    # intentionally excluded: it is a hard pt != 0 count with no gradient, so an OT
+    # term on it would change the loss value but not drive training.
+    event_wasserstein_distance: dict[str, torch.Tensor] = {}
+    for key in ("log_ht",):
+        pv = pred[key].reshape(-1, 1)
+        tv = target[key].reshape(-1, 1)
+        if pv.shape[0] == 0 or tv.shape[0] == 0:
+            continue
+        event_wasserstein_distance[key] = sliced_sw2(pv, tv)
+
+    # Sum every term -> the scalar loss the training loop back-props. The per-event
+    # log_ht term is down-weighted by EVENT_WEIGHT relative to the per-pid object
+    # terms (scalar * tensor keeps the gradient).
+    EVENT_WEIGHT = 0.1
+    terms = list(object_wasserstein_distance.values()) + [
+        EVENT_WEIGHT * d for d in event_wasserstein_distance.values()
+    ]
+    if not terms:  # degenerate empty batch: keep a graph-connected zero
+        return pred_particles.sum() * 0.0
+    return torch.stack(terms).sum()
+
+
