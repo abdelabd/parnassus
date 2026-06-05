@@ -19,7 +19,7 @@ import torch
 import uproot
 
 from parnassus.data.particle_io import N_FEATURES, ColumnMap
-from parnassus.utils import class_to_pid_vectorized
+from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
 from .config import PFLOW_BRANCHES, TRUTH_BRANCHES
 
@@ -201,6 +201,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
     all_eta: list[np.ndarray] = []
     # all_phi: list[np.ndarray] = [] # phi doesn't contribute to gradient
     all_e: list[np.ndarray] = []
+    all_pids: list[np.ndarray] = []
     per_event_mult = np.zeros(n_events, dtype=np.float64)
     per_event_ht = np.zeros(n_events, dtype=np.float64)
     for i in range(n_events):
@@ -223,6 +224,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
         all_eta.append(eta)
         # all_phi.append(phi)
         all_e.append(e)
+        all_pids.append(pids)
         per_event_mult[i] = float(pt.shape[0])
         per_event_ht[i] = float(pt.sum())
 
@@ -243,6 +245,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
     eta_pad = _pad_stack(all_eta)
     # phi_pad = _pad_stack(all_phi)  # phi doesn't contribute to gradient
     e_pad = _pad_stack(all_e)
+    pids_pad = _pad_stack(all_pids)
 
     # True where a real particle exists, False for padding.
     mask = np.zeros((n_events, max_n_particles), dtype=bool)
@@ -267,6 +270,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
         # "E": torch.from_numpy(e_pad),
         "log_pt": torch.from_numpy(log_pt_pad),
         "log_E": torch.from_numpy(log_E_pad),
+        "pid": torch.from_numpy(pids_pad),
         "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
@@ -302,16 +306,25 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
     """
     pt = arrays[..., ColumnMap.PT]  # (n_events, max_n_objects)
     eta = arrays[..., ColumnMap.ETA]
-    pid = arrays[..., ColumnMap.PID]
+
+    # Normalize the trainee card's mixed Delphes PID column (neutral-hadron
+    # marker 0, photon 22, real PDG on tracks) to the SAME canonical PDG codes
+    # the target side carries (load_pflow_targets): pid -> class id -> canonical
+    # pid (211/11/13/111/22). PID is discrete bookkeeping (not in the loss; it
+    # only selects the mass below), so route it through numpy off the graph and
+    # place the result back on the input device.
+    pid_np = arrays[..., ColumnMap.PID].detach().cpu().numpy().astype(np.int64)
+    pid_np = class_to_pid_vectorized(pid_to_class_vectorized(pid_np))
+    pid = torch.from_numpy(pid_np).to(device=arrays.device)
 
     # Real particle <=> nonzero pt (drops padding and efficiency-killed ghosts).
     valid = pt != 0
 
     # Reconstruct E = sqrt((pt * cosh(eta))^2 + m^2) with the mass derived from
-    # the signed PDG in the PID column (211/11/13/22/0), mirroring
-    # load_pflow_targets. PID is discrete bookkeeping, so detach it: the mass is
-    # a per-row constant and must not be a gradient path.
-    abs_pid = pid.detach().abs()
+    # the canonical PDG in the PID column (211/11/13/111/22), mirroring
+    # load_pflow_targets. PID is already an off-graph int64 tensor (no gradient
+    # path), so the mass is a per-row constant as required.
+    abs_pid = pid.abs()
     mass = torch.where(
         abs_pid == 11,
         torch.full_like(pt, 0.000511),
@@ -343,6 +356,7 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
 
     pt_out = torch.where(valid, pt, torch.zeros_like(pt))
     eta_out = torch.where(valid, eta, torch.zeros_like(eta))
+    pid_out = torch.where(valid, pid, torch.zeros_like(pid))
 
     valid_f = valid.to(pt.dtype)
     multiplicity = valid_f.sum(dim=1)  # (n_events,) -- a count (no gradient)
@@ -358,6 +372,7 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
         "log_E": log_E,
         # "E": e,
         "log_pt": log_pt,
+        "pid": pid_out,
         "multiplicity": multiplicity,
         "ht": ht,
         "log_ht": log_ht,

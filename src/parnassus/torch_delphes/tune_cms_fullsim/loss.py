@@ -202,7 +202,7 @@ def wasserstein_1d_loss(
 def multi_observable_loss(
     pred: dict[str, torch.Tensor],
     target: dict[str, torch.Tensor],
-    bin_edges: dict[str, torch.Tensor],
+    observales: list[str],
     weights: dict[str, float] | None = None,
     p: int = 1,
     eps: float = 1e-8,
@@ -227,11 +227,6 @@ def multi_observable_loss(
     O(1), which keeps the per-observable ``weights`` -- tuned against the old
     unit-free histogram MSE -- meaningful.
 
-    ``bin_edges`` is no longer used to histogram; it is retained only to anchor
-    the accumulator's dtype/device and (when ``weights`` is None) to enumerate
-    the observable set. ``beta`` is unused on this Wasserstein path and kept only
-    for call-signature compatibility with the soft-histogram primitives.
-
     Returns
     -------
     torch.Tensor
@@ -245,19 +240,14 @@ def multi_observable_loss(
             return v[obs["pt"] != 0]  # boolean-index READ is a differentiable gather
         return v.reshape(-1)  # per-event, already 1-D
 
-    # Anchor the accumulator on bin_edges' dtype/device (bin_edges are float64
-    # and moved to the compute device by the caller); a bare torch.zeros((), ...)
-    # would sit on the CPU and break once DDP runs on GPU.
-    any_edges = next(iter(bin_edges.values()))
-    total = torch.zeros((), dtype=any_edges.dtype, device=any_edges.device)
-
+    total = torch.zeros((), device=next(iter(pred.values())).device, dtype=next(iter(pred.values())).dtype)
     # The weights dict drives the active observable set: DEFAULT_OBS_WEIGHTS lists
     # the active observables (e.g. eta/log_pt/log_E/log_ht; linear pt/ht are kept
     # at weight 0), so iterating its keys honors those weights -- including the
     # weight-0 ones -- instead of defaulting every bin_edges key to weight 1.0.
-    active_keys = weights.keys() if weights else bin_edges.keys()
+    active_keys = weights.keys() if weights else observales
     for key in active_keys:
-        if key not in bin_edges or key not in pred or key not in target:
+        if key not in observales or key not in pred or key not in target:
             continue
         pred_vals = _flatten_valid(pred, key)
         tgt_vals = _flatten_valid(target, key)

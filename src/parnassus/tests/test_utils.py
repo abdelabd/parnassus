@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from parnassus.utils import class_to_pid, class_to_pid_vectorized, pid_to_class, reshape_phi
+from parnassus.utils import (
+    class_to_pid,
+    class_to_pid_vectorized,
+    pid_to_class,
+    pid_to_class_vectorized,
+    reshape_phi,
+)
 
 
 @pytest.mark.parametrize(
@@ -93,6 +99,35 @@ def test_class_to_pid_vectorized():
     particle_classes = np.array([0, 1, 2, 3, 4], dtype=np.int32)
     pids = class_to_pid_vectorized(particle_classes)
     assert pids.tolist() == [211, 11, 13, 111, 22]
+
+
+def test_pid_to_class_vectorized_matches_scalar():
+    """Vectorized pid->class must agree elementwise with the scalar pid_to_class
+    (the mapping generate_pseudodata uses to fill pflow_class/truth_class)."""
+    pids = np.array(
+        [11, -11, 13, -13, 211, -211, 321, 2212, 111, 311, 2112, 0, 22, 12, 23],
+        dtype=np.int64,
+    )
+    expected = np.array([pid_to_class(int(p)) for p in pids])
+    np.testing.assert_array_equal(pid_to_class_vectorized(pids), expected)
+    # shape is preserved for the (n_events, max_n_objects) tensor use case
+    assert pid_to_class_vectorized(pids.reshape(3, 5)).shape == (3, 5)
+
+
+def test_pred_target_pid_parity():
+    """The same particles seen two ways -- trainee (Delphes pid) vs ROOT (class
+    id) -- must normalize to identical canonical PDG codes, so prediction and
+    target observables agree on the 'pid' field."""
+    # Delphes pid as the trainee card emits it (neutral hadron 0, photon 22,
+    # real PDG on tracks).
+    delphes_pid = np.array([211, 321, 2212, 11, -11, 13, -13, 0, 22], dtype=np.int64)
+    # Class id the target side reads from the ROOT pflow_class branch for the
+    # same particles.
+    target_class = np.array([0, 0, 0, 1, 1, 2, 2, 3, 4], dtype=np.int64)
+    pred_pid = class_to_pid_vectorized(pid_to_class_vectorized(delphes_pid))
+    target_pid = class_to_pid_vectorized(target_class)
+    assert pred_pid.tolist() == target_pid.tolist()
+    assert pred_pid.tolist() == [211, 211, 211, 11, 11, 13, 13, 111, 22]
 
 
 def test_reshape_phi():

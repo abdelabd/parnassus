@@ -8,10 +8,10 @@ training epoch** so the fit can be watched as it converges.
 epoch (``intermediate_epoch_<step>.pdf``), one observable per page. Each page
 overlays the full-sim target, the current-epoch trainee prediction, and a faint
 epoch-0 reference, and shows that observable's *unweighted* soft-histogram MSE
-in the title -- i.e. its loss contribution **before** the per-observable weight
-(``DEFAULT_OBS_WEIGHTS``) is applied. The same bin edges and ``beta`` the loss
-uses are passed in, so the number in the title corresponds exactly to the
-histogram shown.
+in the title as a quick distribution-mismatch diagnostic. The bin edges are
+derived per observable from the pooled target/prediction range (linear,
+``_N_BINS`` bins); the same edges feed both the title MSE and the plotted
+histogram, so the number always corresponds exactly to the curves shown.
 
 This module is imported lazily from :mod:`tune_cms_fullsim.training` (only on the
 main rank, only when plotting is enabled) so matplotlib never enters the hot
@@ -20,6 +20,7 @@ training import path.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import matplotlib as mpl
@@ -27,6 +28,7 @@ import matplotlib as mpl
 mpl.use("Agg")  # non-interactive backend for headless / srun runs
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
 import torch
@@ -57,11 +59,44 @@ _XLABELS: dict[str, str] = {
 # Observables drawn on a log-y scale (wide dynamic range / steep tails).
 _LOG_Y: frozenset[str] = frozenset({"pt"})
 
+# Number of (linear) bins for the per-epoch histograms, derived from the data.
+_N_BINS: int = 50
+
+
+def _auto_bin_edges(
+    value_tensors: list[torch.Tensor | None], n_bins: int = _N_BINS
+) -> np.ndarray | None:
+    """Shared linear bin edges spanning the finite range of all given 1-D tensors.
+
+    The target, prediction and (optional) initial-reference values for one
+    observable are pooled so every overlaid histogram lands on the same axis.
+    Non-finite entries are ignored. Returns ``None`` when no finite value is
+    available (the caller then skips that page), and widens a zero-width range
+    (all values identical) into a small non-degenerate interval so the edges
+    stay strictly increasing for both ``np.histogram`` and ``soft_histogram``.
+    """
+    lo, hi = math.inf, -math.inf
+    for v in value_tensors:
+        if v is None or v.numel() == 0:
+            continue
+        x = v.detach().reshape(-1)
+        x = x[torch.isfinite(x)]
+        if x.numel() == 0:
+            continue
+        lo = min(lo, float(x.min()))
+        hi = max(hi, float(x.max()))
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return None
+    if hi <= lo:  # all values identical -> widen to a strictly-increasing range
+        pad = max(abs(lo), 1.0) * 1e-3
+        lo, hi = lo - pad, hi + pad
+    return np.linspace(lo, hi, n_bins + 1)
+
 
 def save_intermediate_observable_plots(
     pred_by_key: dict[str, torch.Tensor],
     target_by_key: dict[str, torch.Tensor],
-    edges: dict[str, torch.Tensor],
+    observables: list[str],
     weights: dict[str, float],
     beta: float,
     step: int,
@@ -76,15 +111,12 @@ def save_intermediate_observable_plots(
     pred_by_key, target_by_key : dict[str, torch.Tensor]
         Per-observable **flattened, padding/ghost-stripped** 1-D values for the
         whole validation set, for the trainee prediction and the full-sim
-        target respectively. Same keys as ``edges``.
-    edges : dict[str, torch.Tensor]
-        The loss bin edges (``DEFAULT_BIN_EDGES``); the displayed MSE is computed
-        on these bins so it matches the histogram drawn.
+        target respectively. Both dicts share the same observable keys.
     weights : dict[str, float]
         Per-observable loss weights; used only to flag weight-0 observables
         (shown but not part of the optimized loss).
     beta : float
-        Soft-histogram softness used by the loss (so the title MSE matches).
+        Soft-histogram softness for the per-page diagnostic MSE.
     step : int
         Epoch index; controls the output filename and is shown on each page.
     output_dir : str | Path
@@ -104,26 +136,28 @@ def save_intermediate_observable_plots(
 
     with PdfPages(out_path) as pdf:
         for key in _PANEL_ORDER:
-            if key not in edges or key not in pred_by_key or key not in target_by_key:
+            if key not in observables or key not in pred_by_key or key not in target_by_key:
                 continue
 
             pred_vals = pred_by_key[key]
             tgt_vals = target_by_key[key]
             init_vals = init_by_key.get(key) if init_by_key is not None else None
 
-            np_edges = edges[key].detach().cpu().numpy()
+            # Bins are derived per observable from the pooled target/pred/init
+            # range (the loss no longer carries fixed bin edges). The same edges
+            # feed the title MSE and every histogram, so they stay consistent.
+            np_edges = _auto_bin_edges([tgt_vals, pred_vals, init_vals])
+            if np_edges is None:  # no finite values on any side -> nothing to draw
+                continue
             centers = 0.5 * (np_edges[1:] + np_edges[:-1])
 
-            # Unweighted per-observable soft-hist MSE -- the loss contribution
-            # before multiplying by weights[key]. NaN when a side is empty.
+            # Unweighted per-observable soft-hist MSE over these bins -- a
+            # distribution-mismatch diagnostic. NaN when a side is empty.
             if pred_vals.numel() == 0 or tgt_vals.numel() == 0:
                 mse = float("nan")
             else:
-                mse = float(
-                    histogram_mse_loss(
-                        pred_vals, tgt_vals, edges[key].detach().cpu(), beta=beta
-                    )
-                )
+                edges_t = torch.as_tensor(np_edges, dtype=pred_vals.dtype)
+                mse = float(histogram_mse_loss(pred_vals, tgt_vals, edges_t, beta=beta))
 
             fig, ax = plt.subplots(figsize=(5.5, 4.0))
             ax.step(
@@ -133,7 +167,7 @@ def save_intermediate_observable_plots(
                 color="black",
                 label="target (full sim)",
             )
-            if init_vals is not None:
+            if init_vals is not None and init_vals.numel() > 0:
                 ax.step(
                     centers,
                     _density_histogram(init_vals, np_edges),

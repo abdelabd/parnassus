@@ -4,8 +4,8 @@ This module centralizes every tunable constant used across the package so
 they live in exactly one place:
 
 - the ROOT branch names we consume (:data:`TRUTH_BRANCHES`, :data:`PFLOW_BRANCHES`);
-- the default histogram bin edges and per-observable loss weights
-  (:data:`DEFAULT_BIN_EDGES`, :data:`DEFAULT_OBS_WEIGHTS`);
+- the default per-observable loss weights
+  (data:`DEFAULT_OBS_WEIGHTS`);
 - the parameter-name matchers used to bucket the 66 learnable params into
   four optimizer groups (:data:`_SCALE_SUFFIXES`, :data:`_EFFICIENCY_SUFFIXES`,
   :data:`_FRACTION_FRAGMENTS`) and the per-group default learning rates
@@ -34,30 +34,7 @@ PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_
 # Observable histogram bins and loss weights
 # =============================================================================
 
-# Default bin edges for the four observables. Wide-enough to cover the bulk
-# of both target and trainee distributions on a QCD-jet sample; users can
-# override these via --bin-config when needed.
-DEFAULT_BIN_EDGES: dict[str, torch.Tensor] = {
-    "pt": torch.linspace(0.0, 200.0, 41, dtype=torch.float64),
-    "eta": torch.linspace(-5.0, 5.0, 41, dtype=torch.float64),
-    # "phi": torch.linspace(-np.pi, np.pi, 41, dtype=torch.float64),
-    # E ranges higher than pt since E = pt * cosh(eta) >= pt for the
-    # reconstructed particles; widen the upper edge accordingly.
-    # "E": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
-    # log(pt) bin spanning ~0.37 GeV (e^-1) to ~403 GeV (e^6); linear in
-    # log space gives Adam much better gradient signal in the high-pT
-    # tail than the linear pt histogram does.
-    "log_pt": torch.linspace(-1.0, 6.0, 41, dtype=torch.float64),
-    "log_E": torch.linspace(-1.0, 6.5, 41, dtype=torch.float64),
-    "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
-    "ht": torch.linspace(0.0, 2000.0, 41, dtype=torch.float64),
-    # log(HT) spanning ~e^4.5 = 90 GeV to ~e^7.5 = 1808 GeV. HT is a per-event
-    # SUM, so (unlike particle-level log_pt/log_E) it is tightly concentrated --
-    # the QCD-jet target bulk sits around log_ht ~ 5.4-6.8 -- so the range is kept
-    # narrow to spend the 40 bins where the distribution actually is. Tune it if
-    # the plotted log_ht histogram clips at an edge.
-    "log_ht": torch.linspace(4.5, 7.5, 41, dtype=torch.float64),
-}
+OBSERVABLES: list[str] = ["pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid"]
 
 # Default per-observable weights. The particle-level observables (pt, eta)
 # are far less noisy than the per-event scalars (multiplicity, ht) because

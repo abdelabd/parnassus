@@ -22,7 +22,7 @@ import torch
 from parnassus.data.particle_io import N_FEATURES, ColumnMap
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.tune_cms_fullsim import (
-    DEFAULT_BIN_EDGES,
+    OBSERVABLES,
     PFLOW_BRANCHES,
     TRUTH_BRANCHES,
     fit_card_to_fullsim,
@@ -125,7 +125,7 @@ def test_one_step_gradient_is_finite(fixture_root: Path):
     card = CMSEnergyFlowDefault(debug=False, learnable=True)
     out = card(t)
     pred = trainee_observables(out, n_events=20)
-    loss = multi_observable_loss(pred, target, DEFAULT_BIN_EDGES, beta=0.15)
+    loss = multi_observable_loss(pred, target, OBSERVABLES, beta=0.15)
     assert torch.isfinite(loss)
     loss.backward()
     for name, p in card.named_parameters():

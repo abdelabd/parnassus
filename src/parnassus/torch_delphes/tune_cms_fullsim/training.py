@@ -24,7 +24,7 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.param_config import to_physical
 
 from .config import (
-    DEFAULT_BIN_EDGES,
+    OBSERVABLES,
     DEFAULT_OBS_WEIGHTS,
     _DEFAULT_LR,
     _DEFAULT_LR_EFFICIENCY,
@@ -149,7 +149,6 @@ def fit_card_to_fullsim(
     log_every: int = 10,
     parameters_to_train: list[nn.Parameter] | None = None,
     param_groups: list[dict] | None = None,
-    bin_edges: dict[str, torch.Tensor] | None = None,
     observable_weights: dict[str, float] | None = None,
     lr_scales: float = _DEFAULT_LR_SCALES,
     lr_resolution: float = _DEFAULT_LR_RESOLUTION,
@@ -245,7 +244,6 @@ def fit_card_to_fullsim(
             )
     lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4)
 
-    edges = bin_edges if bin_edges is not None else DEFAULT_BIN_EDGES
     weights = observable_weights if observable_weights is not None else DEFAULT_OBS_WEIGHTS
 
     # Per-epoch intermediate plots: resolve the output dir (None/"" disables),
@@ -273,11 +271,11 @@ def fit_card_to_fullsim(
             init_pred_by_key = {k: t.clone() for k, t in pred_by_key.items()}
         # Lazy import keeps matplotlib out of the training import path.
         from .intermediate_plots import save_intermediate_observable_plots
-
+        observables = OBSERVABLES
         save_intermediate_observable_plots(
             pred_by_key,
             target_by_key,
-            edges,
+            observables,
             weights,
             beta,
             step,
@@ -356,7 +354,7 @@ def fit_card_to_fullsim(
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
             # pred = trainee_observables(out)
             loss = multi_observable_loss(
-                pred_observables, target_observables, edges, weights=weights
+                pred_observables, target_observables, OBSERVABLES, weights=weights
             )
 
             loss.backward()
@@ -407,7 +405,7 @@ def fit_card_to_fullsim(
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
                 val_loss = multi_observable_loss(
-                    pred_observables, target_observables, edges, weights=weights
+                    pred_observables, target_observables, OBSERVABLES, weights=weights
                 )
                 val_loss_acc += val_loss.detach()
 
@@ -417,7 +415,7 @@ def fit_card_to_fullsim(
                 # CPU so memory stays flat and concatenation across batches with
                 # different max_n_objects is safe.
                 if collect_obs:
-                    for key in edges.keys():
+                    for key in OBSERVABLES:
                         if key not in pred_observables or key not in target_observables:
                             continue
                         pv, tv = pred_observables[key], target_observables[key]

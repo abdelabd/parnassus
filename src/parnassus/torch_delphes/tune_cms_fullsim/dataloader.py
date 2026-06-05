@@ -8,14 +8,14 @@ from torch.utils.data import DataLoader, Dataset
 from parnassus.utils import class_to_pid_vectorized
 from parnassus.data.particle_io import N_FEATURES, ColumnMap
 
-from .config import DEFAULT_BIN_EDGES
+from .config import OBSERVABLES
 
 
 class DelphesDataSet(Dataset):
     """Dataset for Delphes model tuning."""
     def __init__(self, truth_particles: torch.Tensor, target_objects: dict[str, torch.Tensor], device: torch.device) -> None:
         self.truth_particles = truth_particles.to(device)
-        for obs in DEFAULT_BIN_EDGES.keys():
+        for obs in OBSERVABLES:
             self.__setattr__(f"{obs}", target_objects[obs].to(device))
 
     def __len__(self) -> int:
@@ -23,7 +23,7 @@ class DelphesDataSet(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         item = {"truth_particles": self.truth_particles[idx]}
-        for obs in DEFAULT_BIN_EDGES.keys():
+        for obs in OBSERVABLES:
             item[f"{obs}"] = self.__getattribute__(f"{obs}")[idx]
         return item
     

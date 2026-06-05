@@ -61,7 +61,7 @@ import torch.distributed as dist
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
-from .config import DEFAULT_BIN_EDGES, _DEFAULT_LR
+from .config import _DEFAULT_LR
 from .data import (
     load_cms_flow_root, load_truth_events, load_pflow_targets, split_truth_objects, split_pflow_targets,
 )    
@@ -226,7 +226,6 @@ def main() -> None:
 
     # truth_tensor = truth_tensor.to(device)
     # target = {k: v.to(device) for k, v in target.items()}
-    bin_edges = {k: v.to(device) for k, v in DEFAULT_BIN_EDGES.items()}
 
     # All ranks must use the *same* initial parameters for the manual-
     # gradient-sync scheme to keep them in sync; ``torch.manual_seed``
@@ -264,7 +263,6 @@ def main() -> None:
         log_every=max(1, args.n_steps // 10),
         parameters_to_train=params_to_train,
         param_groups=param_groups,
-        bin_edges=bin_edges,
         snapshot_parameters=args.history_path is not None,
         rank=rank,
         device=device,

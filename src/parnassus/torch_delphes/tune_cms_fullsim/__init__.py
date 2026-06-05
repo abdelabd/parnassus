@@ -24,7 +24,7 @@ Run with ``python -m parnassus.torch_delphes.tune_cms_fullsim ...``.
 from __future__ import annotations
 
 from .cli import main
-from .config import DEFAULT_BIN_EDGES, DEFAULT_OBS_WEIGHTS, PFLOW_BRANCHES, TRUTH_BRANCHES
+from .config import OBSERVABLES, DEFAULT_OBS_WEIGHTS, PFLOW_BRANCHES, TRUTH_BRANCHES
 from .data import (
     load_cms_flow_root,
 )
@@ -33,7 +33,7 @@ from .loss import multi_observable_loss
 from .training import build_parameter_groups, fit_card_to_fullsim
 
 __all__ = [
-    "DEFAULT_BIN_EDGES",
+    "OBSERVABLES",
     "DEFAULT_OBS_WEIGHTS",
     "PFLOW_BRANCHES",
     "TRUTH_BRANCHES",
