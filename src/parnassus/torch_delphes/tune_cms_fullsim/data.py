@@ -1,13 +1,16 @@
 """ROOT I/O and observable construction for ``tune_cms_fullsim``.
 
-This module turns a cms-flow-format ROOT file into the two things the fit
-loop needs:
+This module turns a cms-flow-format ROOT file into the things the fit loop needs:
 
-- the ``(N_particles, N_FEATURES)`` truth particle tensor that is fed to the
-  trainee card (:func:`load_cms_flow_root`, :func:`truth_to_particle_tensor`);
-- the per-observable target / prediction dictionaries used by the loss
-  (:func:`pflow_target_observables` from the frozen ``pflow_*`` reco, and
-  :func:`trainee_observables` from the trainee card's ``EFlowObject`` output).
+- :func:`load_cms_flow_root` reads the ``truth_*`` / ``pflow_*`` branches into
+  per-event numpy arrays;
+- :func:`load_truth_events` builds the padded ``(n_events, max_n_particles,
+  N_FEATURES)`` truth particle tensor fed to the trainee card;
+- :func:`load_pflow_targets` builds the per-observable target dict from the
+  frozen ``pflow_*`` reco, and :func:`load_pflow_targets_from_tensor` builds the
+  differentiable prediction dict from the trainee card's ``EFlowObject`` output
+  (:func:`restore_event_format` regroups that flat output per event);
+- :func:`split_truth_objects` / :func:`split_pflow_targets` do the train/val split.
 """
 
 from __future__ import annotations

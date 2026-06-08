@@ -7,8 +7,9 @@ training epoch** so the fit can be watched as it converges.
 :func:`save_intermediate_observable_plots` writes a single multi-page PDF per
 epoch (``intermediate_epoch_<step>.pdf``), one observable per page. Each page
 overlays the full-sim target, the current-epoch trainee prediction, and a faint
-epoch-0 reference, and shows that observable's *unweighted* soft-histogram MSE
-in the title as a quick distribution-mismatch diagnostic. The bin edges are
+epoch-0 reference, and shows that observable's soft-histogram MSE in the title
+as a quick distribution-mismatch diagnostic (this is display-only; the training
+loss is the sliced-Wasserstein distance in :mod:`tune_cms_fullsim.loss`). The bin edges are
 derived per observable from the pooled target/prediction range (linear,
 ``_N_BINS`` bins); the same edges feed both the title MSE and the plotted
 histogram, so the number always corresponds exactly to the curves shown.
@@ -62,6 +63,16 @@ _LOG_Y: frozenset[str] = frozenset({"pt"})
 # Number of (linear) bins for the per-epoch histograms, derived from the data.
 _N_BINS: int = 50
 
+# The observables the Wasserstein training loss actually optimizes. Panels for
+# observables outside this set are still drawn (for reference) but annotated as
+# not being part of the loss.
+_LOSS_OBSERVABLES: frozenset[str] = frozenset({"log_E", "log_pt", "eta", "log_ht"})
+
+# Softness of the diagnostic soft-histogram MSE shown in each panel title. This
+# is a display-only diagnostic (the training loss is the Wasserstein distance),
+# so it is fixed here rather than exposed as a CLI flag.
+_DIAG_BETA: float = 0.15
+
 
 def _auto_bin_edges(
     value_tensors: list[torch.Tensor | None], n_bins: int = _N_BINS
@@ -97,8 +108,6 @@ def save_intermediate_observable_plots(
     pred_by_key: dict[str, torch.Tensor],
     target_by_key: dict[str, torch.Tensor],
     observables: list[str],
-    weights: dict[str, float],
-    beta: float,
     step: int,
     output_dir: str | Path,
     val_loss: float | None = None,
@@ -112,11 +121,6 @@ def save_intermediate_observable_plots(
         Per-observable **flattened, padding/ghost-stripped** 1-D values for the
         whole validation set, for the trainee prediction and the full-sim
         target respectively. Both dicts share the same observable keys.
-    weights : dict[str, float]
-        Per-observable loss weights; used only to flag weight-0 observables
-        (shown but not part of the optimized loss).
-    beta : float
-        Soft-histogram softness for the per-page diagnostic MSE.
     step : int
         Epoch index; controls the output filename and is shown on each page.
     output_dir : str | Path
@@ -157,7 +161,7 @@ def save_intermediate_observable_plots(
                 mse = float("nan")
             else:
                 edges_t = torch.as_tensor(np_edges, dtype=pred_vals.dtype)
-                mse = float(histogram_mse_loss(pred_vals, tgt_vals, edges_t, beta=beta))
+                mse = float(histogram_mse_loss(pred_vals, tgt_vals, edges_t, beta=_DIAG_BETA))
 
             fig, ax = plt.subplots(figsize=(5.5, 4.0))
             ax.step(
@@ -191,8 +195,8 @@ def save_intermediate_observable_plots(
                 ax.set_yscale("log")
 
             title = f"{key}: soft-hist MSE = {mse:.3e}"
-            if weights.get(key, 1.0) == 0:
-                title += " (weight 0, not in loss)"
+            if key not in _LOSS_OBSERVABLES:
+                title += " (not in loss)"
             ax.set_title(title)
             ax.grid(True, alpha=0.3)
             ax.legend(loc="best")

@@ -1,12 +1,8 @@
 """
 This is the dataloader for delphes model tuning.
 """
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-
-from parnassus.utils import class_to_pid_vectorized
-from parnassus.data.particle_io import N_FEATURES, ColumnMap
 
 from .config import OBSERVABLES
 
