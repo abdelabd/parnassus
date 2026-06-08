@@ -95,16 +95,16 @@ ChargedHadronMomentumSmearing.resolution_module.b_raw[2]:
   trainable: false
   lr_scale: 0.1
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]:
-  value: 1.0
+  value: 0.71
   trainable: true
   lr_scale: 1.0
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]:
-  value: 1.25
-  trainable: false
+  value: 0.71
+  trainable: true
   lr_scale: 1.0
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]:
-  value: 1.25
-  trainable: false
+  value: 0.71
+  trainable: true
   lr_scale: 1.0
 ElectronMomentumSmearing.resolution_module.a_raw[0]:
   value: 0.03
