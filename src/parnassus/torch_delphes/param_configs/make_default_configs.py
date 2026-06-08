@@ -8,9 +8,10 @@ Produces, next to this file:
   three energy/momentum scales overridden to the reachable ground-truth values
   (CHAD 1.25, ECal 1.20, HCal 0.90). All ``trainable: false``. Use this as the
   pseudodata-generation truth.
-- ``debug_train_chad_scale_barrel.yaml``: identical, except the charged-hadron
-  barrel pT-scale element starts off-truth at 1.0 and is the *only* trainable
-  parameter -- the minimal single-knob identifiability debug.
+- ``debug_train_chad_scale_barrel.yaml``: identical, except the three
+  charged-hadron pT-scale elements (barrel/endcap/forward) start off-truth at
+  0.71 and are the *only* trainable parameters -- a single-knob (the charged-hadron
+  momentum scale, truth 1.25) identifiability debug.
 
 These are intentionally derived programmatically from the live model so they
 always cover exactly the current parameter set; edit the YAMLs (or this script)
@@ -35,9 +36,14 @@ _TARGET_SCALES = {
     "ECal.scale_module.scale_raw": 1.20,
     "HCal.scale_module.scale_raw": 0.90,
 }
-# The single parameter the debug config trains, and its off-truth start value.
-_DEBUG_KEY = "ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]"
-_DEBUG_START = 1.0
+# The parameters the debug config trains (the charged-hadron pT scale in all
+# three eta regions), and their shared off-truth start value.
+_DEBUG_KEYS = [
+    "ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]",
+    "ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]",
+    "ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]",
+]
+_DEBUG_START = 0.71
 
 
 def main() -> None:
@@ -56,8 +62,9 @@ def main() -> None:
 
     with open(target_path) as f:
         cfg = yaml.safe_load(f)
-    cfg[_DEBUG_KEY]["value"] = _DEBUG_START
-    cfg[_DEBUG_KEY]["trainable"] = True
+    for key in _DEBUG_KEYS:
+        cfg[key]["value"] = _DEBUG_START
+        cfg[key]["trainable"] = True
     debug_path = _HERE / "debug_train_chad_scale_barrel.yaml"
     with open(debug_path, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
