@@ -56,12 +56,11 @@ import socket
 from pathlib import Path
 
 import torch
-import torch.distributed as dist
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
-from .config import DEFAULT_BIN_EDGES, _DEFAULT_LR
+from .config import _DEFAULT_LR
 from .data import (
     load_cms_flow_root, load_truth_events, load_pflow_targets, split_truth_objects, split_pflow_targets,
 )    
@@ -72,11 +71,9 @@ from .distributed import (
     _barrier,
     _cleanup_distributed,
     _init_distributed,
-    _is_dist,
     _is_main,
 )
 from .fixture import write_synthetic_fixture
-from .loss import multi_observable_loss_distributed
 from .training import fit_card_to_fullsim
 
 # =============================================================================
@@ -123,7 +120,6 @@ def main() -> None:
             "live under parnassus/torch_delphes/param_configs/."
         ),
     )
-    parser.add_argument("--beta", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--history-path",
@@ -149,10 +145,9 @@ def main() -> None:
             "Directory for per-epoch intermediate observable plots: one "
             "multi-page PDF per epoch (intermediate_epoch_<step>.pdf, one "
             "observable per page) comparing the trainee prediction to the "
-            "full-sim target, with each observable's unweighted soft-hist MSE "
-            "(its loss contribution before the per-observable weight) in the "
-            "page title. Pass an empty string to disable. Only the main rank "
-            "plots."
+            "full-sim target, with each observable's soft-hist MSE in the "
+            "page title as a distribution-mismatch diagnostic. Pass an empty "
+            "string to disable. Only the main rank plots."
         ),
     )
     parser.add_argument(
@@ -225,10 +220,6 @@ def main() -> None:
     train_dataloader = DelphesDataLoader(train_dataset, batch_size=512, shuffle=True)
     val_dataloader = DelphesDataLoader(val_dataset, batch_size=512, shuffle=False)
 
-    # truth_tensor = truth_tensor.to(device)
-    # target = {k: v.to(device) for k, v in target.items()}
-    bin_edges = {k: v.to(device) for k, v in DEFAULT_BIN_EDGES.items()}
-
     # All ranks must use the *same* initial parameters for the manual-
     # gradient-sync scheme to keep them in sync; ``torch.manual_seed``
     # with the user seed (not seed+rank!) handles that.
@@ -259,13 +250,9 @@ def main() -> None:
         trainee,
         train_dataloader,
         val_dataloader,
-        n_steps=args.n_steps,
-        lr=args.lr,
-        beta=args.beta,
-        log_every=max(1, args.n_steps // 10),
-        parameters_to_train=params_to_train,
         param_groups=param_groups,
-        bin_edges=bin_edges,
+        n_steps=args.n_steps,
+        log_every=max(1, args.n_steps // 10),
         snapshot_parameters=args.history_path is not None,
         rank=rank,
         device=device,

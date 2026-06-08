@@ -10,11 +10,11 @@ name that used to be importable from
 
 Submodules
 ----------
-- :mod:`.config`      — all constants (branch names, bin edges, weights, LRs).
+- :mod:`.config`      — constants (branch names, observable keys, default LR).
 - :mod:`.distributed` — DDP / rank helpers.
 - :mod:`.data`        — ROOT I/O and observable construction.
-- :mod:`.loss`        — differentiable soft-histogram losses (self-contained).
-- :mod:`.training`    — parameter groups and the Adam fit loop.
+- :mod:`.loss`        — the sliced-Wasserstein training loss (self-contained).
+- :mod:`.training`    — the Adam fit loop.
 - :mod:`.fixture`     — synthetic fallback ROOT writer.
 - :mod:`.cli`         — the ``main()`` entry point (see also :mod:`.__main__`).
 
@@ -24,27 +24,19 @@ Run with ``python -m parnassus.torch_delphes.tune_cms_fullsim ...``.
 from __future__ import annotations
 
 from .cli import main
-from .config import DEFAULT_BIN_EDGES, DEFAULT_OBS_WEIGHTS, PFLOW_BRANCHES, TRUTH_BRANCHES
+from .config import OBSERVABLES, PFLOW_BRANCHES, TRUTH_BRANCHES
 from .data import (
     load_cms_flow_root,
 )
 from .fixture import write_synthetic_fixture
-from .loss import multi_observable_loss, multi_observable_loss_distributed
-from .training import build_parameter_groups, fit_card_to_fullsim
+from .training import fit_card_to_fullsim
 
 __all__ = [
-    "DEFAULT_BIN_EDGES",
-    "DEFAULT_OBS_WEIGHTS",
+    "OBSERVABLES",
     "PFLOW_BRANCHES",
     "TRUTH_BRANCHES",
-    "build_parameter_groups",
     "fit_card_to_fullsim",
     "load_cms_flow_root",
     "main",
-    "multi_observable_loss",
-    "multi_observable_loss_distributed",
-    "pflow_target_observables",
-    "trainee_observables",
-    "truth_to_particle_tensor",
     "write_synthetic_fixture",
 ]

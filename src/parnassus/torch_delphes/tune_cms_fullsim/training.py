@@ -2,12 +2,10 @@
 
 This module holds the training machinery proper:
 
-- :func:`_classify_parameter` / :func:`build_parameter_groups` bucket the 66
-  learnable parameters into four Adam groups (scales / efficiency / fractions
-  / resolution) with independent learning rates (the matchers and default LRs
-  live in :mod:`.config`).
 - :func:`fit_card_to_fullsim` is the Adam optimization loop that fits the
-  trainee card to a fixed target observable dict.
+  trainee card to a fixed target observable dict, using the per-parameter Adam
+  groups built by
+  :func:`parnassus.torch_delphes.param_config.select_trainable`.
 """
 
 from __future__ import annotations
@@ -15,124 +13,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-import torch.distributed as dist
-from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.param_config import to_physical
 
-from .config import (
-    DEFAULT_BIN_EDGES,
-    DEFAULT_OBS_WEIGHTS,
-    _DEFAULT_LR,
-    _DEFAULT_LR_EFFICIENCY,
-    _DEFAULT_LR_FRACTIONS,
-    _DEFAULT_LR_RESOLUTION,
-    _DEFAULT_LR_SCALES,
-    _EFFICIENCY_SUFFIXES,
-    _FRACTION_FRAGMENTS,
-    _SCALE_SUFFIXES,
-)
+from .config import OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
-from .distributed import _is_dist, _is_main
-from .loss import multi_observable_loss_distributed
-
-# =============================================================================
-# Parameter groups for per-group learning rates
-# =============================================================================
-#
-# The 66 learnable parameters live in parameter spaces with very different
-# natural scales, so a single global Adam learning rate is a poor fit. We
-# instead set each group's Adam learning rate to ``base_lr * ratio_group``,
-# where ``base_lr`` is the global ``--lr`` magnitude and ``ratio_group`` is a
-# dimensionless per-group ratio (``--lr-<group>``). The default ratios are
-# ``scales : efficiency : fractions : resolution = 1 : 1 : 1 : 0.1`` because:
-#
-# - Resolution coefficients ``a_raw, b_raw, c_E, c_S, c_N`` are softplus-
-#   wrapped positive scalars whose post-softplus values range from ~1e-3 to
-#   ~3. A raw Adam step can blow up a tiny coefficient by orders of magnitude
-#   in one step, so they step ~10x slower (ratio 0.1).
-# - Region scales ``scale_raw`` sit at 0 in the raw space and are bounded via
-#   ``tanh``; a raw step moves the bounded output only mildly, which is safe
-#   and responsive (ratio 1).
-# - Efficiency logits ``eff_logits`` map to probabilities via sigmoid and sit
-#   at finite values like ``logit(0.95)=2.94``; a raw step moves the
-#   probability only slightly, the right magnitude for PF efficiency fits
-#   (ratio 1).
-# - Hadron-fraction logits behave like efficiency logits (ratio 1).
-#
-# The function below maps each named parameter in a learnable card to one
-# of the four groups so that :func:`fit_card_to_fullsim` can build a
-# ``torch.optim.Adam`` with per-group learning rates ``base_lr * ratio_group``.
-# (The suffix/fragment matchers, ``base_lr`` and the default ratios live in
-# ``config.py``.)
-
-
-def _classify_parameter(name: str) -> str:
-    """Return the parameter-group key for a given fully-qualified name.
-
-    Returns
-    -------
-    str
-        One of ``"scales"``, ``"efficiency"``, ``"fractions"``,
-        ``"resolution"``.
-    """
-    if any(name.endswith(s) for s in _SCALE_SUFFIXES):
-        return "scales"
-    if any(frag in name for frag in _FRACTION_FRAGMENTS):
-        return "fractions"
-    if any(name.endswith(s) for s in _EFFICIENCY_SUFFIXES):
-        return "efficiency"
-    return "resolution"
-
-
-def build_parameter_groups(
-    card: CMSEnergyFlowDefault,
-    lr: float = _DEFAULT_LR,
-    lr_scales: float = _DEFAULT_LR_SCALES,
-    lr_resolution: float = _DEFAULT_LR_RESOLUTION,
-    lr_efficiency: float = _DEFAULT_LR_EFFICIENCY,
-    lr_fractions: float = _DEFAULT_LR_FRACTIONS,
-) -> list[dict]:
-    """Split ``card.parameters()`` into Adam parameter groups by type.
-
-    The effective Adam learning rate of each group is ``lr * ratio_group``:
-    ``lr`` is the global magnitude (``--lr``) and the four ``lr_<group>``
-    arguments are dimensionless per-group *ratios* (``--lr-<group>``). With
-    the default ratios (1 / 1 / 1 / 0.1) and ``lr = 1e-3``, the effective LRs
-    are scales/efficiency/fractions = 1e-3 and resolution = 1e-4.
-
-    Returns
-    -------
-    list[dict]
-        A list of four ``{"params": [...], "lr": float, "name": str}``
-        dicts, suitable to pass directly to ``torch.optim.Adam``.
-        Empty groups are filtered out so the optimizer doesn't complain
-        about an empty ``params`` list.
-    """
-    buckets: dict[str, list[nn.Parameter]] = {
-        "scales": [],
-        "resolution": [],
-        "efficiency": [],
-        "fractions": [],
-    }
-    for name, p in card.named_parameters():
-        buckets[_classify_parameter(name)].append(p)
-    ratios = {
-        "scales": lr_scales,
-        "resolution": lr_resolution,
-        "efficiency": lr_efficiency,
-        "fractions": lr_fractions,
-    }
-    groups: list[dict] = []
-    for key, params in buckets.items():
-        if not params:
-            continue
-        groups.append({"params": params, "lr": lr * ratios[key], "name": key})
-    return groups
-
+from .distributed import _is_main
+from .loss import per_event_wasserstein_loss
 
 # =============================================================================
 # Fit loop
@@ -143,47 +33,27 @@ def fit_card_to_fullsim(
     card: CMSEnergyFlowDefault | DDP,
     train_dataloader: torch.utils.data.DataLoader,
     val_dataloader: torch.utils.data.DataLoader,
+    param_groups: list[dict],
     n_steps: int = 100,
-    lr: float | None = None,
-    beta: float = 0.15,
     log_every: int = 10,
-    parameters_to_train: list[nn.Parameter] | None = None,
-    param_groups: list[dict] | None = None,
-    bin_edges: dict[str, torch.Tensor] | None = None,
-    observable_weights: dict[str, float] | None = None,
-    lr_scales: float = _DEFAULT_LR_SCALES,
-    lr_resolution: float = _DEFAULT_LR_RESOLUTION,
-    lr_efficiency: float = _DEFAULT_LR_EFFICIENCY,
-    lr_fractions: float = _DEFAULT_LR_FRACTIONS,
     snapshot_parameters: bool = False,
     rank: int = 0,
     device: torch.device = torch.device("cpu"),
     intermediate_plot_dir: str | Path | None = None,
     plot_every: int = 1,
 ) -> dict[str, list[float]]:
-    """Run Adam on ``card`` to match ``target_observables``.
+    """Run Adam on ``card`` to match the target observables.
 
     Each step runs the trainee once over every training batch and steps
     Adam per batch. The target observables are read from the ROOT file
     once (into the dataloaders) and re-used on every step.
 
-    When ``parameters_to_train`` is ``None`` this function automatically
-    builds four parameter groups (scales, resolution, efficiency,
-    fractions) whose effective learning rates are ``lr * ratio_group``
-    (the global magnitude ``lr`` times the per-group ratio ``lr_*``),
-    because the four groups have very different natural step sizes. Pass a
-    non-None ``parameters_to_train`` list to get a single group at the
-    global ``lr`` value (backwards-compatible with earlier callers that
-    fit a small focused subset).
+    ``param_groups`` are the ready-made ``torch.optim.Adam`` groups (with each
+    parameter's effective learning rate already folded in); build them with
+    :func:`parnassus.torch_delphes.param_config.select_trainable`.
 
     Parameters
     ----------
-    lr : float | None
-        Global learning-rate magnitude. When ``parameters_to_train`` is
-        ``None`` the four parameter groups get ``lr * lr_<group>``; when a
-        ``parameters_to_train`` list is given, the single group uses ``lr``
-        directly (the caller is expected to have folded in any per-group
-        ratio). Falls back to ``_DEFAULT_LR`` when ``None``.
     snapshot_parameters : bool
         If True, the history dict will additionally contain a
         ``"parameters"`` list whose i-th entry is a ``{name: float}``
@@ -194,9 +64,9 @@ def fit_card_to_fullsim(
         If set (and not ``""``), write a multi-page PDF per epoch
         (``intermediate_epoch_<step>.pdf``, one observable per page)
         comparing the trainee prediction to the full-sim target on the
-        validation set, with each observable's *unweighted* soft-hist MSE
-        in the page title. Only the main rank plots. ``None``/``""``
-        disables it. See :mod:`tune_cms_fullsim.intermediate_plots`.
+        validation set, with each observable's soft-hist MSE in the page
+        title. Only the main rank plots. ``None``/``""`` disables it. See
+        :mod:`tune_cms_fullsim.intermediate_plots`.
     plot_every : int
         Save intermediate plots every ``plot_every`` epochs (default 1 =
         every epoch). The final / early-stopped epoch is always plotted.
@@ -210,32 +80,6 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
-    base_lr = lr if lr is not None else _DEFAULT_LR
-    if param_groups is not None:
-        # Caller supplied ready-made Adam groups (e.g. cli builds them from the
-        # per-parameter lr_scale in a param config). Use them verbatim.
-        pass
-    elif parameters_to_train is not None:
-        param_groups = [
-            {
-                "params": list(parameters_to_train),
-                "lr": base_lr,
-                "name": "user",
-            }
-        ]
-    else:
-        # Always group on the underlying (unwrapped) card so the
-        # parameter-name suffix matching works regardless of DDP wrapping.
-        underlying = card.module if isinstance(card, DDP) else card
-        param_groups = build_parameter_groups(
-            underlying,
-            lr=base_lr,
-            lr_scales=lr_scales,
-            lr_resolution=lr_resolution,
-            lr_efficiency=lr_efficiency,
-            lr_fractions=lr_fractions,
-        )
-
     opt = torch.optim.Adam(param_groups)
     if _is_main(rank):
         for g in param_groups:
@@ -244,9 +88,6 @@ def fit_card_to_fullsim(
                 f"({len(g['params'])} tensors)"
             )
     lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4)
-
-    edges = bin_edges if bin_edges is not None else DEFAULT_BIN_EDGES
-    weights = observable_weights if observable_weights is not None else DEFAULT_OBS_WEIGHTS
 
     # Per-epoch intermediate plots: resolve the output dir (None/"" disables),
     # create it once on the main rank, and remember the epoch-0 prediction so
@@ -273,13 +114,11 @@ def fit_card_to_fullsim(
             init_pred_by_key = {k: t.clone() for k, t in pred_by_key.items()}
         # Lazy import keeps matplotlib out of the training import path.
         from .intermediate_plots import save_intermediate_observable_plots
-
+        observables = OBSERVABLES
         save_intermediate_observable_plots(
             pred_by_key,
             target_by_key,
-            edges,
-            weights,
-            beta,
+            observables,
             step,
             plot_dir,
             val_loss=val_loss,
@@ -354,9 +193,8 @@ def fit_card_to_fullsim(
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-            # pred = trainee_observables(out)
-            loss = multi_observable_loss_distributed(
-                pred_observables, target_observables, edges, beta=beta, weights=weights
+            loss = per_event_wasserstein_loss(
+                pred_observables, target_observables
             )
 
             loss.backward()
@@ -406,8 +244,8 @@ def fit_card_to_fullsim(
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-                val_loss = multi_observable_loss_distributed(
-                    pred_observables, target_observables, edges, beta=beta, weights=weights
+                val_loss = per_event_wasserstein_loss(
+                    pred_observables, target_observables
                 )
                 val_loss_acc += val_loss.detach()
 
@@ -417,7 +255,7 @@ def fit_card_to_fullsim(
                 # CPU so memory stays flat and concatenation across batches with
                 # different max_n_objects is safe.
                 if collect_obs:
-                    for key in edges.keys():
+                    for key in OBSERVABLES:
                         if key not in pred_observables or key not in target_observables:
                             continue
                         pv, tv = pred_observables[key], target_observables[key]

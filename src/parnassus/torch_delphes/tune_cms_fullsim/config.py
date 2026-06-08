@@ -1,23 +1,17 @@
 """Constants for the ``tune_cms_fullsim`` package.
 
-This module centralizes every tunable constant used across the package so
-they live in exactly one place:
+This module centralizes the constants used across the package:
 
 - the ROOT branch names we consume (:data:`TRUTH_BRANCHES`, :data:`PFLOW_BRANCHES`);
-- the default histogram bin edges and per-observable loss weights
-  (:data:`DEFAULT_BIN_EDGES`, :data:`DEFAULT_OBS_WEIGHTS`);
-- the parameter-name matchers used to bucket the 66 learnable params into
-  four optimizer groups (:data:`_SCALE_SUFFIXES`, :data:`_EFFICIENCY_SUFFIXES`,
-  :data:`_FRACTION_FRAGMENTS`) and the per-group default learning rates
-  (:data:`_DEFAULT_LR_SCALES` etc.).
+- the observable keys built from them (:data:`OBSERVABLES`);
+- the default global Adam learning rate (:data:`_DEFAULT_LR`).
 
-Nothing here consumes the global RNG (``torch.linspace`` is deterministic),
-so importing this module has no effect on reproducibility.
+Nothing here consumes the global RNG, so importing this module has no effect on
+reproducibility.
 """
 
 from __future__ import annotations
 
-import torch
 
 # =============================================================================
 # ROOT branch names
@@ -31,94 +25,18 @@ PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_
 
 
 # =============================================================================
-# Observable histogram bins and loss weights
+# Observables
 # =============================================================================
 
-# Default bin edges for the four observables. Wide-enough to cover the bulk
-# of both target and trainee distributions on a QCD-jet sample; users can
-# override these via --bin-config when needed.
-DEFAULT_BIN_EDGES: dict[str, torch.Tensor] = {
-    "pt": torch.linspace(0.0, 200.0, 41, dtype=torch.float64),
-    "eta": torch.linspace(-5.0, 5.0, 41, dtype=torch.float64),
-    # "phi": torch.linspace(-np.pi, np.pi, 41, dtype=torch.float64),
-    # E ranges higher than pt since E = pt * cosh(eta) >= pt for the
-    # reconstructed particles; widen the upper edge accordingly.
-    # "E": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
-    # log(pt) bin spanning ~0.37 GeV (e^-1) to ~403 GeV (e^6); linear in
-    # log space gives Adam much better gradient signal in the high-pT
-    # tail than the linear pt histogram does.
-    "log_pt": torch.linspace(-1.0, 6.0, 41, dtype=torch.float64),
-    "log_E": torch.linspace(-1.0, 6.5, 41, dtype=torch.float64),
-    "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
-    "ht": torch.linspace(0.0, 2000.0, 41, dtype=torch.float64),
-    # log(HT) spanning ~e^4.5 = 90 GeV to ~e^7.5 = 1808 GeV. HT is a per-event
-    # SUM, so (unlike particle-level log_pt/log_E) it is tightly concentrated --
-    # the QCD-jet target bulk sits around log_ht ~ 5.4-6.8 -- so the range is kept
-    # narrow to spend the 40 bins where the distribution actually is. Tune it if
-    # the plotted log_ht histogram clips at an edge.
-    "log_ht": torch.linspace(4.5, 7.5, 41, dtype=torch.float64),
-}
-
-# Default per-observable weights. The particle-level observables (pt, eta)
-# are far less noisy than the per-event scalars (multiplicity, ht) because
-# they have O(N_particles) rather than O(N_events) samples, so we upweight
-# them and put a small tie-breaking weight on the per-event pair.
-#
-# E and log_pt are also particle-level. log_pt is highly correlated with pt
-# (it's a monotone reparametrization), so we down-weight it slightly to
-# avoid double-counting; its main role is to give Adam a non-vanishing
-# gradient on the high-pT tail where the linear-pt histogram bins are
-# nearly empty. E adds genuinely new information through the eta-dependent
-# pt -> p_total mapping (it probes the forward calo scales).
-DEFAULT_OBS_WEIGHTS: dict[str, float] = {
-    "pt": 0.0,
-    "eta": 1.0,
-    # "phi": 1.0,
-    # "E": 1.0,
-    "log_E": 1.0,
-    "log_pt": 1.0,
-    "multiplicity": 0.5,
-    # Linear ht is kept at weight 0 (plotting reference only); log_ht carries
-    # the per-event scalar in the loss, mirroring the log_pt / log_E switch.
-    "ht": 0.0,
-    "log_ht": 0.5,
-}
+OBSERVABLES: list[str] = ["pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid"]
 
 
 # =============================================================================
-# Parameter-group classification and per-group learning rates
+# Learning rate
 # =============================================================================
 #
-# The 66 learnable parameters live in parameter spaces with very different
-# natural scales, so a single global Adam learning rate is a poor fit. The
-# name matchers below let ``training.build_parameter_groups`` bucket each
-# named parameter into one of four groups (scales / efficiency / fractions /
-# resolution), each with its own learning rate. See the rationale comment in
-# ``training.py`` (above ``_classify_parameter``) for why the four groups
-# need different step sizes.
-
-_SCALE_SUFFIXES = ("scale_raw",)
-_EFFICIENCY_SUFFIXES = ("eff_logits", "rate_raw")
-_FRACTION_FRAGMENTS = ("HadronFractions",)
-# Everything else on a learnable card that has an ``nn.Parameter`` is a
-# resolution coefficient (softplus-wrapped positive number).
-
-# Learning-rate model: a single global magnitude (``_DEFAULT_LR``) times a
-# per-group *relative ratio*. The effective Adam learning rate of a group is
-#
-#     effective_lr = lr * lr_<group>
-#
-# where ``lr`` is the global ``--lr`` and ``lr_<group>`` is the dimensionless
-# ``--lr-<group>`` ratio below. This lets the user sweep the overall step size
-# with one knob (``--lr``) while keeping the physically-motivated ratios
-# between groups fixed. The default ratios encode "resolution coefficients
-# step 10x slower than everything else" (1 : 1 : 1 : 0.1), because the
-# softplus-wrapped resolution coefficients are far more sensitive to a raw
-# Adam step than the tanh/sigmoid-wrapped scale/efficiency/fraction params
-# (see the rationale comment in ``training.py`` above ``_classify_parameter``).
-_DEFAULT_LR: float = 1e-3
-
-_DEFAULT_LR_SCALES: float = 1.0
-_DEFAULT_LR_EFFICIENCY: float = 1.0
-_DEFAULT_LR_FRACTIONS: float = 1.0
-_DEFAULT_LR_RESOLUTION: float = 0.1
+# Global Adam learning-rate magnitude (the ``--lr`` default). Each parameter's
+# effective learning rate is ``--lr * lr_scale``, where the per-parameter
+# ``lr_scale`` comes from the YAML param config and the Adam parameter groups
+# are built by :func:`parnassus.torch_delphes.param_config.select_trainable`.
+_DEFAULT_LR: float = 1e-2

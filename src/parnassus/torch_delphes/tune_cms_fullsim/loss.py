@@ -1,29 +1,29 @@
-"""Differentiable soft-histogram losses for ``tune_cms_fullsim``.
+"""Differentiable distribution-matching losses for ``tune_cms_fullsim``.
 
 This module is the package's self-contained loss layer:
 
-- :func:`soft_histogram` and :func:`histogram_mse_loss` are the
-  fully-differentiable histogram primitives. They are an exact COPY of the
-  same-named functions in :mod:`parnassus.torch_delphes.tuning` so that this
-  package does not depend on ``tuning`` at all. (The ``tuning`` module keeps
-  its own copies for its standalone demo / tests; keep the two in sync if you
-  ever change the soft-histogram math.)
-- :func:`multi_observable_loss` sums the per-observable histogram MSEs.
-- :func:`multi_observable_loss_distributed` is the DDP-aware version that
-  all-reduces the histograms across ranks; it falls back to
-  :func:`multi_observable_loss` when no process group is initialized.
+- :func:`per_event_wasserstein_loss` is the active training loss: a sliced
+  Wasserstein-2 distance computed per particle type over the standardized
+  ``[log_E, log_pt, eta]`` object clouds, plus a down-weighted event-level term
+  on the ``log(HT)`` distribution. It uses POT's
+  ``ot.sliced_wasserstein_distance`` and stays differentiable w.r.t. the
+  trainee card's predicted object kinematics.
+- :func:`soft_histogram` and :func:`histogram_mse_loss` are fully-differentiable
+  histogram primitives. They are no longer part of the training loss; they
+  remain only as the diagnostic that
+  :mod:`tune_cms_fullsim.intermediate_plots` uses to annotate each per-epoch
+  plot with a soft-histogram MSE. They are an exact COPY of the same-named
+  functions in :mod:`parnassus.torch_delphes.tuning` (keep the two in sync if
+  you ever change the soft-histogram math).
 """
 
 from __future__ import annotations
 
+import ot
 import torch
-import torch.distributed as dist
-from torch.distributed.nn.functional import all_reduce as diff_all_reduce
-
-from .distributed import _is_dist
 
 # =============================================================================
-# Differentiable histogram and loss primitives (copied verbatim from tuning.py)
+# Differentiable histogram primitives (diagnostic only; copied from tuning.py)
 # =============================================================================
 
 
@@ -93,9 +93,8 @@ def histogram_mse_loss(
 ) -> torch.Tensor:
     """MSE between two soft histograms, both normalized to densities.
 
-    Suitable as a training loss when ``pred_values`` are produced by a
-    differentiable detector simulation and ``target_values`` are
-    detached (a fixed target distribution).
+    Used by :mod:`tune_cms_fullsim.intermediate_plots` as a per-epoch
+    distribution-mismatch diagnostic (it is not part of the training loss).
 
     Returns
     -------
@@ -110,93 +109,101 @@ def histogram_mse_loss(
 
 
 # =============================================================================
-# Multi-observable losses
+# Active training loss: per-event sliced Wasserstein
 # =============================================================================
 
 
-def multi_observable_loss(
+def per_event_wasserstein_loss(
     pred: dict[str, torch.Tensor],
     target: dict[str, torch.Tensor],
-    bin_edges: dict[str, torch.Tensor],
-    beta: float = 0.15,
-    weights: dict[str, float] | None = None,
 ) -> torch.Tensor:
-    """Sum of per-observable soft-histogram MSE losses, optionally weighted.
+    """Sliced Wasserstein-2 loss between predicted and target observables.
 
-    Per-particle observables (``pt``, ``eta``, ``log_pt``, ``log_E``) arrive as
-    2-D ``(n_events, max_n_particles)`` padded tensors; they are flattened to 1-D
-    and stripped of padding / efficiency-ghost slots before histogramming. The
-    validity mask is derived from the *same side's* ``pt`` key, because
-    ``eta == 0`` and ``log_pt == log(1) == 0`` are valid real values and cannot
-    be detected per-observable. Per-event observables (``multiplicity``,
-    ``ht``, ``log_ht``) are already 1-D and pass through unchanged. ``pred`` and ``target``
-    may have different ``max_n_particles``; each side is flattened and masked
-    independently and ``histogram_mse_loss`` normalizes to a density, so
-    unequal counts are handled correctly.
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar loss summed over every observable for which both
-        ``pred`` and ``target`` have at least one valid value.
+    One SW_2 term per particle type (``pid``) over the standardized 3-D
+    ``[log_E, log_pt, eta]`` object clouds, plus a down-weighted event-level
+    SW_2 term on the per-event ``log(HT)`` distribution. The target side is
+    detached; gradients flow back to the trainee card through ``pred``.
     """
 
-    def _flatten_valid(obs: dict[str, torch.Tensor], key: str) -> torch.Tensor:
-        v = obs[key]
-        if v.ndim >= 2:  # per-particle, padded -> drop padding/ghost slots
-            return v[obs["pt"] != 0]  # boolean-index READ is a differentiable gather
-        return v.reshape(-1)  # per-event, already 1-D
+    object_level_observables = ["log_E", "log_pt", "eta", "pid"]
 
-    # Anchor the accumulator on bin_edges' dtype/device (bin_edges are float64
-    # and moved to the compute device by the caller); a bare torch.zeros((), ...)
-    # would sit on the CPU and break once DDP runs on GPU.
-    any_edges = next(iter(bin_edges.values()))
-    total = torch.zeros((), dtype=any_edges.dtype, device=any_edges.device)
+    pred_particles = torch.stack([pred[k] for k in object_level_observables], dim=-1) # shape (n_events, max_n_particles, n_observables)
+    target_particles = torch.stack([target[k] for k in object_level_observables], dim=-1)
 
-    # The weights dict drives the active observable set: DEFAULT_OBS_WEIGHTS lists
-    # the active observables (e.g. eta/log_pt/log_E/log_ht; linear pt/ht are kept
-    # at weight 0), so iterating its keys honors those weights -- including the
-    # weight-0 ones -- instead of defaulting every bin_edges key to weight 1.0.
-    active_keys = weights.keys() if weights else bin_edges.keys()
-    for key in active_keys:
-        if key not in bin_edges or key not in pred or key not in target:
+    def get_object_groups(input_tensor: torch.Tensor) -> dict[int, torch.Tensor]:
+        """Flatten ``(n_events, max_n_particles, n_obs)`` -> ``(N, n_obs)``, drop
+        padding / efficiency-killed slots (``pid == 0``), and group the valid
+        particles by integer ``pid``.
+
+        The last column is ``pid`` (discrete, off the autograd graph); columns
+        ``0:3`` are the differentiable features ``[log_E, log_pt, eta]``. Boolean-
+        mask indexing is a differentiable gather, so on the pred side the returned
+        feature tensors keep the gradient back to the learnable detector params.
+
+        Returns ``dict`` pid -> ``(num_objects_with_that_pid, 3)`` feature tensor.
+        """
+        flat = input_tensor.reshape(-1, input_tensor.shape[-1])  # (N, n_obs)
+        pid_col = flat[..., -1]  # (N,) pid, no grad
+        valid = pid_col != 0  # padding/ghost -> pid == 0
+        flat = flat[valid]  # differentiable gather
+        pid_valid = pid_col[valid]
+
+        groups: dict[int, torch.Tensor] = {}
+        for pid in torch.unique(pid_valid).tolist():
+            sel = pid_valid == pid
+            groups[int(pid)] = flat[sel][:, :3]  # [log_E, log_pt, eta], keeps grad
+        return groups
+
+    # Group both sides across the whole batch. Pred keeps its graph; the target is a
+    # fixed reference, so detach it.
+    pred_groups = get_object_groups(pred_particles)
+    target_groups = get_object_groups(target_particles.detach())
+
+    def sliced_sw2(x_pred: torch.Tensor, y_tgt: torch.Tensor) -> torch.Tensor:
+        """SW_2 between a differentiable pred cloud ``x_pred`` (n_pred, d) and a
+        reference target cloud ``y_tgt`` (n_tgt, d).
+
+        Each feature is standardized by the detached target std so no axis
+        dominates the random 1-D projections (the scale is a gradient-free
+        constant). Returns a scalar SW_2 distance that keeps the gradient back to
+        ``x_pred``. Works for the (n, 3) object clouds and the (n, 1) per-event
+        clouds alike; SW on 1-D data is exact.
+        """
+        y = y_tgt.detach().to(device=x_pred.device, dtype=x_pred.dtype)
+        scale = y.std(dim=0, unbiased=False).clamp(min=1e-8)  # (d,)
+        return ot.sliced_wasserstein_distance(
+            x_pred / scale, y / scale, n_projections=100, p=2, seed=0
+        )
+
+    # Object-level term: one SW_2 per pid present on BOTH sides, over the 3
+    # standardized kinematic features [log_E, log_pt, eta].
+    object_wasserstein_distance: dict[int, torch.Tensor] = {}
+    for pid in sorted(set(pred_groups) & set(target_groups)):
+        x = pred_groups[pid]  # (n_pred, 3), differentiable
+        y = target_groups[pid]  # (n_tgt, 3), reference (detached inside sliced_sw2)
+        if x.shape[0] == 0 or y.shape[0] == 0:  # nothing to match on one side
             continue
-        pred_vals = _flatten_valid(pred, key)
-        tgt_vals = _flatten_valid(target, key)
-        if pred_vals.numel() == 0 or tgt_vals.numel() == 0:
+        object_wasserstein_distance[int(pid)] = sliced_sw2(x, y)
+
+    # Event-level term: SW_2 on the per-event log(HT) distribution, (n_events,) ->
+    # (n_events, 1). log_ht is differentiable (built from pt). multiplicity is
+    # intentionally excluded: it is a hard pt != 0 count with no gradient, so an OT
+    # term on it would change the loss value but not drive training.
+    event_wasserstein_distance: dict[str, torch.Tensor] = {}
+    for key in ("log_ht",):
+        pv = pred[key].reshape(-1, 1)
+        tv = target[key].reshape(-1, 1)
+        if pv.shape[0] == 0 or tv.shape[0] == 0:
             continue
-        w = weights[key] if weights else 1.0
-        total = total + w * histogram_mse_loss(pred_vals, tgt_vals, bin_edges[key], beta=beta)
-    return total
+        event_wasserstein_distance[key] = sliced_sw2(pv, tv)
 
-
-def multi_observable_loss_distributed(
-    pred: dict[str, torch.Tensor],
-    target: dict[str, torch.Tensor],
-    bin_edges: dict[str, torch.Tensor],
-    beta: float = 0.15,
-    weights: dict[str, float] | None = None,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """DDP-aware multi-observable soft-histogram MSE loss.
-
-    Each rank computes its local *unnormalized* soft histogram for both
-    pred and target. We then all-reduce-SUM both histograms across ranks
-    (differentiably for the pred side, via
-    ``torch.distributed.nn.functional.all_reduce``), normalize, and
-    compute the MSE. The result is mathematically identical to running
-    :func:`multi_observable_loss` on the union of every rank's events.
-
-    Falls back to :func:`multi_observable_loss` when no process group is
-    initialized (single-process / plain ``python`` runs).
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar loss; gradients propagate through the all-reduce back to
-        the learnable parameters on the local rank.
-    """
-    if not _is_dist():
-        return multi_observable_loss(pred, target, bin_edges, beta=beta, weights=weights)
-    else:
-        raise NotImplementedError("multi_observable_loss_distributed is not implemented yet")
+    # Sum every term -> the scalar loss the training loop back-props. The per-event
+    # log_ht term is down-weighted by EVENT_WEIGHT relative to the per-pid object
+    # terms (scalar * tensor keeps the gradient).
+    EVENT_WEIGHT = 0.1
+    terms = list(object_wasserstein_distance.values()) + [
+        EVENT_WEIGHT * d for d in event_wasserstein_distance.values()
+    ]
+    if not terms:  # degenerate empty batch: keep a graph-connected zero
+        return pred_particles.sum() * 0.0
+    return torch.stack(terms).sum()
