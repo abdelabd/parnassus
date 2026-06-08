@@ -82,7 +82,7 @@ Key files in this directory:
 | [tune_cms_fullsim/](tune_cms_fullsim/) | Step 2 — fit the trainee card to the pseudodata |
 | [tune_cms_fullsim/cli.py](tune_cms_fullsim/cli.py) | tuning entry point (`python -m parnassus.torch_delphes.tune_cms_fullsim`) |
 | [tune_cms_fullsim/training.py](tune_cms_fullsim/training.py) | Adam loop, scheduler, early stopping |
-| [tune_cms_fullsim/loss.py](tune_cms_fullsim/loss.py) | per-event sliced-Wasserstein loss + soft histograms |
+| [tune_cms_fullsim/loss.py](tune_cms_fullsim/loss.py) | per-event sliced-Wasserstein loss (+ soft-hist diagnostic) |
 | [tune_cms_fullsim/data.py](tune_cms_fullsim/data.py) | ROOT loading, padding, train/val split, observable extraction |
 | [tune_cms_fullsim/plot_fit_results.py](tune_cms_fullsim/plot_fit_results.py) | Step 3 — validation plots |
 | [param_config.py](param_config.py) | YAML loader, raw↔physical transforms, `select_trainable` |
@@ -150,7 +150,6 @@ predicted observables and the full-sim targets. Uses a `ReduceLROnPlateau` sched
 | `--n-events` | int | `-1` | Number of events to load. **`-1` = all events** in the tree. |
 | `--n-steps` | int | `200` | Number of Adam steps (epochs); each step is one pass over the training data. |
 | `--lr` | float | `1e-2` | **Global** learning-rate magnitude. The *effective* Adam LR of each parameter is `--lr × lr_scale` (see below). |
-| `--beta` | float | `0.15` | Soft-histogram softness used when computing the per-observable MSE shown on the intermediate plots. |
 | `--seed` | int | `0` | Torch RNG seed and train/validation split seed. |
 | `--history-path` | path | `None` | If set, write the full training history (loss trajectory + per-epoch parameter snapshots) to this JSON. **Required input for Step 3.** |
 | `--fixture-path` | path | `/tmp/tune_cms_fullsim_fixture.root` | Where the synthetic fallback fixture is written/read when `--root-file` is absent. |
