@@ -93,7 +93,7 @@ _FRACTION_FRAGMENTS = ("HadronFractions",)
 # softplus-wrapped resolution coefficients are far more sensitive to a raw
 # Adam step than the tanh/sigmoid-wrapped scale/efficiency/fraction params
 # (see the rationale comment in ``training.py`` above ``_classify_parameter``).
-_DEFAULT_LR: float = 1e-3
+_DEFAULT_LR: float = 1e-2
 
 _DEFAULT_LR_SCALES: float = 1.0
 _DEFAULT_LR_EFFICIENCY: float = 1.0
