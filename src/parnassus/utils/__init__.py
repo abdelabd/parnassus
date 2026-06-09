@@ -28,12 +28,31 @@ def pid_to_class(pid: int) -> int:
         return 1
     if abs(pid) == 13:
         return 2
+    if pid == 0:  # neutral-hadron calorimeter tower (Delphes convention)
+        return 3
     p = PDGID(pid)
     if p.is_hadron:
         if p.charge != 0:
             return 0
         return 3
     return 4
+
+
+def pid_to_class_vectorized(pid: IntArray) -> IntArray:
+    """Vectorized Delphes/PDG pid -> class id (0..4), the inverse direction of
+    :func:`class_to_pid`.
+
+    Each distinct pid is mapped once through the scalar :func:`pid_to_class`,
+    then gathered back to the original shape. This reuses the single tested
+    mapping that handles the Delphes neutral-hadron 0 marker and arbitrary PDG
+    hadron codes via :class:`PDGID`, and matches the conversion
+    :mod:`generate_pseudodata` uses to fill ``pflow_class`` / ``truth_class``.
+    """
+    pid = np.asarray(pid)
+    # ravel keeps inv 1-D across numpy versions; reshape restores the shape.
+    uniq, inv = np.unique(pid.ravel(), return_inverse=True)
+    lut = np.array([pid_to_class(int(p)) for p in uniq], dtype=np.int64)
+    return lut[inv].reshape(pid.shape)
 
 
 def class_to_pid(particle_class: int) -> int:

@@ -91,4 +91,5 @@ src/parnassus/torch_delphes/validation/logs/
 .DS_Store
 
 *.png
-doc/fit_results/*.json
+doc/figures/*
+doc/fit_results/*

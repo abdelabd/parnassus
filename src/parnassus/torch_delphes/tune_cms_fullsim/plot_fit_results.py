@@ -29,7 +29,7 @@ Usage
 -----
 .. code-block:: shell
 
-    uv run python -m parnassus.torch_delphes.plot_fit_results \
+    uv run python -m parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results \
         --history doc/fit_results/all66_history.json \
         --root-file src/parnassus/tests/benchmark_data/cms_pseudodata.root \
         --output-dir doc/figures
@@ -49,20 +49,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
-from parnassus.torch_delphes.generate_pseudodata import (
-    TARGET_CHAD_EFF_BARREL_LOWPT,
-    TARGET_CHAD_RES_A_BARREL_FACTOR,
-    TARGET_CHAD_SCALE,
-    TARGET_ECAL_SCALE,
-    TARGET_HCAL_SCALE,
-    TARGET_K0S_ECAL_FRAC,
+
+# The truth reference lines on the parameter-drift plots come from the same
+# param config used to generate the sample (its physical ``value`` fields).
+_DEFAULT_PARAM_CONFIG = (
+    Path(pc.__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
 )
-from parnassus.torch_delphes.tune_cms_fullsim import (
+
+from .data import (
     load_cms_flow_root,
-    pflow_target_observables,
-    trainee_observables,
-    truth_to_particle_tensor,
+    load_pflow_targets,
+    load_pflow_targets_from_tensor,
+    load_truth_events,
+    restore_event_format,
 )
 
 # Mild styling so the figures are legible in both light and dark themes.
@@ -78,14 +79,67 @@ plt.rcParams.update({
 })
 
 
+def _load_history(path: Path) -> dict:
+    """Load a training-history JSON and normalize it for the plot helpers.
+
+    Accepts ONLY the current nested schema written by
+    ``tune_cms_fullsim`` (``{"metadata", "history", "best_result"}``).
+    Old flat-format files (top-level ``"loss"``/``"step"``/``"parameters"``)
+    are rejected with a clear error because they lack the per-epoch
+    validation loss needed to pick the best (min-val-loss) epoch.
+
+    Returns a dict exposing the parallel-list keys the existing plot
+    helpers consume — ``"step"``, ``"loss"`` (train loss), ``"parameters"``
+    (per-epoch snapshots) — plus ``"val_loss"``, ``"metadata"`` and
+    ``"best_result"``. Epochs are returned in ascending ``step`` order.
+    """
+    with path.open() as f:
+        raw = json.load(f)
+
+    if "history" not in raw or "metadata" not in raw:
+        raise SystemExit(
+            f"{path} is in the old flat history format. Re-run training with "
+            "the updated --history-path to produce the new "
+            "{metadata, history, best_result} schema (the old format has no "
+            "per-epoch validation loss, so the best epoch cannot be selected)."
+        )
+
+    entries = sorted(raw["history"].values(), key=lambda e: e["step"])
+    return {
+        "step": [e["step"] for e in entries],
+        "loss": [e["train_loss"] for e in entries],
+        "val_loss": [e.get("val_loss") for e in entries],
+        "parameters": [e.get("parameters", {}) for e in entries],
+        "metadata": raw["metadata"],
+        "best_result": raw.get("best_result", {}),
+    }
+
+
 def plot_loss(history: dict, output_path: Path) -> None:
-    """Plot the loss trajectory on a log-y axis."""
+    """Plot the train/val loss trajectory on a log-y axis.
+
+    Marks the best (min-validation-loss) epoch with a vertical line so it
+    is visually clear why it can differ from the last epoch (early stopping
+    keeps training for ``patience`` extra steps after the best).
+    """
     steps = history["step"]
     loss = history["loss"]
+    val_loss = history.get("val_loss") or []
     fig, ax = plt.subplots(figsize=(5.5, 4.0))
     ax.semilogy(steps, loss, color="tab:blue", label="training loss")
+    if any(v is not None for v in val_loss):
+        ax.semilogy(steps, val_loss, color="tab:orange", label="validation loss")
+    best_step = history.get("best_result", {}).get("step")
+    if best_step is not None:
+        ax.axvline(
+            best_step,
+            color="tab:green",
+            linestyle="--",
+            alpha=0.6,
+            label=f"best (min val) @ step {best_step}",
+        )
     ax.set_xlabel("Adam step")
-    ax.set_ylabel("soft-histogram MSE loss")
+    ax.set_ylabel("loss")
     ax.set_title("Loss trajectory")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(loc="upper right")
@@ -240,6 +294,37 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
             p.copy_(raw.reshape(p.shape).to(p.dtype))
 
 
+def _trainee_observables(card: CMSEnergyFlowDefault, truth_tensor: torch.Tensor) -> dict:
+    """Run the trainee card on padded truth events -> predicted observable dict.
+
+    Mirrors the fit loop in :mod:`tune_cms_fullsim.training`: drop the padded
+    truth particles, run the card (which expects a flat
+    ``(n_particles, n_features)`` tensor), regroup the flat ``EFlowObject``
+    output back into per-event format, then extract the observable dict. The
+    caller seeds the RNG before calling, since the card's momentum smearing /
+    Gumbel-ST efficiency is stochastic.
+    """
+    mask = torch.any(truth_tensor != 0, dim=-1)
+    with torch.no_grad():
+        out = card(truth_tensor[mask])
+    eflow_restored = restore_event_format(out["EFlowObject"], mask)
+    return load_pflow_targets_from_tensor(eflow_restored)
+
+
+def _obs_values(obs: dict, key: str) -> torch.Tensor:
+    """Flatten an observable to 1-D for histogramming, dropping padding/ghosts.
+
+    Per-particle observables are 2-D ``(n_events, max_n_objects)`` zero-padded;
+    the same ``pt != 0`` cut the loss uses removes padding and efficiency-killed
+    ghost slots (``eta == 0`` and ``log_pt == 0`` are valid values, so they can
+    not be masked per-observable). Per-event observables (1-D) pass through.
+    """
+    v = obs[key]
+    if v.ndim >= 2:
+        return v[obs["pt"] != 0]
+    return v.reshape(-1)
+
+
 def _density_histogram(values: torch.Tensor, edges: np.ndarray) -> np.ndarray:
     """Normalised histogram counts (density, summing to 1).
 
@@ -292,7 +377,7 @@ def plot_observable(
 
 
 def main() -> None:
-    """Entry point for ``python -m parnassus.torch_delphes.plot_fit_results``."""
+    """Entry point for ``python -m parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results``."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history", type=Path, required=True)
     parser.add_argument(
@@ -303,12 +388,39 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("doc/figures"))
     parser.add_argument("--n-events-for-plots", type=int, default=400)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--truth-config",
+        type=Path,
+        default=_DEFAULT_PARAM_CONFIG,
+        help=(
+            "The GENERATION/truth config that made the ROOT file -- its physical "
+            "'value' fields are drawn as the truth reference lines on the "
+            "parameter-drift plots. Do NOT pass a training config: a trained "
+            "parameter's 'value' there is its off-truth STARTING point, not its "
+            "truth, so the reference line would be wrong. Defaults to "
+            "cms_target_default.yaml."
+        ),
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    with args.history.open() as f:
-        history = json.load(f)
+    history = _load_history(args.history)
+
+    # Ground-truth physical value of every scalar, keyed by the same name[i]
+    # form the history snapshots use. These come from the GENERATION config; a
+    # training config would give a trained param's start value, not its truth.
+    flat_truth_cfg = pc.load_param_config(args.truth_config)
+    n_trainable = sum(1 for spec in flat_truth_cfg.values() if spec["trainable"])
+    if n_trainable:
+        print(
+            f"WARNING: {args.truth_config} marks {n_trainable} parameter(s) trainable -- "
+            "it looks like a TRAINING config, not the generation/truth config. Truth "
+            "reference lines for those params will show their START value, not the truth. "
+            "Pass the generation config (e.g. param_configs/cms_target_default.yaml) "
+            "to --truth-config instead."
+        )
+    truth = {k: spec["value"] for k, spec in flat_truth_cfg.items()}
 
     print(f"Writing figures to {args.output_dir}")
 
@@ -317,18 +429,22 @@ def main() -> None:
     print("  wrote loss_trajectory.pdf")
 
     # ----- 2. Scale parameter drift -----
-    # The committed pseudodata has uniform targets across eta regions
-    # for the three scale types (chad pT, ECal E, HCal E).
+    # Truth values are read from the param config (per eta region).
     scale_members: dict[str, list[tuple[str, float]]] = {
         "charged-hadron pT scale": [
-            (f"ChargedHadronMomentumSmearing.resolution_module.scale_raw[{i}]", TARGET_CHAD_SCALE)
-            for i in range(3)
+            (k, truth[k])
+            for k in (
+                f"ChargedHadronMomentumSmearing.resolution_module.scale_raw[{i}]"
+                for i in range(3)
+            )
         ],
         "ECal energy scale": [
-            (f"ECal.scale_module.scale_raw[{i}]", TARGET_ECAL_SCALE) for i in range(3)
+            (f"ECal.scale_module.scale_raw[{i}]", truth[f"ECal.scale_module.scale_raw[{i}]"])
+            for i in range(3)
         ],
         "HCal energy scale": [
-            (f"HCal.scale_module.scale_raw[{i}]", TARGET_HCAL_SCALE) for i in range(2)
+            (f"HCal.scale_module.scale_raw[{i}]", truth[f"HCal.scale_module.scale_raw[{i}]"])
+            for i in range(2)
         ],
     }
     plot_param_drift(
@@ -339,24 +455,16 @@ def main() -> None:
     )
     print("  wrote param_drift_scales.pdf")
 
-    # ----- 3. Other perturbed parameters -----
-    # Default values: chad a barrel 0.06, chad barrel low-pt eff 0.70,
-    # K0S ECal fraction 0.30.
+    # ----- 3. Other representative parameters (truth from the config) -----
     other_members: dict[str, list[tuple[str, float]]] = {
         "chad res. a (barrel)": [
-            (
-                "ChargedHadronMomentumSmearing.resolution_module.a_raw[0]",
-                0.06 * TARGET_CHAD_RES_A_BARREL_FACTOR,
-            ),
+            (k := "ChargedHadronMomentumSmearing.resolution_module.a_raw[0]", truth[k]),
         ],
         "chad eff. (barrel, low-pT)": [
-            (
-                "ChargedHadronTrackingEfficiency.eff_logits[0]",
-                TARGET_CHAD_EFF_BARREL_LOWPT,
-            ),
+            (k := "ChargedHadronTrackingEfficiency.eff_logits[0]", truth[k]),
         ],
         "K0-short ECal fraction": [
-            ("HadronFractions.k0s_logit", TARGET_K0S_ECAL_FRAC),
+            (k := "HadronFractions.k0s_logit", truth[k]),
         ],
     }
     plot_param_drift(
@@ -369,26 +477,32 @@ def main() -> None:
 
     # ----- 4. Observable histograms (target vs init vs final) -----
     arrays = load_cms_flow_root(args.root_file, n_events=args.n_events_for_plots)
-    truth_tensor = truth_to_particle_tensor(arrays, n_events=args.n_events_for_plots)
-    target = pflow_target_observables(arrays, n_events=args.n_events_for_plots)
+    truth_tensor = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
 
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True)
-    with torch.no_grad():
-        out_init = trainee(truth_tensor)
-    pred_init = trainee_observables(out_init, n_events=args.n_events_for_plots)
+    pred_init = _trainee_observables(trainee, truth_tensor)
 
-    # Restore the *final* parameter snapshot and re-run.
-    _set_trainee_from_snapshot(trainee, history["parameters"][-1])
+    # Restore the *best* (min-validation-loss) parameter snapshot and re-run.
+    # Early stopping keeps training past the best epoch, so the last snapshot
+    # is over-trained; best_result holds the snapshot we actually want to show.
+    best_params = history["best_result"].get("parameters") or (
+        history["parameters"][-1] if history.get("parameters") else None
+    )
+    if not best_params:
+        raise SystemExit(
+            "History has no parameter snapshots, cannot plot trainee observables. "
+            "Re-run training with --history-path (snapshots are enabled there)."
+        )
+    _set_trainee_from_snapshot(trainee, best_params)
     torch.manual_seed(args.seed)
-    with torch.no_grad():
-        out_final = trainee(truth_tensor)
-    pred_final = trainee_observables(out_final, n_events=args.n_events_for_plots)
+    pred_final = _trainee_observables(trainee, truth_tensor)
 
     plot_observable(
-        target["pt"],
-        pred_init["pt"],
-        pred_final["pt"],
+        _obs_values(target, "pt"),
+        _obs_values(pred_init, "pt"),
+        _obs_values(pred_final, "pt"),
         edges=np.linspace(0.0, 100.0, 51),
         xlabel=r"PF object $p_\mathrm{T}$ [GeV]",
         output_path=args.output_dir / "observable_pt.pdf",
@@ -397,9 +511,9 @@ def main() -> None:
     print("  wrote observable_pt.pdf")
 
     plot_observable(
-        target["eta"],
-        pred_init["eta"],
-        pred_final["eta"],
+        _obs_values(target, "eta"),
+        _obs_values(pred_init, "eta"),
+        _obs_values(pred_final, "eta"),
         edges=np.linspace(-5.0, 5.0, 51),
         xlabel=r"PF object $\eta$",
         output_path=args.output_dir / "observable_eta.pdf",
@@ -407,9 +521,31 @@ def main() -> None:
     print("  wrote observable_eta.pdf")
 
     plot_observable(
-        target["multiplicity"],
-        pred_init["multiplicity"],
-        pred_final["multiplicity"],
+        _obs_values(target, "ht"),
+        _obs_values(pred_init, "ht"),
+        _obs_values(pred_final, "ht"),
+        edges=np.linspace(0.0, 1000.0, 51),
+        xlabel=r"PF scalar $H_\mathrm{T}$ [GeV]",
+        output_path=args.output_dir / "observable_ht.pdf",
+    )
+    print("  wrote observable_ht.pdf")
+
+    # log(HT) -- the per-event scalar actually in the loss. Keep these edges in
+    # sync with DEFAULT_BIN_EDGES["log_ht"] in config.py.
+    plot_observable(
+        _obs_values(target, "log_ht"),
+        _obs_values(pred_init, "log_ht"),
+        _obs_values(pred_final, "log_ht"),
+        edges=np.linspace(4.5, 7.5, 51),
+        xlabel=r"PF scalar $\log\,H_\mathrm{T}$",
+        output_path=args.output_dir / "observable_log_ht.pdf",
+    )
+    print("  wrote observable_log_ht.pdf")
+
+    plot_observable(
+        _obs_values(target, "multiplicity"),
+        _obs_values(pred_init, "multiplicity"),
+        _obs_values(pred_final, "multiplicity"),
         edges=np.linspace(0.0, 600.0, 61),
         xlabel=r"PF objects per event",
         output_path=args.output_dir / "observable_multiplicity.pdf",
