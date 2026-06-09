@@ -41,7 +41,7 @@ def fit_card_to_fullsim(
     device: torch.device = torch.device("cpu"),
     intermediate_plot_dir: str | Path | None = None,
     plot_every: int = 1,
-    early_stopping_patience: int | None = 100,
+    early_stopping_patience: int | None = 10,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
