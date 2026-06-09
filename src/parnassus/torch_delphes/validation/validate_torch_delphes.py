@@ -42,7 +42,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import uproot
-from PIL import Image
 from torch.utils.data import DataLoader
 
 from parnassus.configs.accessors import AccessorStore
@@ -51,6 +50,14 @@ from parnassus.configs.writer import WriterConfig
 from parnassus.data.adapters import ParametricAdapter, parametric_collate_fn
 from parnassus.data.hepmc import HepMCDataset
 from parnassus.pipelines.generators.parametric import ParametricEventGenerator
+from parnassus.torch_delphes.plotting import (
+    AXIS_LABELS,
+    TITLE_LABELS,
+    apply_axis_scale,
+    axis_label as _axis_label,
+    stitch_pngs as _stitch_pngs,
+    title_label as _title_label,
+)
 from parnassus.utils.logger import setup_logger
 from parnassus.writers.root import RootWriter
 
@@ -67,36 +74,14 @@ TORCH_MAP_DICT = {
     "EFlowObject": "Pflow",
 }
 
-# Pretty (LaTeX) display labels for kinematic variables. Used only for plot
-# titles / axis labels — branch keys and PNG filenames keep their plain names.
-TITLE_LABELS: dict[str, str] = {
-    "Eta": r"$\eta$",
-    "Phi": r"$\phi$",
-    "PT": r"$p_T$",
-    "ET": r"$E_T$",
-    "P": r"$p$",
-    "E": r"$E$",
-}
-def _title_label(var: str) -> str:
-    """Return a LaTeX-formatted display label for ``var`` if available."""
-    return TITLE_LABELS.get(var, var)
-
-AXIS_LABELS: dict[str, str] = {
-    "Eta": r"$\eta$",
-    "Phi": r"$\phi$",
-    "PT": r"$p_T$ [GeV]",
-    "ET": r"$E_T$ [GeV]",
-    "P": r"$p$ [GeV]",
-    "E": r"$E$ [GeV]",
-}
-def _axis_label(var: str) -> str:
-    """Return a LaTeX-formatted axis label for ``var`` if available."""
-    return AXIS_LABELS.get(var, var)
 
 def _axis_scale(ax: plt.axes, var: str) -> None:
-    """Apply variable-specific axis scaling (log scale, etc.) if desired."""
-    if var in {"PT", "ET", "P", "E"}:
-        ax.set_yscale("log")
+    """Apply variable-specific axis scaling (log scale, etc.) if desired.
+
+    Thin wrapper around :func:`parnassus.torch_delphes.plotting.apply_axis_scale`
+    kept for backward compatibility with this module's pre-refactor name.
+    """
+    apply_axis_scale(ax, var)
 
 PROCESS_LABELS: dict[str, str] = {
     "HZZ4l": r"$H \to ZZ \to 4\ell$",
@@ -139,176 +124,6 @@ def _get_suptitle(
             suptitle += f"\n{num_events} events"
 
     return suptitle
-
-def _stitch_pngs(
-    image_paths: list[Path],
-    output_path: Path,
-    title: str | None = None,
-    title_height: int | None = None,
-    title_fontsize: int = 22,
-    title_line_spacing: float = 1.6,
-    title_pad: int = 20,
-    title_align: str = "center",
-    background: tuple[int, int, int] = (255, 255, 255),
-    ncols: int = 2,
-) -> bool:
-    """Combine multiple PNG files into a grid.
-
-    Despite the legacy name, this function arranges inputs into a grid with
-    ``ncols`` columns (default 2 → 2x2 for four inputs). Within each row, all
-    images are vertically resized to a common height (preserving aspect
-    ratio). Each row's width is independently determined; rows are padded to
-    the widest row so the output is rectangular. An optional title bar is
-    rendered on top.
-
-    Parameters
-    ----------
-    image_paths : list[Path]
-        Paths of PNGs to combine, in row-major order. Missing paths are
-        silently skipped.
-    output_path : Path
-        Where to save the stitched PNG.
-    title : str, optional
-        Centered title rendered above the grid. Skipped if ``None``.
-        May contain ``\\n`` for multi-line titles; the title bar will grow
-        automatically unless ``title_height`` is explicitly provided.
-    title_height : int, optional
-        Pixel height of the title bar. If ``None`` (default), auto-sized
-        from the number of lines in ``title``, ``title_fontsize``, and
-        ``title_line_spacing``.
-    title_fontsize : int
-        Font size for the title.
-    title_line_spacing : float
-        Multiplier on ``title_fontsize`` (in points) used to estimate the
-        rendered height of one line of title text. Only used when
-        ``title_height`` is ``None``.
-    title_pad : int
-        Extra vertical padding (pixels) added above and below the title
-        text when auto-sizing.
-    title_align : str
-        Horizontal alignment of each line of the title within the title
-        bar. One of ``"left"``, ``"center"``, ``"right"``. Default
-        ``"center"``.
-    background : tuple of int
-        RGB background colour.
-    ncols : int
-        Number of columns in the grid.
-
-    Returns
-    -------
-    bool
-        ``True`` if a stitched image was written, ``False`` if no input files
-        existed.
-    """
-    existing = [p for p in image_paths if p.exists()]
-    if not existing:
-        return False
-
-    images = [Image.open(p).convert("RGB") for p in existing]
-
-    # Chunk images into rows of `ncols`
-    rows: list[list[Image.Image]] = [
-        images[i : i + ncols] for i in range(0, len(images), ncols)
-    ]
-
-    # For each row, resize all images to the row's max height
-    rendered_rows: list[Image.Image] = []
-    for row in rows:
-        row_max_h = max(im.height for im in row)
-        resized = []
-        for im in row:
-            if im.height == row_max_h:
-                resized.append(im)
-            else:
-                new_w = int(round(im.width * row_max_h / im.height))
-                resized.append(im.resize((new_w, row_max_h), Image.LANCZOS))
-        row_w = sum(im.width for im in resized)
-        row_canvas = Image.new("RGB", (row_w, row_max_h), background)
-        x = 0
-        for im in resized:
-            row_canvas.paste(im, (x, 0))
-            x += im.width
-        rendered_rows.append(row_canvas)
-
-    total_w = max(r.width for r in rendered_rows)
-    grid_h = sum(r.height for r in rendered_rows)
-
-    # Auto-size the title bar to fit all lines if title_height wasn't given.
-    # Matplotlib renders \n as a real line break, so we just need enough
-    # vertical room. 1 pt ≈ 100/72 px at dpi=100, then scaled by line spacing.
-    #
-    # ↓↓↓ Change this number to adjust the gap between the suptitle and the
-    # top row of plots (in pixels). ↓↓↓
-    title_pad_bottom_px = 0
-    if title:
-        title = title.strip("\n")  # drop leading/trailing blank lines
-        n_lines = title.count("\n") + 1
-        line_px = int(round(title_fontsize * (100 / 72) * title_line_spacing))
-        text_block_px = n_lines * line_px
-        if title_height is None:
-            title_h = text_block_px + title_pad + title_pad_bottom_px
-        else:
-            title_h = title_height
-    else:
-        title_h = 0
-        text_block_px = 0
-
-    canvas = Image.new("RGB", (total_w, grid_h + title_h), background)
-
-    y = title_h
-    for r in rendered_rows:
-        # Center each row horizontally if narrower than total_w
-        x = (total_w - r.width) // 2
-        canvas.paste(r, (x, y))
-        y += r.height
-
-    if title:
-        # Render the title via matplotlib (so we don't need a system TTF font)
-        fig = plt.figure(figsize=(total_w / 100, title_h / 100), dpi=100)
-        fig.patch.set_facecolor(
-            (background[0] / 255, background[1] / 255, background[2] / 255)
-        )
-        ax = fig.add_subplot(111)
-        # Make the axes fill the whole figure so axes-fraction coords map
-        # directly onto pixels — needed to control the bottom gap exactly.
-        ax.set_position((0.0, 0.0, 1.0, 1.0))
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis("off")
-        # `ha` anchors the text block within the axes; `multialignment`
-        # controls how individual lines align relative to *each other*.
-        # A small inset (0.01 / 0.99) keeps text from touching the edge.
-        if title_align == "left":
-            x_anchor, ha = 0.44, "left"
-        elif title_align == "right":
-            x_anchor, ha = 0.99, "right"
-        else:
-            x_anchor, ha = 0.5, "center"
-        # Put the bottom of the text block exactly `title_pad_bottom_px`
-        # above the bottom of the title strip.
-        y_anchor = title_pad_bottom_px / title_h
-        ax.text(
-            x_anchor,
-            y_anchor,
-            title,
-            ha=ha,
-            va="bottom",
-            multialignment=title_align,
-            fontsize=title_fontsize,
-            fontweight="bold",
-        )
-        title_png = output_path.with_suffix(".title.png")
-        fig.savefig(title_png, dpi=100, bbox_inches=None, pad_inches=0)
-        plt.close(fig)
-
-        title_img = Image.open(title_png).convert("RGB")
-        if title_img.size != (total_w, title_h):
-            title_img = title_img.resize((total_w, title_h), Image.LANCZOS)
-        canvas.paste(title_img, (0, 0))
-        title_png.unlink(missing_ok=True)
-
-    canvas.save(output_path)
-    return True
 
 
 def validate_against_benchmark(

@@ -84,13 +84,15 @@ from .data import (
     restore_event_format,
 )
 from .debug import (
-    DISCRETE_VARS,
     INTERMEDIATE_BRANCHES,
-    axis_label,
     debug_branch_name,
     extract_variable,
     filter_valid_rows,
-    log_y_for_var,
+)
+from parnassus.torch_delphes.plotting import (
+    combined_vars_for,
+    plot_comparison_with_ratio,
+    stitch_pngs,
 )
 
 # Mild styling so the figures are legible in both light and dark themes.
@@ -384,7 +386,7 @@ def plot_observable(
     centers = 0.5 * (edges[1:] + edges[:-1])
 
     fig, ax = plt.subplots(figsize=(5.5, 4.0))
-    ax.step(centers, h_tgt, where="mid", color="black", label="target (full sim)")
+    ax.step(centers, h_tgt, where="mid", color="black", label="target")
     ax.step(centers, h_init, where="mid", color="tab:red", label="trainee, initial")
     ax.step(centers, h_final, where="mid", color="tab:blue", label="trainee, fitted")
     ax.set_xlabel(xlabel)
@@ -474,45 +476,24 @@ def _module_values_from_outputs(
     return extract_variable(tensor, var).detach().cpu()
 
 
-def _auto_edges(
-    values: list[torch.Tensor | None],
-    var: str,
-    n_bins: int = 50,
-) -> np.ndarray | None:
-    """Build histogram edges spanning the 1st--99th percentile of pooled values.
+# Colour scheme for the intermediate-plot overlays. Target matches the yellow
+# "C++ Delphes" stepfilled style of validate_torch_delphes; trainee curves
+# stay red (initial) / blue (fitted) consistent with the headline observable
+# plots above.
+_TARGET_COLOR: str = "gold"
+_INIT_COLOR: str = "tab:red"
+_FINAL_COLOR: str = "tab:blue"
 
-    Mirrors the per-variable binning used by
-    :mod:`validation.validate_torch_delphes` (percentile-clipped linear bins)
-    so that outlier-heavy variables (PT, P, E, …) don't squash the bulk of the
-    distribution into a single bin. For the small set of discrete integer
-    variables (``DISCRETE_VARS`` -- PID, Charge, Status) we use 1-wide integer
-    bins.
 
-    Returns ``None`` when there is no finite data to bin from.
+def _intermediate_suptitle(module_name: str, n_events: int) -> str:
+    """Two-line title for the per-module ``all.png`` overview.
+
+    Mirrors the short ``_get_suptitle`` body in
+    :mod:`validation.validate_torch_delphes`: identify the module then the
+    event count.
     """
-    pooled_list = [
-        v.detach().cpu().numpy() for v in values if v is not None and v.numel() > 0
-    ]
-    if not pooled_list:
-        return None
-    pooled = np.concatenate(pooled_list)
-    pooled = pooled[np.isfinite(pooled)]
-    if pooled.size == 0:
-        return None
-    if var in DISCRETE_VARS:
-        # 1-wide integer bins centered on each value; covers every integer
-        # present in any of the three datasets.
-        lo = int(np.floor(pooled.min()))
-        hi = int(np.ceil(pooled.max()))
-        return np.arange(lo - 0.5, hi + 1.5, 1.0)
-    lo = float(np.percentile(pooled, 1.0))
-    hi = float(np.percentile(pooled, 99.0))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        # Degenerate range (all equal, or non-finite tails): widen so the edges
-        # stay strictly increasing for np.histogram.
-        center = float(np.mean(pooled)) if np.isfinite(pooled).any() else 0.0
-        lo, hi = center - 0.5, center + 0.5
-    return np.linspace(lo, hi, n_bins + 1)
+    pretty_name = "PropagatedParticle" if module_name == "ParticleAfterProp" else module_name
+    return f"Output: {pretty_name}\n{n_events} events"
 
 
 def plot_intermediate_observables(
@@ -524,21 +505,23 @@ def plot_intermediate_observables(
 ) -> None:
     """Generate target / init / fitted overlays for every intermediate output.
 
-    For every ``(module, var)`` in
-    :data:`parnassus.torch_delphes.tune_cms_fullsim.debug.INTERMEDIATE_BRANCHES`,
-    this routine reads the target distribution from the pseudodata ROOT file
-    (written by ``generate_pseudodata --debug``), extracts the matching
-    trainee distributions from the debug-mode forward passes, and writes a
-    single overlay PDF under ``output_dir/<ModuleName>/<Var>.pdf``.
+    Visually identical to the per-branch comparison plots produced by
+    :mod:`parnassus.torch_delphes.validation.validate_torch_delphes`:
 
-    Mirrors the debug branch list of
-    :mod:`parnassus.torch_delphes.validation.validate_torch_delphes` -- every
-    plot it produces (sans Eem/Ehad, which aren't in our tensor) has a
-    counterpart here, just compared trainee-vs-target instead of
-    TorchDelphes-vs-C++.
+    - Per-variable PNGs (``<output_dir>/<ModuleName>/<Var>.png``) drawn via
+      :func:`parnassus.torch_delphes.plotting.plot_comparison_with_ratio` --
+      stepfilled yellow target (the reference), step-red trainee-initial and
+      step-blue trainee-fitted overlays, with a ratio panel below showing
+      ``init/target`` and ``fitted/target``. Counts are NOT normalised;
+      log-y / discrete-bar handling is identical to the validation harness.
+    - A combined ``<output_dir>/<ModuleName>/all.png`` per module stitching
+      the (Eta, Phi, PT, P) / (Eta, Phi, E, ET) / (Eta, Phi, PT, E) panel
+      group, picked via
+      :func:`parnassus.torch_delphes.plotting.combined_vars_for` (the same
+      heuristic used by the validation harness).
 
     Branches absent from the ROOT file (e.g. file produced without
-    ``--debug``) are silently skipped with a one-line warning.
+    ``--debug``) are silently skipped with a summary count at the end.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"  Writing intermediate plots to {output_dir}")
@@ -564,8 +547,14 @@ def plot_intermediate_observables(
                 trainee_final_outputs, module_name, var
             )
 
-            edges = _auto_edges([target_vals, init_vals, final_vals], var)
-            if edges is None:
+            # Pool inputs as plain numpy arrays for the shared helper. Empty
+            # overlays are passed as length-0 arrays so the legend still
+            # carries them and the layout stays consistent across modules.
+            target_np = target_vals.numpy() if target_vals is not None else np.empty(0)
+            init_np = init_vals.numpy() if init_vals is not None else np.empty(0)
+            final_np = final_vals.numpy() if final_vals is not None else np.empty(0)
+
+            if target_np.size == 0 and init_np.size == 0 and final_np.size == 0:
                 # No finite data anywhere -- skip the page rather than emit a
                 # blank plot.
                 continue
@@ -574,19 +563,39 @@ def plot_intermediate_observables(
                 module_dir.mkdir(parents=True, exist_ok=True)
                 module_has_any = True
 
-            plot_observable(
-                target_vals if target_vals is not None else torch.empty(0),
-                init_vals if init_vals is not None else torch.empty(0),
-                final_vals if final_vals is not None else torch.empty(0),
-                edges=edges,
-                xlabel=axis_label(var),
-                output_path=module_dir / f"{var}.pdf",
-                log_y=log_y_for_var(var),
+            plot_comparison_with_ratio(
+                distributions=[
+                    (target_np, "target (full sim)", _TARGET_COLOR),
+                    (init_np, "trainee, initial", _INIT_COLOR),
+                    (final_np, "trainee, fitted", _FINAL_COLOR),
+                ],
+                var=var,
+                output_path=module_dir / f"{var}.png",
+                ratio_ylabel="ratio / target",
+                # Match the legend placement used by validate_torch_delphes
+                # for Eta plots (anchored above the axes) so the per-module
+                # `all.png` stitch shows the legend without overlap.
+                legend_loc=("upper left" if var != "Eta" else "best"),
             )
             n_plots_written += 1
 
+        # Per-module ``all.png``: stitch the (Eta, Phi, PT/P, E/ET) group
+        # picked by the same heuristic validate_torch_delphes uses. Skip
+        # cleanly when the module wrote no per-var PNGs (e.g. branches
+        # missing from the ROOT file).
         if module_has_any:
-            print(f"    {module_name}: wrote {len(list(module_dir.glob('*.pdf')))} plots")
+            combo = combined_vars_for(variables)
+            per_var_pngs = [module_dir / f"{var}.png" for var in combo]
+            all_png = module_dir / "all.png"
+            wrote = stitch_pngs(
+                image_paths=per_var_pngs,
+                output_path=all_png,
+                title=_intermediate_suptitle(module_name, n_events=n_events),
+                title_align="left",
+            )
+            n_var_pngs = len(list(module_dir.glob("*.png"))) - (1 if wrote else 0)
+            extra = f" + all.png ({', '.join(combo)})" if wrote else ""
+            print(f"    {module_name}: wrote {n_var_pngs} per-var PNGs{extra}")
 
     if n_branches_missing > 0:
         print(
@@ -612,7 +621,7 @@ def main() -> None:
         default=Path("src/parnassus/tests/benchmark_data/cms_pseudodata.root"),
     )
     parser.add_argument("--output-dir", type=Path, default=Path("doc/figures"))
-    parser.add_argument("--n-events-for-plots", type=int, default=400)
+    parser.add_argument("--n-events-for-plots", type=int, default=4000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--truth-config",

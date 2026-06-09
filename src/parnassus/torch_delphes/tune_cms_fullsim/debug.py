@@ -263,46 +263,26 @@ def tensor_to_per_event_arrays(
 # =============================================================================
 # Plot styling: axis labels / log-y rules / display titles
 # =============================================================================
+#
+# The canonical definitions now live in :mod:`parnassus.torch_delphes.plotting`
+# (shared with :mod:`validation.validate_torch_delphes`). We re-export them
+# here so existing callers keep working without modification.
 
-# Pretty (LaTeX) axis labels per variable, matching the convention in
-# :mod:`validation.validate_torch_delphes`.
-AXIS_LABELS: dict[str, str] = {
-    "Eta": r"$\eta$",
-    "EtaOuter": r"$\eta_\mathrm{outer}$",
-    "Phi": r"$\phi$",
-    "PT": r"$p_T$ [GeV]",
-    "ET": r"$E_T$ [GeV]",
-    "P": r"$p$ [GeV]",
-    "E": r"$E$ [GeV]",
-    "PID": "PID",
-    "Charge": "Charge",
-    "Status": "Status",
-    "Mass": "Mass [GeV]",
-    "T": r"$t$",
-    "X": r"$x$",
-    "Y": r"$y$",
-    "Z": r"$z$",
-    "Px": r"$p_x$ [GeV]",
-    "Py": r"$p_y$ [GeV]",
-    "Pz": r"$p_z$ [GeV]",
-}
+from parnassus.torch_delphes.plotting import (  # noqa: E402
+    AXIS_LABELS,
+    DISCRETE_VARS,
+    axis_label,
+    log_y_for_var,
+)
 
-
-def axis_label(var: str) -> str:
-    """Return a LaTeX-formatted axis label for ``var`` (falls back to raw name)."""
-    return AXIS_LABELS.get(var, var)
-
-
-# Variables drawn on a log-y scale (wide dynamic range / steep tails). Mirrors
-# the ``_axis_scale`` rule in :mod:`validation.validate_torch_delphes`.
-_LOG_Y_VARS: frozenset[str] = frozenset({"PT", "ET", "P", "E"})
-
-
-def log_y_for_var(var: str) -> bool:
-    """Whether the variable should be plotted on a log-y scale by default."""
-    return var in _LOG_Y_VARS
-
-
-# Variables that take discrete integer values; plotted as bar charts in the
-# validation script rather than continuous histograms.
-DISCRETE_VARS: frozenset[str] = frozenset({"PID", "Charge", "Status"})
+__all__ = [
+    "AXIS_LABELS",
+    "DISCRETE_VARS",
+    "INTERMEDIATE_BRANCHES",
+    "axis_label",
+    "debug_branch_name",
+    "extract_variable",
+    "filter_valid_rows",
+    "log_y_for_var",
+    "tensor_to_per_event_arrays",
+]
