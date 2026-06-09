@@ -217,8 +217,12 @@ def main() -> None:
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
 
-    train_dataloader = DelphesDataLoader(train_dataset, batch_size=4096, shuffle=True)
-    val_dataloader = DelphesDataLoader(val_dataset, batch_size=512, shuffle=False)
+    train_dataloader = DelphesDataLoader(train_dataset, batch_size=512, shuffle=True)
+    # drop_last on val so a tiny tail batch (e.g. 20000 % 512 = 32 events) is not
+    # weighted equally with full batches in the per-batch val-loss mean.
+    val_dataloader = DelphesDataLoader(
+        val_dataset, batch_size=512, shuffle=False, drop_last=True
+    )
 
     # All ranks must use the *same* initial parameters for the manual-
     # gradient-sync scheme to keep them in sync; ``torch.manual_seed``
