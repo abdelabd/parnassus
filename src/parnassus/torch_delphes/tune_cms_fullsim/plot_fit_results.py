@@ -20,6 +20,16 @@ The intended figures are:
 - ``observable_eta.pdf`` : same for pseudorapidity.
 - ``observable_multiplicity.pdf`` : per-event PF multiplicity.
 
+With ``--debug``, the script additionally writes per-module
+intermediate-output overlays (``intermediate/<ModuleName>/<Var>.pdf``)
+for every entry in the same debug branch list used by
+:mod:`parnassus.torch_delphes.validation.validate_torch_delphes`
+(``ParticleAfterProp``, ``ChargedHadronEfficiency``, ``ECalTower``, …),
+so the trainee's per-module response can be inspected against the
+target the same way TorchDelphes is inspected against C++ Delphes.
+This requires the input ROOT file to have been produced with
+``generate_pseudodata.py --debug``.
+
 The script is driven entirely from the training history dict: it re-
 runs the trainee card at init and at the final parameter values to
 recompute the histograms, so nothing is stored in the history itself
@@ -33,6 +43,14 @@ Usage
         --history doc/fit_results/all66_history.json \
         --root-file src/parnassus/tests/benchmark_data/cms_pseudodata.root \
         --output-dir doc/figures
+
+    # With per-module intermediate-output overlays (ROOT file must have been
+    # generated with `generate_pseudodata.py --debug`):
+    uv run python -m parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results \
+        --history doc/fit_results/all66_history.json \
+        --root-file src/parnassus/tests/benchmark_data/cms_pseudodata_debug.root \
+        --output-dir doc/figures \
+        --debug
 """
 
 from __future__ import annotations
@@ -64,6 +82,15 @@ from .data import (
     load_pflow_targets_from_tensor,
     load_truth_events,
     restore_event_format,
+)
+from .debug import (
+    DISCRETE_VARS,
+    INTERMEDIATE_BRANCHES,
+    axis_label,
+    debug_branch_name,
+    extract_variable,
+    filter_valid_rows,
+    log_y_for_var,
 )
 
 # Mild styling so the figures are legible in both light and dark themes.
@@ -372,6 +399,205 @@ def plot_observable(
 
 
 # ---------------------------------------------------------------------------
+# Intermediate (per-module) observables  --  enabled by --debug
+# ---------------------------------------------------------------------------
+
+
+def _trainee_intermediate_outputs(
+    card: CMSEnergyFlowDefault, truth_tensor: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """Run a debug-mode trainee card and return its full per-module output dict.
+
+    The card MUST have been built with ``debug=True`` so the forward pass
+    returns ``ParticleAfterProp``, ``ChargedHadronEfficiency``, ``ECalTower``,
+    ``Track``, etc., in addition to the final ``EFlowObject``. Each value in
+    the returned dict is a flat ``(N_objects_for_module, N_FEATURES)`` tensor
+    -- the same layout used by the target side written to ROOT by
+    :mod:`parnassus.torch_delphes.generate_pseudodata`. The caller seeds the
+    RNG before calling, since the card's momentum smearing / Gumbel-ST
+    efficiency is stochastic.
+    """
+    mask = torch.any(truth_tensor != 0, dim=-1)
+    with torch.no_grad():
+        out = card(truth_tensor[mask])
+    return out
+
+
+def _load_target_intermediate_values(
+    root_file: Path,
+    module_name: str,
+    var: str,
+    n_events: int,
+) -> torch.Tensor | None:
+    """Read one debug branch from the pseudodata ROOT file as a flat 1-D tensor.
+
+    Returns ``None`` if the requested branch isn't in the file (e.g. the
+    pseudodata was generated without ``--debug``, or the module wasn't
+    populated for some reason). Flattens the jagged per-event arrays into a
+    single 1-D ``torch.Tensor`` ready to feed into
+    :func:`plot_observable`.
+    """
+    import uproot  # local import: keeps the no-debug code path uproot-free
+
+    branch = debug_branch_name(module_name, var)
+    with uproot.open(str(root_file)) as f:
+        tree = f["event_tree"]
+        if branch not in tree:
+            return None
+        arr = tree[branch].array(  # pyright: ignore[reportAttributeAccessIssue]
+            entry_stop=n_events
+        )
+    # Awkward -> numpy via flatten -> torch. Empty events become zero-length
+    # subarrays and disappear under flatten, which is what we want.
+    import awkward as ak
+
+    flat = ak.flatten(arr)
+    return torch.from_numpy(np.asarray(flat).astype(np.float64))
+
+
+def _module_values_from_outputs(
+    outputs: dict[str, torch.Tensor], module_name: str, var: str
+) -> torch.Tensor | None:
+    """Extract a 1-D value tensor for ``(module, var)`` from a debug output dict.
+
+    Applies the same ghost-row filter
+    (:func:`parnassus.torch_delphes.tune_cms_fullsim.debug.filter_valid_rows`)
+    used on the target side at write time, so trainee and target distributions
+    are filtered identically before histogramming.
+    """
+    tensor = outputs.get(module_name)
+    if tensor is None or tensor.numel() == 0:
+        return None
+    tensor = filter_valid_rows(tensor, module_name)
+    if tensor.numel() == 0:
+        return None
+    return extract_variable(tensor, var).detach().cpu()
+
+
+def _auto_edges(
+    values: list[torch.Tensor | None],
+    var: str,
+    n_bins: int = 50,
+) -> np.ndarray | None:
+    """Build histogram edges spanning the 1st--99th percentile of pooled values.
+
+    Mirrors the per-variable binning used by
+    :mod:`validation.validate_torch_delphes` (percentile-clipped linear bins)
+    so that outlier-heavy variables (PT, P, E, …) don't squash the bulk of the
+    distribution into a single bin. For the small set of discrete integer
+    variables (``DISCRETE_VARS`` -- PID, Charge, Status) we use 1-wide integer
+    bins.
+
+    Returns ``None`` when there is no finite data to bin from.
+    """
+    pooled_list = [
+        v.detach().cpu().numpy() for v in values if v is not None and v.numel() > 0
+    ]
+    if not pooled_list:
+        return None
+    pooled = np.concatenate(pooled_list)
+    pooled = pooled[np.isfinite(pooled)]
+    if pooled.size == 0:
+        return None
+    if var in DISCRETE_VARS:
+        # 1-wide integer bins centered on each value; covers every integer
+        # present in any of the three datasets.
+        lo = int(np.floor(pooled.min()))
+        hi = int(np.ceil(pooled.max()))
+        return np.arange(lo - 0.5, hi + 1.5, 1.0)
+    lo = float(np.percentile(pooled, 1.0))
+    hi = float(np.percentile(pooled, 99.0))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        # Degenerate range (all equal, or non-finite tails): widen so the edges
+        # stay strictly increasing for np.histogram.
+        center = float(np.mean(pooled)) if np.isfinite(pooled).any() else 0.0
+        lo, hi = center - 0.5, center + 0.5
+    return np.linspace(lo, hi, n_bins + 1)
+
+
+def plot_intermediate_observables(
+    root_file: Path,
+    trainee_init_outputs: dict[str, torch.Tensor],
+    trainee_final_outputs: dict[str, torch.Tensor],
+    output_dir: Path,
+    n_events: int,
+) -> None:
+    """Generate target / init / fitted overlays for every intermediate output.
+
+    For every ``(module, var)`` in
+    :data:`parnassus.torch_delphes.tune_cms_fullsim.debug.INTERMEDIATE_BRANCHES`,
+    this routine reads the target distribution from the pseudodata ROOT file
+    (written by ``generate_pseudodata --debug``), extracts the matching
+    trainee distributions from the debug-mode forward passes, and writes a
+    single overlay PDF under ``output_dir/<ModuleName>/<Var>.pdf``.
+
+    Mirrors the debug branch list of
+    :mod:`parnassus.torch_delphes.validation.validate_torch_delphes` -- every
+    plot it produces (sans Eem/Ehad, which aren't in our tensor) has a
+    counterpart here, just compared trainee-vs-target instead of
+    TorchDelphes-vs-C++.
+
+    Branches absent from the ROOT file (e.g. file produced without
+    ``--debug``) are silently skipped with a one-line warning.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Writing intermediate plots to {output_dir}")
+
+    n_plots_written = 0
+    n_branches_missing = 0
+
+    for module_name, variables in INTERMEDIATE_BRANCHES:
+        module_dir = output_dir / module_name
+        module_has_any = False
+        for var in variables:
+            target_vals = _load_target_intermediate_values(
+                root_file, module_name, var, n_events=n_events
+            )
+            if target_vals is None:
+                n_branches_missing += 1
+                continue
+
+            init_vals = _module_values_from_outputs(
+                trainee_init_outputs, module_name, var
+            )
+            final_vals = _module_values_from_outputs(
+                trainee_final_outputs, module_name, var
+            )
+
+            edges = _auto_edges([target_vals, init_vals, final_vals], var)
+            if edges is None:
+                # No finite data anywhere -- skip the page rather than emit a
+                # blank plot.
+                continue
+
+            if not module_has_any:
+                module_dir.mkdir(parents=True, exist_ok=True)
+                module_has_any = True
+
+            plot_observable(
+                target_vals if target_vals is not None else torch.empty(0),
+                init_vals if init_vals is not None else torch.empty(0),
+                final_vals if final_vals is not None else torch.empty(0),
+                edges=edges,
+                xlabel=axis_label(var),
+                output_path=module_dir / f"{var}.pdf",
+                log_y=log_y_for_var(var),
+            )
+            n_plots_written += 1
+
+        if module_has_any:
+            print(f"    {module_name}: wrote {len(list(module_dir.glob('*.pdf')))} plots")
+
+    if n_branches_missing > 0:
+        print(
+            f"  NOTE: {n_branches_missing} debug branch(es) were absent from "
+            f"{root_file}. If you didn't intend this, regenerate the ROOT "
+            "file with `generate_pseudodata.py --debug`."
+        )
+    print(f"  Wrote {n_plots_written} intermediate plots in total.")
+
+
+# ---------------------------------------------------------------------------
 # Main: load history, build figures
 # ---------------------------------------------------------------------------
 
@@ -399,6 +625,21 @@ def main() -> None:
             "parameter's 'value' there is its off-truth STARTING point, not its "
             "truth, so the reference line would be wrong. Defaults to "
             "cms_target_default.yaml."
+        ),
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "In addition to the headline observable plots, generate target / "
+            "trainee-init / trainee-fitted overlays for every intermediate "
+            "per-module output (ParticleAfterProp, ChargedHadronEfficiency, "
+            "ECalTower, ...). Mirrors the --debug branch list of "
+            "validation/validate_torch_delphes.py. Plots land in "
+            "<output-dir>/intermediate/<ModuleName>/<Var>.pdf. "
+            "REQUIRES the input ROOT file to have been written with "
+            "`generate_pseudodata.py --debug` (so the per-module target "
+            "branches are present); missing branches are silently skipped."
         ),
     )
     args = parser.parse_args()
@@ -551,6 +792,34 @@ def main() -> None:
         output_path=args.output_dir / "observable_multiplicity.pdf",
     )
     print("  wrote observable_multiplicity.pdf")
+
+    # ----- 5. Optional: per-module intermediate observables (--debug) -----
+    # Mirrors the --debug branch list of validate_torch_delphes.py: for every
+    # post-module output (ParticleAfterProp, ChargedHadronEfficiency,
+    # ECalTower, ...), overlay target / trainee-init / trainee-fitted on the
+    # same axes. Requires the ROOT file to have been written with
+    # `generate_pseudodata.py --debug` -- otherwise the target branches are
+    # missing and each pair of plots is silently skipped (with a summary
+    # warning at the end). The trainee plots are obtained by re-running the
+    # init and best-fit cards in debug mode, reusing the same RNG seed as the
+    # headline EFlowObject plots above so the stochastic noise is consistent.
+    if args.debug:
+        print("\n  --debug: rendering per-module intermediate-output overlays...")
+        torch.manual_seed(args.seed)
+        trainee_dbg = CMSEnergyFlowDefault(debug=True, learnable=True)
+        init_outputs = _trainee_intermediate_outputs(trainee_dbg, truth_tensor)
+
+        _set_trainee_from_snapshot(trainee_dbg, best_params)
+        torch.manual_seed(args.seed)
+        final_outputs = _trainee_intermediate_outputs(trainee_dbg, truth_tensor)
+
+        plot_intermediate_observables(
+            root_file=args.root_file,
+            trainee_init_outputs=init_outputs,
+            trainee_final_outputs=final_outputs,
+            output_dir=args.output_dir / "intermediate",
+            n_events=args.n_events_for_plots,
+        )
 
     print(f"Done. {len(list(args.output_dir.glob('*.pdf')))} figures in {args.output_dir}.")
 

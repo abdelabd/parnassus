@@ -48,6 +48,17 @@ Class values follow :func:`parnassus.utils.pid_to_class` (0=charged
 hadron, 1=electron, 2=muon, 3=neutral hadron, 4=photon), matching the
 cms-flow loader.
 
+Debug mode (``--debug``) additionally writes a per-module breakdown of
+the target card's *intermediate* outputs (``ParticleAfterProp``,
+``ChargedHadronEfficiency``, ``ECalTower``, …) into the same tree,
+following the
+:mod:`parnassus.torch_delphes.tune_cms_fullsim.debug` schema (branch
+names like ``"Track.PT"``, ``"ECalTower.E"`` mirror the
+:mod:`validation.validate_torch_delphes` convention).
+:mod:`parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results`'s own
+``--debug`` flag reads those branches back and overlays them with the
+trainee's intermediate outputs at init / best.
+
 Size targeting
 --------------
 The ``--target-size-mb`` flag controls how many events are generated.
@@ -85,6 +96,11 @@ from parnassus.data.particle_io import ColumnMap, pythia_particles_to_tensor
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.tune_cms_fullsim.data import load_truth_events
+from parnassus.torch_delphes.tune_cms_fullsim.debug import (
+    INTERMEDIATE_BRANCHES,
+    debug_branch_name,
+    tensor_to_per_event_arrays,
+)
 from parnassus.utils import pid_to_class
 
 # The "target" (fake full-sim) card's parameters are taken verbatim from a
@@ -132,6 +148,7 @@ def build_pythia(pt_hat_min: float, seed: int) -> object:
 
 def make_target_card(
     param_config: str | Path = _DEFAULT_PARAM_CONFIG,
+    debug: bool = False,
 ) -> CMSEnergyFlowDefault:
     """Build a learnable CMS card initialized from a parameter config.
 
@@ -146,13 +163,20 @@ def make_target_card(
     param_config : str | Path
         Path to a YAML parameter config. Defaults to the shipped
         ``param_configs/cms_target_default.yaml``.
+    debug : bool
+        If True, build the card in debug mode so it returns every
+        intermediate per-module tensor in addition to the final
+        ``EFlowObject`` (see
+        :class:`parnassus.torch_delphes.defaults.CMSEnergyFlowDefault`). This
+        is what enables ``generate_pseudodata --debug`` to save the
+        per-module breakdown into the ROOT file.
 
     Returns
     -------
     CMSEnergyFlowDefault
         A frozen learnable card whose parameters match the config values.
     """
-    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    card = CMSEnergyFlowDefault(debug=debug, learnable=True)
     cfg = pc.load_param_config(param_config)
     pc.apply_param_config(card, cfg)
     for p in card.parameters():
@@ -262,6 +286,7 @@ def _flush_batch(
     target_card: CMSEnergyFlowDefault,
     start_idx: int,
     batch_size: int,
+    debug: bool = False,
 ) -> tuple[dict[str, list[np.ndarray]], int]:
     """Generate one batch of events and return cms-flow-schema lists.
 
@@ -269,11 +294,19 @@ def _flush_batch(
     tensor, passes them through the perturbed target card, and splits
     both sides into per-event jagged arrays.
 
+    When ``debug`` is True, the target card is expected to have been built
+    with ``debug=True`` so its forward pass returns every intermediate
+    per-module tensor in addition to ``EFlowObject``. Each module's output is
+    split into per-event jagged arrays under branch names of the form
+    ``"<ModuleName>.<Var>"`` (see
+    :func:`parnassus.torch_delphes.tune_cms_fullsim.debug.debug_branch_name`).
+
     Returns
     -------
     branches : dict
-        Mapping from branch name (e.g. ``"truth_pt"``) to a list of
-        per-event numpy arrays for the batch.
+        Mapping from branch name (e.g. ``"truth_pt"`` or
+        ``"ChargedHadron.PT"`` in debug mode) to a list of per-event numpy
+        arrays for the batch.
     n_generated : int
         Actual number of events generated (may be smaller than
         ``batch_size`` if Pythia skipped events).
@@ -329,19 +362,39 @@ def _flush_batch(
         eflow, eflow[:, ColumnMap.EVENT_NUMBER], n_events=n_generated
     )
 
-    return (
-        {
-            "truth_pt": truth_pt,
-            "truth_eta": truth_eta,
-            "truth_phi": truth_phi,
-            "truth_class": truth_class,
-            "pflow_pt": pflow_pt,
-            "pflow_eta": pflow_eta,
-            "pflow_phi": pflow_phi,
-            "pflow_class": pflow_class,
-        },
-        n_generated,
-    )
+    batch_branches: dict[str, list[np.ndarray]] = {
+        "truth_pt": truth_pt,
+        "truth_eta": truth_eta,
+        "truth_phi": truth_phi,
+        "truth_class": truth_class,
+        "pflow_pt": pflow_pt,
+        "pflow_eta": pflow_eta,
+        "pflow_phi": pflow_phi,
+        "pflow_class": pflow_class,
+    }
+
+    # In debug mode, every key in INTERMEDIATE_BRANCHES is expected to be
+    # present in the card's output dict (the target card was built with
+    # ``debug=True``); split each per-module tensor into per-event jagged
+    # arrays for ROOT writing. Branch names follow the
+    # ``"<ModuleName>.<Var>"`` convention used by validate_torch_delphes,
+    # which uproot accepts verbatim.
+    if debug:
+        for module_name, variables in INTERMEDIATE_BRANCHES:
+            tensor = out.get(module_name)
+            if tensor is None:
+                # The target card didn't return this module's output. This
+                # shouldn't happen with the CMS card in debug=True mode, but
+                # we skip rather than crash to keep the script forward-
+                # compatible with cards that expose fewer intermediates.
+                continue
+            per_var = tensor_to_per_event_arrays(
+                tensor, module_name, variables, n_events=n_generated
+            )
+            for var, lists in per_var.items():
+                batch_branches[debug_branch_name(module_name, var)] = lists
+
+    return batch_branches, n_generated
 
 
 def generate(
@@ -352,8 +405,20 @@ def generate(
     max_events: int = 100_000,
     seed: int = 1,
     param_config: str | Path = _DEFAULT_PARAM_CONFIG,
+    debug: bool = False,
 ) -> int:
     """Generate the pseudodataset and write it to ``output_path``.
+
+    Parameters
+    ----------
+    debug : bool
+        If True, run the target card in debug mode and additionally write
+        every intermediate per-module output into the ROOT file under branch
+        names ``"<ModuleName>.<Var>"`` (see
+        :mod:`parnassus.torch_delphes.tune_cms_fullsim.debug`). The file
+        size will grow considerably (one branch per kinematic variable per
+        intermediate module, ~150 extra branches), so leave this off when
+        generating samples for plain training.
 
     Returns
     -------
@@ -363,29 +428,36 @@ def generate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     pythia = build_pythia(pt_hat_min=pt_hat_min, seed=seed)
-    target_card = make_target_card(param_config=param_config)
+    target_card = make_target_card(param_config=param_config, debug=debug)
 
-    accumulated: dict[str, list[np.ndarray]] = {
-        b: []
-        for b in (
-            "truth_pt",
-            "truth_eta",
-            "truth_phi",
-            "truth_class",
-            "pflow_pt",
-            "pflow_eta",
-            "pflow_phi",
-            "pflow_class",
-        )
-    }
+    base_branches = (
+        "truth_pt",
+        "truth_eta",
+        "truth_phi",
+        "truth_class",
+        "pflow_pt",
+        "pflow_eta",
+        "pflow_phi",
+        "pflow_class",
+    )
+    accumulated: dict[str, list[np.ndarray]] = {b: [] for b in base_branches}
+    if debug:
+        for module_name, variables in INTERMEDIATE_BRANCHES:
+            for var in variables:
+                accumulated[debug_branch_name(module_name, var)] = []
 
     total_written = 0
     while total_written < max_events:
-        batch, n_gen = _flush_batch(pythia, target_card, total_written, batch_size)
+        batch, n_gen = _flush_batch(
+            pythia, target_card, total_written, batch_size, debug=debug
+        )
         if n_gen == 0:
             break
         for key, val in batch.items():
-            accumulated[key].extend(val)
+            # New keys (e.g. a debug branch we hadn't pre-allocated) are
+            # initialized on first sight so the schema stays consistent if
+            # one of the early batches happened to produce zero rows for it.
+            accumulated.setdefault(key, []).extend(val)
         total_written += n_gen
 
         # Write a checkpoint so we can measure the file size on disk.
@@ -426,12 +498,26 @@ def main() -> None:
             "Defaults to the shipped param_configs/cms_target_default.yaml."
         ),
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Also write every intermediate per-module output of the target card "
+            "into the ROOT file under '<ModuleName>.<Var>' branches "
+            "(ParticleAfterProp, ChargedHadronEfficiency, ECalTower, ...). "
+            "Mirrors the --debug branch list of "
+            "validation/validate_torch_delphes.py and is what enables "
+            "tune_cms_fullsim/plot_fit_results.py --debug. Increases the file "
+            "size considerably (~150 extra branches), so leave off for plain "
+            "training runs."
+        ),
+    )
     args = parser.parse_args()
 
     print(
         f"Generating pseudodata -> {args.output}\n"
         f"  pTHatMin={args.pt_hat_min}  target={args.target_size_mb} MB  seed={args.seed}\n"
-        f"  param-config={args.param_config}"
+        f"  param-config={args.param_config}  debug={args.debug}"
     )
     n = generate(
         args.output,
@@ -441,6 +527,7 @@ def main() -> None:
         max_events=args.max_events,
         seed=args.seed,
         param_config=args.param_config,
+        debug=args.debug,
     )
     size_mb = args.output.stat().st_size / (1024 * 1024)
     print(f"Wrote {n} events, {size_mb:.2f} MB, to {args.output}")
