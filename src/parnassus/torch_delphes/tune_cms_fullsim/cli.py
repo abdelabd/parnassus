@@ -217,7 +217,7 @@ def main() -> None:
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
 
-    train_dataloader = DelphesDataLoader(train_dataset, batch_size=512, shuffle=True)
+    train_dataloader = DelphesDataLoader(train_dataset, batch_size=4096, shuffle=True)
     val_dataloader = DelphesDataLoader(val_dataset, batch_size=512, shuffle=False)
 
     # All ranks must use the *same* initial parameters for the manual-
