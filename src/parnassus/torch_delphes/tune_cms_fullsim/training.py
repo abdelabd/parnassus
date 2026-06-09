@@ -41,6 +41,7 @@ def fit_card_to_fullsim(
     device: torch.device = torch.device("cpu"),
     intermediate_plot_dir: str | Path | None = None,
     plot_every: int = 1,
+    early_stopping_patience: int | None = 100,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -70,6 +71,11 @@ def fit_card_to_fullsim(
     plot_every : int
         Save intermediate plots every ``plot_every`` epochs (default 1 =
         every epoch). The final / early-stopped epoch is always plotted.
+    early_stopping_patience : int | None
+        Number of epochs with no improvement in ``val_loss`` after which
+        training is stopped. Set to ``None`` (or any value ``<= 0``) to
+        disable early stopping entirely; the loop will then always run
+        the full ``n_steps``. Default is 10.
 
     Returns
     -------
@@ -164,7 +170,12 @@ def fit_card_to_fullsim(
 
     min_loss = float("inf")
     patience_counter = 0
-    patience = 10  # Number of steps to wait for improvement before early stopping
+    # ``early_stopping_patience`` is the number of epochs with no val_loss
+    # improvement before we break. ``None`` (or any non-positive value)
+    # disables early stopping entirely.
+    early_stopping_enabled = (
+        early_stopping_patience is not None and early_stopping_patience > 0
+    )
 
     for step in pbar:
         # Re-enter train mode each step: the validation block below leaves the
@@ -288,9 +299,9 @@ def fit_card_to_fullsim(
         if val_loss_acc < min_loss:
             min_loss = val_loss_acc
             patience_counter = 0
-        else:
+        elif early_stopping_enabled:
             patience_counter += 1
-            if patience_counter >= patience:
+            if patience_counter >= early_stopping_patience:
                 # Always render the final (early-stopped) epoch, even when it is
                 # not a scheduled plot_every epoch.
                 if collect_obs and not rendered:
