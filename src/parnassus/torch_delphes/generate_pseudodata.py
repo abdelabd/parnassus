@@ -32,7 +32,9 @@ Event generation
 
 3. The truth particles are run through a
    :class:`CMSEnergyFlowDefault` card to produce a CMS-PF-like reco
-   object collection. Two cards are used:
+   object collection. This phase runs on CUDA when a GPU is available
+   (auto-detected; override with ``--device``), while phase 1 stays
+   CPU-parallel. Two cards are used:
 
    - A **default** (non-learnable) card which gives us the truth
      particles themselves as the ``truth_*`` branches.
@@ -134,6 +136,10 @@ _DEFAULT_PARAM_CONFIG: Path = (
 # --pt-hat-min flag, so this file only carries the process / beam definition.
 _DEFAULT_CMND_FILE: Path = Path(__file__).resolve().parent / "qcd_dijet.cmnd"
 
+def resolve_device(device=None) -> torch.device:
+    if device is not None:
+        return torch.device(device)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def build_effective_cmnd(
     base_cmnd: str | Path,
@@ -205,6 +211,7 @@ def generate_truth_events(
 def make_target_card(
     param_config: str | Path = _DEFAULT_PARAM_CONFIG,
     debug: bool = False,
+    device: str | torch.device = "cpu",
 ) -> CMSEnergyFlowDefault:
     """Build a learnable CMS card initialized from a parameter config.
 
@@ -226,6 +233,8 @@ def make_target_card(
         :class:`parnassus.torch_delphes.defaults.CMSEnergyFlowDefault`). This
         is what enables ``generate_pseudodata --debug`` to save the
         per-module breakdown into the ROOT file.
+    device : str | torch.device
+        Device to place the card on (e.g. ``"cuda"`` or ``"cpu"``).
 
     Returns
     -------
@@ -238,6 +247,7 @@ def make_target_card(
     for p in card.parameters():
         p.requires_grad_(False)
     card.eval()
+    card.to(device)
     return card
 
 
@@ -399,6 +409,7 @@ def truth_arrays_to_pflow(
     target_card: CMSEnergyFlowDefault,
     batch_size: int = 512,
     debug: bool = False,
+    device: str | torch.device = "cpu",
 ) -> dict[str, list[np.ndarray]]:
     """Run the class-based truth events through the target card in batches.
 
@@ -420,6 +431,13 @@ def truth_arrays_to_pflow(
     tensor in addition to ``EFlowObject``; each is split into per-event jagged
     arrays under ``"<ModuleName>.<Var>"`` branch names (see
     :func:`parnassus.torch_delphes.tune_cms_fullsim.debug.debug_branch_name`).
+
+    Parameters
+    ----------
+    device : str | torch.device
+        Device the ``target_card`` lives on; each batch's input tensor is moved
+        here before the forward pass. Outputs are moved back to CPU when split
+        into per-event arrays.
 
     Returns
     -------
@@ -457,7 +475,7 @@ def truth_arrays_to_pflow(
             continue
 
         with torch.no_grad():
-            out = target_card(reco_input)
+            out = target_card(reco_input.to(device))
         eflow = out["EFlowObject"]
 
         pflow_pt, pflow_eta, pflow_phi, pflow_class = eflow_to_class_arrays(
@@ -504,6 +522,7 @@ def generate(
     debug: bool = False,
     work_dir: str | Path | None = None,
     keep_hepmc: bool = False,
+    device: str | torch.device | None = None,
 ) -> int:
     """Generate the pseudodataset and write it to ``output_path``.
 
@@ -533,6 +552,10 @@ def generate(
     keep_hepmc : bool
         If True, do not delete the intermediate HepMC files/logs when a
         temporary ``work_dir`` was created. No effect when ``work_dir`` is given.
+    device : str | torch.device | None
+        Device for the phase-2 TorchDelphes forward pass. ``None`` auto-detects
+        (``"cuda"`` if a GPU is available, else ``"cpu"``). Phase-1 Pythia
+        generation is always CPU-parallel and unaffected.
     debug : bool
         If True, run the target card in debug mode and additionally write
         every intermediate per-module output into the ROOT file under branch
@@ -548,6 +571,9 @@ def generate(
         Number of events actually written to the output file.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    resolved_device = resolve_device(device)
+    print(f"DEVICE: {resolved_device}")
 
     # Resolve worker count: default to all cores, never more than n_events
     # (HepMC3Generator would otherwise hand some workers zero events).
@@ -579,11 +605,20 @@ def generate(
         n_read = len(truth_arrays["truth_pt"])
 
         # ----- Phase 2b: pass truth events through TorchDelphes. -----
-        print(f"[3/3] Passing {n_read} events through TorchDelphes (target card)...")
-        target_card = make_target_card(param_config=param_config, debug=debug)
+        print(
+            f"[3/3] Passing {n_read} events through TorchDelphes (target card) "
+            f"on {resolved_device}..."
+        )
+        target_card = make_target_card(
+            param_config=param_config, debug=debug, device=resolved_device
+        )
         torch.manual_seed(seed)  # the card's smearing / Gumbel-ST is stochastic
         pflow_arrays = truth_arrays_to_pflow(
-            truth_arrays, target_card, batch_size=batch_size, debug=debug
+            truth_arrays,
+            target_card,
+            batch_size=batch_size,
+            debug=debug,
+            device=resolved_device,
         )
 
         # ----- Write the cms-flow-schema ROOT file. -----
@@ -630,6 +665,16 @@ def main() -> None:
         help="Number of events per TorchDelphes forward pass.",
     )
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help=(
+            "Device for the TorchDelphes forward pass (e.g. 'cuda', 'cuda:0', "
+            "'cpu'). Defaults to auto-detect: 'cuda' if a GPU is available, "
+            "else 'cpu'. Pythia generation is always CPU-parallel."
+        ),
+    )
     parser.add_argument(
         "--cmnd-file",
         type=Path,
@@ -683,11 +728,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    resolved_device = resolve_device(args.device)
     print(
         f"Generating pseudodata -> {args.output}\n"
         f"  n_events={args.n_events}  n_workers={args.n_workers or 'auto'}  "
         f"pTHatMin={args.pt_hat_min}  seed={args.seed}\n"
-        f"  cmnd-file={args.cmnd_file}  param-config={args.param_config}  debug={args.debug}"
+        f"  device={resolved_device}  cmnd-file={args.cmnd_file}  "
+        f"param-config={args.param_config}  debug={args.debug}"
     )
     n = generate(
         args.output,
@@ -701,6 +748,7 @@ def main() -> None:
         debug=args.debug,
         work_dir=args.work_dir,
         keep_hepmc=args.keep_hepmc,
+        device=resolved_device,
     )
     size_mb = args.output.stat().st_size / (1024 * 1024)
     print(f"Wrote {n} events, {size_mb:.2f} MB, to {args.output}")
