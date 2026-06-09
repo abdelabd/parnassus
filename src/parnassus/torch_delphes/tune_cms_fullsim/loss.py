@@ -159,31 +159,54 @@ def per_event_wasserstein_loss(
     pred_groups = get_object_groups(pred_particles)
     target_groups = get_object_groups(target_particles.detach())
 
-    def sliced_sw2(x_pred: torch.Tensor, y_tgt: torch.Tensor) -> torch.Tensor:
+    def sliced_sw2(
+        x_pred: torch.Tensor, y_tgt: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor:
         """SW_2 between a differentiable pred cloud ``x_pred`` (n_pred, d) and a
-        reference target cloud ``y_tgt`` (n_tgt, d).
+        reference target cloud ``y_tgt`` (n_tgt, d), standardized by ``scale`` (d,).
 
-        Each feature is standardized by the detached target std so no axis
-        dominates the random 1-D projections (the scale is a gradient-free
-        constant). Returns a scalar SW_2 distance that keeps the gradient back to
-        ``x_pred``. Works for the (n, 3) object clouds and the (n, 1) per-event
-        clouds alike; SW on 1-D data is exact.
+        ``scale`` is a gradient-free per-feature constant (so no axis dominates the
+        random 1-D projections) supplied by the caller rather than computed from
+        ``y_tgt`` here: a per-pid batch std collapses to ~0 when a rare pid has only
+        one target particle in the batch (e.g. a single electron), and a tiny clamp
+        floor then inflates the distance by ~1/floor. Returns a scalar SW_2 that
+        keeps the gradient back to ``x_pred``. Works for the (n, 3) object clouds
+        and the (n, 1) per-event clouds alike; SW on 1-D data is exact.
         """
         y = y_tgt.detach().to(device=x_pred.device, dtype=x_pred.dtype)
-        scale = y.std(dim=0, unbiased=False).clamp(min=1e-8)  # (d,)
         return ot.sliced_wasserstein_distance(
             x_pred / scale, y / scale, n_projections=100, p=2, seed=0
         )
 
+    # Per-feature scale for the object terms: the std of each of the 3 features
+    # [log_E, log_pt, eta] over ALL valid target particles, pooled across pids.
+    # Pooling (rather than a per-pid std) keeps the scale well-conditioned even when
+    # a rare pid has a single target particle in the batch -- a per-pid std would be
+    # 0 there and explode that term through the clamp floor.
+    target_flat = target_particles.detach().reshape(-1, target_particles.shape[-1])
+    target_valid = target_flat[target_flat[..., -1] != 0]  # drop padding/ghosts (pid == 0)
+    if target_valid.shape[0] > 0:
+        object_scale = (
+            target_valid[:, :3]
+            .std(dim=0, unbiased=False)
+            .clamp(min=1e-2)
+            .to(device=pred_particles.device, dtype=pred_particles.dtype)
+        )
+    else:
+        object_scale = torch.ones(
+            3, device=pred_particles.device, dtype=pred_particles.dtype
+        )
+
     # Object-level term: one SW_2 per pid present on BOTH sides, over the 3
-    # standardized kinematic features [log_E, log_pt, eta].
+    # standardized kinematic features [log_E, log_pt, eta], all on the shared pooled
+    # scale above.
     object_wasserstein_distance: dict[int, torch.Tensor] = {}
     for pid in sorted(set(pred_groups) & set(target_groups)):
         x = pred_groups[pid]  # (n_pred, 3), differentiable
         y = target_groups[pid]  # (n_tgt, 3), reference (detached inside sliced_sw2)
         if x.shape[0] == 0 or y.shape[0] == 0:  # nothing to match on one side
             continue
-        object_wasserstein_distance[int(pid)] = sliced_sw2(x, y)
+        object_wasserstein_distance[int(pid)] = sliced_sw2(x, y, object_scale)
 
     # Event-level term: SW_2 on the per-event log(HT) distribution, (n_events,) ->
     # (n_events, 1). log_ht is differentiable (built from pt). multiplicity is
@@ -195,7 +218,15 @@ def per_event_wasserstein_loss(
         tv = target[key].reshape(-1, 1)
         if pv.shape[0] == 0 or tv.shape[0] == 0:
             continue
-        event_wasserstein_distance[key] = sliced_sw2(pv, tv)
+        # Per-event observable: (n_events,) values, never degenerate; standardize by
+        # its own std with a 1e-2 floor as belt-and-suspenders.
+        event_scale = (
+            tv.detach()
+            .std(dim=0, unbiased=False)
+            .clamp(min=1e-2)
+            .to(device=pv.device, dtype=pv.dtype)
+        )
+        event_wasserstein_distance[key] = sliced_sw2(pv, tv, event_scale)
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
     # log_ht term is down-weighted by EVENT_WEIGHT relative to the per-pid object
