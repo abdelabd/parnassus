@@ -682,13 +682,15 @@ they are not needed for the tuning pipeline.
 
 The committed pseudo-dataset lives at\\
 \texttt{src/parnassus/tests/benchmark\_data/cms\_pseudodata.root}.
-To regenerate it from scratch (takes $\sim$3~min):
+To regenerate it from scratch (Pythia generation runs in parallel
+across \texttt{--n-workers} cores):
 
 \begin{verbatim}
 uv run python -m parnassus.torch_delphes.generate_pseudodata \
   --output src/parnassus/tests/benchmark_data/ \
            cms_pseudodata.root \
-  --target-size-mb 20 \
+  --n-events 20000 \
+  --n-workers 32 \
   --pt-hat-min 100 \
   --seed 1
 \end{verbatim}
@@ -825,12 +827,13 @@ signal accumulates across steps even on a small-event window).
 
 \subsection{Using a larger locally-generated pseudo-dataset}
 
-To generate, say, a 200\,MB file ($\sim$22\,000 events):
+To generate, say, $\sim$200\,000 events:
 
 \begin{verbatim}
 uv run python -m parnassus.torch_delphes.generate_pseudodata \
   --output /path/to/large_pseudodata.root \
-  --target-size-mb 200 \
+  --n-events 200000 \
+  --n-workers 64 \
   --pt-hat-min 100 \
   --seed 42
 \end{verbatim}

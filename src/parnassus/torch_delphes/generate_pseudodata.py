@@ -5,22 +5,32 @@ This script produces a ROOT file in the cms-flow ``event_tree`` schema
 ``tune_cms_fullsim.py`` can be run end-to-end on reproducible input
 without needing network access.
 
+The generator runs in two clean phases: **all** Pythia events are
+generated up front (and in parallel) into a single HepMC3 file, and only
+then are those events streamed through TorchDelphes. This keeps the
+expensive event generation cleanly separated from (and parallel to) the
+calorimeter simulation.
+
 Event generation
 ----------------
-1. Pythia8 generates hard QCD dijet events at ``sqrt(s) = 13 TeV`` with
-   ``pTHatMin`` set by ``--pt-hat-min``. Hadronization is on; final-state
-   radiation is on. This produces a realistic mix of charged hadrons,
-   electrons, muons, photons, K-shorts, Lambdas, and neutrons -- the
-   exact particle zoo that exercises every learnable parameter in
+1. :class:`parnassus.pythia.HepMC3Generator` generates hard QCD dijet
+   events at ``sqrt(s) = 13 TeV`` (see the shipped ``qcd_dijet.cmnd``,
+   with ``pTHatMin`` overridable via ``--pt-hat-min``) across
+   ``--n-workers`` parallel Pythia8 processes, retries failed events so
+   the merged HepMC3 file contains *exactly* ``--n-events`` events, and
+   merges the per-worker outputs into one file. Hadronization and
+   final-state radiation are on, producing a realistic mix of charged
+   hadrons, electrons, muons, photons, K-shorts, Lambdas, and neutrons --
+   the exact particle zoo that exercises every learnable parameter in
    ``CMSEnergyFlowDefault``.
 
-2. Each event's stable particles are converted to the
+2. The merged HepMC3 file is read back event by event; each event's
+   final-state particles (HepMC ``status == 1``) are converted to the
    ``(N, N_FEATURES)`` particle tensor via
-   :func:`parnassus.data.particle_io.pythia_particles_to_tensor`,
-   with ``EVENT_NUMBER`` set to the (0-indexed) global event number so
-   the calorimeter's per-event aggregation works correctly.
+   :func:`parnassus.data.particle_io.hepmc_particles_to_tensor` and
+   reduced to the class-based ``truth_*`` branches.
 
-3. The stable particles are run through a
+3. The truth particles are run through a
    :class:`CMSEnergyFlowDefault` card to produce a CMS-PF-like reco
    object collection. Two cards are used:
 
@@ -59,21 +69,23 @@ names like ``"Track.PT"``, ``"ECalTower.E"`` mirror the
 ``--debug`` flag reads those branches back and overlays them with the
 trainee's intermediate outputs at init / best.
 
-Size targeting
---------------
-The ``--target-size-mb`` flag controls how many events are generated.
-The script measures the current file size after every 200 events and
-stops once the target size is reached, so the output is always at
-roughly the requested size regardless of event multiplicity.
+Event count
+-----------
+The ``--n-events`` flag sets exactly how many events are generated.
+Pythia generation is parallelised across ``--n-workers`` processes via
+:class:`parnassus.pythia.HepMC3Generator`, which retries failed events so
+the merged HepMC3 file always contains exactly ``--n-events`` events
+regardless of per-event acceptance.
 
 Usage
 -----
 .. code-block:: shell
 
-    # Generate ~20 MB of pseudodata at pT-hat > 100 GeV
+    # Generate 20k events at pT-hat > 100 GeV using 32 parallel workers
     uv run python -m parnassus.torch_delphes.generate_pseudodata \
         --output src/parnassus/tests/benchmark_data/cms_pseudodata.root \
-        --target-size-mb 20 \
+        --n-events 20000 \
+        --n-workers 32 \
         --pt-hat-min 100
 
 By default, the output lives in ``src/parnassus/tests/benchmark_data/``
@@ -84,15 +96,19 @@ so it can be committed and consumed by
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import awkward as ak
 import numpy as np
-import pythia8mc
+import pyhepmc
 import torch
 import uproot
 
-from parnassus.data.particle_io import ColumnMap, pythia_particles_to_tensor
+from parnassus.data.particle_io import ColumnMap, hepmc_particles_to_tensor
+from parnassus.pythia import HepMC3Generator
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.tune_cms_fullsim.data import load_truth_events
@@ -113,37 +129,77 @@ _DEFAULT_PARAM_CONFIG: Path = (
     Path(__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
 )
 
+# QCD-dijet Pythia8 configuration consumed by HepMC3Generator. The random seed
+# is injected per-worker by the generator and the pTHatMin is overridden by the
+# --pt-hat-min flag, so this file only carries the process / beam definition.
+_DEFAULT_CMND_FILE: Path = Path(__file__).resolve().parent / "qcd_dijet.cmnd"
 
-def build_pythia(pt_hat_min: float, seed: int) -> object:
-    """Configure and initialise a Pythia8 instance for QCD dijets.
+
+def build_effective_cmnd(
+    base_cmnd: str | Path,
+    pt_hat_min: float,
+    dest_dir: str | Path,
+) -> Path:
+    """Copy ``base_cmnd`` and append a ``pTHatMin`` override.
+
+    Pythia applies settings in order, so appending
+    ``PhaseSpace:pTHatMin = <pt_hat_min>`` after the base file's contents makes
+    the ``--pt-hat-min`` CLI flag always win over whatever the shipped
+    ``qcd_dijet.cmnd`` declares. The effective file is written into
+    ``dest_dir`` (typically the run's scratch directory) and its path returned.
 
     Returns
     -------
-    pythia8mc.Pythia
-        An initialised Pythia8 instance ready for :meth:`next` calls.
+    Path
+        Path to the written effective ``.cmnd`` file.
     """
-    pythia = pythia8mc.Pythia()
-    settings = [
-        "Beams:eCM = 13000.",
-        "HardQCD:all = on",
-        f"PhaseSpace:pTHatMin = {pt_hat_min}",
-        f"Random:seed = {seed}",
-        "Random:setSeed = on",
-        "Next:numberShowInfo = 0",
-        "Next:numberShowProcess = 0",
-        "Next:numberShowEvent = 0",
-        "Init:showProcesses = off",
-        "Init:showMultipartonInteractions = off",
-        "Init:showChangedSettings = off",
-        "Init:showChangedParticleData = off",
-        "Stat:showProcessLevel = off",
-        "Stat:showPartonLevel = off",
-        "Stat:showErrors = off",
-    ]
-    for setting in settings:
-        pythia.readString(setting)
-    pythia.init()
-    return pythia
+    base = Path(base_cmnd).read_text()
+    override = (
+        "\n! ---- Override injected by generate_pseudodata.py ----\n"
+        f"PhaseSpace:pTHatMin = {pt_hat_min}\n"
+    )
+    dest = Path(dest_dir) / "effective.cmnd"
+    dest.write_text(base + override)
+    return dest
+
+
+def generate_truth_events(
+    cmnd_file: str | Path,
+    n_events: int,
+    n_workers: int,
+    work_dir: str | Path,
+) -> Path:
+    """Generate ``n_events`` Pythia events in parallel into one HepMC3 file.
+
+    Thin wrapper around :class:`parnassus.pythia.HepMC3Generator`: it launches
+    ``n_workers`` single-core Pythia8 jobs (each seeded distinctly by the
+    generator), retries failed events so exactly ``n_events`` are produced, and
+    merges the per-worker outputs into a single HepMC3 file.
+
+    Parameters
+    ----------
+    cmnd_file : str | Path
+        Pythia ``.cmnd`` configuration (see :func:`build_effective_cmnd`).
+    n_events : int
+        Total number of events to generate across all workers.
+    n_workers : int
+        Number of parallel Pythia8 processes.
+    work_dir : str | Path
+        Scratch directory; the HepMC files and per-job logs are written under
+        ``<work_dir>/hepmc`` and ``<work_dir>/hepmc_logs``.
+
+    Returns
+    -------
+    Path
+        Path to the merged HepMC3 file holding all ``n_events`` events.
+    """
+    work_dir = Path(work_dir)
+    generator = HepMC3Generator(
+        cmnd_file=str(cmnd_file),
+        output_dir=str(work_dir / "hepmc"),
+        log_dir=str(work_dir / "hepmc_logs"),
+    )
+    return generator.generate(n_events=n_events, max_workers=n_workers, debug=False)
 
 
 def make_target_card(
@@ -281,136 +337,202 @@ def truth_tensor_to_class_arrays(
     return pt_list, eta_list, phi_list, cls_list
 
 
-def _flush_batch(
-    pythia: object,
-    target_card: CMSEnergyFlowDefault,
-    start_idx: int,
-    batch_size: int,
-    debug: bool = False,
-) -> tuple[dict[str, list[np.ndarray]], int]:
-    """Generate one batch of events and return cms-flow-schema lists.
+def hepmc_to_truth_class_arrays(
+    hepmc_path: str | Path,
+    n_events: int | None = None,
+) -> dict[str, list[np.ndarray]]:
+    """Read a merged HepMC3 file into per-event class-based ``truth_*`` arrays.
 
-    Runs ``batch_size`` events through Pythia, converts them to a truth
-    tensor, passes them through the perturbed target card, and splits
-    both sides into per-event jagged arrays.
+    Each event's final-state particles (HepMC ``status == 1``) are converted to
+    a ``(N, N_FEATURES)`` tensor via
+    :func:`parnassus.data.particle_io.hepmc_particles_to_tensor` and reduced to
+    the ``(pt, eta, phi, class)`` representation written to the ROOT file --
+    the ONLY thing the trainee ever gets to see. Pre-filtering to ``status ==
+    1`` before tensor construction skips the (large) intermediate shower
+    history, which is what :func:`truth_tensor_to_class_arrays` would discard
+    anyway.
 
-    When ``debug`` is True, the target card is expected to have been built
-    with ``debug=True`` so its forward pass returns every intermediate
-    per-module tensor in addition to ``EFlowObject``. Each module's output is
-    split into per-event jagged arrays under branch names of the form
-    ``"<ModuleName>.<Var>"`` (see
-    :func:`parnassus.torch_delphes.tune_cms_fullsim.debug.debug_branch_name`).
+    Parameters
+    ----------
+    hepmc_path : str | Path
+        Path to the merged HepMC3 file produced by :func:`generate_truth_events`.
+    n_events : int | None
+        If given, stop after reading this many events (a safety cap matching the
+        number requested from Pythia). ``None`` reads the whole file.
 
     Returns
     -------
-    branches : dict
-        Mapping from branch name (e.g. ``"truth_pt"`` or
-        ``"ChargedHadron.PT"`` in debug mode) to a list of per-event numpy
-        arrays for the batch.
-    n_generated : int
-        Actual number of events generated (may be smaller than
-        ``batch_size`` if Pythia skipped events).
+    dict
+        ``{"truth_pt", "truth_eta", "truth_phi", "truth_class"}`` -> list of
+        per-event numpy arrays, one entry per event (empty events kept as
+        zero-length arrays so the per-event alignment is preserved).
     """
-    del start_idx  # event numbers are shifted to [0, n_generated) locally
-    batch_truth_rows: list[torch.Tensor] = []
-    n_generated = 0
-    for _ in range(batch_size):
-        if not pythia.next():  # type: ignore[attr-defined]
-            continue
-        # Use a *local* event number in [0, n_generated) so the helpers
-        # below can split jagged arrays with a straightforward
-        # ``ev == i`` comparison. The absolute event index across
-        # batches is tracked by the caller.
-        row = pythia_particles_to_tensor(pythia.event, n_generated, dtype=torch.float64)  # type: ignore[attr-defined]
-        batch_truth_rows.append(row)
-        n_generated += 1
+    truth_pt: list[np.ndarray] = []
+    truth_eta: list[np.ndarray] = []
+    truth_phi: list[np.ndarray] = []
+    truth_class: list[np.ndarray] = []
 
-    if n_generated == 0:
-        return {}, 0
+    with pyhepmc.open(str(hepmc_path), "r") as reader:
+        for event_idx, event in enumerate(reader):
+            if n_events is not None and event_idx >= n_events:
+                break
+            # Keep only final-state particles; event_number=0 so the single
+            # event splits trivially under truth_tensor_to_class_arrays below.
+            final_particles = [p for p in event.particles if p.status == 1]
+            truth = hepmc_particles_to_tensor(final_particles, 0, dtype=torch.float64)
+            pts, etas, phis, clss = truth_tensor_to_class_arrays(truth, n_events=1)
+            truth_pt.append(pts[0])
+            truth_eta.append(etas[0])
+            truth_phi.append(phis[0])
+            truth_class.append(clss[0])
 
-    # Flatten all events in the batch into a single tensor.
-    batch_truth = torch.cat(batch_truth_rows, dim=0)
-
-    # The truth_* branches (status==1, non-neutrino, |eta|<10, PID->class) are
-    # the ONLY thing the trainee gets to see. Build them first, then feed the
-    # target card the SAME class-based reconstruction the trainee will rebuild
-    # from those branches via load_truth_events. This keeps generation-input
-    # identical to trainee-input (representative PID, pi-mass, derived charge,
-    # zero vertex, recomputed E), so the fit can recover the truth parameters;
-    # otherwise the full-Pythia species (real PID/mass) make the target
-    # unreachable from the class-only truth. See
-    # doc truth_input_fidelity_issue.md.
-    truth_pt, truth_eta, truth_phi, truth_class = truth_tensor_to_class_arrays(
-        batch_truth, n_events=n_generated
-    )
-    truth_tensor = load_truth_events(
-        {
-            "truth_pt": truth_pt,
-            "truth_eta": truth_eta,
-            "truth_phi": truth_phi,
-            "truth_class": truth_class,
-        }
-    )  # padded (n_events, max_n_particles, N_FEATURES)
-    # Flatten back to (N, N_FEATURES) and drop the zero-padding rows.
-    reco_input = truth_tensor[torch.any(truth_tensor != 0, dim=-1)]
-
-    with torch.no_grad():
-        out = target_card(reco_input)
-    eflow = out["EFlowObject"]
-
-    pflow_pt, pflow_eta, pflow_phi, pflow_class = eflow_to_class_arrays(
-        eflow, eflow[:, ColumnMap.EVENT_NUMBER], n_events=n_generated
-    )
-
-    batch_branches: dict[str, list[np.ndarray]] = {
+    return {
         "truth_pt": truth_pt,
         "truth_eta": truth_eta,
         "truth_phi": truth_phi,
         "truth_class": truth_class,
-        "pflow_pt": pflow_pt,
-        "pflow_eta": pflow_eta,
-        "pflow_phi": pflow_phi,
-        "pflow_class": pflow_class,
     }
 
-    # In debug mode, every key in INTERMEDIATE_BRANCHES is expected to be
-    # present in the card's output dict (the target card was built with
-    # ``debug=True``); split each per-module tensor into per-event jagged
-    # arrays for ROOT writing. Branch names follow the
-    # ``"<ModuleName>.<Var>"`` convention used by validate_torch_delphes,
-    # which uproot accepts verbatim.
+
+def truth_arrays_to_pflow(
+    truth_arrays: dict[str, list[np.ndarray]],
+    target_card: CMSEnergyFlowDefault,
+    batch_size: int = 512,
+    debug: bool = False,
+) -> dict[str, list[np.ndarray]]:
+    """Run the class-based truth events through the target card in batches.
+
+    The trainee only ever sees the ``truth_*`` branches, so we feed the target
+    card the SAME class-based reconstruction the trainee will rebuild from those
+    branches via :func:`load_truth_events` (representative PID, pi-mass, derived
+    charge, zero vertex, recomputed E). This keeps generation-input identical to
+    trainee-input, so the fit can recover the truth parameters; otherwise the
+    full-Pythia species (real PID/mass) make the target unreachable from the
+    class-only truth. See doc ``truth_input_fidelity_issue.md``.
+
+    Events are processed in slices of ``batch_size`` for memory; per-event
+    alignment with ``truth_arrays`` is preserved because each slice is split
+    back out with ``n_events`` equal to the slice length (empty events yield
+    empty per-event arrays on both sides).
+
+    When ``debug`` is True, the target card is expected to have been built with
+    ``debug=True`` so its forward pass returns every intermediate per-module
+    tensor in addition to ``EFlowObject``; each is split into per-event jagged
+    arrays under ``"<ModuleName>.<Var>"`` branch names (see
+    :func:`parnassus.torch_delphes.tune_cms_fullsim.debug.debug_branch_name`).
+
+    Returns
+    -------
+    dict
+        ``{"pflow_pt", "pflow_eta", "pflow_phi", "pflow_class"}`` (plus the
+        ``"<ModuleName>.<Var>"`` debug branches when ``debug`` is True) -> list
+        of per-event numpy arrays, index-aligned with ``truth_arrays``.
+    """
+    n_events = len(truth_arrays["truth_pt"])
+
+    branches: dict[str, list[np.ndarray]] = {
+        "pflow_pt": [],
+        "pflow_eta": [],
+        "pflow_phi": [],
+        "pflow_class": [],
+    }
     if debug:
         for module_name, variables in INTERMEDIATE_BRANCHES:
-            tensor = out.get(module_name)
-            if tensor is None:
-                # The target card didn't return this module's output. This
-                # shouldn't happen with the CMS card in debug=True mode, but
-                # we skip rather than crash to keep the script forward-
-                # compatible with cards that expose fewer intermediates.
-                continue
-            per_var = tensor_to_per_event_arrays(
-                tensor, module_name, variables, n_events=n_generated
-            )
-            for var, lists in per_var.items():
-                batch_branches[debug_branch_name(module_name, var)] = lists
+            for var in variables:
+                branches[debug_branch_name(module_name, var)] = []
 
-    return batch_branches, n_generated
+    for start in range(0, n_events, batch_size):
+        end = min(start + batch_size, n_events)
+        n_batch = end - start
+        batch_truth = {k: v[start:end] for k, v in truth_arrays.items()}
+
+        truth_tensor = load_truth_events(batch_truth)
+        # Flatten back to (N, N_FEATURES) and drop the zero-padding rows.
+        reco_input = truth_tensor[torch.any(truth_tensor != 0, dim=-1)]
+        if reco_input.numel() == 0:
+            # Whole slice was empty events: emit empty per-event arrays so the
+            # output stays index-aligned with the truth side.
+            for key in branches:
+                branches[key].extend([np.empty(0, dtype=np.float32) for _ in range(n_batch)])
+            continue
+
+        with torch.no_grad():
+            out = target_card(reco_input)
+        eflow = out["EFlowObject"]
+
+        pflow_pt, pflow_eta, pflow_phi, pflow_class = eflow_to_class_arrays(
+            eflow, eflow[:, ColumnMap.EVENT_NUMBER], n_events=n_batch
+        )
+        branches["pflow_pt"].extend(pflow_pt)
+        branches["pflow_eta"].extend(pflow_eta)
+        branches["pflow_phi"].extend(pflow_phi)
+        branches["pflow_class"].extend(pflow_class)
+
+        # In debug mode, every key in INTERMEDIATE_BRANCHES is expected to be
+        # present in the card's output dict (the target card was built with
+        # ``debug=True``); split each per-module tensor into per-event jagged
+        # arrays for ROOT writing. Branch names follow the
+        # ``"<ModuleName>.<Var>"`` convention used by validate_torch_delphes,
+        # which uproot accepts verbatim.
+        if debug:
+            for module_name, variables in INTERMEDIATE_BRANCHES:
+                tensor = out.get(module_name)
+                if tensor is None:
+                    # The target card didn't return this module's output. This
+                    # shouldn't happen with the CMS card in debug=True mode, but
+                    # we skip rather than crash to keep the script forward-
+                    # compatible with cards that expose fewer intermediates.
+                    continue
+                per_var = tensor_to_per_event_arrays(
+                    tensor, module_name, variables, n_events=n_batch
+                )
+                for var, lists in per_var.items():
+                    branches[debug_branch_name(module_name, var)].extend(lists)
+
+    return branches
 
 
 def generate(
     output_path: Path,
-    target_size_mb: float = 20.0,
+    n_events: int = 20_000,
     pt_hat_min: float = 100.0,
-    batch_size: int = 200,
-    max_events: int = 100_000,
+    n_workers: int | None = None,
+    batch_size: int = 512,
     seed: int = 1,
+    cmnd_file: str | Path = _DEFAULT_CMND_FILE,
     param_config: str | Path = _DEFAULT_PARAM_CONFIG,
     debug: bool = False,
+    work_dir: str | Path | None = None,
+    keep_hepmc: bool = False,
 ) -> int:
     """Generate the pseudodataset and write it to ``output_path``.
 
+    Runs the two-phase pipeline: (1) generate ALL ``n_events`` Pythia events up
+    front and in parallel into one HepMC3 file, then (2) stream those events
+    through the perturbed TorchDelphes target card and write the cms-flow-schema
+    ROOT file.
+
     Parameters
     ----------
+    n_events : int
+        Exact number of events to generate.
+    pt_hat_min : float
+        ``PhaseSpace:pTHatMin`` for the QCD dijet generation (overrides the
+        value in ``cmnd_file``).
+    n_workers : int | None
+        Number of parallel Pythia8 processes. ``None`` defaults to
+        ``os.cpu_count()`` (capped at ``n_events`` so no worker gets zero
+        events).
+    batch_size : int
+        Number of events per TorchDelphes forward pass in phase 2.
+    cmnd_file : str | Path
+        Base Pythia ``.cmnd`` file (defaults to the shipped ``qcd_dijet.cmnd``).
+    work_dir : str | Path | None
+        Scratch directory for the intermediate HepMC files / logs. ``None``
+        creates (and, unless ``keep_hepmc``, removes) a temporary directory.
+    keep_hepmc : bool
+        If True, do not delete the intermediate HepMC files/logs when a
+        temporary ``work_dir`` was created. No effect when ``work_dir`` is given.
     debug : bool
         If True, run the target card in debug mode and additionally write
         every intermediate per-module output into the ROOT file under branch
@@ -427,52 +549,54 @@ def generate(
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pythia = build_pythia(pt_hat_min=pt_hat_min, seed=seed)
-    target_card = make_target_card(param_config=param_config, debug=debug)
+    # Resolve worker count: default to all cores, never more than n_events
+    # (HepMC3Generator would otherwise hand some workers zero events).
+    if n_workers is None:
+        n_workers = os.cpu_count() or 1
+    n_workers = max(1, min(n_workers, n_events))
 
-    base_branches = (
-        "truth_pt",
-        "truth_eta",
-        "truth_phi",
-        "truth_class",
-        "pflow_pt",
-        "pflow_eta",
-        "pflow_phi",
-        "pflow_class",
-    )
-    accumulated: dict[str, list[np.ndarray]] = {b: [] for b in base_branches}
-    if debug:
-        for module_name, variables in INTERMEDIATE_BRANCHES:
-            for var in variables:
-                accumulated[debug_branch_name(module_name, var)] = []
+    # Resolve scratch dir. A user-provided dir is never auto-deleted.
+    cleanup = False
+    if work_dir is None:
+        work_dir = Path(tempfile.mkdtemp(prefix="generate_pseudodata_"))
+        cleanup = not keep_hepmc
+    else:
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
 
-    total_written = 0
-    while total_written < max_events:
-        batch, n_gen = _flush_batch(
-            pythia, target_card, total_written, batch_size, debug=debug
-        )
-        if n_gen == 0:
-            break
-        for key, val in batch.items():
-            # New keys (e.g. a debug branch we hadn't pre-allocated) are
-            # initialized on first sight so the schema stays consistent if
-            # one of the early batches happened to produce zero rows for it.
-            accumulated.setdefault(key, []).extend(val)
-        total_written += n_gen
-
-        # Write a checkpoint so we can measure the file size on disk.
-        with uproot.recreate(str(output_path)) as f:
-            f["event_tree"] = {k: ak.Array(v) for k, v in accumulated.items()}
-        size_mb = output_path.stat().st_size / (1024 * 1024)
+    try:
+        # ----- Phase 1: generate ALL Pythia events up front, in parallel. -----
+        eff_cmnd = build_effective_cmnd(cmnd_file, pt_hat_min, work_dir)
         print(
-            f"  generated {total_written} events, "
-            f"file size = {size_mb:.2f} MB "
-            f"(target {target_size_mb:.1f} MB)"
+            f"[1/3] Generating {n_events} Pythia events with {n_workers} worker(s) "
+            f"(pTHatMin={pt_hat_min})..."
         )
-        if size_mb >= target_size_mb:
-            break
+        hepmc_path = generate_truth_events(eff_cmnd, n_events, n_workers, work_dir)
 
-    return total_written
+        # ----- Phase 2a: read HepMC back into class-based truth arrays. -----
+        print(f"[2/3] Reading {hepmc_path.name} -> truth particles...")
+        truth_arrays = hepmc_to_truth_class_arrays(hepmc_path, n_events=n_events)
+        n_read = len(truth_arrays["truth_pt"])
+
+        # ----- Phase 2b: pass truth events through TorchDelphes. -----
+        print(f"[3/3] Passing {n_read} events through TorchDelphes (target card)...")
+        target_card = make_target_card(param_config=param_config, debug=debug)
+        torch.manual_seed(seed)  # the card's smearing / Gumbel-ST is stochastic
+        pflow_arrays = truth_arrays_to_pflow(
+            truth_arrays, target_card, batch_size=batch_size, debug=debug
+        )
+
+        # ----- Write the cms-flow-schema ROOT file. -----
+        all_branches = {**truth_arrays, **pflow_arrays}
+        with uproot.recreate(str(output_path)) as f:
+            f["event_tree"] = {k: ak.Array(v) for k, v in all_branches.items()}
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"  wrote {n_read} events ({size_mb:.2f} MB) to {output_path}")
+
+        return n_read
+    finally:
+        if cleanup:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def main() -> None:
@@ -483,11 +607,56 @@ def main() -> None:
         type=Path,
         default=Path("src/parnassus/tests/benchmark_data/cms_pseudodata.root"),
     )
-    parser.add_argument("--target-size-mb", type=float, default=20.0)
+    parser.add_argument(
+        "--n-events",
+        type=int,
+        default=20_000,
+        help="Exact number of events to generate.",
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of parallel Pythia8 processes for event generation. "
+            "Defaults to all available CPU cores (capped at --n-events)."
+        ),
+    )
     parser.add_argument("--pt-hat-min", type=float, default=100.0)
-    parser.add_argument("--batch-size", type=int, default=200)
-    parser.add_argument("--max-events", type=int, default=100_000)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=512,
+        help="Number of events per TorchDelphes forward pass.",
+    )
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--cmnd-file",
+        type=Path,
+        default=_DEFAULT_CMND_FILE,
+        help=(
+            "Base Pythia .cmnd configuration. The --pt-hat-min flag is appended "
+            "as an override. Defaults to the shipped qcd_dijet.cmnd."
+        ),
+    )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Scratch directory for the intermediate HepMC files / per-job logs. "
+            "Defaults to a temporary directory that is removed on completion "
+            "(unless --keep-hepmc is given)."
+        ),
+    )
+    parser.add_argument(
+        "--keep-hepmc",
+        action="store_true",
+        help=(
+            "Keep the intermediate HepMC files / logs instead of deleting the "
+            "auto-created temporary work directory. No effect with --work-dir."
+        ),
+    )
     parser.add_argument(
         "--param-config",
         type=Path,
@@ -516,18 +685,22 @@ def main() -> None:
 
     print(
         f"Generating pseudodata -> {args.output}\n"
-        f"  pTHatMin={args.pt_hat_min}  target={args.target_size_mb} MB  seed={args.seed}\n"
-        f"  param-config={args.param_config}  debug={args.debug}"
+        f"  n_events={args.n_events}  n_workers={args.n_workers or 'auto'}  "
+        f"pTHatMin={args.pt_hat_min}  seed={args.seed}\n"
+        f"  cmnd-file={args.cmnd_file}  param-config={args.param_config}  debug={args.debug}"
     )
     n = generate(
         args.output,
-        target_size_mb=args.target_size_mb,
+        n_events=args.n_events,
         pt_hat_min=args.pt_hat_min,
+        n_workers=args.n_workers,
         batch_size=args.batch_size,
-        max_events=args.max_events,
         seed=args.seed,
+        cmnd_file=args.cmnd_file,
         param_config=args.param_config,
         debug=args.debug,
+        work_dir=args.work_dir,
+        keep_hepmc=args.keep_hepmc,
     )
     size_mb = args.output.stat().st_size / (1024 * 1024)
     print(f"Wrote {n} events, {size_mb:.2f} MB, to {args.output}")

@@ -24,13 +24,15 @@ a Pythia-generated multi-knob pseudo-dataset.
 All commands below assume you are at the repository root and have run
 `uv sync --all-extras` at least once.
 
-1. **Regenerate the pseudo-dataset** (takes ~3 min, writes ~20 MB to
+1. **Regenerate the pseudo-dataset** (Pythia generation is parallelised
+   across `--n-workers` cores, writes to
    `src/parnassus/tests/benchmark_data/cms_pseudodata.root`):
 
    ```bash
    uv run python -m parnassus.torch_delphes.generate_pseudodata \
        --output src/parnassus/tests/benchmark_data/cms_pseudodata.root \
-       --target-size-mb 20 \
+       --n-events 20000 \
+       --n-workers 32 \
        --pt-hat-min 100 \
        --seed 1
    ```
@@ -68,8 +70,8 @@ All commands below assume you are at the repository root and have run
 
 ## Scaling to the full Zenodo sample
 
-The committed pseudo-dataset is deliberately tiny (2200 events,
-20 MB) so that it can live in git. To reproduce the results on the
+The committed pseudo-dataset is deliberately tiny (a few thousand
+events) so that it can live in git. To reproduce the results on the
 full `train_800_1000_filter.root` from [Zenodo record
 11389651](https://zenodo.org/records/11389651), the only change is to
 pass a different path to `--root-file` in step 2 above and to scale

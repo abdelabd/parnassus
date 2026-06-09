@@ -1,0 +1,37 @@
+! qcd_dijet.cmnd
+! QCD dijet events for the CMS full-simulation pseudodata generator
+! (parnassus.torch_delphes.generate_pseudodata).
+!
+! Inclusive hard QCD 2->2 scattering at the LHC with hadronization and
+! final-state radiation on. This produces the full charged-hadron / electron /
+! muon / photon / neutral-hadron particle zoo that exercises every learnable
+! parameter of CMSEnergyFlowDefault.
+!
+! NOTES
+!   * Do NOT set Random:seed here. The per-worker random seed is supplied by
+!     parnassus.pythia.HepMC3Generator's single-job driver, which calls
+!     readString("Random:seed = <seed>") BEFORE reading this file.
+!   * The PhaseSpace:pTHatMin value below is only a default; it is overridden
+!     by the --pt-hat-min CLI flag of generate_pseudodata.py (which appends an
+!     override line to a temporary copy of this file).
+
+! 1) Incoming beams
+Beams:idA = 2212                    ! proton
+Beams:idB = 2212                    ! proton
+Beams:eCM = 13000.                  ! 13 TeV center-of-mass energy
+
+! 2) Hard process: inclusive QCD 2->2
+HardQCD:all = on
+PhaseSpace:pTHatMin = 100.          ! default; overridden by --pt-hat-min
+
+! 3) Suppress per-event and initialization printout
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off
