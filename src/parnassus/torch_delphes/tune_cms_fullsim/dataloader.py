@@ -26,7 +26,15 @@ class DelphesDataSet(Dataset):
     
 class DelphesDataLoader(DataLoader):
     """DataLoader for Delphes model tuning."""
-    def __init__(self, dataset: DelphesDataSet, batch_size: int, shuffle: bool = True) -> None:
-        super().__init__(dataset, batch_size=batch_size, shuffle=shuffle)
+    def __init__(
+        self,
+        dataset: DelphesDataSet,
+        batch_size: int,
+        shuffle: bool = True,
+        drop_last: bool = False,
+    ) -> None:
+        super().__init__(
+            dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last
+        )
         
 
