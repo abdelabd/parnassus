@@ -5,7 +5,11 @@ This module holds the training machinery proper:
 - :func:`fit_card_to_fullsim` is the Adam optimization loop that fits the
   trainee card to a fixed target observable dict, using the per-parameter Adam
   groups built by
-  :func:`parnassus.torch_delphes.param_config.select_trainable`.
+  :func:`parnassus.torch_delphes.param_config.select_trainable`. The training
+  loss is selected at call time via the ``loss_name`` argument (one of
+  :data:`tune_cms_fullsim.loss.LOSS_CHOICES`); the dispatcher in
+  :mod:`tune_cms_fullsim.loss` resolves the name to either the sliced
+  Wasserstein loss or the soft-histogram MSE loss.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from parnassus.torch_delphes.param_config import to_physical
 from .config import OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_main
-from .loss import per_event_wasserstein_loss
+from .loss import LOSS_CHOICES, get_loss_fn
 
 # =============================================================================
 # Fit loop
@@ -41,7 +45,8 @@ def fit_card_to_fullsim(
     device: torch.device = torch.device("cpu"),
     intermediate_plot_dir: str | Path | None = None,
     plot_every: int = 1,
-    early_stopping_patience: int | None = 100,
+    early_stopping_patience: int | None = 10,
+    loss_name: str = "wasserstein",
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -76,6 +81,18 @@ def fit_card_to_fullsim(
         training is stopped. Set to ``None`` (or any value ``<= 0``) to
         disable early stopping entirely; the loop will then always run
         the full ``n_steps``. Default is 10.
+    loss_name : str
+        Selects the training loss. One of
+        :data:`tune_cms_fullsim.loss.LOSS_CHOICES`:
+
+        - ``"wasserstein"`` (default): per-pid sliced Wasserstein-2 over
+          ``[log_E, log_pt, eta]`` + a down-weighted ``log(HT)`` term, via
+          :func:`tune_cms_fullsim.loss.per_event_wasserstein_loss`.
+        - ``"soft_hist"``: the original soft-histogram MSE loss (ported
+          from commit 5cac599) summed across observables, via
+          :func:`tune_cms_fullsim.loss.multi_observable_soft_hist_loss_distributed`.
+          DDP-aware: per-rank histograms are summed with a differentiable
+          all-reduce.
 
     Returns
     -------
@@ -86,6 +103,15 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
+    # Resolve the training-loss callable once, up front. Raises ValueError
+    # with the valid choices if ``loss_name`` is invalid -- fail fast rather
+    # than per-step.
+    loss_fn = get_loss_fn(loss_name)
+    if _is_main(rank):
+        print(
+            f"  training loss: {loss_name!r} "
+            f"(choices: {list(LOSS_CHOICES)})"
+        )
     opt = torch.optim.Adam(param_groups)
     if _is_main(rank):
         for g in param_groups:
@@ -204,7 +230,7 @@ def fit_card_to_fullsim(
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-            loss = per_event_wasserstein_loss(
+            loss = loss_fn(
                 pred_observables, target_observables
             )
 
@@ -255,7 +281,7 @@ def fit_card_to_fullsim(
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-                val_loss = per_event_wasserstein_loss(
+                val_loss = loss_fn(
                     pred_observables, target_observables
                 )
                 val_loss_acc += val_loss.detach()

@@ -74,6 +74,7 @@ from .distributed import (
     _is_main,
 )
 from .fixture import write_synthetic_fixture
+from .loss import LOSS_CHOICES
 from .training import fit_card_to_fullsim
 
 # =============================================================================
@@ -105,6 +106,20 @@ def main() -> None:
             "learning rate is --lr times its per-parameter 'lr_scale' from the "
             "--param-config file, so this is the single knob for sweeping the "
             "overall step size."
+        ),
+    )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default="wasserstein",
+        choices=list(LOSS_CHOICES),
+        help=(
+            "Training loss. 'wasserstein' (default) is the per-pid sliced "
+            "Wasserstein-2 over [log_E, log_pt, eta] plus a down-weighted "
+            "log(HT) term. 'soft_hist' is the original soft-histogram MSE "
+            "loss (ported from commit 5cac599) summed across observables; "
+            "DDP-aware via differentiable all-reduce on the per-rank "
+            "histograms. See parnassus.torch_delphes.tune_cms_fullsim.loss."
         ),
     )
     parser.add_argument(
@@ -217,7 +232,7 @@ def main() -> None:
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
 
-    train_dataloader = DelphesDataLoader(train_dataset, batch_size=4096, shuffle=True)
+    train_dataloader = DelphesDataLoader(train_dataset, batch_size=512, shuffle=True)
     val_dataloader = DelphesDataLoader(val_dataset, batch_size=512, shuffle=False)
 
     # All ranks must use the *same* initial parameters for the manual-
@@ -258,6 +273,7 @@ def main() -> None:
         device=device,
         intermediate_plot_dir=args.intermediate_plot_dir,
         plot_every=args.plot_every,
+        loss_name=args.loss,
     )
 
     if args.history_path is not None and _is_main(rank):
