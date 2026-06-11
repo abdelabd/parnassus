@@ -49,6 +49,16 @@ _SCALE_HALF_WIDTH = 0.3
 _SCALE_MIN = _SCALE_CENTER - _SCALE_HALF_WIDTH  # 0.7
 _SCALE_MAX = _SCALE_CENTER + _SCALE_HALF_WIDTH  # 1.3
 
+# Allowed initial range for *trainable* ``logit`` parameters. A trainable
+# efficiency/fraction initialized at (or near) 0/1 maps to a raw logit with a
+# vanishing sigmoid Jacobian -- ``d eff / d logit = eff*(1-eff)`` -- so Adam gets
+# essentially no gradient and the parameter is stuck. Initializing a *fitted*
+# logit inside (0.1, 0.9) keeps that Jacobian >= 0.09 (well-conditioned). Fixed
+# (``trainable: false``) logit params are unconstrained in [0, 1] (e.g. a truth
+# efficiency of 0.99 or a 1e-6 fraction is fine -- they never move).
+_TRAINABLE_LOGIT_MIN = 0.1
+_TRAINABLE_LOGIT_MAX = 0.9
+
 _DTYPE = torch.float64
 
 
@@ -210,9 +220,25 @@ def load_param_config(path: str | Path) -> dict[str, dict]:
             raise ValueError(f"{path}: entry {key!r} must be a mapping with a 'value' field.")
         # The base name (strip a trailing ``[i]``) drives the transform kind.
         base = key.split("[", 1)[0]
+        value = float(spec["value"])
+        trainable = bool(spec.get("trainable", False))
+        # Guard trainable logit params away from the dead-gradient sigmoid tails.
+        # A non-trainable logit may sit anywhere in [0, 1] (it never moves), but a
+        # *fitted* one initialized outside (0.1, 0.9) starts where the sigmoid
+        # Jacobian ~ 0, so Adam cannot move it (e.g. value 1.0 -> raw logit ~ +13.8).
+        if trainable and param_transform_kind(base) == "logit":
+            if not (_TRAINABLE_LOGIT_MIN < value < _TRAINABLE_LOGIT_MAX):
+                raise ValueError(
+                    f"{path}: {key!r} is a trainable logit parameter with value {value}, "
+                    f"which must be strictly inside the open interval "
+                    f"({_TRAINABLE_LOGIT_MIN}, {_TRAINABLE_LOGIT_MAX}). Initializing a "
+                    f"fitted efficiency/fraction at the 0/1 tails maps to a saturated raw "
+                    f"logit with a vanishing gradient, so the fit cannot move it. Use an "
+                    f"interior value (e.g. 0.85); only pin the boundary with trainable: false."
+                )
         out[str(key)] = {
-            "value": float(spec["value"]),
-            "trainable": bool(spec.get("trainable", False)),
+            "value": value,
+            "trainable": trainable,
             "lr_scale": float(spec.get("lr_scale", default_lr_scale(base))),
         }
     return out

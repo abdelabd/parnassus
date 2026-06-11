@@ -72,6 +72,35 @@ def test_to_raw_rejects_bad_softplus_and_logit() -> None:
         pc.to_raw("HadronFractions.k0s_logit", 1.5)
 
 
+def test_load_rejects_trainable_logit_at_dead_gradient_tails(tmp_path: Path) -> None:
+    """A *trainable* efficiency/fraction logit initialized at/near 0 or 1 maps to a
+    saturated raw logit (vanishing sigmoid gradient) and must be rejected; fixed
+    logits anywhere in [0, 1] and interior trainable logits load fine."""
+    import yaml
+
+    key = "ChargedHadronTrackingEfficiency.eff_logits[0]"
+
+    def _write(value: float, trainable: bool) -> Path:
+        p = tmp_path / "one.yaml"
+        with p.open("w") as f:
+            yaml.safe_dump({key: {"value": value, "trainable": trainable}}, f)
+        return p
+
+    # Trainable logit outside the open (0.1, 0.9) interval -> reject.
+    for bad in (0.0, 0.05, 0.1, 0.9, 0.95, 1.0):
+        with pytest.raises(ValueError, match="trainable logit"):
+            pc.load_param_config(_write(bad, trainable=True))
+
+    # Interior trainable logit -> ok.
+    assert pc.load_param_config(_write(0.85, trainable=True))[key]["value"] == 0.85
+
+    # Fixed logit anywhere in [0, 1] -> ok (it never moves; e.g. a 0.99 truth).
+    assert pc.load_param_config(_write(0.99, trainable=False))[key]["value"] == 0.99
+
+    # The shipped truth config (many fixed logits at 0.95/0.99/1e-6) still loads.
+    pc.load_param_config(_PARAM_CONFIG_DIR / "cms_target_default.yaml")
+
+
 def test_apply_validates_coverage(tmp_path: Path) -> None:
     """A config missing an entry is rejected against the card."""
     card = _fresh_card()
