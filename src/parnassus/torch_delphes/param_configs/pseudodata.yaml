@@ -1,0 +1,264 @@
+ChargedHadronTrackingEfficiency.eff_logits[0]:
+  value: 0.7
+  trainable: false
+  lr_scale: 1.0
+ChargedHadronTrackingEfficiency.eff_logits[1]:
+  value: 0.95
+  trainable: false
+  lr_scale: 1.0
+ChargedHadronTrackingEfficiency.eff_logits[2]:
+  value: 0.6
+  trainable: false
+  lr_scale: 1.0
+ChargedHadronTrackingEfficiency.eff_logits[3]:
+  value: 0.85
+  trainable: false
+  lr_scale: 1.0
+ElectronTrackingEfficiency.eff_logits[0]:
+  value: 0.73
+  trainable: false
+  lr_scale: 1.0
+ElectronTrackingEfficiency.eff_logits[1]:
+  value: 0.95
+  trainable: false
+  lr_scale: 1.0
+ElectronTrackingEfficiency.eff_logits[2]:
+  value: 0.99
+  trainable: false
+  lr_scale: 1.0
+ElectronTrackingEfficiency.eff_logits[3]:
+  value: 0.5
+  trainable: false
+  lr_scale: 1.0
+ElectronTrackingEfficiency.eff_logits[4]:
+  value: 0.83
+  trainable: false
+  lr_scale: 1.0
+ElectronTrackingEfficiency.eff_logits[5]:
+  value: 0.9
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.eff_logits[0]:
+  value: 0.75
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.eff_logits[1]:
+  value: 0.99
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.eff_logits[2]:
+  value: 0.99
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.eff_logits[3]:
+  value: 0.7
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.eff_logits[4]:
+  value: 0.98
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.eff_logits[5]:
+  value: 0.98
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.rate_raw[0]:
+  value: 0.0005
+  trainable: false
+  lr_scale: 1.0
+MuonTrackingEfficiency.rate_raw[1]:
+  value: 0.0005
+  trainable: false
+  lr_scale: 1.0
+ChargedHadronMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.6
+  trainable: true
+  lr_scale: 0.1
+ChargedHadronMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.6
+  trainable: true
+  lr_scale: 0.1
+ChargedHadronMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.6
+  trainable: true
+  lr_scale: 0.1
+ChargedHadronMomentumSmearing.resolution_module.b_raw[0]:
+  value: 0.05
+  trainable: true
+  lr_scale: 0.1
+ChargedHadronMomentumSmearing.resolution_module.b_raw[1]:
+  value: 0.05
+  trainable: true
+  lr_scale: 0.1
+ChargedHadronMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.05
+  trainable: true
+  lr_scale: 0.1
+ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 0.71
+  trainable: true
+  lr_scale: 1.0
+ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 0.71
+  trainable: true
+  lr_scale: 1.0
+ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 0.71
+  trainable: true
+  lr_scale: 1.0
+ElectronMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.5
+  trainable: true
+  lr_scale: 0.1
+ElectronMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.5
+  trainable: true
+  lr_scale: 0.1
+ElectronMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.5
+  trainable: true
+  lr_scale: 0.1
+ElectronMomentumSmearing.resolution_module.b_raw[0]:
+  value: 0.5
+  trainable: true
+  lr_scale: 0.1
+ElectronMomentumSmearing.resolution_module.b_raw[1]:
+  value: 0.5
+  trainable: true
+  lr_scale: 0.1
+ElectronMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.5
+  trainable: true
+  lr_scale: 0.1
+ElectronMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 0.85
+  trainable: true
+  lr_scale: 1.0
+ElectronMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 0.85
+  trainable: true
+  lr_scale: 1.0
+ElectronMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 0.85
+  trainable: true
+  lr_scale: 1.0
+MuonMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.13
+  trainable: true
+  lr_scale: 0.1
+MuonMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.13
+  trainable: true
+  lr_scale: 0.1
+MuonMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.13
+  trainable: true
+  lr_scale: 0.1
+MuonMomentumSmearing.resolution_module.b_raw[0]:
+  value: 0.13
+  trainable: true
+  lr_scale: 0.1
+MuonMomentumSmearing.resolution_module.b_raw[1]:
+  value: 0.13
+  trainable: true
+  lr_scale: 0.1
+MuonMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.13
+  trainable: true
+  lr_scale: 0.1
+MuonMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 1.15
+  trainable: true
+  lr_scale: 1.0
+MuonMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 1.15
+  trainable: true
+  lr_scale: 1.0
+MuonMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 1.15
+  trainable: true
+  lr_scale: 1.0
+HadronFractions.chad_logit:
+  value: 1.0e-06
+  trainable: false
+  lr_scale: 1.0
+HadronFractions.k0s_logit:
+  value: 0.3
+  trainable: false
+  lr_scale: 1.0
+HadronFractions.lambda_logit:
+  value: 0.3
+  trainable: false
+  lr_scale: 1.0
+ECal.scale_module.scale_raw[0]:
+  value: 1.2
+  trainable: false
+  lr_scale: 1.0
+ECal.scale_module.scale_raw[1]:
+  value: 1.2
+  trainable: false
+  lr_scale: 1.0
+ECal.scale_module.scale_raw[2]:
+  value: 1.2
+  trainable: false
+  lr_scale: 1.0
+ECal.resolution_func.common_c_E:
+  value: 0.008
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.common_c_S:
+  value: 0.11
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.common_c_N:
+  value: 0.4
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.barrel_a:
+  value: 1.0
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.barrel_b:
+  value: 0.64
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.endcap_a:
+  value: 2.16
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.endcap_b:
+  value: 5.6
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.forward_c_E:
+  value: 0.107
+  trainable: false
+  lr_scale: 0.1
+ECal.resolution_func.forward_c_S:
+  value: 2.08
+  trainable: false
+  lr_scale: 0.1
+HCal.scale_module.scale_raw[0]:
+  value: 0.9
+  trainable: false
+  lr_scale: 1.0
+HCal.scale_module.scale_raw[1]:
+  value: 0.9
+  trainable: false
+  lr_scale: 1.0
+HCal.resolution_func.central_c_E:
+  value: 0.05
+  trainable: false
+  lr_scale: 0.1
+HCal.resolution_func.central_c_S:
+  value: 1.5
+  trainable: false
+  lr_scale: 0.1
+HCal.resolution_func.forward_c_E:
+  value: 0.13
+  trainable: false
+  lr_scale: 0.1
+HCal.resolution_func.forward_c_S:
+  value: 2.7
+  trainable: false
+  lr_scale: 0.1
