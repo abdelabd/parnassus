@@ -238,11 +238,6 @@ def per_event_wasserstein_loss(
 # Alternative training loss: per-observable soft-histogram MSE
 # =============================================================================
 #
-# Ported from ``parnassus/torch_delphes/tune_cms_fullsim.py`` at git hash
-# 5cac599 (pre-Wasserstein era). The math is preserved verbatim
-# (:func:`soft_histogram` -> normalize -> MSE, weighted sum across observables,
-# differentiable all-reduce of histograms under DDP); the only adaptations are:
-#
 # 1. The current data pipeline carries per-particle observables as 2-D padded
 #    tensors ``(n_events, max_n_objects)`` with ``pt == 0`` on padding /
 #    efficiency-killed slots. We flatten and apply the ``pt != 0`` mask before
@@ -260,27 +255,14 @@ def per_event_wasserstein_loss(
 DEFAULT_SOFT_HIST_BIN_EDGES: dict[str, torch.Tensor] = {
     "pt": torch.linspace(0.0, 200.0, 41, dtype=torch.float64),
     "eta": torch.linspace(-5.0, 5.0, 41, dtype=torch.float64),
-    # log(pt) bin spanning ~0.37 GeV (e^-1) to ~403 GeV (e^6); linear in log
-    # space gives Adam much better gradient signal in the high-pT tail than
-    # the linear pt histogram does. Same range was used in the old harness.
     "log_pt": torch.linspace(-1.0, 6.0, 41, dtype=torch.float64),
-    # log(E) tracks log(pt) but extends a bit higher because E = pt*cosh(eta)
-    # >= pt for reconstructed particles. Floor matches the value the data
-    # pipeline clamps to (1e-6) -> log(1e-6) ~ -13.8.
     "log_E": torch.linspace(-1.0, 7.0, 41, dtype=torch.float64),
     "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
     "ht": torch.linspace(0.0, 2000.0, 41, dtype=torch.float64),
-    # log(HT) bin in the same units as log_E / log_pt; floor 1e-6 -> -13.8.
     "log_ht": torch.linspace(0.0, 8.0, 41, dtype=torch.float64),
 }
 
-# Default per-observable weights. Particle-level observables (pt, eta, log_pt,
-# log_E) have O(N_particles) samples and are far less noisy than per-event
-# scalars (multiplicity, ht, log_ht), so we upweight them and put a small
-# tie-breaking weight on the per-event group. The old harness's choice is
-# preserved (pt/eta at 1.0, log_pt at 0.5, per-event at 0.1) and extended:
-# log_E is treated as a particle-level observable on par with log_pt; log_ht
-# matches ht's weight.
+# Default per-observable weights
 DEFAULT_SOFT_HIST_WEIGHTS: dict[str, float] = {
     "pt": 1.0,
     "eta": 1.0,
@@ -291,12 +273,6 @@ DEFAULT_SOFT_HIST_WEIGHTS: dict[str, float] = {
     "log_ht": 0.1,
 }
 
-# Per-particle observables in the dict produced by ``load_pflow_targets[_from_tensor]``.
-# They come as 2-D padded ``(n_events, max_n_objects)`` tensors with
-# ``pt == 0`` on padding / efficiency-killed slots, so they need a flatten +
-# ``pt != 0`` mask before being passed to :func:`soft_histogram`. Per-event
-# observables (multiplicity, ht, log_ht) are already 1-D and are passed
-# through unchanged.
 _PARTICLE_OBSERVABLES: frozenset[str] = frozenset(
     {"pt", "eta", "phi", "E", "log_E", "log_pt"}
 )

@@ -2,7 +2,7 @@
 This is the dataloader for delphes model tuning.
 """
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .config import OBSERVABLES
 
@@ -25,8 +25,27 @@ class DelphesDataSet(Dataset):
     
     
 class DelphesDataLoader(DataLoader):
-    """DataLoader for Delphes model tuning."""
-    def __init__(self, dataset: DelphesDataSet, batch_size: int, shuffle: bool = True) -> None:
-        super().__init__(dataset, batch_size=batch_size, shuffle=shuffle)
+    """DataLoader for Delphes model tuning.
+
+    Accepts an optional ``sampler`` so the CLI can plug in a
+    ``torch.utils.data.distributed.DistributedSampler`` under ``srun`` /
+    DDP. When a sampler is provided, ``shuffle`` must be False (PyTorch
+    requires this; the sampler controls the per-epoch order via
+    ``set_epoch``).
+    """
+    def __init__(
+        self,
+        dataset: DelphesDataSet,
+        batch_size: int,
+        shuffle: bool = True,
+        sampler: Sampler | None = None,
+    ) -> None:
+        if sampler is not None:
+            # ``DataLoader`` raises a ValueError if both ``shuffle=True`` and a
+            # custom sampler are passed; the sampler is responsible for the
+            # ordering, so silently turn shuffle off here for caller
+            # convenience.
+            shuffle = False
+        super().__init__(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler)
         
 

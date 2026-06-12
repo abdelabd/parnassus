@@ -17,7 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
@@ -25,12 +27,21 @@ from parnassus.torch_delphes.param_config import to_physical
 
 from .config import OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
-from .distributed import _is_main
+from .distributed import _is_dist, _is_main
 from .loss import LOSS_CHOICES, get_loss_fn
 
 # =============================================================================
 # Fit loop
 # =============================================================================
+
+
+def _all_reduce_mean(value: torch.Tensor) -> torch.Tensor:
+    """Average ``value`` across ranks in-place; no-op when not under DDP.
+    """
+    if _is_dist():
+        dist.all_reduce(value, op=dist.ReduceOp.SUM)
+        value /= dist.get_world_size()
+    return value
 
 
 def fit_card_to_fullsim(
@@ -208,6 +219,12 @@ def fit_card_to_fullsim(
         # card in eval(). The current card has no train/eval-dependent layers,
         # but this keeps the train forward correct if one is ever added.
         card.train()
+
+        # Re-shuffle the per-rank shard each epoch. 
+        train_sampler = getattr(train_dataloader, "sampler", None)
+        if isinstance(train_sampler, DistributedSampler):
+            train_sampler.set_epoch(step)
+
         loss_acc = torch.zeros(
             (), dtype=torch.float64, device=device
         )
@@ -240,6 +257,7 @@ def fit_card_to_fullsim(
             loss_acc += loss.detach()
 
         loss_acc /= len(train_dataloader)
+        loss_acc = _all_reduce_mean(loss_acc)
 
         # Record the per-step MEAN over all train batches (mirrors the val
         # side's averaged val_loss_acc), not the noisy last-batch loss.
@@ -304,6 +322,7 @@ def fit_card_to_fullsim(
                         acc_pred.setdefault(key, []).append(pv.detach().cpu())
                         acc_tgt.setdefault(key, []).append(tv.detach().cpu())
             val_loss_acc /= len(val_dataloader)
+            val_loss_acc = _all_reduce_mean(val_loss_acc)
             print_val_loss = float(val_loss_acc)
             if _is_main(rank):
                 tqdm.write(f"  step {step:3d}/{n_steps}  val_loss = {print_val_loss:.4e}")
