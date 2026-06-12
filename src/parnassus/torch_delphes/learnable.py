@@ -24,13 +24,21 @@ Design notes
   pt cuts at 0.1/1/100/1000) are stored as buffers, not parameters. Per
   the design discussion, geometric quantities like detector dimensions and
   region edges are not optimized.
-- **Efficiency uses a Gumbel-sigmoid straight-through mask.** The forward
-  pass produces a hard 0/1 selection (so downstream physics is unchanged in
-  expectation), while gradients flow through the soft sigmoid in the backward
-  pass. Masked particles have their (PT, PX, PY, PZ, E) multiplied by the
-  binary mask; their rows remain in the tensor so that the calorimeter still
-  sees the original calorimeter deposit (efficiency only affects tracking,
-  not calorimetry).
+- **Efficiency uses a hard (detached) Gumbel-sigmoid mask.** The forward pass
+  produces a hard 0/1 selection (so downstream physics is unchanged in
+  expectation). The mask is **detached**, so NO gradient flows to ``eff_logits``
+  through the momentum multiply: that straight-through path was a biased
+  estimator -- it behaved like a momentum *scale* on the surviving tracks rather
+  than the keep-probability, which inverted the gradient for the low-pt regions.
+  Tracking efficiencies are instead fit through a differentiable, reco-space
+  charged-hadron *count* term: each track is tagged with its pre-reco region
+  (:meth:`region_index_1based`), and the loss reweights the trainee's reco-bin
+  counts by ``eff`` to match the reconstructed data (see
+  ``CMSEnergyFlowDefault._charged_hadron_expected_reco_counts`` and
+  ``tune_cms_fullsim.loss.per_event_wasserstein_loss``). Masked particles have
+  their (PT, PX, PY, PZ, E) multiplied by the binary mask; their rows remain in
+  the tensor so that the calorimeter still sees the original calorimeter deposit
+  (efficiency only affects tracking, not calorimetry).
 
 The classes here are designed to plug into the existing ``MomentumSmearing``
 and ``SimpleCalorimeter`` modules via the ``resolution_formula`` callable
@@ -342,7 +350,13 @@ class _LearnableEfficiencyBase(nn.Module):
         pt = particles[:, ColumnMap.PT]
         eta_outer = particles[:, ColumnMap.ETA_OUTER]
         eff = self.compute_efficiency(pt, eta_outer)
-        mask = self._gumbel_sigmoid_st(eff)  # shape (N,)
+        # Detach the mask: the forward stays a hard ~Bernoulli(eff) sample, but no
+        # gradient reaches eff_logits through this momentum multiply. The old
+        # straight-through gradient was biased (a survivor-momentum scale, not the
+        # keep-probability). eff_logits are fit via the differentiable reco-space
+        # count term instead (see region_index_1based /
+        # CMSEnergyFlowDefault._charged_hadron_expected_reco_counts).
+        mask = self._gumbel_sigmoid_st(eff).detach()  # shape (N,)
 
         # Build a per-column multiplier: mask[i] for momentum columns, 1
         # everywhere else. Using torch.where keeps the operation fully
@@ -379,21 +393,54 @@ class CMSChargedHadronLearnableEfficiency(_LearnableEfficiencyBase):
     def get_efficiencies(self) -> torch.Tensor:
         return torch.sigmoid(self.eff_logits)
 
-    def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        abs_eta = eta_outer.abs()
-        effs = self.get_efficiencies()
+    @staticmethod
+    def _region_masks(pt: torch.Tensor, eta_outer: torch.Tensor) -> list[torch.Tensor]:
+        """Boolean membership masks for the 4 (pt, |eta|) regions, in eff_logits order.
 
+        Order matches ``eff_logits``: ``[barrel-lowpt, barrel-highpt,
+        endcap-lowpt, endcap-highpt]``. Shared by :meth:`compute_efficiency` and
+        :meth:`region_index_1based` so the binning stays in one place.
+        """
+        abs_eta = eta_outer.abs()
         in_pt_low = (pt > 0.1) & (pt <= 1.0)
         in_pt_high = pt > 1.0
         in_barrel = abs_eta <= 1.5
         in_endcap = (abs_eta > 1.5) & (abs_eta <= 2.5)
+        return [
+            in_barrel & in_pt_low,
+            in_barrel & in_pt_high,
+            in_endcap & in_pt_low,
+            in_endcap & in_pt_high,
+        ]
 
+    def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
+        effs = self.get_efficiencies()
         eff = torch.zeros_like(pt)
-        eff = torch.where(in_barrel & in_pt_low, effs[0].to(pt.dtype), eff)
-        eff = torch.where(in_barrel & in_pt_high, effs[1].to(pt.dtype), eff)
-        eff = torch.where(in_endcap & in_pt_low, effs[2].to(pt.dtype), eff)
-        eff = torch.where(in_endcap & in_pt_high, effs[3].to(pt.dtype), eff)
+        for r, m in enumerate(self._region_masks(pt, eta_outer)):
+            eff = torch.where(m, effs[r].to(pt.dtype), eff)
         return eff
+
+    def region_index_1based(
+        self, pt: torch.Tensor, eta_outer: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-particle pre-reco region label, 1-based: region ``r`` -> ``r + 1``;
+        ``0`` for charged hadrons outside all four ``(pt, |eta_outer|)`` regions.
+        ``1`` for in the barrel low-pt region, 
+        ``2`` for barrel high-pt, 
+        ``3`` for endcap low-pt,
+        ``4`` for endcap high-pt.
+
+        Written into the ``EFF_REGION`` feature column (gradient-free) so the tuning
+        loss can build the reco-bin <- pre-reco-region migration matrix for the
+        differentiable, reco-space charged-hadron count term (see
+        ``CMSEnergyFlowDefault._charged_hadron_expected_reco_counts``).
+
+        return idx: shape (N, ), integer in [0, 4] with the mapping above.
+        """
+        idx = torch.zeros_like(pt)
+        for r, m in enumerate(self._region_masks(pt, eta_outer)):
+            idx = torch.where(m, torch.full_like(pt, float(r + 1)), idx)
+        return idx
 
 
 class CMSElectronLearnableEfficiency(_LearnableEfficiencyBase):

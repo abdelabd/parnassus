@@ -47,6 +47,13 @@ class ColumnMap(IntEnum):
     EVENT_NUMBER = 17
     PASS_PROP = 18
     TRACK_RESOLUTION = 19
+    # Pre-reconstruction tracking-efficiency region label (1-based: region r -> r+1;
+    # 0 = not a charged hadron in a tracking-efficiency region). Written by the
+    # learnable charged-hadron efficiency BEFORE the mask and carried (unchanged --
+    # only PT/PX/PY/PZ/E are rescaled downstream) to the EFlowObject, so the tuning
+    # loss can build the reco-bin <- pre-reco-region migration for the differentiable
+    # charged-hadron count term. Default 0 everywhere else.
+    EFF_REGION = 20
 
 
 # Number of features per particle

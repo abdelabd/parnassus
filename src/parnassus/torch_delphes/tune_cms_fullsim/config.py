@@ -28,7 +28,13 @@ PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_
 # Observables
 # =============================================================================
 
-OBSERVABLES: list[str] = ["pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid"]
+# NOTE: "chad_region_counts" is a per-event (n_events, 4) target carried for the
+# differentiable expected-count loss term; it is NOT a plottable 1-D/2-D observable
+# and has no prediction-side counterpart in load_pflow_targets_from_tensor, so the
+# intermediate-plot loop skips it (it is absent from the pred dict).
+OBSERVABLES: list[str] = [
+    "pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid", "chad_region_counts",
+]
 
 
 # =============================================================================

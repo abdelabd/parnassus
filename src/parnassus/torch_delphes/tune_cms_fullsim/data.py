@@ -207,6 +207,13 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
     all_pids: list[np.ndarray] = []
     per_event_mult = np.zeros(n_events, dtype=np.float64)
     per_event_ht = np.zeros(n_events, dtype=np.float64)
+    # Per-event reconstructed charged-hadron (pid 211) count in each of the 4 RECO
+    # (pt, |eta|) bins [barrel-lowpt, barrel-highpt, endcap-lowpt, endcap-highpt].
+    # This is the (realistic, data-only) TARGET for the differentiable charged-hadron
+    # count term: the trainee builds a differentiable expected count in these SAME
+    # reco bins from its own reco-bin <- pre-reco-region migration (see
+    # CMSEnergyFlowDefault._charged_hadron_expected_reco_counts) and matches it here.
+    per_event_chad_region_counts = np.zeros((n_events, 4), dtype=np.float64)
     for i in range(n_events):
         pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
@@ -230,6 +237,18 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
         all_pids.append(pids)
         per_event_mult[i] = float(pt.shape[0])
         per_event_ht[i] = float(pt.sum())
+
+        # Per-region charged-hadron counts (regions match the learnable efficiency).
+        is_chad = abs_pid == 211
+        abs_eta = np.abs(eta)
+        pt_low = (pt > 0.1) & (pt <= 1.0)
+        pt_high = pt > 1.0
+        barrel = abs_eta <= 1.5
+        endcap = (abs_eta > 1.5) & (abs_eta <= 2.5)
+        per_event_chad_region_counts[i, 0] = float(np.sum(is_chad & barrel & pt_low))
+        per_event_chad_region_counts[i, 1] = float(np.sum(is_chad & barrel & pt_high))
+        per_event_chad_region_counts[i, 2] = float(np.sum(is_chad & endcap & pt_low))
+        per_event_chad_region_counts[i, 3] = float(np.sum(is_chad & endcap & pt_high))
 
     # shape of all_pt, all_eta, all_e is (num_events, num_particles_in_event); num_particles_in_event can vary across events
     # pad to the max num_particles across events and stack into a single tensor of shape (num_events, max_num_particles)
@@ -277,6 +296,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
         "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
+        "chad_region_counts": torch.from_numpy(per_event_chad_region_counts),
     }
 
 

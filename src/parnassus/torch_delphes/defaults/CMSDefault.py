@@ -27,6 +27,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from parnassus.data.particle_io import ColumnMap
 from parnassus.torch_delphes.Efficiency import Efficiency
 from parnassus.torch_delphes.EFlowMerger import EFlowMerger
 from parnassus.torch_delphes.learnable import (
@@ -291,6 +292,22 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             electrons_eff = self.ElectronTrackingEfficiency(electrons_smeared_pre)
             muons_eff = self.MuonTrackingEfficiency(muons_smeared_pre)
 
+            # Tag each charged-hadron track with its pre-reco tracking-efficiency
+            # region (EFF_REGION column, 1-based; 0 = outside all 4 regions) BEFORE it
+            # enters the reco chain. EFlowTrack creation clones the tensor and only
+            # rescales the momentum columns, so this label is carried unchanged to the
+            # EFlowObject. The loss uses it to build the reco-bin <- pre-reco-region
+            # migration for the differentiable charged-hadron count term -- the only
+            # gradient source for eff_logits (the Gumbel mask above is detached).
+            chad_region_idx = self.ChargedHadronTrackingEfficiency.region_index_1based(
+                charged_hadrons_smeared_pre[:, ColumnMap.PT],
+                charged_hadrons_smeared_pre[:, ColumnMap.ETA_OUTER],
+            )
+            charged_hadrons_eff = torch.cat(
+                [charged_hadrons_eff[:, : ColumnMap.EFF_REGION], chad_region_idx.unsqueeze(1)],
+                dim=1,
+            )
+
             charged_hadrons_smeared = charged_hadrons_eff
             electrons_smeared = electrons_eff
             muons_smeared = muons_eff
@@ -324,6 +341,16 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         # EFlowMerger
         eflow_objects = self.EFlowMerger([hcal_tracks, eflow_photons, eflow_neutral_hadrons])
 
+        # Differentiable expected reconstructed charged-hadron count per RECO bin,
+        # built from the reco-bin <- pre-reco-region migration of the trainee's own
+        # hard reco (see _charged_hadron_expected_reco_counts). This is the gradient
+        # source for eff_logits. None in the legacy (non-learnable) path.
+        chad_expected_counts = (
+            self._charged_hadron_expected_reco_counts(eflow_objects)
+            if self.learnable
+            else None
+        )
+
         if self.debug:
             return {
                 "ParticleBeforeProp": particles_before_prop,
@@ -347,6 +374,7 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
                 "EFlowNeutralHadron": eflow_neutral_hadrons,
                 "Tower": merged_towers,
                 "EFlowObject": eflow_objects,
+                "ChargedHadronExpectedCounts": chad_expected_counts,
             }
         return {
             "Track": merged_tracks,
@@ -355,7 +383,59 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             "EFlowPhoton": eflow_photons,
             "EFlowNeutralHadron": eflow_neutral_hadrons,
             "EFlowObject": eflow_objects,
+            "ChargedHadronExpectedCounts": chad_expected_counts,
         }
+
+    def _charged_hadron_expected_reco_counts(self, eflow_objects: torch.Tensor) -> torch.Tensor:
+        """Differentiable expected reconstructed charged-hadron count per RECO bin.
+
+        Each reconstructed charged hadron carries its pre-reco efficiency region in the 
+        ``EFF_REGION`` column. We histogram the trainee's survivors into the migration 
+        ``M[b, r]`` = number landing in reco-bin ``b`` whose pre-reco region was ``r`` 
+        (a gradient-free count of the current hard reco), then form
+
+            expected[b] = sum_r (eff_r / eff_r.detach()) * M[b, r]
+
+        which equals the hard reco count ``sum_r M[b, r]`` at the current efficiencies
+        but is differentiable wrt ``eff_logits``. The tuning loss matches ``expected``
+        to the reconstructed-data per-reco-bin charged-hadron counts; its unique
+        minimum is the true efficiency (the reweighting is a fixed point at truth).
+
+        The 4 reco bins use the SAME ``(pt, |eta|)`` cuts as the target in
+        ``tune_cms_fullsim.data.load_pflow_targets`` (pt 0.1/1.0, |eta| 1.5/2.5).
+
+        Returns
+        -------
+        torch.Tensor
+            ``(4,)`` differentiable expected reco-bin counts (zeros if empty).
+        """
+        effs = self.ChargedHadronTrackingEfficiency.get_efficiencies()  # (4,)
+        if eflow_objects.shape[0] == 0:
+            return torch.zeros(4, dtype=effs.dtype, device=effs.device)
+        eff_det = effs.detach()
+        pt = eflow_objects[:, ColumnMap.PT]
+        abs_eta = eflow_objects[:, ColumnMap.ETA].abs()
+        region = eflow_objects[:, ColumnMap.EFF_REGION]  # 1-based; 0 = not a chad-region track
+        reco_bins = [
+            (abs_eta <= 1.5) & (pt > 0.1) & (pt <= 1.0),
+            (abs_eta <= 1.5) & (pt > 1.0),
+            (abs_eta > 1.5) & (abs_eta <= 2.5) & (pt > 0.1) & (pt <= 1.0),
+            (abs_eta > 1.5) & (abs_eta <= 2.5) & (pt > 1.0),
+        ]
+        valid = pt > 0  # drop efficiency-killed ghosts (zeroed momentum)
+        expected = []
+
+        # For each reco bin, find which region events are coming from, 
+        # then add their counts as eff/eff_detach where eff is the efficiency
+        # in their original pre-reco region, and the eff/eff_detach trick
+        # is to make sure during backprop the gradient flow to effs
+        for b_mask in reco_bins:
+            term = torch.zeros((), dtype=effs.dtype, device=effs.device)
+            for r in range(4):
+                m_br = (valid & b_mask & (region == float(r + 1))).sum().to(effs.dtype)
+                term = term + (effs[r] / eff_det[r]) * m_br
+            expected.append(term)
+        return torch.stack(expected)
 
     def _setup_ECal(self):
         energy_fractions = {

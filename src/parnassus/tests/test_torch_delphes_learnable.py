@@ -218,9 +218,15 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
         "EFlowPhoton",
         "EFlowNeutralHadron",
         "EFlowObject",
+        "ChargedHadronExpectedCounts",
     }
     assert set(out.keys()) == expected_keys
     for k, v in out.items():
+        if k == "ChargedHadronExpectedCounts":
+            # Per-(pt,eta) region differentiable expected counts, shape (4,) -- not
+            # an (N, N_FEATURES) object cloud like the other branches.
+            assert v.ndim == 1 and v.shape[0] == 4
+            continue
         assert v.ndim == 2
         assert v.shape[1] == N_FEATURES, f"{k} has wrong feature count"
 
@@ -236,8 +242,14 @@ def test_gradient_flows_to_all_reachable_parameters():
 
     We don't assert on the K-short / Lambda / muon-high-pt-rate parameters
     because the random batch won't usually contain pt > 1000 GeV muons.
-    We do assert that *all* other parameter tensors have finite,
-    non-zero gradients.
+
+    The tracking-efficiency logits (and the muon high-pt rate, which only acts
+    through the efficiency) are INTENTIONALLY detached from the momentum path:
+    the Gumbel mask is applied with ``.detach()`` so the biased straight-through
+    gradient never reaches them. They are fit through the differentiable reco-space
+    count term instead (CMSEnergyFlowDefault._charged_hadron_expected_reco_counts /
+    tune_cms_fullsim.loss), which this momentum-only loss does not include -- so
+    they legitimately get no gradient here.
     """
     torch.manual_seed(123)
     card = CMSEnergyFlowDefault(debug=False, learnable=True)
@@ -251,10 +263,21 @@ def test_gradient_flows_to_all_reachable_parameters():
     )
     loss.backward()
 
-    # Every parameter must have a finite gradient.
+    # Params deliberately cut off from the momentum-path gradient (detached mask).
+    detached_fragments = (
+        "TrackingEfficiency.eff_logits",   # charged-hadron / electron / muon
+        "MuonTrackingEfficiency.rate_raw",
+    )
+
+    # Every other parameter must have a finite gradient.
     missing: list[str] = []
     nan_or_inf: list[str] = []
     for name, p in card.named_parameters():
+        if any(frag in name for frag in detached_fragments):
+            assert p.grad is None or float(p.grad.abs().sum()) == 0.0, (
+                f"{name} is expected to be detached from the momentum loss"
+            )
+            continue
         if p.grad is None:
             missing.append(name)
         elif not torch.isfinite(p.grad).all():
@@ -264,11 +287,9 @@ def test_gradient_flows_to_all_reachable_parameters():
 
     # The learnable params that our batch actually exercises must have
     # non-zero gradients. We list them by name-fragment so the test is
-    # robust to future renames of specific components.
+    # robust to future renames of specific components. (The efficiency logits
+    # are excluded -- they are fit via the expected-count term, not this loss.)
     must_have_grad_fragments = [
-        "ChargedHadronTrackingEfficiency.eff_logits",
-        "ElectronTrackingEfficiency.eff_logits",
-        "MuonTrackingEfficiency.eff_logits",
         "ChargedHadronMomentumSmearing.resolution_module.a_raw",
         "ChargedHadronMomentumSmearing.resolution_module.b_raw",
         "ChargedHadronMomentumSmearing.resolution_module.scale_raw",

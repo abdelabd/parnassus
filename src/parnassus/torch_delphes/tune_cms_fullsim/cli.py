@@ -63,7 +63,7 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from .config import _DEFAULT_LR
 from .data import (
     load_cms_flow_root, load_truth_events, load_pflow_targets, split_truth_objects, split_pflow_targets,
-)    
+)
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
 
@@ -209,6 +209,8 @@ def main() -> None:
         root_file, n_events=args.n_events
     )
     truth_tensor = load_truth_events(arrays)
+    # ``target`` carries the per-reco-bin charged-hadron counts (chad_region_counts)
+    # the differentiable count term matches the trainee's reco-bin migration against.
     target = load_pflow_targets(arrays)
 
     train_truth_tensor, val_truth_tensor = split_truth_objects(truth_tensor, train_fraction=0.8, seed=args.seed)

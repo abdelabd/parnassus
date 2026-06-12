@@ -22,6 +22,13 @@ from __future__ import annotations
 import ot
 import torch
 
+# Weight of the differentiable charged-hadron expected-count term relative to the
+# per-pid sliced-Wasserstein terms. This term is the ONLY gradient source for
+# ChargedHadronTrackingEfficiency.eff_logits (the hard Gumbel mask is detached),
+# so its absolute scale mainly sets the reported-loss balance; Adam's per-parameter
+# normalization makes the eff step size insensitive to it. Tune if needed.
+COUNT_WEIGHT = 0.5
+
 # =============================================================================
 # Differentiable histogram primitives (diagnostic only; copied from tuning.py)
 # =============================================================================
@@ -228,13 +235,40 @@ def per_event_wasserstein_loss(
         )
         event_wasserstein_distance[key] = sliced_sw2(pv, tv, event_scale)
 
+    # Differentiable charged-hadron expected-count term: the gradient source for
+    # eff_logits. pred["chad_expected_counts"] is the trainee's differentiable
+    # expected reconstructed count per RECO bin (from its reco-bin <- pre-reco-region
+    # migration; see CMSEnergyFlowDefault._charged_hadron_expected_reco_counts);
+    # target["chad_region_counts"] is the per-event reconstructed-DATA charged-hadron
+    # count in the same reco bins. We match the batch totals with a relative MSE; its
+    # fixed point is the true per-region efficiency (no truth information is used --
+    # only the trainee's own reco and the reco data).
+    count_terms: list[torch.Tensor] = []
+    pred_counts = pred.get("chad_expected_counts")
+    if pred_counts is not None and "chad_region_counts" in target:
+        pred_counts = pred_counts.reshape(-1)  # (n_regions,), differentiable
+        tgt_counts = (
+            target["chad_region_counts"]
+            .reshape(-1, pred_counts.shape[0])
+            .sum(dim=0)
+            .detach()
+            .to(device=pred_counts.device, dtype=pred_counts.dtype)
+        )
+        # +1 in the denominator is a soft floor (counts are batch totals, so this is
+        # negligible) that keeps an empty region's term finite and well-conditioned.
+
+        rel_resid = (pred_counts - tgt_counts) / (tgt_counts + 1.0)
+        count_terms.append(COUNT_WEIGHT * (rel_resid**2).mean())
+
     # Sum every term -> the scalar loss the training loop back-props. The per-event
     # log_ht term is down-weighted by EVENT_WEIGHT relative to the per-pid object
     # terms (scalar * tensor keeps the gradient).
     EVENT_WEIGHT = 0.1
-    terms = list(object_wasserstein_distance.values()) + [
-        EVENT_WEIGHT * d for d in event_wasserstein_distance.values()
-    ]
+    terms = (
+        list(object_wasserstein_distance.values())
+        + [EVENT_WEIGHT * d for d in event_wasserstein_distance.values()]
+        + count_terms
+    )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
         return pred_particles.sum() * 0.0
     return torch.stack(terms).sum()

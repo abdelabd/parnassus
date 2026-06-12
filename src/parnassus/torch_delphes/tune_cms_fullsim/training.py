@@ -201,6 +201,9 @@ def fit_card_to_fullsim(
             eflow_objects_restored = restore_event_format(eflow_objects, mask)
             # Then extract the observables from predicted objects
             pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
+            # Differentiable per-region expected charged-hadron count -- the honest
+            # gradient signal for ChargedHadronTrackingEfficiency.eff_logits.
+            pred_observables["chad_expected_counts"] = out["ChargedHadronExpectedCounts"]
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
@@ -253,6 +256,7 @@ def fit_card_to_fullsim(
                 eflow_objects = out["EFlowObject"]
                 eflow_objects_restored = restore_event_format(eflow_objects, mask)
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
+                pred_observables["chad_expected_counts"] = out["ChargedHadronExpectedCounts"]
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
                 val_loss = per_event_wasserstein_loss(
