@@ -71,12 +71,6 @@ from PIL import Image
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
-# The truth reference lines on the parameter-drift plots come from the same
-# param config used to generate the sample (its physical ``value`` fields).
-_DEFAULT_PARAM_CONFIG = (
-    Path(pc.__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
-)
-
 from .data import (
     load_cms_flow_root,
     load_pflow_targets,
@@ -180,15 +174,16 @@ def plot_loss(history: dict, output_path: Path) -> None:
 
 def plot_param_drift(
     history: dict,
-    param_groups: dict[str, list[tuple[str, float]]],
+    param_groups: dict[str, list[tuple[str, float | None]]],
     output_path: Path,
     title: str,
 ) -> None:
     """Plot per-parameter trajectories with horizontal ground-truth lines.
 
     ``param_groups`` maps a group label to a list of
-    ``(history_key, target_value)`` pairs. One matplotlib axis is used
-    per group (stacked vertically).
+    ``(history_key, target_value_or_none)`` pairs. If ``target_value`` is
+    ``None``, no dashed reference line is drawn for that parameter. One
+    matplotlib axis is used per group (stacked vertically).
     """
     if not history.get("parameters"):
         raise ValueError("history dict has no 'parameters' snapshots")
@@ -203,7 +198,14 @@ def plot_param_drift(
                 continue
             trajectory = [snap[key] for snap in snapshots]
             (line,) = ax.plot(steps, trajectory, label=key)
-            ax.axhline(target, color=line.get_color(), linestyle="--", alpha=0.4)
+            if target is not None:
+                ax.axhline(
+                    target,
+                    color=line.get_color(),
+                    linestyle="--",
+                    alpha=0.4,
+                    label=f"{key} target",
+                )
         ax.set_ylabel(group_label)
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=8)
@@ -570,7 +572,13 @@ def _plot_parameter_panel(
             line_label = key.split(".")[-1]
             (line,) = ax.plot(steps, traj, label=line_label)
             if key in truth:
-                ax.axhline(truth[key], color=line.get_color(), linestyle="--", alpha=0.4)
+                ax.axhline(
+                    truth[key],
+                    color=line.get_color(),
+                    linestyle="--",
+                    alpha=0.4,
+                    label=f"{line_label} target",
+                )
             n_axis_lines += 1
             n_drawn += 1
 
@@ -964,14 +972,12 @@ def main() -> None:
     parser.add_argument(
         "--truth-config",
         type=Path,
-        default=_DEFAULT_PARAM_CONFIG,
+        default=None,
         help=(
-            "The GENERATION/truth config that made the ROOT file -- its physical "
-            "'value' fields are drawn as the truth reference lines on the "
-            "parameter-drift plots. Do NOT pass a training config: a trained "
-            "parameter's 'value' there is its off-truth STARTING point, not its "
-            "truth, so the reference line would be wrong. Defaults to "
-            "cms_target_default.yaml."
+            "Optional path to the GENERATION/truth config that made the ROOT "
+            "file. When provided, its physical 'value' fields are drawn as the "
+            "dashed target-reference lines on parameter plots. Leave unset for "
+            "real fullsim data (unknown truth): no target lines are plotted."
         ),
     )
     parser.add_argument(
@@ -995,20 +1001,19 @@ def main() -> None:
 
     history = _load_history(args.history)
 
-    # Ground-truth physical value of every scalar, keyed by the same name[i]
-    # form the history snapshots use. These come from the GENERATION config; a
-    # training config would give a trained param's start value, not its truth.
-    flat_truth_cfg = pc.load_param_config(args.truth_config)
-    n_trainable = sum(1 for spec in flat_truth_cfg.values() if spec["trainable"])
-    if n_trainable:
+    # Ground-truth physical values keyed in the same ``name[i]`` form as the
+    # history snapshots. Optional: for real fullsim data the truth is unknown,
+    # so we omit dashed target lines entirely.
+    truth: dict[str, float] = {}
+    if args.truth_config is not None:
+        flat_truth_cfg = pc.load_param_config(args.truth_config)
+        n_trainable = sum(1 for spec in flat_truth_cfg.values() if spec["trainable"])
+        truth = {k: spec["value"] for k, spec in flat_truth_cfg.items()}
+    else:
         print(
-            f"WARNING: {args.truth_config} marks {n_trainable} parameter(s) trainable -- "
-            "it looks like a TRAINING config, not the generation/truth config. Truth "
-            "reference lines for those params will show their START value, not the truth. "
-            "Pass the generation config (e.g. param_configs/cms_target_default.yaml) "
-            "to --truth-config instead."
+            "No --truth-config provided: skipping dashed target-reference lines "
+            "on parameter plots."
         )
-    truth = {k: spec["value"] for k, spec in flat_truth_cfg.items()}
 
     print(f"Writing figures to {args.output_dir}")
 
