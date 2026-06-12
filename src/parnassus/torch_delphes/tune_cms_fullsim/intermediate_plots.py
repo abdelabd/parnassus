@@ -34,11 +34,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 import torch
 
-# Reuse the exact density-histogram helper (and, as an import side effect, the
-# shared rcParams styling) from the offline plotting script so intermediate and
-# final figures look identical.
 from .loss import histogram_mse_loss
-from .plot_fit_results import _density_histogram
 
 # Order of pages in the per-epoch PDF: the particle-level observables first,
 # then the per-event scalars. Keys missing from a run's obs dict are skipped.
@@ -72,6 +68,20 @@ _LOSS_OBSERVABLES: frozenset[str] = frozenset({"log_E", "log_pt", "eta", "log_ht
 # is a display-only diagnostic (the training loss is the Wasserstein distance),
 # so it is fixed here rather than exposed as a CLI flag.
 _DIAG_BETA: float = 0.15
+
+
+def _histogram_counts(values: torch.Tensor, bin_edges: np.ndarray) -> np.ndarray:
+    """Return plain histogram counts (not normalized) on ``bin_edges``.
+
+    This helper keeps :mod:`intermediate_plots` self-contained and avoids
+    importing private helpers from :mod:`plot_fit_results`.
+    """
+    x = values.detach().reshape(-1)
+    x = x[torch.isfinite(x)]
+    if x.numel() == 0:
+        return np.zeros(len(bin_edges) - 1, dtype=np.float64)
+    counts, _ = np.histogram(x.cpu().numpy(), bins=bin_edges)
+    return counts.astype(np.float64)
 
 
 def _auto_bin_edges(
@@ -166,7 +176,7 @@ def save_intermediate_observable_plots(
             fig, ax = plt.subplots(figsize=(5.5, 4.0))
             ax.step(
                 centers,
-                _density_histogram(tgt_vals, np_edges),
+                _histogram_counts(tgt_vals, np_edges),
                 where="mid",
                 color="black",
                 label="target (full sim)",
@@ -174,7 +184,7 @@ def save_intermediate_observable_plots(
             if init_vals is not None and init_vals.numel() > 0:
                 ax.step(
                     centers,
-                    _density_histogram(init_vals, np_edges),
+                    _histogram_counts(init_vals, np_edges),
                     where="mid",
                     color="tab:red",
                     linestyle="--",
@@ -183,14 +193,14 @@ def save_intermediate_observable_plots(
                 )
             ax.step(
                 centers,
-                _density_histogram(pred_vals, np_edges),
+                _histogram_counts(pred_vals, np_edges),
                 where="mid",
                 color="tab:blue",
                 label=f"trainee, epoch {step}",
             )
 
             ax.set_xlabel(_XLABELS.get(key, key))
-            ax.set_ylabel("normalised density")
+            ax.set_ylabel("Counts")
             if key in _LOG_Y:
                 ax.set_yscale("log")
 
