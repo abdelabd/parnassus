@@ -354,23 +354,8 @@ def _obs_values(obs: dict, key: str) -> torch.Tensor:
     return v.reshape(-1)
 
 
-def _density_histogram(values: torch.Tensor, edges: np.ndarray) -> np.ndarray:
-    """Normalised histogram counts (density, summing to 1).
-
-    Returns
-    -------
-    numpy.ndarray
-        Non-negative array of length ``len(edges) - 1`` summing to 1
-        (or to 0 when ``values`` is empty).
-    """
-    counts, _ = np.histogram(values.detach().cpu().numpy(), bins=edges)
-    total = counts.sum()
-    if total == 0:
-        return counts.astype(np.float64)
-    return counts.astype(np.float64) / total
-
-
 def plot_observable(
+    var: str,
     target_vals: torch.Tensor,
     init_vals: torch.Tensor,
     final_vals: torch.Tensor,
@@ -379,25 +364,28 @@ def plot_observable(
     output_path: Path,
     log_y: bool = False,
 ) -> None:
-    """Overlay target / trainee-init / trainee-final on one axis."""
-    h_tgt = _density_histogram(target_vals, edges)
-    h_init = _density_histogram(init_vals, edges)
-    h_final = _density_histogram(final_vals, edges)
-    centers = 0.5 * (edges[1:] + edges[:-1])
+    """Overlay target / trainee-init / trainee-final with a ratio panel.
 
-    fig, ax = plt.subplots(figsize=(5.5, 4.0))
-    ax.step(centers, h_tgt, where="mid", color="black", label="target")
-    ax.step(centers, h_init, where="mid", color="tab:red", label="trainee, initial")
-    ax.step(centers, h_final, where="mid", color="tab:blue", label="trainee, fitted")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("normalised density")
-    if log_y:
-        ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
+    This now uses the same shared helper as the ``intermediate/`` plots, so
+    final observable PDFs (``observable_*.pdf``) also include the lower ratio
+    axis with ``init/target`` and ``fitted/target``.
+    """
+    plot_comparison_with_ratio(
+        distributions=[
+            (target_vals.detach().cpu().numpy(), "target", _TARGET_COLOR),
+            (init_vals.detach().cpu().numpy(), "trainee, initial", _INIT_COLOR),
+            (final_vals.detach().cpu().numpy(), "trainee, fitted", _FINAL_COLOR),
+        ],
+        var=var,
+        output_path=output_path,
+        bins=edges,
+        xlabel=xlabel,
+        ylabel="Counts",
+        ratio_ylabel="ratio / target",
+        figsize=(5.5, 4.8),
+        legend_loc="best",
+        log_y=log_y,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +738,7 @@ def main() -> None:
     pred_final = _trainee_observables(trainee, truth_tensor)
 
     plot_observable(
+        "PT",
         _obs_values(target, "pt"),
         _obs_values(pred_init, "pt"),
         _obs_values(pred_final, "pt"),
@@ -761,6 +750,7 @@ def main() -> None:
     print("  wrote observable_pt.pdf")
 
     plot_observable(
+        "Eta",
         _obs_values(target, "eta"),
         _obs_values(pred_init, "eta"),
         _obs_values(pred_final, "eta"),
@@ -771,6 +761,7 @@ def main() -> None:
     print("  wrote observable_eta.pdf")
 
     plot_observable(
+        "ht",
         _obs_values(target, "ht"),
         _obs_values(pred_init, "ht"),
         _obs_values(pred_final, "ht"),
@@ -783,6 +774,7 @@ def main() -> None:
     # log(HT) -- the per-event scalar actually in the loss. Keep these edges in
     # sync with DEFAULT_BIN_EDGES["log_ht"] in config.py.
     plot_observable(
+        "log_ht",
         _obs_values(target, "log_ht"),
         _obs_values(pred_init, "log_ht"),
         _obs_values(pred_final, "log_ht"),
@@ -793,10 +785,11 @@ def main() -> None:
     print("  wrote observable_log_ht.pdf")
 
     plot_observable(
+        "multiplicity",
         _obs_values(target, "multiplicity"),
         _obs_values(pred_init, "multiplicity"),
         _obs_values(pred_final, "multiplicity"),
-        edges=np.linspace(0.0, 600.0, 61),
+        edges=np.linspace(0.0, 300.0, 61),
         xlabel=r"PF objects per event",
         output_path=args.output_dir / "observable_multiplicity.pdf",
     )

@@ -170,11 +170,15 @@ def plot_comparison_with_ratio(
     output_path: Path,
     *,
     n_bins: int = 50,
+    bins: np.ndarray | Sequence[float] | None = None,
     title: str | None = None,
+    xlabel: str | None = None,
+    ylabel: str = "Counts",
     ratio_ylabel: str | None = None,
     figsize: tuple[float, float] = (10, 8),
     dpi: int = 150,
     legend_loc: str | tuple[float, float] = "best",
+    log_y: bool | None = None,
 ) -> None:
     """Plot N distributions with a ratio panel underneath.
 
@@ -201,19 +205,30 @@ def plot_comparison_with_ratio(
         Variable name; used to look up the axis label, the log-y rule and
         the discrete-bar handling.
     output_path : Path
-        Where to write the PNG.
+        Where to write the figure (any format supported by matplotlib,
+        e.g. ``.png`` or ``.pdf``).
     n_bins : int
         Number of histogram bins for continuous variables (ignored for
         discrete variables, which use one bin per unique integer value).
+    bins : array-like, optional
+        Explicit bin edges for continuous variables. If provided, overrides
+        ``n_bins``/auto-binning. Ignored for discrete variables.
     title : str, optional
         Axes title for the upper panel (in addition to the per-variable
         LaTeX symbol). Defaults to just the symbol via :func:`title_label`.
+    xlabel : str, optional
+        X-axis label for the ratio panel. Defaults to :func:`axis_label(var)`.
+    ylabel : str
+        Y-axis label for the upper panel. Defaults to ``"Counts"``.
     ratio_ylabel : str, optional
         Y-label for the ratio panel. Defaults to ``"ratio / <ref label>"``.
     figsize, dpi : float / int
         Forwarded to :func:`matplotlib.pyplot.figure` / ``Figure.savefig``.
     legend_loc : str or (float, float)
         Forwarded to ``Axes.legend(loc=...)``.
+    log_y : bool | None
+        If ``True``, force log-y on the histogram panel. If ``False``, force
+        linear-y. If ``None`` (default), defer to :func:`apply_axis_scale(var)`.
     """
     if len(distributions) < 2:
         raise ValueError(
@@ -246,23 +261,31 @@ def plot_comparison_with_ratio(
     if is_discrete(var):
         _draw_discrete(ax_hist, ax_ratio, distributions)
     else:
-        bins = _auto_bins([d[0] for d in distributions], n_bins=n_bins)
-        _draw_continuous(ax_hist, ax_ratio, distributions, bins=bins, var=var)
+        if bins is None:
+            bins_to_use: np.ndarray | int = _auto_bins(
+                [d[0] for d in distributions], n_bins=n_bins
+            )
+        else:
+            bins_to_use = np.asarray(bins)
+        _draw_continuous(ax_hist, ax_ratio, distributions, bins=bins_to_use, var=var)
 
     # ---- Upper panel cosmetics
-    ax_hist.set_ylabel("Counts", fontsize=12)
+    ax_hist.set_ylabel(ylabel, fontsize=12)
     ax_hist.set_title(title if title is not None else title_label(var),
                       fontsize=14, fontweight="bold")
     ax_hist.legend(loc=legend_loc, fontsize=10)
     ax_hist.grid(True, alpha=0.3)
     ax_hist.tick_params(labelbottom=False)
     if not is_discrete(var):
-        apply_axis_scale(ax_hist, var)
+        if log_y is None:
+            apply_axis_scale(ax_hist, var)
+        elif log_y:
+            ax_hist.set_yscale("log")
 
     # ---- Lower (ratio) panel cosmetics
     if ratio_ylabel is None:
         ratio_ylabel = f"ratio / {ref_label}"
-    ax_ratio.set_xlabel(axis_label(var), fontsize=12)
+    ax_ratio.set_xlabel(xlabel if xlabel is not None else axis_label(var), fontsize=12)
     ax_ratio.set_ylabel(ratio_ylabel, fontsize=10)
     ax_ratio.grid(True, alpha=0.3)
 
