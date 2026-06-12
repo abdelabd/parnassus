@@ -66,6 +66,7 @@ mpl.use("Agg")  # non-interactive backend for CI / headless runs
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from PIL import Image
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
@@ -277,6 +278,355 @@ def plot_top_param_drift(
     fig.savefig(output_path.with_stem(output_path.stem + "_logy"))
     plt.close(fig)
     return top
+
+
+# ---------------------------------------------------------------------------
+# Full parameter atlas (all 66) -- dict-driven grouped PNG structure
+# ---------------------------------------------------------------------------
+
+
+AxisSpec = dict[str, object]
+PlotSpec = dict[str, list[AxisSpec]]
+
+
+PARAMETER_PLOT_LAYOUT: dict[str, dict[str, object]] = {
+    "TrackingEfficiency": {
+        "plots": {
+            "ChargedHadronTrackingEfficiency.png": [
+                {
+                    "title": "ChargedHadronTrackingEfficiency.eff_logits[0..3]",
+                    "keys": [
+                        f"ChargedHadronTrackingEfficiency.eff_logits[{i}]" for i in range(4)
+                    ],
+                    "ylabel": "efficiency",
+                }
+            ],
+            "ElectronTrackingEfficiency.png": [
+                {
+                    "title": "ElectronTrackingEfficiency.eff_logits[0..5]",
+                    "keys": [
+                        f"ElectronTrackingEfficiency.eff_logits[{i}]" for i in range(6)
+                    ],
+                    "ylabel": "efficiency",
+                }
+            ],
+            "MuonTrackingEfficiency.png": [
+                {
+                    "title": "MuonTrackingEfficiency.eff_logits[0..5]",
+                    "keys": [
+                        f"MuonTrackingEfficiency.eff_logits[{i}]" for i in range(6)
+                    ],
+                    "ylabel": "efficiency",
+                },
+                {
+                    "title": "MuonTrackingEfficiency.rate_raw[0..1]",
+                    "keys": [
+                        "MuonTrackingEfficiency.rate_raw[0]",
+                        "MuonTrackingEfficiency.rate_raw[1]",
+                    ],
+                    "ylabel": "rate",
+                },
+            ],
+        },
+        "stacked_pngs": {
+            "TrackingEfficiency.png": [
+                "ChargedHadronTrackingEfficiency.png",
+                "ElectronTrackingEfficiency.png",
+                "MuonTrackingEfficiency.png",
+            ]
+        },
+    },
+    "MomentumSmearing": {
+        "plots": {
+            "ChargedHadronMomentumSmearing.png": [
+                {
+                    "title": "ChargedHadronMomentumSmearing.resolution_module.a_raw[0..2]",
+                    "keys": [
+                        f"ChargedHadronMomentumSmearing.resolution_module.a_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "a_raw",
+                },
+                {
+                    "title": "ChargedHadronMomentumSmearing.resolution_module.b_raw[0..2]",
+                    "keys": [
+                        f"ChargedHadronMomentumSmearing.resolution_module.b_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "b_raw",
+                },
+                {
+                    "title": "ChargedHadronMomentumSmearing.resolution_module.scale_raw[0..2]",
+                    "keys": [
+                        f"ChargedHadronMomentumSmearing.resolution_module.scale_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "scale_raw",
+                },
+            ],
+            "ElectronMomentumSmearing.png": [
+                {
+                    "title": "ElectronMomentumSmearing.resolution_module.a_raw[0..2]",
+                    "keys": [
+                        f"ElectronMomentumSmearing.resolution_module.a_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "a_raw",
+                },
+                {
+                    "title": "ElectronMomentumSmearing.resolution_module.b_raw[0..2]",
+                    "keys": [
+                        f"ElectronMomentumSmearing.resolution_module.b_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "b_raw",
+                },
+                {
+                    "title": "ElectronMomentumSmearing.resolution_module.scale_raw[0..2]",
+                    "keys": [
+                        f"ElectronMomentumSmearing.resolution_module.scale_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "scale_raw",
+                },
+            ],
+            "MuonMomentumSmearing.png": [
+                {
+                    "title": "MuonMomentumSmearing.resolution_module.a_raw[0..2]",
+                    "keys": [
+                        f"MuonMomentumSmearing.resolution_module.a_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "a_raw",
+                },
+                {
+                    "title": "MuonMomentumSmearing.resolution_module.b_raw[0..2]",
+                    "keys": [
+                        f"MuonMomentumSmearing.resolution_module.b_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "b_raw",
+                },
+                {
+                    "title": "MuonMomentumSmearing.resolution_module.scale_raw[0..2]",
+                    "keys": [
+                        f"MuonMomentumSmearing.resolution_module.scale_raw[{i}]" for i in range(3)
+                    ],
+                    "ylabel": "scale_raw",
+                },
+            ],
+        }
+    },
+    "_root": {
+        "plots": {
+            "HadronFractions.png": [
+                {
+                    "title": "HadronFractions logits",
+                    "keys": [
+                        "HadronFractions.chad_logit",
+                        "HadronFractions.k0s_logit",
+                        "HadronFractions.lambda_logit",
+                    ],
+                    "ylabel": "fraction",
+                }
+            ]
+        }
+    },
+    "ECal": {
+        "plots": {
+            "ECal_scale.png": [
+                {
+                    "title": "ECal.scale_module.scale_raw[0..2]",
+                    "keys": [f"ECal.scale_module.scale_raw[{i}]" for i in range(3)],
+                    "ylabel": "scale_raw",
+                }
+            ],
+            "ECal_resolution.png": [
+                {
+                    "title": "ECal.resolution_func.common_c_*",
+                    "keys": [
+                        "ECal.resolution_func.common_c_E",
+                        "ECal.resolution_func.common_c_S",
+                        "ECal.resolution_func.common_c_N",
+                    ],
+                    "ylabel": "common",
+                },
+                {
+                    "title": "ECal.resolution_func.barrel_{a,b}",
+                    "keys": [
+                        "ECal.resolution_func.barrel_a",
+                        "ECal.resolution_func.barrel_b",
+                    ],
+                    "ylabel": "barrel",
+                },
+                {
+                    "title": "ECal.resolution_func.endcap_{a,b}",
+                    "keys": [
+                        "ECal.resolution_func.endcap_a",
+                        "ECal.resolution_func.endcap_b",
+                    ],
+                    "ylabel": "endcap",
+                },
+                {
+                    "title": "ECal.resolution_func.forward_c_{E,S}",
+                    "keys": [
+                        "ECal.resolution_func.forward_c_E",
+                        "ECal.resolution_func.forward_c_S",
+                    ],
+                    "ylabel": "forward",
+                },
+            ],
+        }
+    },
+    "HCal": {
+        "plots": {
+            "HCal_scale.png": [
+                {
+                    "title": "HCal.scale_module.scale_raw[0..1]",
+                    "keys": [f"HCal.scale_module.scale_raw[{i}]" for i in range(2)],
+                    "ylabel": "scale_raw",
+                }
+            ],
+            # HCal has fewer resolution coefficients than ECal in the current
+            # card/config. We keep the same top-level naming convention.
+            "HCal_resolution.png": [
+                {
+                    "title": "HCal.resolution_func.central_c_{E,S}",
+                    "keys": [
+                        "HCal.resolution_func.central_c_E",
+                        "HCal.resolution_func.central_c_S",
+                    ],
+                    "ylabel": "central",
+                },
+                {
+                    "title": "HCal.resolution_func.forward_c_{E,S}",
+                    "keys": [
+                        "HCal.resolution_func.forward_c_E",
+                        "HCal.resolution_func.forward_c_S",
+                    ],
+                    "ylabel": "forward",
+                },
+            ],
+        }
+    },
+}
+
+
+def _stack_pngs_vertical(image_paths: list[Path], output_path: Path) -> bool:
+    """Stack existing PNG files vertically by copy-pasting their pixel data."""
+    existing = [p for p in image_paths if p.exists()]
+    if not existing:
+        return False
+
+    imgs = [Image.open(p).convert("RGBA") for p in existing]
+    try:
+        width = max(img.width for img in imgs)
+        height = sum(img.height for img in imgs)
+        canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+        y = 0
+        for img in imgs:
+            x = (width - img.width) // 2
+            canvas.paste(img, (x, y))
+            y += img.height
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.convert("RGB").save(output_path)
+        return True
+    finally:
+        for img in imgs:
+            img.close()
+
+
+def _plot_parameter_panel(
+    history: dict,
+    truth: dict[str, float],
+    axis_specs: list[AxisSpec],
+    output_path: Path,
+) -> int:
+    """Render one PNG panel containing one or more vertically-stacked axes.
+
+    Returns
+    -------
+    int
+        Number of parameter trajectories actually drawn.
+    """
+    if not history.get("parameters"):
+        raise ValueError("history dict has no 'parameters' snapshots")
+
+    snapshots = history["parameters"]
+    steps = history["step"]
+
+    n_axes = max(1, len(axis_specs))
+    fig, axes = plt.subplots(
+        n_axes,
+        1,
+        figsize=(7.6, 2.7 * n_axes),
+        sharex=True,
+        squeeze=False,
+    )
+
+    n_drawn = 0
+    for ax, spec in zip(axes[:, 0], axis_specs, strict=True):
+        keys = list(spec.get("keys", []))
+        axis_title = str(spec.get("title", ""))
+        ylabel = str(spec.get("ylabel", "value"))
+
+        n_axis_lines = 0
+        for key in keys:
+            if key not in snapshots[0]:
+                continue
+            traj = [snap.get(key, np.nan) for snap in snapshots]
+            line_label = key.split(".")[-1]
+            (line,) = ax.plot(steps, traj, label=line_label)
+            if key in truth:
+                ax.axhline(truth[key], color=line.get_color(), linestyle="--", alpha=0.4)
+            n_axis_lines += 1
+            n_drawn += 1
+
+        ax.set_ylabel(ylabel)
+        if axis_title:
+            ax.set_title(axis_title, fontsize=10, loc="left")
+        ax.grid(True, alpha=0.3)
+        if n_axis_lines > 0:
+            ax.legend(loc="best", fontsize=8)
+        else:
+            ax.text(0.5, 0.5, "no matching parameters in history", ha="center", va="center")
+
+    axes[-1, 0].set_xlabel("optimizer step")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+    return n_drawn
+
+
+def plot_all_parameter_groups(
+    history: dict,
+    truth: dict[str, float],
+    output_dir: Path,
+) -> tuple[int, int]:
+    """Render the dict-defined full parameter atlas (all grouped PNGs).
+
+    Parameters
+    ----------
+    output_dir : Path
+        Target root directory, e.g. ``<fig_dir>_parameters``.
+
+    Returns
+    -------
+    (int, int)
+        ``(n_pngs_written, n_parameter_trajectories_drawn)``.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    n_pngs_written = 0
+    n_params_drawn = 0
+    for section, section_spec in PARAMETER_PLOT_LAYOUT.items():
+        section_dir = output_dir if section == "_root" else (output_dir / section)
+        plots: PlotSpec = section_spec.get("plots", {})  # type: ignore[assignment]
+        for filename, axis_specs in plots.items():
+            out_png = section_dir / filename
+            n_params_drawn += _plot_parameter_panel(history, truth, axis_specs, out_png)
+            n_pngs_written += 1
+
+        stacked = section_spec.get("stacked_pngs", {})
+        for stacked_name, members in stacked.items():
+            src = [section_dir / name for name in members]
+            if _stack_pngs_vertical(src, section_dir / stacked_name):
+                n_pngs_written += 1
+
+    return n_pngs_written, n_params_drawn
 
 
 # ---------------------------------------------------------------------------
@@ -666,54 +1016,24 @@ def main() -> None:
     plot_loss(history, args.output_dir / "loss_trajectory.pdf")
     print("  wrote loss_trajectory.pdf")
 
-    # ----- 2. Scale parameter drift -----
-    # Truth values are read from the param config (per eta region).
-    scale_members: dict[str, list[tuple[str, float]]] = {
-        "charged-hadron pT scale": [
-            (k, truth[k])
-            for k in (
-                f"ChargedHadronMomentumSmearing.resolution_module.scale_raw[{i}]"
-                for i in range(3)
-            )
-        ],
-        "ECal energy scale": [
-            (f"ECal.scale_module.scale_raw[{i}]", truth[f"ECal.scale_module.scale_raw[{i}]"])
-            for i in range(3)
-        ],
-        "HCal energy scale": [
-            (f"HCal.scale_module.scale_raw[{i}]", truth[f"HCal.scale_module.scale_raw[{i}]"])
-            for i in range(2)
-        ],
-    }
-    plot_param_drift(
-        history,
-        scale_members,
-        args.output_dir / "param_drift_scales.pdf",
-        title="Scale-parameter drift during Adam fit",
-    )
-    print("  wrote param_drift_scales.pdf")
+    # ----- 2. Parameter values versus optimizer step -----
 
-    # ----- 3. Other representative parameters (truth from the config) -----
-    other_members: dict[str, list[tuple[str, float]]] = {
-        "chad res. a (barrel)": [
-            (k := "ChargedHadronMomentumSmearing.resolution_module.a_raw[0]", truth[k]),
-        ],
-        "chad eff. (barrel, low-pT)": [
-            (k := "ChargedHadronTrackingEfficiency.eff_logits[0]", truth[k]),
-        ],
-        "K0-short ECal fraction": [
-            (k := "HadronFractions.k0s_logit", truth[k]),
-        ],
-    }
-    plot_param_drift(
-        history,
-        other_members,
-        args.output_dir / "param_drift_other.pdf",
-        title="Resolution / efficiency / fraction drift during Adam fit",
+    param_atlas_dir = Path(args.output_dir) / "parameters"
+    param_atlas_dir.mkdir(parents=True, exist_ok=True)
+    n_param_pngs, n_param_traces = plot_all_parameter_groups(
+        history=history,
+        truth=truth,
+        output_dir=param_atlas_dir,
     )
-    print("  wrote param_drift_other.pdf")
+    print(
+        "  wrote "
+        f"{n_param_pngs} grouped parameter PNGs ({n_param_traces} trajectories) "
+        f"to {param_atlas_dir}"
+    )
 
-    # ----- 4. Observable histograms (target vs init vs final) -----
+    # ----- 3. Final observable histograms (target vs init vs final) -----
+    final_obs_output_dir = args.output_dir / "observables" / "final"
+    final_obs_output_dir.mkdir(parents=True, exist_ok=True)
     arrays = load_cms_flow_root(args.root_file, n_events=args.n_events_for_plots)
     truth_tensor = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
@@ -744,7 +1064,7 @@ def main() -> None:
         _obs_values(pred_final, "pt"),
         edges=np.linspace(0.0, 100.0, 51),
         xlabel=r"PF object $p_\mathrm{T}$ [GeV]",
-        output_path=args.output_dir / "observable_pt.pdf",
+        output_path=final_obs_output_dir / "observable_pt.pdf",
         log_y=True,
     )
     print("  wrote observable_pt.pdf")
@@ -756,7 +1076,7 @@ def main() -> None:
         _obs_values(pred_final, "eta"),
         edges=np.linspace(-5.0, 5.0, 51),
         xlabel=r"PF object $\eta$",
-        output_path=args.output_dir / "observable_eta.pdf",
+        output_path=final_obs_output_dir / "observable_eta.pdf",
     )
     print("  wrote observable_eta.pdf")
 
@@ -767,7 +1087,7 @@ def main() -> None:
         _obs_values(pred_final, "ht"),
         edges=np.linspace(0.0, 1000.0, 51),
         xlabel=r"PF scalar $H_\mathrm{T}$ [GeV]",
-        output_path=args.output_dir / "observable_ht.pdf",
+        output_path=final_obs_output_dir / "observable_ht.pdf",
     )
     print("  wrote observable_ht.pdf")
 
@@ -780,7 +1100,7 @@ def main() -> None:
         _obs_values(pred_final, "log_ht"),
         edges=np.linspace(4.5, 7.5, 51),
         xlabel=r"PF scalar $\log\,H_\mathrm{T}$",
-        output_path=args.output_dir / "observable_log_ht.pdf",
+        output_path=final_obs_output_dir / "observable_log_ht.pdf",
     )
     print("  wrote observable_log_ht.pdf")
 
@@ -791,11 +1111,11 @@ def main() -> None:
         _obs_values(pred_final, "multiplicity"),
         edges=np.linspace(0.0, 300.0, 61),
         xlabel=r"PF objects per event",
-        output_path=args.output_dir / "observable_multiplicity.pdf",
+        output_path=final_obs_output_dir / "observable_multiplicity.pdf",
     )
     print("  wrote observable_multiplicity.pdf")
 
-    # ----- 5. Optional: per-module intermediate observables (--debug) -----
+    # ----- 4. Optional: per-module intermediate observables (--debug) -----
     # Mirrors the --debug branch list of validate_torch_delphes.py: for every
     # post-module output (ParticleAfterProp, ChargedHadronEfficiency,
     # ECalTower, ...), overlay target / trainee-init / trainee-fitted on the
@@ -819,7 +1139,7 @@ def main() -> None:
             root_file=args.root_file,
             trainee_init_outputs=init_outputs,
             trainee_final_outputs=final_outputs,
-            output_dir=args.output_dir / "intermediate",
+            output_dir=args.output_dir / "observables" / "intermediate",
             n_events=args.n_events_for_plots,
         )
 
