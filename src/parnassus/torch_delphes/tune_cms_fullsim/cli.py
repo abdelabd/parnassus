@@ -155,14 +155,14 @@ def main() -> None:
     parser.add_argument(
         "--intermediate-plot-dir",
         type=str,
-        default="doc/figures/intermediate_plots",
+        default="",
         help=(
             "Directory for per-epoch intermediate observable plots: one "
             "multi-page PDF per epoch (intermediate_epoch_<step>.pdf, one "
             "observable per page) comparing the trainee prediction to the "
             "full-sim target, with each observable's soft-hist MSE in the "
             "page title as a distribution-mismatch diagnostic. Pass an empty "
-            "string to disable. Only the main rank plots."
+            "string to disable (default: disabled). Only the main rank plots."
         ),
     )
     parser.add_argument(

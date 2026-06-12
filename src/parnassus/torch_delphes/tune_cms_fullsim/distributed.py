@@ -33,7 +33,7 @@ import torch.distributed as dist
 
 
 def _init_distributed() -> tuple[int, int, int, torch.device]:
-    """Initialize the torch.distributed process group from SLURM env vars.
+    """Initialize the torch.distributed process group from launcher env vars.
 
     Returns
     -------
@@ -42,7 +42,20 @@ def _init_distributed() -> tuple[int, int, int, torch.device]:
         within-node rank used to pick the CUDA device. ``device`` is
         ``cuda:local_rank`` if CUDA is available, else ``cpu``.
     """
-    if "SLURM_PROCID" in os.environ and int(os.environ.get("SLURM_NTASKS", "1")) > 1:
+
+    has_slurm_multi = (
+        "SLURM_PROCID" in os.environ
+        and int(os.environ.get("SLURM_NTASKS", "1")) > 1
+    )
+    # srun exports PMI/PMIx rank env vars; a plain shell in an allocation
+    # generally does not. Requiring this in auto-mode avoids unintended
+    # multi-rank init when users run without srun.
+    has_launcher_rank_env = any(
+        k in os.environ for k in ("PMI_RANK", "PMIX_RANK", "OMPI_COMM_WORLD_RANK")
+    )
+
+    should_init = (has_slurm_multi and has_launcher_rank_env)
+    if should_init:
         rank = int(os.environ["SLURM_PROCID"])
         world_size = int(os.environ["SLURM_NTASKS"])
         local_rank = int(os.environ.get("SLURM_LOCALID", "0"))

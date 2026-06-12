@@ -305,7 +305,8 @@ def fit_card_to_fullsim(
                         acc_tgt.setdefault(key, []).append(tv.detach().cpu())
             val_loss_acc /= len(val_dataloader)
             print_val_loss = float(val_loss_acc)
-            tqdm.write(f"  step {step:3d}/{n_steps}  val_loss = {print_val_loss:.4e}")
+            if _is_main(rank):
+                tqdm.write(f"  step {step:3d}/{n_steps}  val_loss = {print_val_loss:.4e}")
 
         # Record the per-step val loss aligned with step/loss/parameters above
         # (all appended before any early-stopping break, so index i refers to
