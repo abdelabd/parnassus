@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -40,6 +41,7 @@ from parnassus.torch_delphes.tune_cms_fullsim.dataloader import (
     DelphesDataLoader,
     DelphesDataSet,
 )
+from parnassus.torch_delphes.tune_cms_fullsim.config import COUNT_TERM_KEYS
 from parnassus.torch_delphes.tune_cms_fullsim.loss import per_event_wasserstein_loss
 
 
@@ -142,8 +144,35 @@ def test_load_pflow_targets_shapes(fixture_root: Path):
     # Per-event observables are 1-D, length n_events.
     assert tgt["multiplicity"].shape == (15,)
     assert tgt["ht"].shape == (15,)
+    # Per-species region-count targets: (n_events, n_regions), non-negative integers.
+    assert tgt["chad_region_counts"].shape == (15, 4)
+    assert tgt["electron_region_counts"].shape == (15, 6)
+    assert tgt["muon_region_counts"].shape == (15, 6)
+    for key in ("chad_region_counts", "electron_region_counts", "muon_region_counts"):
+        assert (tgt[key] >= 0).all()
     for name, v in tgt.items():
         assert torch.isfinite(v).all(), f"non-finite in target '{name}'"
+
+
+def test_load_pflow_targets_region_counts_cross_check(fixture_root: Path):
+    """One reco bin's electron count, recomputed by hand from the raw pflow branches,
+    matches the loader's ``electron_region_counts`` (barrel low-pt = region 0)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=15)
+    tgt = load_pflow_targets(arrays)
+    from parnassus.utils import class_to_pid_vectorized
+
+    total_manual = 0
+    for i in range(15):
+        pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
+        eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
+        cls = np.asarray(arrays["pflow_class"][i], dtype=np.int64)
+        if pt.size == 0:
+            continue
+        abs_pid = np.abs(class_to_pid_vectorized(cls))
+        is_e = abs_pid == 11
+        barrel_low = (np.abs(eta) <= 1.5) & (pt > 0.1) & (pt <= 1.0)
+        total_manual += int(np.sum(is_e & barrel_low))
+    assert int(tgt["electron_region_counts"][:, 0].sum()) == total_manual
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +194,10 @@ def test_one_step_gradient_is_finite(fixture_root: Path):
     out = card(truth[mask])
     eflow = restore_event_format(out["EFlowObject"], mask)
     pred = load_pflow_targets_from_tensor(eflow)
+    # Inject the per-species expected counts so the loss exercises the count terms
+    # (the eff_logits' only gradient path), exactly as training.py does.
+    for out_key, pred_key, _tgt_key in COUNT_TERM_KEYS:
+        pred[pred_key] = out[out_key]
 
     loss = per_event_wasserstein_loss(pred, target)
     assert torch.isfinite(loss)
@@ -175,6 +208,17 @@ def test_one_step_gradient_is_finite(fixture_root: Path):
     for name, p in card.named_parameters():
         if p.grad is not None:
             assert torch.isfinite(p.grad).all(), f"{name} has non-finite gradient"
+
+    # The count terms must reach the tracking-efficiency logits (their only path).
+    # The synthetic fixture's uniform class mix populates the lepton low/mid bins.
+    params = dict(card.named_parameters())
+    for mod in (
+        "ChargedHadronTrackingEfficiency",
+        "ElectronTrackingEfficiency",
+        "MuonTrackingEfficiency",
+    ):
+        g = params[f"{mod}.eff_logits"].grad
+        assert g is not None and float(g.abs().sum()) > 0, f"{mod}.eff_logits got no count grad"
 
 
 def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):

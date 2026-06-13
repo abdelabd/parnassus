@@ -19,7 +19,7 @@ from tqdm import tqdm
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.param_config import to_physical
 
-from .config import OBSERVABLES
+from .config import COUNT_TERM_KEYS, OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_main
 from .loss import per_event_wasserstein_loss
@@ -201,9 +201,10 @@ def fit_card_to_fullsim(
             eflow_objects_restored = restore_event_format(eflow_objects, mask)
             # Then extract the observables from predicted objects
             pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
-            # Differentiable per-region expected charged-hadron count -- the honest
-            # gradient signal for ChargedHadronTrackingEfficiency.eff_logits.
-            pred_observables["chad_expected_counts"] = out["ChargedHadronExpectedCounts"]
+            # Differentiable per-region expected counts (one per track species) -- the
+            # honest gradient signal for the eff_logits of each tracking efficiency.
+            for out_key, pred_key, _tgt_key in COUNT_TERM_KEYS:
+                pred_observables[pred_key] = out[out_key]
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
@@ -256,7 +257,8 @@ def fit_card_to_fullsim(
                 eflow_objects = out["EFlowObject"]
                 eflow_objects_restored = restore_event_format(eflow_objects, mask)
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
-                pred_observables["chad_expected_counts"] = out["ChargedHadronExpectedCounts"]
+                for out_key, pred_key, _tgt_key in COUNT_TERM_KEYS:
+                    pred_observables[pred_key] = out[out_key]
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
                 val_loss = per_event_wasserstein_loss(

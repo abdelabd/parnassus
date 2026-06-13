@@ -31,12 +31,17 @@ Design notes
   estimator -- it behaved like a momentum *scale* on the surviving tracks rather
   than the keep-probability, which inverted the gradient for the low-pt regions.
   Tracking efficiencies are instead fit through a differentiable, reco-space
-  charged-hadron *count* term: each track is tagged with its pre-reco region
-  (:meth:`region_index_1based`), and the loss reweights the trainee's reco-bin
-  counts by ``eff`` to match the reconstructed data (see
-  ``CMSEnergyFlowDefault._charged_hadron_expected_reco_counts`` and
-  ``tune_cms_fullsim.loss.per_event_wasserstein_loss``). Masked particles have
-  their (PT, PX, PY, PZ, E) multiplied by the binary mask; their rows remain in
+  *count* term, one per track species (charged hadron, electron, muon): each
+  track is tagged with its pre-reco region (:meth:`region_index_1based`), using
+  a per-species :class:`EfficiencyRegionSpec` with disjoint global label ranges
+  (chad 1-4, electron 5-10, muon 11-16; 0 = outside all regions), and the loss
+  reweights the trainee's per-(species, reco-bin) counts by ``eff`` to match the
+  reconstructed data (see ``CMSEnergyFlowDefault._expected_reco_counts`` and
+  ``tune_cms_fullsim.loss.per_event_wasserstein_loss``). The muon high-pt
+  ``rate_raw`` (the exponential roll-off constant) has no count-term gradient
+  path -- it is intentionally left frozen (see
+  :class:`CMSMuonLearnableEfficiency`). Masked particles have their
+  (PT, PX, PY, PZ, E) multiplied by the binary mask; their rows remain in
   the tensor so that the calorimeter still sees the original calorimeter deposit
   (efficiency only affects tracking, not calorimetry).
 
@@ -51,6 +56,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -279,16 +285,131 @@ def make_cms_track_resolution(species: str) -> LearnableMomentumResolution:
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class EfficiencyRegionSpec:
+    """Piecewise-constant ``(pt, |eta|)`` binning for a tracking efficiency.
+
+    A single source of truth for the region geometry, shared by three call
+    sites that previously each hard-coded the same cuts: the trainee's
+    efficiency evaluation / region tagging (:class:`_LearnableEfficiencyBase`),
+    the reco-bin migration in ``CMSEnergyFlowDefault._expected_reco_counts``,
+    and the data-target binning in ``tune_cms_fullsim.data.load_pflow_targets``.
+
+    Binning conventions (chosen to reproduce the original inline cuts exactly):
+
+    - ``pt`` bins, with ``e = pt_edges``: ``(e[0], e[1]], (e[1], e[2]], ...,
+      (e[-1], inf)`` -- i.e. ``len(pt_edges)`` bins, the first opening just above
+      ``e[0]`` and the last open-ended above ``e[-1]``. Tracks with
+      ``pt <= e[0]`` fall in no region.
+    - ``|eta|`` bins, with ``f = abs_eta_edges``: ``[0, f[0]], (f[0], f[1]],
+      ..., (f[-2], f[-1]]`` -- ``len(abs_eta_edges)`` bins; the first is closed
+      at 0, the last closed at ``f[-1]``. ``|eta| > f[-1]`` falls in no region.
+
+    Region index order is **eta-major, pt-minor**: ``r = eta_bin * n_pt +
+    pt_bin``. This matches the layout of every ``eff_logits`` tensor in this
+    module.
+
+    Attributes
+    ----------
+    species : str
+        Human-readable species key (``"charged_hadron"``/``"electron"``/``"muon"``).
+    pt_edges : tuple[float, ...]
+        See the pt binning convention above.
+    abs_eta_edges : tuple[float, ...]
+        See the ``|eta|`` binning convention above.
+    label_offset : int
+        Offset for the **global** 1-based ``EFF_REGION`` label of this species:
+        ``label = label_offset + r + 1`` (``0`` = outside all regions). Offsets
+        are chosen so the per-species label ranges are disjoint (chad 1-4,
+        electron 5-10, muon 11-16), letting one shared column carry all three.
+    """
+
+    species: str
+    pt_edges: tuple[float, ...]
+    abs_eta_edges: tuple[float, ...]
+    label_offset: int
+
+    @property
+    def n_pt(self) -> int:
+        return len(self.pt_edges)
+
+    @property
+    def n_eta(self) -> int:
+        return len(self.abs_eta_edges)
+
+    @property
+    def n_regions(self) -> int:
+        return self.n_pt * self.n_eta
+
+    def region_masks(self, pt, abs_eta):
+        """Boolean membership masks for the regions, in ``eff_logits`` order.
+
+        Duck-typed on ``pt`` / ``abs_eta``: uses only ``>``, ``<=`` and ``&``,
+        so it works identically on ``torch.Tensor`` (trainee / reco side) and
+        ``numpy.ndarray`` (data-target side). ``abs_eta`` is passed already
+        absolute by the caller (the trainee passes ``eta_outer.abs()``, the
+        reco/target sides pass ``|reco eta|`` -- this pre-reco/reco asymmetry is
+        intentional).
+
+        Returns
+        -------
+        list
+            ``n_regions`` masks, ordered eta-major then pt-minor.
+        """
+        pt_masks = []
+        for i, lo in enumerate(self.pt_edges):
+            if i < self.n_pt - 1:
+                hi = self.pt_edges[i + 1]
+                pt_masks.append((pt > lo) & (pt <= hi))
+            else:
+                pt_masks.append(pt > lo)
+        eta_masks = []
+        for j, hi in enumerate(self.abs_eta_edges):
+            if j == 0:
+                eta_masks.append(abs_eta <= hi)
+            else:
+                lo = self.abs_eta_edges[j - 1]
+                eta_masks.append((abs_eta > lo) & (abs_eta <= hi))
+        return [em & pm for em in eta_masks for pm in pt_masks]
+
+
+# CMS tracking-efficiency region specs (one per track species). The cuts and
+# region order reproduce the legacy static ``Efficiency`` formulas exactly. The
+# label offsets keep the three species' EFF_REGION labels disjoint so a single
+# feature column can carry all of them (0 = untagged / outside all regions).
+CMS_EFF_REGION_SPECS: dict[str, EfficiencyRegionSpec] = {
+    "charged_hadron": EfficiencyRegionSpec(
+        species="charged_hadron", pt_edges=(0.1, 1.0), abs_eta_edges=(1.5, 2.5), label_offset=0
+    ),
+    "electron": EfficiencyRegionSpec(
+        species="electron", pt_edges=(0.1, 1.0, 1.0e2), abs_eta_edges=(1.5, 2.5), label_offset=4
+    ),
+    "muon": EfficiencyRegionSpec(
+        species="muon", pt_edges=(0.1, 1.0, 1.0e3), abs_eta_edges=(1.5, 2.5), label_offset=10
+    ),
+}
+
+
 class _LearnableEfficiencyBase(nn.Module):
     """Common base for learnable tracking efficiencies.
 
-    Subclasses implement ``compute_efficiency(pt, eta_outer)`` which returns a
-    per-particle efficiency in ``[0, 1]``. The base class handles the
-    Gumbel-sigmoid straight-through mask and applies it as a multiplier on the
-    momentum columns of the input tensor.
+    The base class owns the per-region ``eff_logits`` parameter, the generic
+    piecewise-constant :meth:`compute_efficiency` driven by the module's
+    :class:`EfficiencyRegionSpec`, the pre-reco region tagging
+    (:meth:`region_index_1based`), and the Gumbel-sigmoid straight-through mask
+    applied (detached) to the momentum columns. Subclasses just supply their
+    region spec and per-region efficiency defaults; a subclass with non-constant
+    behavior (e.g. the muon high-pt exponential roll-off) overrides
+    :meth:`compute_efficiency`.
 
     Parameters
     ----------
+    region_spec : EfficiencyRegionSpec
+        The ``(pt, |eta|)`` binning; defines ``eff_logits`` length and the
+        global ``EFF_REGION`` labels.
+    eff_defaults : Sequence[float]
+        Per-region default efficiencies (physical, in ``[0, 1]``), one per
+        region in ``region_spec`` order. Stored as logits.
     pdg_filter_func : Callable[[torch.Tensor], torch.Tensor] | None
         Retained for parity with the legacy :class:`Efficiency` API. Not used
         internally because in the learnable card, particle splitting by
@@ -301,16 +422,58 @@ class _LearnableEfficiencyBase(nn.Module):
 
     def __init__(
         self,
+        region_spec: EfficiencyRegionSpec,
+        eff_defaults: tuple[float, ...],
         pdg_filter_func: Callable[[torch.Tensor], torch.Tensor] | None = None,
         temperature: float = 0.5,
     ) -> None:
         super().__init__()
         self.pdg_filter_func = pdg_filter_func
         self.temperature: float = float(temperature)
+        self.region_spec = region_spec
+        logits = torch.tensor([_safe_logit(p) for p in eff_defaults], dtype=torch.float64)
+        self.eff_logits = nn.Parameter(logits)
 
-    # Subclasses must override.
+    def get_efficiencies(self) -> torch.Tensor:
+        """Per-region physical efficiencies ``sigmoid(eff_logits)``, shape
+        ``(n_regions,)``, carrying gradient to ``eff_logits``."""
+        return torch.sigmoid(self.eff_logits)
+
     def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        """Per-particle efficiency: piecewise-constant ``effs[r]`` over the
+        regions of :attr:`region_spec`; 0 outside all regions.
+        """
+        effs = self.get_efficiencies()
+        eff = torch.zeros_like(pt)
+        for r, m in enumerate(self.region_spec.region_masks(pt, eta_outer.abs())):
+            eff = torch.where(m, effs[r].to(pt.dtype), eff)
+        return eff
+
+    def region_index_1based(
+        self, pt: torch.Tensor, eta_outer: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-particle **global** pre-reco region label, written into the
+        ``EFF_REGION`` feature column (gradient-free).
+
+        Region ``r`` of :attr:`region_spec` maps to label
+        ``region_spec.label_offset + r + 1``; ``0`` for particles outside all
+        regions. Offsets keep the species' label ranges disjoint (chad 1-4,
+        electron 5-10, muon 11-16) so one shared column carries every species,
+        and the loss can build the per-(species, reco-bin) <- pre-reco-region
+        migration for the differentiable count term (see
+        ``CMSEnergyFlowDefault._expected_reco_counts``).
+
+        Returns
+        -------
+        torch.Tensor
+            Shape ``(N,)``, float, integer-valued in ``[0, label_offset +
+            n_regions]`` with the mapping above.
+        """
+        offset = self.region_spec.label_offset
+        idx = torch.zeros_like(pt)
+        for r, m in enumerate(self.region_spec.region_masks(pt, eta_outer.abs())):
+            idx = torch.where(m, torch.full_like(pt, float(offset + r + 1)), idx)
+        return idx
 
     # ----- Gumbel-sigmoid sampling -----
     def _gumbel_sigmoid_st(self, eff: torch.Tensor) -> torch.Tensor:
@@ -355,7 +518,7 @@ class _LearnableEfficiencyBase(nn.Module):
         # straight-through gradient was biased (a survivor-momentum scale, not the
         # keep-probability). eff_logits are fit via the differentiable reco-space
         # count term instead (see region_index_1based /
-        # CMSEnergyFlowDefault._charged_hadron_expected_reco_counts).
+        # CMSEnergyFlowDefault._expected_reco_counts).
         mask = self._gumbel_sigmoid_st(eff).detach()  # shape (N,)
 
         # Build a per-column multiplier: mask[i] for momentum columns, 1
@@ -379,104 +542,40 @@ class CMSChargedHadronLearnableEfficiency(_LearnableEfficiencyBase):
     Four piecewise-constant efficiency parameters covering the four
     (pt, |eta|) regions defined in
     :meth:`Efficiency._charged_hadron_cms_efficiency`. Each is stored as a
-    logit so the sigmoid keeps it in ``(0, 1)``.
+    logit so the sigmoid keeps it in ``(0, 1)``. Binning + region labels come
+    from ``CMS_EFF_REGION_SPECS["charged_hadron"]``; efficiency evaluation,
+    region tagging, and the detached mask are inherited from the base class.
     """
 
     # (lowpt-barrel, highpt-barrel, lowpt-endcap, highpt-endcap)
     _DEFAULTS: tuple[float, ...] = (0.70, 0.95, 0.60, 0.85)
 
     def __init__(self, temperature: float = 0.5) -> None:
-        super().__init__(pdg_filter_func=pdg_filters.charged_hadron_filter, temperature=temperature)
-        logits = torch.tensor([_safe_logit(p) for p in self._DEFAULTS], dtype=torch.float64)
-        self.eff_logits = nn.Parameter(logits)
-
-    def get_efficiencies(self) -> torch.Tensor:
-        return torch.sigmoid(self.eff_logits)
-
-    @staticmethod
-    def _region_masks(pt: torch.Tensor, eta_outer: torch.Tensor) -> list[torch.Tensor]:
-        """Boolean membership masks for the 4 (pt, |eta|) regions, in eff_logits order.
-
-        Order matches ``eff_logits``: ``[barrel-lowpt, barrel-highpt,
-        endcap-lowpt, endcap-highpt]``. Shared by :meth:`compute_efficiency` and
-        :meth:`region_index_1based` so the binning stays in one place.
-        """
-        abs_eta = eta_outer.abs()
-        in_pt_low = (pt > 0.1) & (pt <= 1.0)
-        in_pt_high = pt > 1.0
-        in_barrel = abs_eta <= 1.5
-        in_endcap = (abs_eta > 1.5) & (abs_eta <= 2.5)
-        return [
-            in_barrel & in_pt_low,
-            in_barrel & in_pt_high,
-            in_endcap & in_pt_low,
-            in_endcap & in_pt_high,
-        ]
-
-    def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        effs = self.get_efficiencies()
-        eff = torch.zeros_like(pt)
-        for r, m in enumerate(self._region_masks(pt, eta_outer)):
-            eff = torch.where(m, effs[r].to(pt.dtype), eff)
-        return eff
-
-    def region_index_1based(
-        self, pt: torch.Tensor, eta_outer: torch.Tensor
-    ) -> torch.Tensor:
-        """Per-particle pre-reco region label, 1-based: region ``r`` -> ``r + 1``;
-        ``0`` for charged hadrons outside all four ``(pt, |eta_outer|)`` regions.
-        ``1`` for in the barrel low-pt region, 
-        ``2`` for barrel high-pt, 
-        ``3`` for endcap low-pt,
-        ``4`` for endcap high-pt.
-
-        Written into the ``EFF_REGION`` feature column (gradient-free) so the tuning
-        loss can build the reco-bin <- pre-reco-region migration matrix for the
-        differentiable, reco-space charged-hadron count term (see
-        ``CMSEnergyFlowDefault._charged_hadron_expected_reco_counts``).
-
-        return idx: shape (N, ), integer in [0, 4] with the mapping above.
-        """
-        idx = torch.zeros_like(pt)
-        for r, m in enumerate(self._region_masks(pt, eta_outer)):
-            idx = torch.where(m, torch.full_like(pt, float(r + 1)), idx)
-        return idx
+        super().__init__(
+            region_spec=CMS_EFF_REGION_SPECS["charged_hadron"],
+            eff_defaults=self._DEFAULTS,
+            pdg_filter_func=pdg_filters.charged_hadron_filter,
+            temperature=temperature,
+        )
 
 
 class CMSElectronLearnableEfficiency(_LearnableEfficiencyBase):
     """Learnable CMS electron tracking efficiency: 6 piecewise constants
-    (3 pt bins x 2 eta bins).
+    (3 pt bins x 2 eta bins). Binning + region labels come from
+    ``CMS_EFF_REGION_SPECS["electron"]``; behavior is the generic
+    piecewise-constant base-class efficiency.
     """
 
     # (low/mid/high)pt-barrel, then (low/mid/high)pt-endcap
     _DEFAULTS: tuple[float, ...] = (0.73, 0.95, 0.99, 0.50, 0.83, 0.90)
 
     def __init__(self, temperature: float = 0.5) -> None:
-        super().__init__(pdg_filter_func=pdg_filters.electron_filter, temperature=temperature)
-        logits = torch.tensor([_safe_logit(p) for p in self._DEFAULTS], dtype=torch.float64)
-        self.eff_logits = nn.Parameter(logits)
-
-    def get_efficiencies(self) -> torch.Tensor:
-        return torch.sigmoid(self.eff_logits)
-
-    def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        abs_eta = eta_outer.abs()
-        effs = self.get_efficiencies()
-
-        in_pt_low = (pt > 0.1) & (pt <= 1.0)
-        in_pt_mid = (pt > 1.0) & (pt <= 1.0e2)
-        in_pt_high = pt > 1.0e2
-        in_barrel = abs_eta <= 1.5
-        in_endcap = (abs_eta > 1.5) & (abs_eta <= 2.5)
-
-        eff = torch.zeros_like(pt)
-        eff = torch.where(in_barrel & in_pt_low, effs[0].to(pt.dtype), eff)
-        eff = torch.where(in_barrel & in_pt_mid, effs[1].to(pt.dtype), eff)
-        eff = torch.where(in_barrel & in_pt_high, effs[2].to(pt.dtype), eff)
-        eff = torch.where(in_endcap & in_pt_low, effs[3].to(pt.dtype), eff)
-        eff = torch.where(in_endcap & in_pt_mid, effs[4].to(pt.dtype), eff)
-        eff = torch.where(in_endcap & in_pt_high, effs[5].to(pt.dtype), eff)
-        return eff
+        super().__init__(
+            region_spec=CMS_EFF_REGION_SPECS["electron"],
+            eff_defaults=self._DEFAULTS,
+            pdg_filter_func=pdg_filters.electron_filter,
+            temperature=temperature,
+        )
 
 
 class CMSMuonLearnableEfficiency(_LearnableEfficiencyBase):
@@ -485,7 +584,19 @@ class CMSMuonLearnableEfficiency(_LearnableEfficiencyBase):
 
     The two high-pt regions (``pt > 1000`` GeV) follow
     ``eff(pt) = coeff * exp(0.5 - rate * pt)`` matching the static formula in
-    :meth:`Efficiency._muon_cms_efficiency`.
+    :meth:`Efficiency._muon_cms_efficiency`. Binning + region labels come from
+    ``CMS_EFF_REGION_SPECS["muon"]``.
+
+    Count-term note. The differentiable count term reweights each region's
+    survivors by ``eff_r / eff_r.detach()``. For the 6 ``eff_logits`` this is
+    exact even in the exponential bins (the coefficient enters ``eff``
+    multiplicatively, so ``dE[N]/d coeff = E[N]/coeff``). The ``rate_raw``
+    constants, however, enter ``eff`` *non*-multiplicatively (inside the
+    exponent), so the per-region scalar reweight carries NO gradient to them --
+    ``rate_raw`` is intentionally left frozen. Fitting it would require a
+    per-particle reweight ``eff_i(pt_i) / eff_i(pt_i).detach()`` (valid because
+    muon reco pt == pre-reco pt -- muons get no PF rescale) AND a sample with
+    ``pt > 1 TeV`` muons, which the QCD-dijet pseudodata does not provide.
     """
 
     # (low/mid/high-coeff)-barrel, then (low/mid/high-coeff)-endcap
@@ -493,41 +604,36 @@ class CMSMuonLearnableEfficiency(_LearnableEfficiencyBase):
     _RATE_DEFAULTS: tuple[float, ...] = (5.0e-4, 5.0e-4)
 
     def __init__(self, temperature: float = 0.5) -> None:
-        super().__init__(pdg_filter_func=pdg_filters.muon_filter, temperature=temperature)
-        logits = torch.tensor([_safe_logit(p) for p in self._DEFAULTS], dtype=torch.float64)
-        self.eff_logits = nn.Parameter(logits)
+        super().__init__(
+            region_spec=CMS_EFF_REGION_SPECS["muon"],
+            eff_defaults=self._DEFAULTS,
+            pdg_filter_func=pdg_filters.muon_filter,
+            temperature=temperature,
+        )
         rates = torch.tensor(self._RATE_DEFAULTS, dtype=torch.float64)
         # softplus reparameterization to keep rate > 0
         self.rate_raw = nn.Parameter(_softplus_inv(rates))
-
-    def get_efficiencies(self) -> torch.Tensor:
-        return torch.sigmoid(self.eff_logits)
 
     def get_rates(self) -> torch.Tensor:
         return F.softplus(self.rate_raw)
 
     def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        abs_eta = eta_outer.abs()
+        """Piecewise-constant ``effs[r]`` over the muon regions, except the
+        high-pt bins (``pt_bin == n_pt - 1``) use the exponential roll-off
+        ``effs[r] * exp(0.5 - rate * pt)``; clamped to ``[0, 1]``.
+        """
         effs = self.get_efficiencies()
         rates = self.get_rates()
-
-        in_pt_low = (pt > 0.1) & (pt <= 1.0)
-        in_pt_mid = (pt > 1.0) & (pt <= 1.0e3)
-        in_pt_high = pt > 1.0e3
-        in_barrel = abs_eta <= 1.5
-        in_endcap = (abs_eta > 1.5) & (abs_eta <= 2.5)
-
-        # High-pt exponential roll-off.
-        barrel_high = effs[2].to(pt.dtype) * torch.exp(0.5 - rates[0].to(pt.dtype) * pt)
-        endcap_high = effs[5].to(pt.dtype) * torch.exp(0.5 - rates[1].to(pt.dtype) * pt)
-
+        n_pt = self.region_spec.n_pt
         eff = torch.zeros_like(pt)
-        eff = torch.where(in_barrel & in_pt_low, effs[0].to(pt.dtype), eff)
-        eff = torch.where(in_barrel & in_pt_mid, effs[1].to(pt.dtype), eff)
-        eff = torch.where(in_barrel & in_pt_high, barrel_high, eff)
-        eff = torch.where(in_endcap & in_pt_low, effs[3].to(pt.dtype), eff)
-        eff = torch.where(in_endcap & in_pt_mid, effs[4].to(pt.dtype), eff)
-        eff = torch.where(in_endcap & in_pt_high, endcap_high, eff)
+        for r, m in enumerate(self.region_spec.region_masks(pt, eta_outer.abs())):
+            eta_bin, pt_bin = divmod(r, n_pt)
+            if pt_bin == n_pt - 1:
+                # High-pt exponential roll-off; rate index = eta bin.
+                val = effs[r].to(pt.dtype) * torch.exp(0.5 - rates[eta_bin].to(pt.dtype) * pt)
+            else:
+                val = effs[r].to(pt.dtype)
+            eff = torch.where(m, val, eff)
         # Clamp because exp() can exceed 1 at the boundary pt = 1000 GeV
         # (where 0.5 - 5e-4 * 1000 = 0 ⇒ coeff * 1.0 = coeff, fine), but for
         # smaller rate values from the optimizer it could exceed 1.

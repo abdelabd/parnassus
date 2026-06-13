@@ -28,13 +28,31 @@ PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_
 # Observables
 # =============================================================================
 
-# NOTE: "chad_region_counts" is a per-event (n_events, 4) target carried for the
-# differentiable expected-count loss term; it is NOT a plottable 1-D/2-D observable
-# and has no prediction-side counterpart in load_pflow_targets_from_tensor, so the
-# intermediate-plot loop skips it (it is absent from the pred dict).
+# NOTE: the "*_region_counts" keys are per-event (n_events, n_regions) targets carried
+# for the differentiable expected-count loss terms (one per track species); they are
+# NOT plottable 1-D/2-D observables and have no prediction-side counterpart in
+# load_pflow_targets_from_tensor, so the intermediate-plot loop skips them (they are
+# absent from the pred dict).
 OBSERVABLES: list[str] = [
-    "pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid", "chad_region_counts",
+    "pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid",
+    "chad_region_counts", "electron_region_counts", "muon_region_counts",
 ]
+
+
+# =============================================================================
+# Count-term wiring
+# =============================================================================
+#
+# One row per differentiable per-species count term, shared by training.py (which
+# injects the card's expected-count output into the pred dict) and loss.py (which
+# matches it against the data target). Tuple = (card forward-output key, pred-dict
+# key, target-dict key). Keeping this in one place ensures the three files agree on
+# the per-species names.
+COUNT_TERM_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("ChargedHadronExpectedCounts", "chad_expected_counts", "chad_region_counts"),
+    ("ElectronExpectedCounts", "electron_expected_counts", "electron_region_counts"),
+    ("MuonExpectedCounts", "muon_expected_counts", "muon_region_counts"),
+)
 
 
 # =============================================================================

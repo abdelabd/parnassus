@@ -22,11 +22,13 @@ from __future__ import annotations
 import ot
 import torch
 
-# Weight of the differentiable charged-hadron expected-count term relative to the
-# per-pid sliced-Wasserstein terms. This term is the ONLY gradient source for
-# ChargedHadronTrackingEfficiency.eff_logits (the hard Gumbel mask is detached),
-# so its absolute scale mainly sets the reported-loss balance; Adam's per-parameter
-# normalization makes the eff step size insensitive to it. Tune if needed.
+from .config import COUNT_TERM_KEYS
+
+# Weight of each differentiable per-species expected-count term relative to the
+# per-pid sliced-Wasserstein terms. These terms are the ONLY gradient source for the
+# tracking-efficiency eff_logits (the hard Gumbel mask is detached), so the absolute
+# scale mainly sets the reported-loss balance; Adam's per-parameter normalization
+# makes the eff step size insensitive to it. Tune if needed.
 COUNT_WEIGHT = 0.5
 
 # =============================================================================
@@ -235,30 +237,41 @@ def per_event_wasserstein_loss(
         )
         event_wasserstein_distance[key] = sliced_sw2(pv, tv, event_scale)
 
-    # Differentiable charged-hadron expected-count term: the gradient source for
-    # eff_logits. pred["chad_expected_counts"] is the trainee's differentiable
-    # expected reconstructed count per RECO bin (from its reco-bin <- pre-reco-region
-    # migration; see CMSEnergyFlowDefault._charged_hadron_expected_reco_counts);
-    # target["chad_region_counts"] is the per-event reconstructed-DATA charged-hadron
-    # count in the same reco bins. We match the batch totals with a relative MSE; its
-    # fixed point is the true per-region efficiency (no truth information is used --
-    # only the trainee's own reco and the reco data).
+    # Differentiable per-species expected-count terms: the gradient source for the
+    # tracking-efficiency eff_logits. For each species, pred[...] is the trainee's
+    # differentiable expected reconstructed count per RECO bin (from its reco-bin <-
+    # pre-reco-region migration; see CMSEnergyFlowDefault._expected_reco_counts), and
+    # target[...] is the per-event reconstructed-DATA count of that species in the same
+    # reco bins. We match the batch totals; the fixed point is the true per-region
+    # efficiency (no truth information is used -- only the trainee's own reco and the
+    # reco data).
+    #
+    # Weighting is chi^2 / Poisson-style: (pred - tgt)^2 / (tgt + 1). The denominator
+    # is the bin's statistical variance (counts are ~Poisson), so each bin's residual
+    # is measured in units of its own statistical error. This self-balances the dense
+    # charged-hadron bins (~1e4 counts/batch, <1% noise) against the sparse electron /
+    # muon bins (tens of counts/batch, 12-45% Poisson noise) -- and bins within one
+    # species -- without per-species hand weights. The +1 floor keeps an empty bin's
+    # term finite and well-conditioned. The fixed point and gradient signs are
+    # unchanged vs a relative MSE; only the reported-loss scale differs (chi^2 is ~1
+    # per d.o.f. at convergence). These terms are gradient-decoupled from every other
+    # parameter (the migration M is gradient-free, and eff_logits get gradient ONLY
+    # here), so the choice of weighting cannot perturb the rest of the fit.
     count_terms: list[torch.Tensor] = []
-    pred_counts = pred.get("chad_expected_counts")
-    if pred_counts is not None and "chad_region_counts" in target:
+    for _out_key, pred_key, tgt_key in COUNT_TERM_KEYS:
+        pred_counts = pred.get(pred_key)
+        if pred_counts is None or tgt_key not in target:
+            continue
         pred_counts = pred_counts.reshape(-1)  # (n_regions,), differentiable
         tgt_counts = (
-            target["chad_region_counts"]
+            target[tgt_key]
             .reshape(-1, pred_counts.shape[0])
             .sum(dim=0)
             .detach()
             .to(device=pred_counts.device, dtype=pred_counts.dtype)
         )
-        # +1 in the denominator is a soft floor (counts are batch totals, so this is
-        # negligible) that keeps an empty region's term finite and well-conditioned.
-
-        rel_resid = (pred_counts - tgt_counts) / (tgt_counts + 1.0)
-        count_terms.append(COUNT_WEIGHT * (rel_resid**2).mean())
+        chi2 = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0)
+        count_terms.append(COUNT_WEIGHT * chi2.mean())
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
     # log_ht term is down-weighted by EVENT_WEIGHT relative to the per-pid object

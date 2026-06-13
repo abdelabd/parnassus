@@ -159,7 +159,12 @@ def test_select_trainable_rejects_mixed_lr_scale(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["cms_target_default.yaml", "debug_train_chad_scale_barrel.yaml"]
+    "name",
+    [
+        "cms_target_default.yaml",
+        "debug_train_chad_scale_barrel.yaml",
+        "debug_train_lepton_eff.yaml",
+    ],
 )
 def test_shipped_configs_load_and_apply(name: str) -> None:
     """The shipped configs cover the card exactly, apply, and select cleanly.

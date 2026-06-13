@@ -209,8 +209,9 @@ def main() -> None:
         root_file, n_events=args.n_events
     )
     truth_tensor = load_truth_events(arrays)
-    # ``target`` carries the per-reco-bin charged-hadron counts (chad_region_counts)
-    # the differentiable count term matches the trainee's reco-bin migration against.
+    # ``target`` carries the per-reco-bin per-species counts (chad/electron/muon
+    # _region_counts) the differentiable count terms match the trainee's reco-bin
+    # migration against.
     target = load_pflow_targets(arrays)
 
     train_truth_tensor, val_truth_tensor = split_truth_objects(truth_tensor, train_fraction=0.8, seed=args.seed)
