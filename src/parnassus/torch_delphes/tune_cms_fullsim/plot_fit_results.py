@@ -9,12 +9,9 @@ generated pseudodata ROOT file, and writes a set of PDF figures under
 The intended figures are:
 
 - ``loss_trajectory.pdf`` : loss vs Adam step on log-y scale.
-- ``param_drift_scales.pdf`` : chad-pT, ECal, HCal scale trajectories
-  vs step, with the known ground-truth values as horizontal dashed
-  lines.
-- ``param_drift_other.pdf`` : trajectories of the non-scale
-  perturbed parameters (resolution barrel ``a``, efficiency barrel
-  low-pT logit, K0S hadron fraction) with ground-truth lines.
+- ``param_drift_all.pdf`` : trajectories of **every** parameter vs step
+  (one subplot per tensor), with the known ground-truth values as
+  horizontal dashed lines.
 - ``observable_pt.pdf`` : PF pT histogram for target (full-sim) and
   trainee at init and after training.
 - ``observable_eta.pdf`` : same for pseudorapidity.
@@ -177,38 +174,81 @@ def plot_loss(history: dict, output_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_param_drift(
-    history: dict,
-    param_groups: dict[str, list[tuple[str, float]]],
-    output_path: Path,
-    title: str,
-) -> None:
-    """Plot per-parameter trajectories with horizontal ground-truth lines.
+# Predictable abbreviations so the per-tensor subplot titles stay short but
+# recognizable in the all-parameter grid.
+_TENSOR_TITLE_ABBREV: tuple[tuple[str, str], ...] = (
+    ("MomentumSmearing.resolution_module", "MS"),
+    ("TrackingEfficiency", "TrkEff"),
+    ("HadronFractions", "HadFrac"),
+    ("scale_module.", ""),
+    ("resolution_func.", ""),
+)
 
-    ``param_groups`` maps a group label to a list of
-    ``(history_key, target_value)`` pairs. One matplotlib axis is used
-    per group (stacked vertically).
+
+def _abbrev_tensor(base: str) -> str:
+    for long, short in _TENSOR_TITLE_ABBREV:
+        base = base.replace(long, short)
+    return base
+
+
+def plot_all_param_drift(
+    history: dict,
+    truth: dict[str, float],
+    output_path: Path,
+    ncols: int = 4,
+    title: str = "All parameter trajectories during Adam fit",
+) -> None:
+    """Plot EVERY parameter in the history snapshots vs Adam step.
+
+    One subplot per tensor (its scalar elements ``name[i]`` share an axis, so
+    they keep a common y-scale); scalar parameters with no index get their own
+    single-line subplot. Subplots are laid out in an ``ncols``-wide grid.
+    Dashed horizontal lines are the ground-truth values from ``truth`` (the
+    generation config), skipped for any key absent from it.
+
+    This covers the full parameter set, so the whole fit can be inspected at a
+    glance.
     """
     if not history.get("parameters"):
         raise ValueError("history dict has no 'parameters' snapshots")
     snapshots = history["parameters"]
     steps = history["step"]
 
-    n_groups = len(param_groups)
-    fig, axes = plt.subplots(n_groups, 1, figsize=(6.0, 2.6 * n_groups), sharex=True, squeeze=False)
-    for ax, (group_label, members) in zip(axes[:, 0], param_groups.items(), strict=True):
-        for key, target in members:
-            if key not in snapshots[0]:
-                continue
+    # Group scalar keys by their tensor name: "Module.tensor[i]" -> "Module.tensor".
+    # Bare scalars ("...barrel_a") form their own single-member group. First-seen
+    # order is preserved so related tensors stay adjacent in the grid.
+    def _idx(key: str) -> int:
+        return int(key[key.rindex("[") + 1 : -1]) if key.endswith("]") else -1
+
+    groups: dict[str, list[str]] = {}
+    for key in snapshots[0]:
+        base = key.rsplit("[", 1)[0] if key.endswith("]") else key
+        groups.setdefault(base, []).append(key)
+
+    n = len(groups)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(3.5 * ncols, 2.6 * nrows), squeeze=False
+    )
+    flat_axes = axes.flatten()
+    for ax, (base, keys) in zip(flat_axes, groups.items()):
+        for key in sorted(keys, key=_idx):
             trajectory = [snap[key] for snap in snapshots]
-            (line,) = ax.plot(steps, trajectory, label=key)
-            ax.axhline(target, color=line.get_color(), linestyle="--", alpha=0.4)
-        ax.set_ylabel(group_label)
+            label = f"[{_idx(key)}]" if key.endswith("]") else "value"
+            (line,) = ax.plot(steps, trajectory, label=label, linewidth=1.2)
+            if key in truth:
+                ax.axhline(truth[key], color=line.get_color(), linestyle="--", alpha=0.4)
+        ax.set_title(_abbrev_tensor(base), fontsize=7)
+        ax.tick_params(labelsize=6)
+        ax.set_xlabel("Adam step", fontsize=6)
         ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=8)
-    axes[-1, 0].set_xlabel("Adam step")
-    fig.suptitle(title)
-    fig.tight_layout()
+        ax.legend(loc="best", fontsize=5, ncol=2 if len(keys) > 3 else 1)
+    # Hide the trailing empty grid cells.
+    for ax in flat_axes[n:]:
+        ax.set_visible(False)
+
+    fig.suptitle(f"{title}  ({len(snapshots[0])} parameters)", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.99))
     fig.savefig(output_path)
     plt.close(fig)
 
@@ -678,54 +718,15 @@ def main() -> None:
     plot_loss(history, args.output_dir / "loss_trajectory.pdf")
     print("  wrote loss_trajectory.pdf")
 
-    # ----- 2. Scale parameter drift -----
-    # Truth values are read from the param config (per eta region).
-    scale_members: dict[str, list[tuple[str, float]]] = {
-        "charged-hadron pT scale": [
-            (k, truth[k])
-            for k in (
-                f"ChargedHadronMomentumSmearing.resolution_module.scale_raw[{i}]"
-                for i in range(3)
-            )
-        ],
-        "ECal energy scale": [
-            (f"ECal.scale_module.scale_raw[{i}]", truth[f"ECal.scale_module.scale_raw[{i}]"])
-            for i in range(3)
-        ],
-        "HCal energy scale": [
-            (f"HCal.scale_module.scale_raw[{i}]", truth[f"HCal.scale_module.scale_raw[{i}]"])
-            for i in range(2)
-        ],
-    }
-    plot_param_drift(
+    # ----- 2. All parameter trajectories (one subplot per tensor) -----
+    plot_all_param_drift(
         history,
-        scale_members,
-        args.output_dir / "param_drift_scales.pdf",
-        title="Scale-parameter drift during Adam fit",
+        truth,
+        args.output_dir / "param_drift_all.pdf",
     )
-    print("  wrote param_drift_scales.pdf")
+    print("  wrote param_drift_all.pdf")
 
-    # ----- 3. Other representative parameters (truth from the config) -----
-    other_members: dict[str, list[tuple[str, float]]] = {
-        "chad res. a (barrel)": [
-            (k := "ChargedHadronMomentumSmearing.resolution_module.a_raw[0]", truth[k]),
-        ],
-        "chad eff. (barrel, low-pT)": [
-            (k := "ChargedHadronTrackingEfficiency.eff_logits[0]", truth[k]),
-        ],
-        "K0-short ECal fraction": [
-            (k := "HadronFractions.k0s_logit", truth[k]),
-        ],
-    }
-    plot_param_drift(
-        history,
-        other_members,
-        args.output_dir / "param_drift_other.pdf",
-        title="Resolution / efficiency / fraction drift during Adam fit",
-    )
-    print("  wrote param_drift_other.pdf")
-
-    # ----- 4. Observable histograms (target vs init vs final) -----
+    # ----- 3. Observable histograms (target vs init vs final) -----
     arrays = load_cms_flow_root(args.root_file, n_events=args.n_events_for_plots)
     truth_tensor = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
@@ -802,7 +803,7 @@ def main() -> None:
     )
     print("  wrote observable_multiplicity.pdf")
 
-    # ----- 5. Optional: per-module intermediate observables (--debug) -----
+    # ----- 4. Optional: per-module intermediate observables (--debug) -----
     # Mirrors the --debug branch list of validate_torch_delphes.py: for every
     # post-module output (ParticleAfterProp, ChargedHadronEfficiency,
     # ECalTower, ...), overlay target / trainee-init / trainee-fitted on the
