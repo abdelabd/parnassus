@@ -77,11 +77,13 @@ def load_cms_flow_root(
 # Constructing inputs
 # =============================================================================
 
-def load_truth_events(arrays: dict[str, np.ndarray],):
-    """
-    This task will pick truth particles from the input array, then it will
-    pad the objects in each event to the max number of particles across events, and finally
-    the output has shape (n_events, max_n_particles, n_features) in tensor form.
+def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
+    """Build the per-event ``(n_particles, N_FEATURES)`` truth rows (float64).
+
+    Shared by :func:`load_truth_events` (pads + stacks them into a dense tensor)
+    and :func:`load_truth_events_ragged` (keeps them ragged). Empty events (zero
+    truth particles) are skipped, so the returned list has one entry per
+    *non-empty* event, in file order.
     """
     rows_list: list[np.ndarray] = []
     key_0 = arrays.keys().__iter__().__next__()
@@ -129,6 +131,16 @@ def load_truth_events(arrays: dict[str, np.ndarray],):
         row[:, ColumnMap.MASS] = mass
         row[:, ColumnMap.EVENT_NUMBER] = i
         rows_list.append(row)
+    return rows_list
+
+
+def load_truth_events(arrays: dict[str, np.ndarray],):
+    """
+    This task will pick truth particles from the input array, then it will
+    pad the objects in each event to the max number of particles across events, and finally
+    the output has shape (n_events, max_n_particles, n_features) in tensor form.
+    """
+    rows_list = _build_truth_rows(arrays)
     if not rows_list:
         return torch.zeros((0, N_FEATURES), dtype=torch.float64)
 
@@ -146,8 +158,23 @@ def load_truth_events(arrays: dict[str, np.ndarray],):
             padded_row = row
         padded_rows.append(padded_row)
     stacked_rows = np.stack(padded_rows, axis=0)
-    
+
     return torch.from_numpy(stacked_rows)
+
+
+def load_truth_events_ragged(arrays: dict[str, np.ndarray]) -> list[torch.Tensor]:
+    """Ragged counterpart of :func:`load_truth_events`.
+
+    Returns the per-event truth particles as a ``list`` of ``(n_particles_i,
+    N_FEATURES)`` float64 tensors (one per non-empty event, file order) instead
+    of padding every event up to the GLOBAL max multiplicity and stacking into a
+    dense ``(n_events, max_n_particles, N_FEATURES)`` tensor. The dense form wastes
+    ~max/mean memory (it pads to the busiest event in the whole file, ~50 GB at
+    100k events) and the fit loop immediately un-pads it anyway, so the ragged
+    list + per-batch padding (see ``DelphesDataSet`` / ``delphes_collate_fn``) is
+    numerically identical and an order of magnitude smaller.
+    """
+    return [torch.from_numpy(row) for row in _build_truth_rows(arrays)]
 
 
 def restore_event_format(
@@ -202,11 +229,14 @@ def restore_event_format(
 # Constructing targets
 # =============================================================================
 
-def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
-    """
-    This task will pick the pflow objects from the input array, then it will
-    pad the objects in each event to the max number of particles across events, and finally
-    the output is a dict of tensors, each with shape (n_events, max_n_particles) except for multiplicity and ht which have shape (n_events,).
+def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
+    """Build the per-event pflow target arrays shared by the dense and ragged loaders.
+
+    Returns ``(n_events, all_pt, all_eta, all_e, all_pids, per_event_mult,
+    per_event_ht, per_event_region_counts)`` where the ``all_*`` are per-event
+    lists of variable-length 1-D float64 arrays (``all_pids`` int64) and the
+    ``per_event_*`` are dense ``(n_events, ...)`` arrays. Every event is kept
+    (including empty ones), so the first axis is the full event count.
     """
     # get num of events
     key_0 = arrays.keys().__iter__().__next__()
@@ -262,6 +292,35 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
             for b, region_mask in enumerate(spec.region_masks(pt, abs_eta)):
                 per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
 
+    return (
+        n_events,
+        all_pt,
+        all_eta,
+        all_e,
+        all_pids,
+        per_event_mult,
+        per_event_ht,
+        per_event_region_counts,
+    )
+
+
+def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
+    """
+    This task will pick the pflow objects from the input array, then it will
+    pad the objects in each event to the max number of particles across events, and finally
+    the output is a dict of tensors, each with shape (n_events, max_n_particles) except for multiplicity and ht which have shape (n_events,).
+    """
+    (
+        n_events,
+        all_pt,
+        all_eta,
+        all_e,
+        all_pids,
+        per_event_mult,
+        per_event_ht,
+        per_event_region_counts,
+    ) = _build_pflow_event_data(arrays)
+
     # shape of all_pt, all_eta, all_e is (num_events, num_particles_in_event); num_particles_in_event can vary across events
     # pad to the max num_particles across events and stack into a single tensor of shape (num_events, max_num_particles)
     max_n_particles = max(pt.shape[0] for pt in all_pt)
@@ -305,6 +364,56 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
         "log_pt": torch.from_numpy(log_pt_pad),
         "log_E": torch.from_numpy(log_E_pad),
         "pid": torch.from_numpy(pids_pad),
+        "multiplicity": torch.from_numpy(per_event_mult),
+        "ht": torch.from_numpy(per_event_ht),
+        "log_ht": torch.from_numpy(per_event_log_ht),
+        **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
+    }
+
+
+def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
+    """Ragged counterpart of :func:`load_pflow_targets`.
+
+    The per-particle observables (``pt``, ``eta``, ``log_pt``, ``log_E``, ``pid``)
+    are returned as a ``list`` of per-event 1-D float64 tensors instead of dense
+    ``(n_events, max_n_particles)`` arrays padded to the GLOBAL max multiplicity.
+    The per-event scalars (``multiplicity``, ``ht``, ``log_ht``) and the per-region
+    count targets (``*_region_counts``) stay dense ``(n_events, ...)`` exactly as in
+    the dense loader. Per-batch padding in ``delphes_collate_fn`` reconstructs the
+    same batch the fit loop expects (padded slots carry ``pid == 0`` and are dropped
+    by the loss), so this is numerically identical at a fraction of the memory.
+    """
+    (
+        n_events,
+        all_pt,
+        all_eta,
+        all_e,
+        all_pids,
+        per_event_mult,
+        per_event_ht,
+        per_event_region_counts,
+    ) = _build_pflow_event_data(arrays)
+
+    # Per-event log(pt) / log(E) on the real particles only -- no padded slots to
+    # mask out. The np.maximum floors mirror the dense loader exactly (a no-op for
+    # the always-positive pflow pt/E, kept for bit-parity).
+    log_pt_list = [np.log(np.maximum(pt, log_pt_floor)) for pt in all_pt]
+    log_E_list = [np.log(np.maximum(e, 1e-6)) for e in all_e]
+
+    # log(HT); floor guards log(0) on the rare empty event (mirrors the dense loader).
+    per_event_log_ht = np.log(np.maximum(per_event_ht, 1e-6))
+
+    def _to_list(arrs: list[np.ndarray]) -> list[torch.Tensor]:
+        # float64 throughout so per-batch pad_sequence and the loss's torch.stack
+        # agree on dtype (the dense loader's pids_pad is float64 too).
+        return [torch.from_numpy(np.ascontiguousarray(a, dtype=np.float64)) for a in arrs]
+
+    return {
+        "pt": _to_list(all_pt),
+        "eta": _to_list(all_eta),
+        "log_pt": _to_list(log_pt_list),
+        "log_E": _to_list(log_E_list),
+        "pid": _to_list(all_pids),
         "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
@@ -462,4 +571,49 @@ def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float =
 
     train_target = {k: v[train_indices] for k, v in target.items()}
     val_target = {k: v[val_indices] for k, v in target.items()}
+    return train_target, val_target
+
+
+def split_truth_objects_ragged(
+    truth_ragged: list[torch.Tensor], train_fraction: float = 0.8, seed: int = 42
+):
+    """Ragged counterpart of :func:`split_truth_objects`.
+
+    Splits the per-event list along the event axis with the SAME seeded
+    permutation as the dense split (``torch.randperm(len(list))``), so the train
+    / val event membership is identical to the dense path.
+    """
+    n_events = len(truth_ragged)
+    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
+    split_idx = int(train_fraction * n_events)
+    train_indices = indices[:split_idx].tolist()
+    val_indices = indices[split_idx:].tolist()
+    train = [truth_ragged[i] for i in train_indices]
+    val = [truth_ragged[i] for i in val_indices]
+    return train, val
+
+
+def split_pflow_targets_ragged(
+    target: dict, train_fraction: float = 0.8, seed: int = 42
+):
+    """Ragged counterpart of :func:`split_pflow_targets`.
+
+    Per-particle entries are ``list`` (indexed by event), per-event entries are
+    dense tensors (fancy-indexed). The seeded permutation matches the dense split
+    (``n_events`` is the full event count, read from the per-event ``multiplicity``
+    tensor), so train / val membership is identical to the dense path.
+    """
+    n_events = target["multiplicity"].shape[0]  # full event count (per-event tensor)
+    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
+    split_idx = int(train_fraction * n_events)
+    train_indices = indices[:split_idx]
+    val_indices = indices[split_idx:]
+
+    def _split_one(v, idx_tensor):
+        if isinstance(v, list):
+            return [v[i] for i in idx_tensor.tolist()]
+        return v[idx_tensor]
+
+    train_target = {k: _split_one(v, train_indices) for k, v in target.items()}
+    val_target = {k: _split_one(v, val_indices) for k, v in target.items()}
     return train_target, val_target

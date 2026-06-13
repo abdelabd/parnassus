@@ -49,6 +49,7 @@ only re-runs the trainee on the truth input.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import socket
 from pathlib import Path
@@ -60,7 +61,11 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
 from .config import _DEFAULT_LR
 from .data import (
-    load_cms_flow_root, load_truth_events, load_pflow_targets, split_truth_objects, split_pflow_targets,
+    load_cms_flow_root,
+    load_truth_events_ragged,
+    load_pflow_targets_ragged,
+    split_truth_objects_ragged,
+    split_pflow_targets_ragged,
 )
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
@@ -183,14 +188,23 @@ def main() -> None:
     arrays = load_cms_flow_root(
         root_file, n_events=args.n_events
     )
-    truth_tensor = load_truth_events(arrays)
+    # Ragged (no global padding): truth particles are kept as a per-event list and
+    # each batch is padded to its own max in delphes_collate_fn. Padding every event
+    # to the GLOBAL max multiplicity here would allocate ~50 GB at 100k events -- and
+    # the fit loop un-pads it on the very next line anyway.
+    truth_ragged = load_truth_events_ragged(arrays)
     # ``target`` carries the per-reco-bin per-species counts (chad/electron/muon
     # _region_counts) the differentiable count terms match the trainee's reco-bin
     # migration against.
-    target = load_pflow_targets(arrays)
+    target = load_pflow_targets_ragged(arrays)
 
-    train_truth_tensor, val_truth_tensor = split_truth_objects(truth_tensor, train_fraction=0.8, seed=args.seed)
-    train_target, val_target = split_pflow_targets(target, train_fraction=0.8, seed=args.seed)
+    # The uproot arrays dict is the largest remaining transient; free it before the
+    # train/val split so peak RSS stays low.
+    del arrays
+    gc.collect()
+
+    train_truth_tensor, val_truth_tensor = split_truth_objects_ragged(truth_ragged, train_fraction=0.8, seed=args.seed)
+    train_target, val_target = split_pflow_targets_ragged(target, train_fraction=0.8, seed=args.seed)
 
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)

@@ -31,14 +31,17 @@ from parnassus.torch_delphes.tune_cms_fullsim import (
 from parnassus.torch_delphes.tune_cms_fullsim.data import (
     load_pflow_targets,
     load_pflow_targets_from_tensor,
+    load_pflow_targets_ragged,
     load_truth_events,
+    load_truth_events_ragged,
     restore_event_format,
-    split_pflow_targets,
-    split_truth_objects,
+    split_pflow_targets_ragged,
+    split_truth_objects_ragged,
 )
 from parnassus.torch_delphes.tune_cms_fullsim.dataloader import (
     DelphesDataLoader,
     DelphesDataSet,
+    delphes_collate_fn,
 )
 from parnassus.torch_delphes.tune_cms_fullsim.config import COUNT_TERM_KEYS
 from parnassus.torch_delphes.tune_cms_fullsim.loss import per_event_wasserstein_loss
@@ -68,10 +71,10 @@ def _make_dataloaders(
     arrays: dict, device: torch.device, batch_size: int = 8, seed: int = 0
 ) -> tuple[DelphesDataLoader, DelphesDataLoader]:
     """Build train/val dataloaders from loaded ROOT arrays (mirrors the CLI)."""
-    truth = load_truth_events(arrays)
-    target = load_pflow_targets(arrays)
-    tr_truth, va_truth = split_truth_objects(truth, train_fraction=0.8, seed=seed)
-    tr_tgt, va_tgt = split_pflow_targets(target, train_fraction=0.8, seed=seed)
+    truth = load_truth_events_ragged(arrays)
+    target = load_pflow_targets_ragged(arrays)
+    tr_truth, va_truth = split_truth_objects_ragged(truth, train_fraction=0.8, seed=seed)
+    tr_tgt, va_tgt = split_pflow_targets_ragged(target, train_fraction=0.8, seed=seed)
     tr_ds = DelphesDataSet(tr_truth, tr_tgt, device=device)
     va_ds = DelphesDataSet(va_truth, va_tgt, device=device)
     return (
@@ -179,6 +182,71 @@ def test_load_pflow_targets_region_counts_cross_check(fixture_root: Path):
         barrel_low = (np.abs(eta) <= 1.5) & (pt > 0.1) & (pt <= 1.0)
         total_manual += int(np.sum(is_e & barrel_low))
     assert int(tgt["electron_region_counts"][:, 0].sum()) == total_manual
+
+
+def test_load_truth_events_ragged_matches_dense(fixture_root: Path):
+    """The ragged truth loader holds exactly the dense loader's non-padded rows.
+
+    The dense ``(n_events, max_n_particles, N_FEATURES)`` tensor with its zero
+    padding removed must equal the concatenation of the ragged per-event tensors,
+    in the same order -- i.e. per-batch padding loses nothing.
+    """
+    arrays = load_cms_flow_root(fixture_root, n_events=20)
+    dense = load_truth_events(arrays)            # (n, max_n, N_FEATURES)
+    ragged = load_truth_events_ragged(arrays)    # list of (n_i, N_FEATURES)
+
+    assert len(ragged) == dense.shape[0]
+    # Every real truth row has STATUS=1, so it is never all-zero; the mask cleanly
+    # separates real rows from padding.
+    dense_nonpad = dense[torch.any(dense != 0, dim=-1)]
+    ragged_cat = torch.cat(ragged, dim=0) if ragged else dense_nonpad
+    assert ragged_cat.shape == dense_nonpad.shape
+    assert torch.equal(ragged_cat, dense_nonpad)
+    # Per-event multiplicities line up too.
+    dense_counts = torch.any(dense != 0, dim=-1).sum(dim=1)
+    ragged_counts = torch.tensor([t.shape[0] for t in ragged])
+    assert torch.equal(ragged_counts, dense_counts)
+
+
+def test_delphes_collate_reproduces_dense_batch(fixture_root: Path):
+    """Per-batch padding reproduces the dense global-padding loaders bit-for-bit.
+
+    Collating the whole (unshuffled) event set pads each entry to the same global
+    max, so the collated batch must equal the dense tensors element-for-element --
+    truth card input and every target observable. A sub-batch that omits the
+    busiest event pads to a strictly smaller width (the memory win).
+    """
+    arrays = load_cms_flow_root(fixture_root, n_events=12)
+    device = torch.device("cpu")
+
+    dense_truth = load_truth_events(arrays)
+    dense_tgt = load_pflow_targets(arrays)
+
+    ragged = load_truth_events_ragged(arrays)
+    target = load_pflow_targets_ragged(arrays)
+    ds = DelphesDataSet(ragged, target, device=device)
+    batch = delphes_collate_fn([ds[i] for i in range(len(ds))])
+
+    # Truth: full set -> per-batch max == global max -> identical to the dense tensor.
+    assert torch.equal(batch["truth_particles"], dense_truth)
+    # The un-padded card input (the way training.py builds it) is identical.
+    dense_input = dense_truth[torch.any(dense_truth != 0, dim=-1)]
+    ragged_input = batch["truth_particles"][torch.any(batch["truth_particles"] != 0, dim=-1)]
+    assert torch.equal(ragged_input, dense_input)
+
+    # Targets: only directly comparable when no truth event was skipped (empty
+    # truth events would desync the dataset's truth-count from the full target
+    # count -- a pre-existing behavior we deliberately preserve).
+    if len(ragged) == dense_tgt["multiplicity"].shape[0]:
+        for key in OBSERVABLES:
+            assert torch.equal(batch[key], dense_tgt[key]), f"mismatch in target '{key}'"
+
+    # Omitting the unique busiest event pads to a strictly smaller width.
+    lengths = [t.shape[0] for t in ragged]
+    if lengths.count(max(lengths)) == 1:
+        busiest = lengths.index(max(lengths))
+        sub = delphes_collate_fn([ds[i] for i in range(len(ds)) if i != busiest])
+        assert sub["truth_particles"].shape[1] < dense_truth.shape[1]
 
 
 # ---------------------------------------------------------------------------
