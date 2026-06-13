@@ -18,11 +18,9 @@ are available; the active one is picked at runtime via ``--loss`` (CLI) or the
   with a *differentiable* all-reduce so the global loss equals the loss
   computed on the union of every rank's events.
 
-The histogram primitives :func:`soft_histogram` and :func:`histogram_mse_loss`
-are also used as a per-epoch diagnostic by
-:mod:`tune_cms_fullsim.intermediate_plots` (each plot is annotated with the
-per-observable soft-hist MSE), so they stay here regardless of which training
-loss is selected.
+The histogram primitives :func:`soft_histogram` and
+:func:`histogram_mse_loss` are kept here as reusable utilities for observable
+distribution diagnostics, regardless of which training loss is selected.
 
 Selecting the active loss
 -------------------------
@@ -118,8 +116,8 @@ def histogram_mse_loss(
 ) -> torch.Tensor:
     """MSE between two soft histograms, both normalized to densities.
 
-    Used by :mod:`tune_cms_fullsim.intermediate_plots` as a per-epoch
-    distribution-mismatch diagnostic (it is not part of the training loss).
+    Useful as a distribution-mismatch diagnostic (it is not part of the
+    training loss).
 
     Returns
     -------

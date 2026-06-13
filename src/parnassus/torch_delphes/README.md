@@ -139,7 +139,7 @@ Loads the pseudodata, builds a trainee `CMSEnergyFlowDefault` initialized from `
 selects the trainable parameters, and runs Adam to minimize the distance between the trainee's
 predicted observables and the full-sim targets. Uses a `ReduceLROnPlateau` scheduler
 (halves the LR after 4 stale epochs) and early stopping (patience 10). DDP-aware: under SLURM
-`srun` it shards across ranks, and only rank 0 logs, plots, and writes history.
+`srun` it shards across ranks, and only rank 0 logs and writes history.
 
 ### Flags
 
@@ -153,8 +153,6 @@ predicted observables and the full-sim targets. Uses a `ReduceLROnPlateau` sched
 | `--seed` | int | `0` | Torch RNG seed and train/validation split seed. |
 | `--history-path` | path | `None` | If set, write the full training history (loss trajectory + per-epoch parameter snapshots) to this JSON. **Required input for Step 3.** |
 | `--fixture-path` | path | `/tmp/tune_cms_fullsim_fixture.root` | Where the synthetic fallback fixture is written/read when `--root-file` is absent. |
-| `--intermediate-plot-dir` | str | `doc/figures/intermediate_plots` | Directory for per-epoch diagnostic PDFs (`intermediate_epoch_<step>.pdf`), one observable per page, overlaying target / epoch-0 / current prediction. Pass `""` to disable. |
-| `--plot-every` | int | `1` | Save intermediate plots every N epochs (`1` = every epoch). The final / early-stopped epoch is always plotted. |
 
 ### The `--lr × lr_scale` rule
 
@@ -281,7 +279,6 @@ programmatically, see [param_configs/make_default_configs.py](param_configs/make
 |---|---|---|
 | Pseudodata ROOT | `src/parnassus/tests/benchmark_data/cms_pseudodata.root` | Step 1 (`--output`) |
 | Training history JSON | (set via `--history-path`, e.g. `doc/fit_results/all66_history.json`) | Step 2 |
-| Per-epoch diagnostic PDFs | `doc/figures/intermediate_plots/intermediate_epoch_<step>.pdf` | Step 2 (`--intermediate-plot-dir`) |
 | Validation PDFs | `doc/figures/*.pdf` | Step 3 (`--output-dir`) |
 | Synthetic fixture (fallback) | `/tmp/tune_cms_fullsim_fixture.root` | Step 2 when `--root-file` is absent |
 
@@ -296,4 +293,4 @@ programmatically, see [param_configs/make_default_configs.py](param_configs/make
 - **Use the *generation* config for `--truth-config` in Step 3** — passing a training config makes
   the truth reference lines wrong (they'd show the off-truth start value). The plotter warns you.
 - **Scale parameters must stay inside `(0.7, 1.3)`** or the `tanh` transform produces NaN.
-- **DDP:** under `srun` only rank 0 writes logs, plots, and the history JSON.
+- **DDP:** under `srun` only rank 0 writes logs and the history JSON.

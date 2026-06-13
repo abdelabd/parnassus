@@ -14,8 +14,6 @@ This module holds the training machinery proper:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -25,7 +23,6 @@ from tqdm import tqdm
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.param_config import to_physical
 
-from .config import OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_dist, _is_main
 from .loss import LOSS_CHOICES, get_loss_fn
@@ -54,8 +51,6 @@ def fit_card_to_fullsim(
     snapshot_parameters: bool = False,
     rank: int = 0,
     device: torch.device = torch.device("cpu"),
-    intermediate_plot_dir: str | Path | None = None,
-    plot_every: int = 1,
     early_stopping_patience: int | None = 40,
     loss_name: str = "wasserstein",
 ) -> dict[str, list[float]]:
@@ -77,16 +72,6 @@ def fit_card_to_fullsim(
         dict recording every learnable parameter value after step i.
         Off by default because it is O(n_steps * 66) in memory and
         only needed for plotting parameter-drift trajectories.
-    intermediate_plot_dir : str | Path | None
-        If set (and not ``""``), write a multi-page PDF per epoch
-        (``intermediate_epoch_<step>.pdf``, one observable per page)
-        comparing the trainee prediction to the full-sim target on the
-        validation set, with each observable's soft-hist MSE in the page
-        title. Only the main rank plots. ``None``/``""`` disables it. See
-        :mod:`tune_cms_fullsim.intermediate_plots`.
-    plot_every : int
-        Save intermediate plots every ``plot_every`` epochs (default 1 =
-        every epoch). The final / early-stopped epoch is always plotted.
     early_stopping_patience : int | None
         Number of epochs with no improvement in ``val_loss`` after which
         training is stopped. Set to ``None`` (or any value ``<= 0``) to
@@ -131,42 +116,6 @@ def fit_card_to_fullsim(
                 f"({len(g['params'])} tensors)"
             )
     lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4)
-
-    # Per-epoch intermediate plots: resolve the output dir (None/"" disables),
-    # create it once on the main rank, and remember the epoch-0 prediction so
-    # later epochs can draw it as a faint "initial" reference.
-    plot_dir = (
-        Path(intermediate_plot_dir) if intermediate_plot_dir not in (None, "") else None
-    )
-    plot_every = max(1, plot_every)
-    if plot_dir is not None and _is_main(rank):
-        plot_dir.mkdir(parents=True, exist_ok=True)
-    init_pred_by_key: dict[str, torch.Tensor] | None = None
-
-    def _render_intermediate(
-        acc_pred: dict[str, list[torch.Tensor]],
-        acc_tgt: dict[str, list[torch.Tensor]],
-        step: int,
-        val_loss: float,
-    ) -> None:
-        """Concatenate the accumulated val observables and write one PDF."""
-        nonlocal init_pred_by_key
-        pred_by_key = {k: torch.cat(v) for k, v in acc_pred.items() if v}
-        target_by_key = {k: torch.cat(v) for k, v in acc_tgt.items() if v}
-        if init_pred_by_key is None:
-            init_pred_by_key = {k: t.clone() for k, t in pred_by_key.items()}
-        # Lazy import keeps matplotlib out of the training import path.
-        from .intermediate_plots import save_intermediate_observable_plots
-        observables = OBSERVABLES
-        save_intermediate_observable_plots(
-            pred_by_key,
-            target_by_key,
-            observables,
-            step,
-            plot_dir,
-            val_loss=val_loss,
-            init_by_key=init_pred_by_key,
-        )
 
     history: dict[str, list] = {"step": [], "loss": [], "val_loss": []}
     if snapshot_parameters:
@@ -271,15 +220,6 @@ def fit_card_to_fullsim(
         if _is_main(rank) and log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
             tqdm.write(f"  step {step:3d}/{n_steps}  loss = {print_loss:.4e}")
 
-        # Per-epoch intermediate plots: collect the full validation set's
-        # observables on the main rank so we can render below. We collect on
-        # every plot-enabled epoch (not just scheduled ones) so the early-
-        # stopped epoch can always be rendered before the break.
-        collect_obs = plot_dir is not None and _is_main(rank)
-        plot_this_epoch = collect_obs and (step % plot_every == 0 or step == n_steps - 1)
-        acc_pred: dict[str, list[torch.Tensor]] = {}
-        acc_tgt: dict[str, list[torch.Tensor]] = {}
-
         # validation loop --- no grad, no step, just logging
         with torch.no_grad():
             card.eval()
@@ -303,24 +243,6 @@ def fit_card_to_fullsim(
                     pred_observables, target_observables
                 )
                 val_loss_acc += val_loss.detach()
-
-                # Accumulate the flattened, padding/ghost-stripped values for
-                # each observable (same cut the loss uses: pt != 0 for 2-D
-                # per-particle obs; 1-D per-event obs pass through). Detached to
-                # CPU so memory stays flat and concatenation across batches with
-                # different max_n_objects is safe.
-                if collect_obs:
-                    for key in OBSERVABLES:
-                        if key not in pred_observables or key not in target_observables:
-                            continue
-                        pv, tv = pred_observables[key], target_observables[key]
-                        if pv.ndim >= 2:
-                            pv = pv[pred_observables["pt"] != 0]
-                            tv = tv[target_observables["pt"] != 0]
-                        else:
-                            pv, tv = pv.reshape(-1), tv.reshape(-1)
-                        acc_pred.setdefault(key, []).append(pv.detach().cpu())
-                        acc_tgt.setdefault(key, []).append(tv.detach().cpu())
             val_loss_acc /= len(val_dataloader)
             val_loss_acc = _all_reduce_mean(val_loss_acc)
             print_val_loss = float(val_loss_acc)
@@ -335,12 +257,6 @@ def fit_card_to_fullsim(
         # lr scheduler step
         lr_scheduler.step(val_loss_acc)
 
-        # Save the per-epoch intermediate observable plots (scheduled epochs).
-        rendered = False
-        if plot_this_epoch:
-            _render_intermediate(acc_pred, acc_tgt, step, print_val_loss)
-            rendered = True
-
         # early stopping check
         if val_loss_acc < min_loss:
             min_loss = val_loss_acc
@@ -348,10 +264,6 @@ def fit_card_to_fullsim(
         elif early_stopping_enabled:
             patience_counter += 1
             if patience_counter >= early_stopping_patience:
-                # Always render the final (early-stopped) epoch, even when it is
-                # not a scheduled plot_every epoch.
-                if collect_obs and not rendered:
-                    _render_intermediate(acc_pred, acc_tgt, step, print_val_loss)
                 if _is_main(rank):
                     tqdm.write(f"Early stopping at step {step} with val_loss {print_val_loss:.4e}")
                 break

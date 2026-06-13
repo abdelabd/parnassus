@@ -154,28 +154,6 @@ def main() -> None:
         default=Path("/tmp/tune_cms_fullsim_fixture.root"),
         help="Where to write (and load) the synthetic fallback fixture.",
     )
-    parser.add_argument(
-        "--intermediate-plot-dir",
-        type=str,
-        default="",
-        help=(
-            "Directory for per-epoch intermediate observable plots: one "
-            "multi-page PDF per epoch (intermediate_epoch_<step>.pdf, one "
-            "observable per page) comparing the trainee prediction to the "
-            "full-sim target, with each observable's soft-hist MSE in the "
-            "page title as a distribution-mismatch diagnostic. Pass an empty "
-            "string to disable (default: disabled). Only the main rank plots."
-        ),
-    )
-    parser.add_argument(
-        "--plot-every",
-        type=int,
-        default=1,
-        help=(
-            "Save intermediate plots every N epochs (default 1 = every epoch). "
-            "The final / early-stopped epoch is always plotted."
-        ),
-    )
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -304,8 +282,6 @@ def main() -> None:
         snapshot_parameters=args.history_path is not None,
         rank=rank,
         device=device,
-        intermediate_plot_dir=args.intermediate_plot_dir,
-        plot_every=args.plot_every,
         loss_name=args.loss,
     )
 
