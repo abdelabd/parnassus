@@ -1,13 +1,13 @@
 """Tests for the ``tune_cms_fullsim`` harness.
 
-These tests cover the pipeline end-to-end using the synthetic fixture writer
-(the real Zenodo sample is not in the test tree): generate a cms-flow-format
-ROOT file, load it, build the padded truth particle tensor and the target
-observable dict, run a forward + backward step on the learnable CMS card, and
-run the Adam fit loop for a few steps.
-
-Real-sample smoke tests are the user's responsibility (download the file and
-run ``python -m parnassus.torch_delphes.tune_cms_fullsim --root-file ...``).
+These tests cover the pipeline end-to-end against the committed Pythia-generated
+pseudodata (``benchmark_data/cms_pseudodata.root``): load it, build the padded
+truth particle tensor and the target observable dict, run a forward + backward
+step on the learnable CMS card, and run the Adam fit loop for a few steps. They
+**skip** when that file is not present in the tree -- proper data is a
+prerequisite for the fit, so there is no synthetic stand-in. Generate the file
+with :mod:`parnassus.torch_delphes.generate_pseudodata` (or download the real
+Zenodo sample) and rerun.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from parnassus.torch_delphes.tune_cms_fullsim import (
     TRUTH_BRANCHES,
     fit_card_to_fullsim,
     load_cms_flow_root,
-    write_synthetic_fixture,
 )
 from parnassus.torch_delphes.tune_cms_fullsim.data import (
     load_pflow_targets,
@@ -49,13 +48,20 @@ from parnassus.torch_delphes.tune_cms_fullsim.loss import per_event_wasserstein_
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
+PSEUDODATA_PATH = Path(__file__).parent / "benchmark_data" / "cms_pseudodata.root"
+
 
 @pytest.fixture(scope="module")
-def fixture_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Module-scoped synthetic ROOT fixture so we write it once per run."""
-    path = tmp_path_factory.mktemp("fullsim_fixture") / "fixture.root"
-    write_synthetic_fixture(path, n_events=30, particles_per_event=50, seed=0)
-    return path
+def fixture_root() -> Path:
+    """The committed Pythia pseudodata; skip when it isn't present in the tree.
+
+    There is no synthetic stand-in -- proper data is a prerequisite for the fit.
+    Generate the file with ``parnassus.torch_delphes.generate_pseudodata`` (or
+    download the real Zenodo sample) and rerun.
+    """
+    if not PSEUDODATA_PATH.exists():
+        pytest.skip("committed pseudodata file not available")
+    return PSEUDODATA_PATH
 
 
 def _make_dataloaders(
@@ -96,13 +102,13 @@ def _trainable_config(card: CMSEnergyFlowDefault, tmp_path: Path, prefixes: list
 
 
 def test_fixture_has_expected_branches(fixture_root: Path):
-    """The fixture is readable and contains every branch the script reads."""
+    """The pseudodata file is readable and contains every branch the script reads."""
     import uproot
 
     with uproot.open(str(fixture_root)) as f:
         keys = set(f["event_tree"].keys())
     for branch in TRUTH_BRANCHES + PFLOW_BRANCHES:
-        assert branch in keys, f"missing branch {branch} in fixture"
+        assert branch in keys, f"missing branch {branch} in pseudodata"
 
 
 def test_load_cms_flow_root_roundtrip(fixture_root: Path):
@@ -183,7 +189,10 @@ def test_load_pflow_targets_region_counts_cross_check(fixture_root: Path):
 def test_one_step_gradient_is_finite(fixture_root: Path):
     """A single forward + backward step produces a finite loss and finite
     gradients on every parameter that the loss reaches."""
-    arrays = load_cms_flow_root(fixture_root, n_events=20)
+    # Use a generous slice so the sparse lepton low/mid reco bins are reliably
+    # populated (only a few leptons per ~20 events), which the count-term
+    # gradient assertion on the muon/electron eff_logits below relies on.
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
     truth = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
 
@@ -210,7 +219,8 @@ def test_one_step_gradient_is_finite(fixture_root: Path):
             assert torch.isfinite(p.grad).all(), f"{name} has non-finite gradient"
 
     # The count terms must reach the tracking-efficiency logits (their only path).
-    # The synthetic fixture's uniform class mix populates the lepton low/mid bins.
+    # The pseudodata populates the lepton low/mid bins, so each species' eff_logits
+    # vector receives a nonzero count-term gradient.
     params = dict(card.named_parameters())
     for mod in (
         "ChargedHadronTrackingEfficiency",
@@ -223,9 +233,9 @@ def test_one_step_gradient_is_finite(fixture_root: Path):
 
 def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):
     """The fit loop runs a handful of steps without errors and returns a
-    history dict of the right shape. We do NOT assert convergence on the
-    synthetic fixture (the loss is dominated by stochastic smearing/Gumbel
-    noise at tiny batch sizes)."""
+    history dict of the right shape. We do NOT assert convergence on this small
+    slice (the loss is dominated by stochastic smearing/Gumbel noise at tiny
+    batch sizes)."""
     arrays = load_cms_flow_root(fixture_root, n_events=24)
     device = torch.device("cpu")
     train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8, seed=0)
@@ -250,8 +260,6 @@ def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Real-Pythia pseudodata end-to-end test
 # ---------------------------------------------------------------------------
-
-PSEUDODATA_PATH = Path(__file__).parent / "benchmark_data" / "cms_pseudodata.root"
 
 
 @pytest.mark.skipif(

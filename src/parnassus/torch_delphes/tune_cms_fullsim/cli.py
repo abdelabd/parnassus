@@ -35,12 +35,10 @@ Usage
         --n-events 2000 \
         --n-steps 100
 
-If ``--root-file`` is omitted (or the path doesn't exist), the script
-generates a small synthetic fixture with the same schema, fits against
-it, and reports the loss trajectory. This is useful for sandbox
-validation and for CI. The real sample lives on Zenodo and is too large
-(and the host is often blocked in sandboxed environments) to download
-inline.
+``--root-file`` is required and must point at an existing CMS
+full-simulation ROOT file with the cms-flow schema. Generate one with
+:mod:`parnassus.torch_delphes.generate_pseudodata`, or download the real
+sample from Zenodo record 11389651.
 
 The fit loop is exactly the one in :mod:`parnassus.torch_delphes.tuning`
 adapted to a fixed *external* target: the reco observables are computed
@@ -68,12 +66,10 @@ from .data import (
 from .dataloader import DelphesDataSet, DelphesDataLoader
 
 from .distributed import (
-    _barrier,
     _cleanup_distributed,
     _init_distributed,
     _is_main,
 )
-from .fixture import write_synthetic_fixture
 from .training import fit_card_to_fullsim
 
 # =============================================================================
@@ -87,11 +83,12 @@ def main() -> None:
     parser.add_argument(
         "--root-file",
         type=Path,
-        default=None,
+        required=True,
         help=(
             "Path to a CMS full-simulation ROOT file with an event_tree "
-            "following the cms-flow schema. If not provided, a synthetic "
-            "fixture is generated under /tmp."
+            "following the cms-flow schema. Required: generate one with "
+            "parnassus.torch_delphes.generate_pseudodata, or download the real "
+            "sample from Zenodo record 11389651."
         ),
     )
     parser.add_argument("--n-events", type=int, default=-1)
@@ -130,12 +127,6 @@ def main() -> None:
             "per-step parameter snapshots) to this path as JSON. Used by "
             "the plotting scripts and by the JINST-paper figures."
         ),
-    )
-    parser.add_argument(
-        "--fixture-path",
-        type=Path,
-        default=Path("/tmp/tune_cms_fullsim_fixture.root"),
-        help="Where to write (and load) the synthetic fallback fixture.",
     )
     parser.add_argument(
         "--intermediate-plot-dir",
@@ -177,33 +168,17 @@ def main() -> None:
             f"(local_rank={local_rank} on host {socket.gethostname()})"
         )
 
-    # Resolve the input file: use the real file if it exists, otherwise
-    # generate a synthetic fixture so the demo is always runnable.
-    # Only rank 0 writes the fixture; everyone else waits at a barrier.
-    root_file: Path
-    if args.root_file is not None and args.root_file.exists():
-        root_file = args.root_file
-        log(f"Loading full-simulation events from {root_file}")
-    else:
-        if args.root_file is not None:
-            log(f"WARNING: {args.root_file} does not exist; falling back to fixture.")
-        log(
-            "No real ROOT file provided. Generating synthetic fixture at "
-            f"{args.fixture_path} (same schema as Zenodo record 11389651)..."
+    # Require a real input file -- no synthetic fallback. Point --root-file at a
+    # CMS full-simulation ROOT file (cms-flow schema).
+    root_file = args.root_file
+    if not root_file.exists():
+        raise SystemExit(
+            f"--root-file {root_file} does not exist. Provide a CMS full-simulation "
+            "ROOT file (cms-flow schema): generate one with "
+            "parnassus.torch_delphes.generate_pseudodata, or download the real sample "
+            "from Zenodo record 11389651."
         )
-        if _is_main(rank):
-            write_synthetic_fixture(
-                args.fixture_path,
-                n_events=args.n_events,
-                particles_per_event=60,
-                seed=args.seed,
-            )
-        _barrier()
-        root_file = args.fixture_path
-        log(
-            "To fit against the real sample, download e.g. "
-            "https://zenodo.org/records/11389651 and rerun with --root-file."
-        )
+    log(f"Loading full-simulation events from {root_file}")
 
     arrays = load_cms_flow_root(
         root_file, n_events=args.n_events

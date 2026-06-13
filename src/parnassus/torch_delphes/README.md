@@ -146,13 +146,12 @@ predicted observables and the full-sim targets. Uses a `ReduceLROnPlateau` sched
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--param-config` | path | **required** | YAML config (see [Param-config reference](#param-config-reference)). Its `value`s **initialize** every parameter, `trainable` selects the optimized subset (per element), and `lr_scale` sets each parameter's effective LR. |
-| `--root-file` | path | `None` | Full-sim pseudodata ROOT file (Step 1 output). If omitted or missing, a synthetic fixture is generated at `--fixture-path`. |
+| `--root-file` | path | **required** | Full-sim pseudodata ROOT file (Step 1 output). Must exist; the script errors if it is missing (no synthetic fallback). |
 | `--n-events` | int | `-1` | Number of events to load. **`-1` = all events** in the tree. |
 | `--n-steps` | int | `200` | Number of Adam steps (epochs); each step is one pass over the training data. |
 | `--lr` | float | `1e-2` | **Global** learning-rate magnitude. The *effective* Adam LR of each parameter is `--lr × lr_scale` (see below). |
 | `--seed` | int | `0` | Torch RNG seed and train/validation split seed. |
 | `--history-path` | path | `None` | If set, write the full training history (loss trajectory + per-epoch parameter snapshots) to this JSON. **Required input for Step 3.** |
-| `--fixture-path` | path | `/tmp/tune_cms_fullsim_fixture.root` | Where the synthetic fallback fixture is written/read when `--root-file` is absent. |
 | `--intermediate-plot-dir` | str | `doc/figures/intermediate_plots` | Directory for per-epoch diagnostic PDFs (`intermediate_epoch_<step>.pdf`), one observable per page, overlaying target / epoch-0 / current prediction. Pass `""` to disable. |
 | `--plot-every` | int | `1` | Save intermediate plots every N epochs (`1` = every epoch). The final / early-stopped epoch is always plotted. |
 
@@ -283,7 +282,6 @@ programmatically, see [param_configs/make_default_configs.py](param_configs/make
 | Training history JSON | (set via `--history-path`, e.g. `doc/fit_results/all66_history.json`) | Step 2 |
 | Per-epoch diagnostic PDFs | `doc/figures/intermediate_plots/intermediate_epoch_<step>.pdf` | Step 2 (`--intermediate-plot-dir`) |
 | Validation PDFs | `doc/figures/*.pdf` | Step 3 (`--output-dir`) |
-| Synthetic fixture (fallback) | `/tmp/tune_cms_fullsim_fixture.root` | Step 2 when `--root-file` is absent |
 
 ---
 

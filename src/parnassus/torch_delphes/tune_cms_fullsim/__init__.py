@@ -15,7 +15,6 @@ Submodules
 - :mod:`.data`        — ROOT I/O and observable construction.
 - :mod:`.loss`        — the sliced-Wasserstein training loss (self-contained).
 - :mod:`.training`    — the Adam fit loop.
-- :mod:`.fixture`     — synthetic fallback ROOT writer.
 - :mod:`.cli`         — the ``main()`` entry point (see also :mod:`.__main__`).
 
 Run with ``python -m parnassus.torch_delphes.tune_cms_fullsim ...``.
@@ -28,7 +27,6 @@ from .config import OBSERVABLES, PFLOW_BRANCHES, TRUTH_BRANCHES
 from .data import (
     load_cms_flow_root,
 )
-from .fixture import write_synthetic_fixture
 from .training import fit_card_to_fullsim
 
 __all__ = [
@@ -38,5 +36,4 @@ __all__ = [
     "fit_card_to_fullsim",
     "load_cms_flow_root",
     "main",
-    "write_synthetic_fixture",
 ]
