@@ -21,7 +21,12 @@ import numpy as np
 import torch
 import uproot
 
-from parnassus.data.particle_io import N_FEATURES, ColumnMap
+from parnassus.data.particle_io import (
+    N_FEATURES,
+    ColumnMap,
+    get_charge_from_pdg_id,
+    get_mass_from_pdg_id,
+)
 from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
 from .config import PFLOW_BRANCHES, TRUTH_BRANCHES
@@ -42,6 +47,13 @@ def load_cms_flow_root(
     Reads the contiguous event range ``[entry_start, entry_start + n_events)``.
     This is used by the DDP code path to give each rank a disjoint shard
     of the file without re-reading the whole tree on every rank.
+
+    Branches in :data:`TRUTH_BRANCHES` / :data:`PFLOW_BRANCHES` that are not
+    present in the tree are silently skipped
+     
+    For older ROOT files that lack the optional
+    ``truth_pdgid`` branch — :func:`load_truth_events` then falls back to the
+    lossy ``truth_class`` mapping.
     """
     with uproot.open(str(path)) as f:
         if tree_name not in f:
@@ -52,8 +64,10 @@ def load_cms_flow_root(
         tree = f[tree_name]
         if n_events < 0: # load all events from entry_start to the end of the tree
             n_events = tree.num_entries - entry_start
+        available = set(tree.keys())
+        requested = [b for b in (TRUTH_BRANCHES + PFLOW_BRANCHES) if b in available]
         arrays = tree.arrays(
-            list(TRUTH_BRANCHES + PFLOW_BRANCHES),
+            requested,
             library="np",
             entry_start=entry_start,
             entry_stop=entry_start + n_events,
@@ -73,36 +87,38 @@ def load_truth_events(arrays: dict[str, np.ndarray],):
     """
     rows_list: list[np.ndarray] = []
     key_0 = arrays.keys().__iter__().__next__()
+    has_pdgid = "truth_pdgid" in arrays
     for i in range(len(arrays[key_0])):
         pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
         phi = np.asarray(arrays["truth_phi"][i], dtype=np.float64)
-        cls = np.asarray(arrays["truth_class"][i], dtype=np.int64)
         n_p = pt.shape[0]
         if n_p == 0:
             continue
-        pids = class_to_pid_vectorized(cls)
-        # Rough masses: electrons/muons use their PDG masses, everything
-        # else uses the charged-pion mass as a stand-in.
-        abs_pid = np.abs(pids)
-        mass = np.where(abs_pid == 11, 0.000511, np.where(abs_pid == 13, 0.10566, 0.13957)).astype(
-            np.float64
-        )
+        # Prefer real PDG IDs (K_L0=130, n=2112, K+/-=321, p=2212, ...).
+        # Fall back to the lossy class -> canonical-PID map for older ROOT
+        # files that don't expose ``truth_pdgid``.
+        if has_pdgid:
+            pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
+        else:
+            cls = np.asarray(arrays["truth_class"][i], dtype=np.int64)
+            pids = class_to_pid_vectorized(cls)
+        # PDG-aware mass and charge so the energy reconstruction and the
+        # B-field track curvature use the correct values per species (K_L0,
+        # neutron, charged kaon, proton, ...). Without this we'd reuse the
+        # charged-pion mass for everything and miscompute log_E on the truth
+        # input that's fed to the card.
+        mass = get_mass_from_pdg_id(pids)
+        charge = get_charge_from_pdg_id(pids)
+        # ``get_charge_from_pdg_id`` returns ``-999`` for unknown PDGs (matches
+        # C++ Delphes); the rest of the card's pdg_filters treat ``|charge|>0``
+        # as "charged", so we clamp these unknowns to neutral instead of
+        # promoting them into the charged-hadron stream.
+        charge = np.where(charge == -999, 0.0, charge).astype(np.float64)
         px = pt * np.cos(phi)
         py = pt * np.sin(phi)
         pz = pt * np.sinh(eta)
         e = np.sqrt(px * px + py * py + pz * pz + mass * mass)
-        charge = np.where(
-            abs_pid == 211,
-            1.0,
-            np.where(
-                abs_pid == 11,
-                -1.0,
-                np.where(abs_pid == 13, -1.0, 0.0),
-            ),
-        ).astype(np.float64)
-        # Sign the charge based on the sign of the underlying PDG (class->PDG
-        # returns positive PIDs, so we conservatively keep |charge| = {0, 1}).
         row = np.zeros((n_p, N_FEATURES), dtype=np.float64)
         row[:, ColumnMap.PID] = pids
         row[:, ColumnMap.STATUS] = 1

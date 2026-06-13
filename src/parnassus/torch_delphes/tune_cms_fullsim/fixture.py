@@ -52,6 +52,7 @@ def write_synthetic_fixture(
     truth_eta_list: list[np.ndarray] = []
     truth_phi_list: list[np.ndarray] = []
     truth_class_list: list[np.ndarray] = []
+    truth_pdgid_list: list[np.ndarray] = []
 
     # Underlying particle tensor we can feed into a card directly.
     truth_arrays_flat: list[np.ndarray] = []
@@ -68,6 +69,7 @@ def write_synthetic_fixture(
 
         # Corresponding flat particle row for running through a card.
         pids = class_to_pid_vectorized(cls.astype(np.int64))
+        truth_pdgid_list.append(pids.astype(np.int32))
         abs_pid = np.abs(pids)
         mass = np.where(
             abs_pid == 11,
@@ -184,6 +186,7 @@ def write_synthetic_fixture(
             "truth_eta": ak.Array(truth_eta_list),
             "truth_phi": ak.Array(truth_phi_list),
             "truth_class": ak.Array(truth_class_list),
+            "truth_pdgid": ak.Array(truth_pdgid_list),
             "pflow_pt": ak.Array(pflow_pt_list),
             "pflow_eta": ak.Array(pflow_eta_list),
             "pflow_phi": ak.Array(pflow_phi_list),
