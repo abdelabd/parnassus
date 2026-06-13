@@ -98,16 +98,19 @@ so it can be committed and consumed by
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import tempfile
 from pathlib import Path
 
 import awkward as ak
+import joblib
 import numpy as np
 import pyhepmc
 import torch
 import uproot
+from tqdm import tqdm
 
 from parnassus.data.particle_io import ColumnMap, hepmc_particles_to_tensor
 from parnassus.pythia import HepMC3Generator
@@ -120,6 +123,7 @@ from parnassus.torch_delphes.tune_cms_fullsim.debug import (
     tensor_to_per_event_arrays,
 )
 from parnassus.utils import pid_to_class
+from parnassus.utils.logger import is_terminal
 
 # The "target" (fake full-sim) card's parameters are taken verbatim from a
 # declarative parameter config (see parnassus.torch_delphes.param_config). The
@@ -169,6 +173,47 @@ def build_effective_cmnd(
     return dest
 
 
+@contextlib.contextmanager
+def _tqdm_joblib(tqdm_bar):
+    """Make a :class:`joblib.Parallel` call drive a tqdm progress bar.
+
+    Monkey-patches joblib's (private) ``BatchCompletionCallBack`` so each
+    completed task advances ``tqdm_bar``, then restores the original in a
+    ``finally``. If a future joblib renames that symbol this raises
+    ``AttributeError`` at setup (fails loudly) rather than silently no-op'ing.
+
+    The Pythia phase dispatches exactly one task per worker, so the bar ticks
+    once per finished worker (use ``total=n_workers``). It is therefore coarse
+    and back-loaded: workers get near-equal event counts and finish around the
+    same time, so the bar sits near empty for most of the (long) generation and
+    then snaps toward 100%. That is expected, not a hang.
+
+    Yields
+    ------
+    tqdm.tqdm
+        The same ``tqdm_bar`` passed in, now advanced by joblib task completions.
+    """
+    old_callback = joblib.parallel.BatchCompletionCallBack
+
+    class TqdmBatchCompletionCallBack(old_callback):
+        def __call__(self, *args, **kwargs):
+            # HepMC3Generator.generate() runs a second (file-merge) Parallel
+            # after the per-worker generation; clamp to total so those extra
+            # task completions don't push the bar past the n_workers total.
+            if tqdm_bar.total is None:
+                tqdm_bar.update(self.batch_size)
+            elif tqdm_bar.n < tqdm_bar.total:
+                tqdm_bar.update(min(self.batch_size, tqdm_bar.total - tqdm_bar.n))
+            return super().__call__(*args, **kwargs)
+
+    joblib.parallel.BatchCompletionCallBack = TqdmBatchCompletionCallBack
+    try:
+        yield tqdm_bar
+    finally:
+        joblib.parallel.BatchCompletionCallBack = old_callback
+        tqdm_bar.close()
+
+
 def generate_truth_events(
     cmnd_file: str | Path,
     n_events: int,
@@ -205,7 +250,19 @@ def generate_truth_events(
         output_dir=str(work_dir / "hepmc"),
         log_dir=str(work_dir / "hepmc_logs"),
     )
-    return generator.generate(n_events=n_events, max_workers=n_workers, debug=False)
+    # Drive a coarse progress bar off joblib task completions (one task per
+    # worker) and silence joblib's own verbose=100 output (verbose=0).
+    with _tqdm_joblib(
+        tqdm(
+            total=n_workers,
+            desc="[1/3] Pythia (CPU workers)",
+            unit="worker",
+            disable=not is_terminal,
+        )
+    ):
+        return generator.generate(
+            n_events=n_events, max_workers=n_workers, debug=False, verbose=0
+        )
 
 
 def make_target_card(
@@ -383,7 +440,15 @@ def hepmc_to_truth_class_arrays(
     truth_class: list[np.ndarray] = []
 
     with pyhepmc.open(str(hepmc_path), "r") as reader:
-        for event_idx, event in enumerate(reader):
+        for event_idx, event in enumerate(
+            tqdm(
+                reader,
+                total=n_events,
+                desc="[2/3] HepMC -> truth",
+                unit="evt",
+                disable=not is_terminal,
+            )
+        ):
             if n_events is not None and event_idx >= n_events:
                 break
             # Keep only final-state particles; event_number=0 so the single
@@ -459,7 +524,12 @@ def truth_arrays_to_pflow(
             for var in variables:
                 branches[debug_branch_name(module_name, var)] = []
 
-    for start in range(0, n_events, batch_size):
+    for start in tqdm(
+        range(0, n_events, batch_size),
+        desc="[3/3] TorchDelphes",
+        unit="batch",
+        disable=not is_terminal,
+    ):
         end = min(start + batch_size, n_events)
         n_batch = end - start
         batch_truth = {k: v[start:end] for k, v in truth_arrays.items()}
@@ -573,7 +643,6 @@ def generate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     resolved_device = resolve_device(device)
-    print(f"DEVICE: {resolved_device}")
 
     # Resolve worker count: default to all cores, never more than n_events
     # (HepMC3Generator would otherwise hand some workers zero events).
@@ -594,7 +663,7 @@ def generate(
         # ----- Phase 1: generate ALL Pythia events up front, in parallel. -----
         eff_cmnd = build_effective_cmnd(cmnd_file, pt_hat_min, work_dir)
         print(
-            f"[1/3] Generating {n_events} Pythia events with {n_workers} worker(s) "
+            f"[1/3] Generating {n_events} Pythia events on {n_workers} CPU worker(s) "
             f"(pTHatMin={pt_hat_min})..."
         )
         hepmc_path = generate_truth_events(eff_cmnd, n_events, n_workers, work_dir)
@@ -731,9 +800,10 @@ def main() -> None:
     resolved_device = resolve_device(args.device)
     print(
         f"Generating pseudodata -> {args.output}\n"
-        f"  n_events={args.n_events}  n_workers={args.n_workers or 'auto'}  "
+        f"  n_events={args.n_events}  cpu-workers={args.n_workers or 'auto'} (Pythia)  "
         f"pTHatMin={args.pt_hat_min}  seed={args.seed}\n"
-        f"  device={resolved_device}  cmnd-file={args.cmnd_file}  "
+        f"  device={resolved_device} (TorchDelphes phase-2 only; Pythia always CPU)  "
+        f"cmnd-file={args.cmnd_file}  "
         f"param-config={args.param_config}  debug={args.debug}"
     )
     n = generate(

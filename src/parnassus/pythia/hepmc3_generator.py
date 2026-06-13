@@ -48,7 +48,9 @@ class HepMC3Generator:
 
         self.hadronization_on = self._is_hadronization_on()
 
-    def generate(self, n_events: int, max_workers: int, debug: bool = False) -> Path:
+    def generate(
+        self, n_events: int, max_workers: int, debug: bool = False, verbose: int = 100
+    ) -> Path:
         tic = time.time()
 
         n_events_per_job = n_events // max_workers
@@ -78,7 +80,7 @@ class HepMC3Generator:
 
         else:
             LOG.info(f"HepMC3Generator: Generating {n_events} events using {max_workers} cores...")
-            Parallel(n_jobs=max_workers, backend="multiprocessing", verbose=100)(
+            Parallel(n_jobs=max_workers, backend="multiprocessing", verbose=verbose)(
                 delayed(self._gen_hepmc_single_job)(
                     cmnd_file=self.cmnd_file,
                     n_events=n_events_list[i],

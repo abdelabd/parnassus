@@ -29,10 +29,11 @@ The user-facing workflow is three commands — **generate → tune → plot** �
 Run these three commands in order, from the repo root:
 
 ```bash
-# 1. Generate ~5000 events of CMS pseudodata (truth response = cms_target_default.yaml)
+# 1. Generate 5000 events of CMS pseudodata (truth response = cms_target_default.yaml)
 uv run python -m parnassus.torch_delphes.generate_pseudodata \
     --output src/parnassus/tests/benchmark_data/cms_pseudodata.root \
-    --target-size-mb 50 \
+    --n-events 5000 \
+    --n-workers 32 \
     --pt-hat-min 100 \
     --seed 1
 
@@ -100,20 +101,26 @@ Generates Pythia8 13 TeV hard-QCD dijet events, turns the stable truth particles
 class-based representation the trainee will see (via `load_truth_events`, which keeps the
 target-card input identical to the trainee input — the "truth-input fidelity" fix), passes them
 through the **frozen target card**, and writes both the truth particles and the reconstructed
-particle-flow objects to a ROOT file. Events are generated in batches and the file is rewritten
-after each batch until it reaches the requested size.
+particle-flow objects to a ROOT file. All `--n-events` events are generated up front in one
+parallel pass across `--n-workers` Pythia8 CPU processes into a single HepMC3 file, then streamed
+in `--batch-size` chunks through the target card before the ROOT file is written in one go.
 
 ### Flags
 
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--output` | path | `src/parnassus/tests/benchmark_data/cms_pseudodata.root` | Output ROOT file. |
-| `--target-size-mb` | float | `20.0` | Keep generating batches until the file on disk reaches this size, then stop. ≈5000 events for 50 MB at `--pt-hat-min 100` (event count depends on multiplicity, not a fixed formula). |
-| `--pt-hat-min` | float | `100.0` | Pythia8 `PhaseSpace:pTHatMin` (GeV) — minimum hard-scatter pT. Lower → softer, higher-multiplicity events → fewer events to fill the target size. |
-| `--batch-size` | int | `200` | Events generated per batch before the file is rewritten/checkpointed. |
-| `--max-events` | int | `100000` | Hard cap on the number of events, even if the size target isn't reached. |
-| `--seed` | int | `1` | Pythia8 RNG seed. Same seed + same `--pt-hat-min` → identical event sequence. |
+| `--n-events` | int | `20000` | Exact number of events to generate. |
+| `--n-workers` | int | `None` (all CPU cores, capped at `--n-events`) | Parallel Pythia8 **CPU** processes for event generation. Independent of `--device`. |
+| `--pt-hat-min` | float | `100.0` | Pythia8 `PhaseSpace:pTHatMin` (GeV) — minimum hard-scatter pT. Lower → softer, higher-multiplicity events. |
+| `--batch-size` | int | `512` | Events per TorchDelphes forward pass in phase 2 (memory knob; does not change the output). |
+| `--seed` | int | `1` | **Torch** RNG seed for the target card's stochastic smearing / Gumbel-ST in phase 2. (Pythia per-worker seeds are assigned internally by `HepMC3Generator`.) |
+| `--device` | str | `None` (auto: `cuda` if a GPU is available, else `cpu`) | Device for the **phase-2 TorchDelphes forward pass only**. Pythia generation (phase 1) is always CPU-parallel. |
+| `--cmnd-file` | path | shipped `qcd_dijet.cmnd` | Base Pythia `.cmnd` configuration; `--pt-hat-min` is appended as an override. |
+| `--work-dir` | path | `None` (temp dir, auto-removed) | Scratch directory for intermediate HepMC files / per-job logs. |
+| `--keep-hepmc` | flag | `False` | Keep the intermediate HepMC files instead of deleting the auto-created temp dir (no effect with `--work-dir`). |
 | `--param-config` | path | `param_configs/cms_target_default.yaml` | YAML whose physical `value` fields define the **ground-truth** detector response written into the `pflow_*` branches. This is the truth you later try to recover. |
+| `--debug` | flag | `False` | Also write ~150 intermediate per-module branches (`<ModuleName>.<Var>`); large files, leave off for plain training. |
 
 ### Output
 
@@ -127,6 +134,56 @@ The `*_class` branches use the 5-class encoding:
 | class | 0 | 1 | 2 | 3 | 4 |
 |---|---|---|---|---|---|
 | particle | charged hadron | electron | muon | neutral hadron | photon |
+
+### Batch generation on SLURM (large samples)
+
+A single run takes ~13 min for 10k events, so a large training sample is built by fanning
+generation out across a SLURM job array (NERSC Perlmutter, project `m3246`) and merging the
+per-seed files. Two scripts in [slurm_scripts/](slurm_scripts/) do this:
+
+| Script | Role |
+|---|---|
+| [slurm_scripts/submit_pseudodata.sh](slurm_scripts/submit_pseudodata.sh) | Login-node driver: submits an `NJOBS`-task array (seed = array index) on the **CPU** partition, each generating `N_EVENTS_PER_JOB` events, then submits the merge job with `--dependency=afterok`. |
+| [slurm_scripts/merge_pseudodata.sbatch](slurm_scripts/merge_pseudodata.sbatch) | The merge job: uproot-concatenates the per-seed files into one, validates the total event count, then deletes the parts. |
+
+Run from a login node (defaults give 10 × 10000 = 100k events):
+
+```bash
+bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh
+```
+
+Everything is configurable via environment variables (shown with defaults):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `OUTBASE` | `/global/cfs/cdirs/m3246/Runze/MCGen/data` | Output base. Parts go in `$OUTBASE/parts/`, logs in `$OUTBASE/logs/`, merged file in `$OUTBASE/`. **Must be a shared filesystem** (CFS / scratch), not node-local `/tmp`. |
+| `NJOBS` | `10` | Number of array tasks (= number of seeds, `1..NJOBS`). |
+| `N_EVENTS_PER_JOB` | `10000` | Events per task (total = `NJOBS × N_EVENTS_PER_JOB`). |
+| `N_WORKERS` | `32` | Pythia CPU workers per task (matches the job's `-c 32`). |
+| `PT_HAT_MIN` | `100` | Pythia `PhaseSpace:pTHatMin`. |
+| `MERGED_NAME` | `cms_pseudodata_100k.root` | Final merged filename under `$OUTBASE`. |
+
+The jobs run on the **CPU partition** with `--device cpu`: the GPU is used for only ~12s (the
+TorchDelphes forward) of a ~13-min job, so a GPU node would sit idle. The driver runs `setup.sh`
+once up front so the array tasks activate the prebuilt uv env directly instead of each firing a
+concurrent `uv sync`.
+
+> **Merge is concatenation-safe.** The ROOT files carry no persisted event-number branch — event
+> identity is the TTree entry index — so appending entries yields globally unique indices with no
+> duplication. The merge verifies the merged entry count equals the sum of the parts before
+> deleting them (so a bad merge leaves the parts intact).
+
+> **Failed tasks.** The `afterok` dependency runs the merge only if **all** tasks succeed. If one
+> fails, rerun that seed (`sbatch --array=<i> ...`) and then submit the merge by hand
+> (`sbatch slurm_scripts/merge_pseudodata.sbatch`), or switch the dependency to `afterany` to merge
+> whatever did succeed.
+
+Cheap dry run (2 jobs × 100 events on scratch):
+
+```bash
+N_EVENTS_PER_JOB=100 NJOBS=2 OUTBASE=$SCRATCH/mcgen_dryrun \
+    bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh
+```
 
 ---
 
@@ -279,6 +336,7 @@ programmatically, see [param_configs/make_default_configs.py](param_configs/make
 | Artifact | Default location | Produced by |
 |---|---|---|
 | Pseudodata ROOT | `src/parnassus/tests/benchmark_data/cms_pseudodata.root` | Step 1 (`--output`) |
+| Large pseudodata ROOT (SLURM) | `/global/cfs/cdirs/m3246/Runze/MCGen/data/cms_pseudodata_100k.root` | Step 1 batch (`slurm_scripts/`) |
 | Training history JSON | (set via `--history-path`, e.g. `doc/fit_results/all66_history.json`) | Step 2 |
 | Per-epoch diagnostic PDFs | `doc/figures/intermediate_plots/intermediate_epoch_<step>.pdf` | Step 2 (`--intermediate-plot-dir`) |
 | Validation PDFs | `doc/figures/*.pdf` | Step 3 (`--output-dir`) |
