@@ -66,6 +66,7 @@ mpl.use("Agg")  # non-interactive backend for CI / headless runs
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import uproot
 from PIL import Image
 
 from parnassus.torch_delphes import param_config as pc
@@ -84,6 +85,7 @@ from .debug import (
     extract_variable,
     filter_valid_rows,
 )
+from .training import PLOT_FRACTION, TRAIN_FRACTION, contiguous_event_partitions
 from parnassus.torch_delphes.plotting import (
     combined_vars_for,
     plot_comparison_with_ratio,
@@ -967,7 +969,16 @@ def main() -> None:
         default=Path("src/parnassus/tests/benchmark_data/cms_pseudodata.root"),
     )
     parser.add_argument("--output-dir", type=Path, default=Path("doc/figures"))
-    parser.add_argument("--n-events-for-plots", type=int, default=4000)
+    parser.add_argument(
+        "--n-events-for-plots",
+        type=int,
+        default=-1,
+        help=(
+            "Maximum number of events to use from the plotting window. The "
+            "window is the NEXT 20% block right after the training 70% block. "
+            "Use -1 (default) to use the full plotting window."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--truth-config",
@@ -1039,7 +1050,40 @@ def main() -> None:
     # ----- 3. Final observable histograms (target vs init vs final) -----
     final_obs_output_dir = args.output_dir / "observables" / "final"
     final_obs_output_dir.mkdir(parents=True, exist_ok=True)
-    arrays = load_cms_flow_root(args.root_file, n_events=args.n_events_for_plots)
+
+    # Plot on the contiguous block immediately after the training block:
+    # train=[0, 70%), plot=[70%, 90%), tail=[90%, 100%).
+    with uproot.open(str(args.root_file)) as f:
+        total_in_file = int(f["event_tree"].num_entries)
+
+    # Respect the same event cap training used (history metadata["n_events"]).
+    # ``-1`` means "all events in file".
+    meta_n_events = int(history.get("metadata", {}).get("n_events", -1))
+    total_considered = total_in_file if meta_n_events < 0 else min(total_in_file, meta_n_events)
+    train_end, plot_end = contiguous_event_partitions(total_considered)
+    plot_start = train_end
+    window_size = max(0, plot_end - plot_start)
+    if window_size <= 0:
+        raise SystemExit(
+            "Plot window is empty after applying the 70/20 split policy. "
+            f"total_considered={total_considered}, train_end={train_end}, plot_end={plot_end}."
+        )
+    n_plot_events = window_size if args.n_events_for_plots < 0 else min(args.n_events_for_plots, window_size)
+    if n_plot_events <= 0:
+        raise SystemExit("No events selected for plotting. Increase --n-events-for-plots.")
+
+    print(
+        "Plot event window: "
+        f"train=[0:{train_end}) ({TRAIN_FRACTION:.0%}), "
+        f"plot=[{plot_start}:{plot_end}) ({PLOT_FRACTION:.0%}), "
+        f"using first {n_plot_events} event(s) from plot window."
+    )
+
+    arrays = load_cms_flow_root(
+        args.root_file,
+        n_events=n_plot_events,
+        entry_start=plot_start,
+    )
     truth_tensor = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
 
@@ -1145,7 +1189,7 @@ def main() -> None:
             trainee_init_outputs=init_outputs,
             trainee_final_outputs=final_outputs,
             output_dir=args.output_dir / "observables" / "intermediate",
-            n_events=args.n_events_for_plots,
+            n_events=n_plot_events,
         )
 
     print(f"Done. {len(list(args.output_dir.glob('*.pdf')))} figures in {args.output_dir}.")

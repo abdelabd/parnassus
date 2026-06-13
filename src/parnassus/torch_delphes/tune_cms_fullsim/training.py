@@ -31,6 +31,57 @@ from .loss import LOSS_CHOICES, get_loss_fn
 # Fit loop
 # =============================================================================
 
+# Shared dataset-partition policy used by both the training CLI and
+# plot_fit_results.py:
+#   - train on the first 70% of events,
+#   - reserve the next 20% for plotting/holdout studies,
+#   - leave the tail (last 10%) unused by this workflow.
+TRAIN_FRACTION: float = 0.70
+PLOT_FRACTION: float = 0.20
+
+
+def contiguous_event_partitions(
+    n_events: int,
+    train_fraction: float = TRAIN_FRACTION,
+    plot_fraction: float = PLOT_FRACTION,
+) -> tuple[int, int]:
+    """Return contiguous split boundaries for train and plot windows.
+
+    Parameters
+    ----------
+    n_events : int
+        Number of events in the dataset being partitioned.
+    train_fraction : float
+        Fraction assigned to the leading training block.
+    plot_fraction : float
+        Fraction assigned to the block immediately after training.
+
+    Returns
+    -------
+    (train_end, plot_end) : tuple[int, int]
+        Event-index boundaries such that:
+
+        - training window is ``[0, train_end)``
+        - plotting window is ``[train_end, plot_end)``
+
+        with ``0 <= train_end <= plot_end <= n_events``.
+    """
+    if n_events < 0:
+        raise ValueError(f"n_events must be >= 0, got {n_events}")
+    if not (0.0 <= train_fraction <= 1.0):
+        raise ValueError(f"train_fraction must be in [0,1], got {train_fraction}")
+    if not (0.0 <= plot_fraction <= 1.0):
+        raise ValueError(f"plot_fraction must be in [0,1], got {plot_fraction}")
+    if train_fraction + plot_fraction > 1.0 + 1e-12:
+        raise ValueError(
+            "train_fraction + plot_fraction must be <= 1.0, got "
+            f"{train_fraction + plot_fraction:.3f}"
+        )
+
+    train_end = int(train_fraction * n_events)
+    plot_end = min(n_events, train_end + int(plot_fraction * n_events))
+    return train_end, plot_end
+
 
 def _all_reduce_mean(value: torch.Tensor) -> torch.Tensor:
     """Average ``value`` across ranks in-place; no-op when not under DDP.

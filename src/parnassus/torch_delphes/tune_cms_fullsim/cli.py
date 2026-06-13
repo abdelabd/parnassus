@@ -64,7 +64,7 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
 from .config import _DEFAULT_LR
 from .data import (
-    load_cms_flow_root, load_truth_events, load_pflow_targets, split_truth_objects, split_pflow_targets,
+    load_cms_flow_root, load_truth_events, load_pflow_targets,
 )    
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
@@ -77,7 +77,7 @@ from .distributed import (
 )
 from .fixture import write_synthetic_fixture
 from .loss import LOSS_CHOICES
-from .training import fit_card_to_fullsim
+from .training import TRAIN_FRACTION, contiguous_event_partitions, fit_card_to_fullsim
 
 # =============================================================================
 # CLI
@@ -206,8 +206,20 @@ def main() -> None:
     truth_tensor = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
 
-    train_truth_tensor, val_truth_tensor = split_truth_objects(truth_tensor, train_fraction=0.8, seed=args.seed)
-    train_target, val_target = split_pflow_targets(target, train_fraction=0.8, seed=args.seed)
+    # Contiguous split policy (shared with plot_fit_results): train on the
+    # first 70% of events; validation uses the remaining tail.
+    n_loaded_events = truth_tensor.shape[0]
+    train_end, _ = contiguous_event_partitions(n_loaded_events)
+    # Keep both train and val non-empty when possible.
+    if n_loaded_events > 1:
+        train_end = min(max(train_end, 1), n_loaded_events - 1)
+    train_truth_tensor, val_truth_tensor = truth_tensor[:train_end], truth_tensor[train_end:]
+    train_target = {k: v[:train_end] for k, v in target.items()}
+    val_target = {k: v[train_end:] for k, v in target.items()}
+    log(
+        f"Using contiguous split: train=[0:{train_end}) ({TRAIN_FRACTION:.0%} nominal), "
+        f"val=[{train_end}:{n_loaded_events})"
+    )
 
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
