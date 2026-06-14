@@ -92,3 +92,4 @@ src/parnassus/torch_delphes/validation/logs/
 *.png
 doc/figures/*
 doc/fit_results/*
+notebooks/per_param_closure
