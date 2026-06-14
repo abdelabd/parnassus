@@ -155,6 +155,28 @@ def main() -> None:
             "The final / early-stopped epoch is always plotted."
         ),
     )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=10,
+        help=(
+            "Stop after this many epochs with no val_loss improvement. Pass a "
+            "value <= 0 to disable early stopping (always run the full "
+            "--n-steps). Default 10."
+        ),
+    )
+    parser.add_argument(
+        "--lr-scheduler-patience",
+        type=int,
+        default=4,
+        help=(
+            "Patience for the ReduceLROnPlateau lr decay (epochs of no val_loss "
+            "improvement before the lr is halved). Pass a value <= 0 to disable "
+            "lr decay entirely and train at a constant lr -- recommended for "
+            "single-parameter closure fits, where the stochastic loss otherwise "
+            "collapses the lr before convergence. Default 4."
+        ),
+    )
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -254,6 +276,13 @@ def main() -> None:
         device=device,
         intermediate_plot_dir=args.intermediate_plot_dir,
         plot_every=args.plot_every,
+        # <= 0 on the CLI means "disable" (None) for both knobs.
+        early_stopping_patience=(
+            args.early_stopping_patience if args.early_stopping_patience > 0 else None
+        ),
+        lr_scheduler_patience=(
+            args.lr_scheduler_patience if args.lr_scheduler_patience > 0 else None
+        ),
     )
 
     if args.history_path is not None and _is_main(rank):
@@ -276,6 +305,10 @@ def main() -> None:
             "param_group_lrs": sorted({g["lr"] for g in param_groups}),
             "trainable_params": sorted(k for k, spec in param_cfg.items() if spec["trainable"]),
             "world_size": world_size,
+            # Optimizer-schedule knobs (recorded so runs are reproducible and the
+            # notebook cache key can detect changes). 0 = disabled.
+            "early_stopping_patience": max(0, args.early_stopping_patience),
+            "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
         }
 
         # Per-epoch history keyed "epoch_{step}". Each step here is a full

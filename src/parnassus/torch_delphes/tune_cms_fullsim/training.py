@@ -42,6 +42,8 @@ def fit_card_to_fullsim(
     intermediate_plot_dir: str | Path | None = None,
     plot_every: int = 1,
     early_stopping_patience: int | None = 10,
+    lr_scheduler_patience: int | None = 4,
+    lr_scheduler_factor: float = 0.5,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -76,6 +78,16 @@ def fit_card_to_fullsim(
         training is stopped. Set to ``None`` (or any value ``<= 0``) to
         disable early stopping entirely; the loop will then always run
         the full ``n_steps``. Default is 10.
+    lr_scheduler_patience : int | None
+        Patience (epochs of no ``val_loss`` improvement) for the
+        ``ReduceLROnPlateau`` learning-rate decay. Set to ``None`` (or any
+        value ``<= 0``) to disable LR decay entirely and train at a constant
+        lr -- recommended for single-parameter closure fits, where the
+        stochastic (resampled) loss otherwise triggers premature lr collapse.
+        Default is 4.
+    lr_scheduler_factor : float
+        Multiplicative factor applied to the lr on each plateau reduction
+        (only used when ``lr_scheduler_patience`` is enabled). Default is 0.5.
 
     Returns
     -------
@@ -93,7 +105,16 @@ def fit_card_to_fullsim(
                 f"  param group {g['name']!r}: effective lr = {g['lr']:.3e} "
                 f"({len(g['params'])} tensors)"
             )
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4)
+    # ReduceLROnPlateau halves the lr after `lr_scheduler_patience` stagnant
+    # epochs. On a stochastic (resampled) loss this can collapse the lr long
+    # before convergence (see the per-param closure diagnosis), so it is
+    # optional: pass `lr_scheduler_patience=None` (or <= 0) to disable LR decay
+    # and train at a constant lr.
+    lr_scheduler = None
+    if lr_scheduler_patience is not None and lr_scheduler_patience > 0:
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode="min", factor=lr_scheduler_factor, patience=lr_scheduler_patience
+        )
 
     # Per-epoch intermediate plots: resolve the output dir (None/"" disables),
     # create it once on the main rank, and remember the epoch-0 prediction so
@@ -292,8 +313,9 @@ def fit_card_to_fullsim(
         # the same epoch across every list).
         history["val_loss"].append(print_val_loss)
 
-        # lr scheduler step
-        lr_scheduler.step(val_loss_acc)
+        # lr scheduler step (only when LR decay is enabled)
+        if lr_scheduler is not None:
+            lr_scheduler.step(val_loss_acc)
 
         # Save the per-epoch intermediate observable plots (scheduled epochs).
         rendered = False

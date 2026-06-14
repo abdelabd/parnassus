@@ -194,8 +194,11 @@ N_EVENTS_PER_JOB=100 NJOBS=2 OUTBASE=$SCRATCH/mcgen_dryrun \
 
 Loads the pseudodata, builds a trainee `CMSEnergyFlowDefault` initialized from `--param-config`,
 selects the trainable parameters, and runs Adam to minimize the distance between the trainee's
-predicted observables and the full-sim targets. Uses a `ReduceLROnPlateau` scheduler
-(halves the LR after 4 stale epochs) and early stopping (patience 10). DDP-aware: under SLURM
+predicted observables and the full-sim targets. By default it uses a `ReduceLROnPlateau`
+scheduler (halves the LR after 4 stale epochs, `--lr-scheduler-patience`) and early stopping
+(patience 10, `--early-stopping-patience`); pass `<= 0` to either flag to **disable** it. Disabling
+the LR decay is recommended for single-parameter closure fits, where the stochastic (resampled)
+loss otherwise makes the scheduler collapse the LR before convergence. DDP-aware: under SLURM
 `srun` it shards across ranks, and only rank 0 logs, plots, and writes history.
 
 ### Flags
@@ -211,6 +214,8 @@ predicted observables and the full-sim targets. Uses a `ReduceLROnPlateau` sched
 | `--history-path` | path | `None` | If set, write the full training history (loss trajectory + per-epoch parameter snapshots) to this JSON. **Required input for Step 3.** |
 | `--intermediate-plot-dir` | str | `doc/figures/intermediate_plots` | Directory for per-epoch diagnostic PDFs (`intermediate_epoch_<step>.pdf`), one observable per page, overlaying target / epoch-0 / current prediction. Pass `""` to disable. |
 | `--plot-every` | int | `1` | Save intermediate plots every N epochs (`1` = every epoch). The final / early-stopped epoch is always plotted. |
+| `--early-stopping-patience` | int | `10` | Stop after this many epochs with no `val_loss` improvement. Pass `<= 0` to **disable** early stopping (always run the full `--n-steps`). |
+| `--lr-scheduler-patience` | int | `4` | Patience for the `ReduceLROnPlateau` LR decay (epochs of no `val_loss` improvement before the LR is halved). Pass `<= 0` to **disable** LR decay and train at a constant LR — recommended for single-parameter closure fits (see the note above). |
 
 ### The `--lr × lr_scale` rule
 
@@ -236,7 +241,8 @@ hook so frozen elements receive zero gradient.
 When `--history-path` is set, the written JSON has three top-level keys:
 
 - `metadata` — run-level scalars: `n_events`, `n_steps`, `lr`, `param_config`, the distinct
-  `param_group_lrs`, the list of `trainable_params`, and `world_size`.
+  `param_group_lrs`, the list of `trainable_params`, `world_size`, and the schedule knobs
+  `early_stopping_patience` / `lr_scheduler_patience` (`0` = disabled).
 - `history` — one entry per epoch (`epoch_<step>`) with `step`, `train_loss`, `val_loss`, and a
   `parameters` snapshot (physical, post-transform values keyed `name[i]`).
 - `best_result` — the epoch with the minimum validation loss, including its final parameter values.
