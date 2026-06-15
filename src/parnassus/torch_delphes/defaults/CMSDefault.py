@@ -331,11 +331,14 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             muons_smeared,
         ])
 
-        # ECal
-        ecal_tracks, ecal_towers, eflow_photons = self.ECal(particles_propagated, merged_tracks)
+        # ECal (4th return: differentiable per-region expected photon count; None
+        # unless learnable)
+        ecal_tracks, ecal_towers, eflow_photons, ecal_calo_counts = self.ECal(
+            particles_propagated, merged_tracks
+        )
 
-        # HCal
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(
+        # HCal (4th return: per-region expected neutral-hadron count; None unless learnable)
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons, hcal_calo_counts = self.HCal(
             particles_propagated, ecal_tracks
         )
 
@@ -390,6 +393,8 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
                 "ChargedHadronExpectedCounts": chad_expected_counts,
                 "ElectronExpectedCounts": electron_expected_counts,
                 "MuonExpectedCounts": muon_expected_counts,
+                "EcalPhotonExpectedCounts": ecal_calo_counts,
+                "HcalNeutralHadronExpectedCounts": hcal_calo_counts,
             }
         return {
             "Track": merged_tracks,
@@ -401,6 +406,8 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             "ChargedHadronExpectedCounts": chad_expected_counts,
             "ElectronExpectedCounts": electron_expected_counts,
             "MuonExpectedCounts": muon_expected_counts,
+            "EcalPhotonExpectedCounts": ecal_calo_counts,
+            "HcalNeutralHadronExpectedCounts": hcal_calo_counts,
         }
 
     @staticmethod
@@ -595,6 +602,9 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             smear_tower_center=True,  # Match C++ Delphes: SmearTowerCenter true
             scale_fn=ecal_scale_fn,
             learnable_fractions=learnable_fractions,
+            # Differentiable per-region count term: on exactly in learnable mode,
+            # mirroring the efficiency count term (off => generation byte-identical).
+            compute_soft_count=self.learnable,
         )
 
     def _setup_HCal(self):
@@ -747,4 +757,5 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             smear_tower_center=True,
             scale_fn=hcal_scale_fn,
             learnable_fractions=learnable_fractions,
+            compute_soft_count=self.learnable,
         )

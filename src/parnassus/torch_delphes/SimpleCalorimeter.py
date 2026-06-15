@@ -55,6 +55,9 @@ class SimpleCalorimeter(nn.Module):
         compute_phi_bins_fn: Callable | None = None,  # Custom phi bin computation function
         scale_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
         learnable_fractions: nn.Module | None = None,
+        disable_significance_cut: bool = False,
+        compute_soft_count: bool = False,
+        count_tau_rel: float = 0.05,
     ) -> None:
         super().__init__()
 
@@ -63,6 +66,21 @@ class SimpleCalorimeter(nn.Module):
         self.energy_sig_min = energy_sig_min
         self.is_ecal = is_ecal
         self.smear_tower_center = smear_tower_center
+        # Diagnostic-only switch. When True, both sigma-dependent significance
+        # cuts (the tower cut and the neutral-object cut) are replaced by their
+        # absolute-energy floor alone. Default False keeps the forward pass and
+        # generation byte-identical; the gradient-bias probe toggles it ON/OFF to
+        # isolate the selection-gradient term that biases the resolution params.
+        self.disable_significance_cut = disable_significance_cut
+        # Differentiable per-|eta|-region expected-object-count term (internal
+        # plumbing, not a CLI/YAML option). When True, forward() also returns a
+        # per-region sum of soft tower-survival probabilities, supplying the
+        # correctly-signed d(membership)/d(theta) gradient that the two hard
+        # significance cuts drop. A hard straight-through keeps the forward count
+        # byte-identical to the hard selection, so generation is unaffected.
+        # CMSDefault sets this True exactly in learnable mode.
+        self.compute_soft_count = compute_soft_count
+        self.count_tau_rel = count_tau_rel
 
         # Optional per-region energy scale (for differentiable tuning).
         # Applied to the tower energy passed into the log-normal smear so
@@ -453,6 +471,10 @@ class SimpleCalorimeter(nn.Module):
         # Tower energy is zeroed if below minimum or below significance threshold
         below_min = tower_energy_smeared < self.energy_min
         below_sig = tower_energy_smeared < self.energy_sig_min * sigma_after
+        if self.disable_significance_cut:
+            # Diagnostic: drop the sigma-dependent significance cut, keep the
+            # absolute-energy floor. Isolates the selection-gradient term.
+            below_sig = torch.zeros_like(below_sig)
         tower_energy_final = torch.where(
             below_min | below_sig, torch.zeros_like(tower_energy_smeared), tower_energy_smeared
         )
@@ -599,9 +621,14 @@ class SimpleCalorimeter(nn.Module):
 
         # Case A: Neutral excess is significant
         # Condition: neutralEnergy > EnergyMin AND neutralSigma > EnergySignificanceMin
-        significant_neutral = (neutral_energy > self.energy_min) & (
-            neutral_sigma > self.energy_sig_min
-        )
+        if self.disable_significance_cut:
+            # Diagnostic: drop the sigma-dependent neutral significance factor,
+            # keep the absolute-energy floor (matches the tower cut above).
+            significant_neutral = neutral_energy > self.energy_min
+        else:
+            significant_neutral = (neutral_energy > self.energy_min) & (
+                neutral_sigma > self.energy_sig_min
+            )
 
         # Case B: Neutral excess is NOT significant but has track energy
         # Condition: NOT significant_neutral AND tower_track_energy > 0
@@ -652,6 +679,56 @@ class SimpleCalorimeter(nn.Module):
             best_energy_estimate / track_energy_safe,
             torch.ones_like(tower_track_energy),
         )
+
+        # ===== Differentiable per-region expected object count =====
+        # Supplies the missing d(membership)/d(theta) gradient for the resolution
+        # params. Both hard significance cuts (the tower cut and the neutral-object
+        # cut) are folded into one soft per-tower survival probability ``gate``;
+        # its per-|eta|-region sum is the expected surviving-object count. A hard
+        # straight-through pins the forward value to today's exact hard count
+        # (``significant_neutral``) while routing the soft gradient backward. None
+        # unless explicitly enabled (learnable tuning).
+        if self.compute_soft_count:
+            tau = self.count_tau_rel
+            # Soft tower cut (carries sigma_after's sigma-dependence). The sharpness
+            # widths are relative to each threshold so the gate is equally sharp
+            # across the ~100x barrel<->forward sigma range; sigma_after cancels in
+            # the significance ratio, so a zero-energy tower maps to sigmoid(-1/tau)
+            # with no division blow-up.
+            gate_tower = torch.sigmoid(
+                (tower_energy_smeared - self.energy_min) / (tau * self.energy_min)
+            ) * torch.sigmoid(
+                (tower_energy_smeared - self.energy_sig_min * sigma_after)
+                / (tau * self.energy_sig_min * sigma_after)
+            )
+            neutral_energy_soft = torch.clamp(
+                gate_tower * tower_energy_smeared - tower_track_energy, min=0.0
+            )
+            neutral_sigma_soft = neutral_energy_soft / denominator_safe  # reuse safe denom
+            # Soft neutral-object cut (neutral_sigma is already dimensionless E/sigma).
+            gate = torch.sigmoid(
+                (neutral_energy_soft - self.energy_min) / (tau * self.energy_min)
+            ) * torch.sigmoid(
+                (neutral_sigma_soft - self.energy_sig_min) / (tau * self.energy_sig_min)
+            )
+            # Straight-through: hard forward value == today's exact count, soft backward.
+            gate_st = significant_neutral.to(gate.dtype).detach() + (gate - gate.detach())
+            abs_eta_center = tower_eta_center.abs()
+            if self.is_ecal:
+                region_masks = [
+                    abs_eta_center <= 1.5,
+                    (abs_eta_center > 1.5) & (abs_eta_center <= 2.5),
+                    abs_eta_center > 2.5,
+                ]
+            else:
+                region_masks = [abs_eta_center <= 3.0, abs_eta_center > 3.0]
+            # +0*sigma_after.sum() anchors a graph path even when n_towers == 0.
+            anchor = sigma_after.sum() * 0.0
+            expected_calo_counts = torch.stack([
+                anchor + (gate_st * m.to(gate_st.dtype)).sum() for m in region_masks
+            ])
+        else:
+            expected_calo_counts = None
 
         # ===== Create Tower output =====
         # Towers with energy > 0 after thresholds
@@ -868,7 +945,7 @@ class SimpleCalorimeter(nn.Module):
             eflow_excess_neutrals[:, ColumnMap.EVENT_NUMBER] = eflow_tower_event_num
 
         # Return results
-        return eflow_tracks, towers, eflow_excess_neutrals
+        return eflow_tracks, towers, eflow_excess_neutrals, expected_calo_counts
 
     def _compute_phi_bins(
         self,

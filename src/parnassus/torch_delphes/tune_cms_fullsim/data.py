@@ -38,6 +38,34 @@ _COUNT_TERM_SPECIES: tuple[tuple[str, int, str], ...] = (
     ("muon", 13, "muon_region_counts"),
 )
 
+# Per-species calorimeter object-count targets for the differentiable resolution-param
+# count term. Unlike the efficiency regions above these bin by |eta| ONLY (different
+# edges), matching the soft significance gate in ``SimpleCalorimeter.forward``: ECal
+# photons (|pid|==22) -> barrel<=1.5 / endcap(1.5,2.5] / forward>2.5; HCal neutral
+# hadrons (|pid|==111) -> central<=3.0 / forward>3.0. Tuple = (|pid| selecting the
+# species, |eta| upper edges (the final region is > the last edge), target dict key).
+# The edges MUST stay identical to the gate's region_masks.
+_CALO_COUNT_SPECIES: tuple[tuple[int, tuple[float, ...], str], ...] = (
+    (22, (1.5, 2.5), "ecal_photon_region_counts"),
+    (111, (3.0,), "hcal_nh_region_counts"),
+)
+
+
+def _calo_eta_region_masks(abs_eta: np.ndarray, upper_edges: tuple[float, ...]) -> list[np.ndarray]:
+    """|eta| region masks matching the SimpleCalorimeter soft-gate regions.
+
+    For ``upper_edges = (1.5, 2.5)`` returns 3 masks: ``<=1.5``, ``(1.5, 2.5]``,
+    ``>2.5`` (the ``<=`` lower edges and ``>`` final edge match the gate exactly).
+    """
+    masks: list[np.ndarray] = []
+    for j, up in enumerate(upper_edges):
+        if j == 0:
+            masks.append(abs_eta <= up)
+        else:
+            masks.append((abs_eta > upper_edges[j - 1]) & (abs_eta <= up))
+    masks.append(abs_eta > upper_edges[-1])
+    return masks
+
 # =============================================================================
 # ROOT I/O
 # =============================================================================
@@ -259,6 +287,12 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
         key: np.zeros((n_events, CMS_EFF_REGION_SPECS[spec_key].n_regions), dtype=np.float64)
         for spec_key, _pid, key in _COUNT_TERM_SPECIES
     }
+    # Calorimeter object-count targets share the same dict, so they spread into the
+    # loader output (and the loss) automatically alongside the efficiency counts.
+    per_event_region_counts.update({
+        key: np.zeros((n_events, len(upper_edges) + 1), dtype=np.float64)
+        for _pid, upper_edges, key in _CALO_COUNT_SPECIES
+    })
     for i in range(n_events):
         pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
@@ -290,6 +324,11 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
             spec = CMS_EFF_REGION_SPECS[spec_key]
             is_species = abs_pid == pid_sel
             for b, region_mask in enumerate(spec.region_masks(pt, abs_eta)):
+                per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
+        # Calorimeter object counts: |eta|-only regions matching the soft gate.
+        for pid_sel, upper_edges, key in _CALO_COUNT_SPECIES:
+            is_species = abs_pid == pid_sel
+            for b, region_mask in enumerate(_calo_eta_region_masks(abs_eta, upper_edges)):
                 per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
 
     return (

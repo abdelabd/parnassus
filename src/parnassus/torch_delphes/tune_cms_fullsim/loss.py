@@ -22,7 +22,7 @@ from __future__ import annotations
 import ot
 import torch
 
-from .config import COUNT_TERM_KEYS
+from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
 
 # Weight of each differentiable per-species expected-count term relative to the
 # per-pid sliced-Wasserstein terms. These terms are the ONLY gradient source for the
@@ -258,7 +258,7 @@ def per_event_wasserstein_loss(
     # parameter (the migration M is gradient-free, and eff_logits get gradient ONLY
     # here), so the choice of weighting cannot perturb the rest of the fit.
     count_terms: list[torch.Tensor] = []
-    for _out_key, pred_key, tgt_key in COUNT_TERM_KEYS:
+    for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred_counts = pred.get(pred_key)
         if pred_counts is None or tgt_key not in target:
             continue

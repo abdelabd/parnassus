@@ -220,11 +220,11 @@ class ATLASEnergyFlowDefault(DelphesBaseCard):
             muons_smeared,
         ])
 
-        # ECal
-        ecal_tracks, ecal_towers, eflow_photons = self.ECal(particles_propagated, merged_tracks)
+        # ECal (4th return is the optional soft-count term, unused for ATLAS)
+        ecal_tracks, ecal_towers, eflow_photons, _ = self.ECal(particles_propagated, merged_tracks)
 
         # HCal
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons, _ = self.HCal(
             particles_propagated, ecal_tracks
         )
 

@@ -36,6 +36,10 @@ PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_
 OBSERVABLES: list[str] = [
     "pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid",
     "chad_region_counts", "electron_region_counts", "muon_region_counts",
+    # Calorimeter object-count targets (per-|eta|-region; ECal photons, HCal
+    # neutral hadrons) for the differentiable resolution-param count term. Same
+    # non-plottable, prediction-less status as the *_region_counts above.
+    "ecal_photon_region_counts", "hcal_nh_region_counts",
 ]
 
 
@@ -52,6 +56,17 @@ COUNT_TERM_KEYS: tuple[tuple[str, str, str], ...] = (
     ("ChargedHadronExpectedCounts", "chad_expected_counts", "chad_region_counts"),
     ("ElectronExpectedCounts", "electron_expected_counts", "electron_region_counts"),
     ("MuonExpectedCounts", "muon_expected_counts", "muon_region_counts"),
+)
+
+# Calorimeter resolution-param count terms. Same (card-key, pred-key, target-key)
+# shape as COUNT_TERM_KEYS, wired identically in training.py and loss.py, but the
+# expected count comes from the differentiable soft significance gate in
+# SimpleCalorimeter (per |eta| region) and supplies the resolution params the
+# correctly-signed d(membership)/d(theta) gradient the hard cuts drop. ECal -> the
+# EFlowPhoton (pid 22) clouds; HCal -> the neutral-hadron (pid 111) clouds.
+CALO_COUNT_TERM_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("EcalPhotonExpectedCounts", "ecal_photon_expected_counts", "ecal_photon_region_counts"),
+    ("HcalNeutralHadronExpectedCounts", "hcal_neutral_hadron_expected_counts", "hcal_nh_region_counts"),
 )
 
 

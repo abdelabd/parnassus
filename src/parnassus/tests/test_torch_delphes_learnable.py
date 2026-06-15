@@ -222,6 +222,9 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
         "ChargedHadronExpectedCounts",
         "ElectronExpectedCounts",
         "MuonExpectedCounts",
+        # Differentiable per-|eta|-region calo object counts (resolution-param count term).
+        "EcalPhotonExpectedCounts",
+        "HcalNeutralHadronExpectedCounts",
     }
     assert set(out.keys()) == expected_keys
     # Per-(pt,eta) region differentiable expected counts (one tensor per track
@@ -230,6 +233,9 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
         "ChargedHadronExpectedCounts": 4,
         "ElectronExpectedCounts": 6,
         "MuonExpectedCounts": 6,
+        # Calo object counts: ECal barrel/endcap/forward (3), HCal central/forward (2).
+        "EcalPhotonExpectedCounts": 3,
+        "HcalNeutralHadronExpectedCounts": 2,
     }
     for k, v in out.items():
         if k in expected_count_shapes:
