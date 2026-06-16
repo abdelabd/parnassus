@@ -90,7 +90,8 @@ python -m parnassus.torch_delphes.generate_pseudodata \
     --n-workers "$N_WORKERS" \
     --pt-hat-min "$PT_HAT_MIN" \
     --seed "$SLURM_ARRAY_TASK_ID" \
-    --device cpu
+    --device cpu \
+    --debug
 EOF
 )
 echo "[submit] generation array job id: $ARRAY_JID  (tasks 1-$NJOBS)"
