@@ -690,21 +690,37 @@ class SimpleCalorimeter(nn.Module):
         # unless explicitly enabled (learnable tuning).
         if self.compute_soft_count:
             tau = self.count_tau_rel
-            # Soft tower cut (carries sigma_after's sigma-dependence). The sharpness
-            # widths are relative to each threshold so the gate is equally sharp
-            # across the ~100x barrel<->forward sigma range; sigma_after cancels in
-            # the significance ratio, so a zero-energy tower maps to sigmoid(-1/tau)
-            # with no division blow-up.
+            # Confine this term's gradient to the calo RESOLUTION COEFFICIENTS only
+            # (like _expected_reco_counts gradients only eff). DETACH every upstream
+            # energy/track input so the count cannot leak a (biased) gradient into the
+            # track-resolution / scale / hadron-fraction params -- those are constrained
+            # by the sliced-Wasserstein term, and the track path rides an unsoftened hard
+            # selection (use_weighted_energy) that would feed a wrong-signed gradient.
+            # The resolution coefficients stay live through ``sigma_after_c``, recomputed
+            # on a DETACHED energy so only the explicit c_E/c_S/... coefficients (not the
+            # energy argument) carry gradient.
+            e_smeared_d = tower_energy_smeared.detach()
+            track_e_d = tower_track_energy.detach()
+            track_sigma_d = tower_track_sigma.detach()
+            sigma_after_c = self.resolution_func(tower_eta_center, e_smeared_d)
+            # Soft tower cut (carries the resolution coefficients via sigma_after_c). The
+            # sharpness widths are relative to each threshold so the gate is equally sharp
+            # across the ~100x barrel<->forward sigma range; sigma_after_c cancels in the
+            # significance ratio, so a zero-energy tower maps to sigmoid(-1/tau) with no
+            # division blow-up.
             gate_tower = torch.sigmoid(
-                (tower_energy_smeared - self.energy_min) / (tau * self.energy_min)
+                (e_smeared_d - self.energy_min) / (tau * self.energy_min)
             ) * torch.sigmoid(
-                (tower_energy_smeared - self.energy_sig_min * sigma_after)
-                / (tau * self.energy_sig_min * sigma_after)
+                (e_smeared_d - self.energy_sig_min * sigma_after_c)
+                / (tau * self.energy_sig_min * sigma_after_c)
             )
             neutral_energy_soft = torch.clamp(
-                gate_tower * tower_energy_smeared - tower_track_energy, min=0.0
+                gate_tower * e_smeared_d - track_e_d, min=0.0
             )
-            neutral_sigma_soft = neutral_energy_soft / denominator_safe  # reuse safe denom
+            # Count-specific denominator: track sigma detached, sigma_after_c live.
+            # sigma_after_c >= sqrt(eps) > 0, so this is always positive (no safe guard).
+            denom_c = torch.sqrt(track_sigma_d * track_sigma_d + sigma_after_c * sigma_after_c)
+            neutral_sigma_soft = neutral_energy_soft / denom_c
             # Soft neutral-object cut (neutral_sigma is already dimensionless E/sigma).
             gate = torch.sigmoid(
                 (neutral_energy_soft - self.energy_min) / (tau * self.energy_min)
@@ -722,8 +738,8 @@ class SimpleCalorimeter(nn.Module):
                 ]
             else:
                 region_masks = [abs_eta_center <= 3.0, abs_eta_center > 3.0]
-            # +0*sigma_after.sum() anchors a graph path even when n_towers == 0.
-            anchor = sigma_after.sum() * 0.0
+            # +0*sigma_after_c.sum() anchors a graph path even when n_towers == 0.
+            anchor = sigma_after_c.sum() * 0.0
             expected_calo_counts = torch.stack([
                 anchor + (gate_st * m.to(gate_st.dtype)).sum() for m in region_masks
             ])
