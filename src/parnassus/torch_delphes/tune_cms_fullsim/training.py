@@ -22,7 +22,7 @@ from parnassus.torch_delphes.param_config import to_physical
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS, OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_main
-from .loss import per_event_wasserstein_loss
+from .loss import COUNT_WEIGHT, EVENT_WEIGHT, per_event_wasserstein_loss
 
 # =============================================================================
 # Fit loop
@@ -44,6 +44,8 @@ def fit_card_to_fullsim(
     early_stopping_patience: int | None = 10,
     lr_scheduler_patience: int | None = 4,
     lr_scheduler_factor: float = 0.5,
+    count_weight: float = COUNT_WEIGHT,
+    event_weight: float = EVENT_WEIGHT,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -88,6 +90,14 @@ def fit_card_to_fullsim(
     lr_scheduler_factor : float
         Multiplicative factor applied to the lr on each plateau reduction
         (only used when ``lr_scheduler_patience`` is enabled). Default is 0.5.
+    count_weight : float
+        Scales every per-species expected-count term in the loss relative to
+        the unit-weighted per-pid object Wasserstein terms. Passed straight
+        through to :func:`per_event_wasserstein_loss`. Defaults to the loss
+        module's ``COUNT_WEIGHT``; surfaced on the CLI as ``--count-weight``.
+    event_weight : float
+        Scales the per-event ``log(HT)`` Wasserstein term, likewise. Defaults
+        to ``EVENT_WEIGHT``; surfaced on the CLI as ``--event-weight``.
 
     Returns
     -------
@@ -231,7 +241,10 @@ def fit_card_to_fullsim(
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
             loss = per_event_wasserstein_loss(
-                pred_observables, target_observables
+                pred_observables,
+                target_observables,
+                count_weight=count_weight,
+                event_weight=event_weight,
             )
 
             loss.backward()
@@ -284,7 +297,10 @@ def fit_card_to_fullsim(
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
                 val_loss = per_event_wasserstein_loss(
-                    pred_observables, target_observables
+                    pred_observables,
+                    target_observables,
+                    count_weight=count_weight,
+                    event_weight=event_weight,
                 )
                 val_loss_acc += val_loss.detach()
 

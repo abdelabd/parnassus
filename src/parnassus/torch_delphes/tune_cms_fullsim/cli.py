@@ -70,6 +70,7 @@ from .data import (
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
 
+from .loss import COUNT_WEIGHT, EVENT_WEIGHT
 from .distributed import (
     _cleanup_distributed,
     _init_distributed,
@@ -107,6 +108,27 @@ def main() -> None:
             "learning rate is --lr times its per-parameter 'lr_scale' from the "
             "--param-config file, so this is the single knob for sweeping the "
             "overall step size."
+        ),
+    )
+    parser.add_argument(
+        "--count-weight",
+        type=float,
+        default=COUNT_WEIGHT,
+        help=(
+            "Weight on every per-species expected-count term, relative to the "
+            "unit-weighted per-pid object Wasserstein terms. The count term is a "
+            "dimensionless, batch-invariant normalized chi^2 (~O(1)), so this is a "
+            f"meaningful balance knob. Default {COUNT_WEIGHT}. Set 0 to disable the "
+            "count terms (drops the eff_logits / calo-resolution count gradient)."
+        ),
+    )
+    parser.add_argument(
+        "--event-weight",
+        type=float,
+        default=EVENT_WEIGHT,
+        help=(
+            "Weight on the per-event log(HT) Wasserstein term, relative to the "
+            f"per-pid object terms. Default {EVENT_WEIGHT}."
         ),
     )
     parser.add_argument(
@@ -283,6 +305,8 @@ def main() -> None:
         lr_scheduler_patience=(
             args.lr_scheduler_patience if args.lr_scheduler_patience > 0 else None
         ),
+        count_weight=args.count_weight,
+        event_weight=args.event_weight,
     )
 
     if args.history_path is not None and _is_main(rank):

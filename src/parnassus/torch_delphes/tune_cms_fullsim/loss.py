@@ -19,17 +19,26 @@ This module is the package's self-contained loss layer:
 
 from __future__ import annotations
 
+import os
+
 import ot
 import torch
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
 
 # Weight of each differentiable per-species expected-count term relative to the
-# per-pid sliced-Wasserstein terms. These terms are the ONLY gradient source for the
-# tracking-efficiency eff_logits (the hard Gumbel mask is detached), so the absolute
-# scale mainly sets the reported-loss balance; Adam's per-parameter normalization
-# makes the eff step size insensitive to it. Tune if needed.
+# per-pid sliced-Wasserstein terms. The count term is now a dimensionless,
+# batch-invariant quantity (chi^2-sum / total-count; see below), so it sits on the
+# same O(1) scale as the z-scored Wasserstein terms and this weight is a meaningful
+# balance knob. It also feeds the calo RESOLUTION coefficients (which simultaneously
+# receive the Wasserstein energy-shape gradient), so the balance genuinely matters
+# there -- not only for the Adam-insensitive eff_logits. Overridable per-call via
+# the CLI --count-weight.
 COUNT_WEIGHT = 0.5
+
+# Weight of the per-event log(HT) sliced-Wasserstein term relative to the per-pid
+# object terms. Overridable per-call via the CLI --event-weight.
+EVENT_WEIGHT = 0.1
 
 # =============================================================================
 # Differentiable histogram primitives (diagnostic only; copied from tuning.py)
@@ -125,13 +134,23 @@ def histogram_mse_loss(
 def per_event_wasserstein_loss(
     pred: dict[str, torch.Tensor],
     target: dict[str, torch.Tensor],
+    *,
+    count_weight: float = COUNT_WEIGHT,
+    event_weight: float = EVENT_WEIGHT,
 ) -> torch.Tensor:
     """Sliced Wasserstein-2 loss between predicted and target observables.
 
     One SW_2 term per particle type (``pid``) over the standardized 3-D
     ``[log_E, log_pt, eta]`` object clouds, plus a down-weighted event-level
-    SW_2 term on the per-event ``log(HT)`` distribution. The target side is
-    detached; gradients flow back to the trainee card through ``pred``.
+    SW_2 term on the per-event ``log(HT)`` distribution, plus the per-species
+    expected-count terms. The target side is detached; gradients flow back to
+    the trainee card through ``pred``.
+
+    ``count_weight`` scales every per-species count term and ``event_weight``
+    scales the per-event ``log(HT)`` term, both relative to the unit-weighted
+    per-pid object terms. They default to the module constants
+    :data:`COUNT_WEIGHT` / :data:`EVENT_WEIGHT` and are surfaced on the CLI as
+    ``--count-weight`` / ``--event-weight``.
     """
 
     object_level_observables = ["log_E", "log_pt", "eta", "pid"]
@@ -246,17 +265,18 @@ def per_event_wasserstein_loss(
     # efficiency (no truth information is used -- only the trainee's own reco and the
     # reco data).
     #
-    # Weighting is chi^2 / Poisson-style: (pred - tgt)^2 / (tgt + 1). The denominator
-    # is the bin's statistical variance (counts are ~Poisson), so each bin's residual
-    # is measured in units of its own statistical error. This self-balances the dense
-    # charged-hadron bins (~1e4 counts/batch, <1% noise) against the sparse electron /
-    # muon bins (tens of counts/batch, 12-45% Poisson noise) -- and bins within one
-    # species -- without per-species hand weights. The +1 floor keeps an empty bin's
-    # term finite and well-conditioned. The fixed point and gradient signs are
-    # unchanged vs a relative MSE; only the reported-loss scale differs (chi^2 is ~1
-    # per d.o.f. at convergence). These terms are gradient-decoupled from every other
-    # parameter (the migration M is gradient-free, and eff_logits get gradient ONLY
-    # here), so the choice of weighting cannot perturb the rest of the fit.
+    # Weighting is a NORMALIZED chi^2 / Poisson: per region, (pred - tgt)^2 / (tgt + 1)
+    # (the +1 floor keeps an empty bin finite), then the per-species term is the bin SUM
+    # divided by that species' total target count. Dividing the chi^2 sum by the total
+    # count makes each term a *population-weighted squared relative error*
+    # (sum_b (O_b/sum O) * ((pred_b - O_b)/O_b)^2): it KEEPS the chi^2 dense/sparse
+    # cross-bin balancing (dense charged-hadron bins still dominate sparse lepton bins by
+    # population) but is dimensionless and batch-size invariant -- O(1) at init and on the
+    # same scale as the z-scored Wasserstein terms, instead of the old bin-MEAN chi^2 that
+    # was extensive (~f^2 * counts ∝ n_events) and blew up to ~1e4 early in training. The
+    # tracking count terms are gradient-decoupled from every other parameter (migration M
+    # is gradient-free, eff_logits get gradient ONLY here); the calo count terms also feed
+    # the resolution coefficients, which is why their scale matters and is now controllable.
     count_terms: list[torch.Tensor] = []
     for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred_counts = pred.get(pred_key)
@@ -271,17 +291,30 @@ def per_event_wasserstein_loss(
             .to(device=pred_counts.device, dtype=pred_counts.dtype)
         )
         chi2 = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0)
-        count_terms.append(COUNT_WEIGHT * chi2.mean())
+        total = tgt_counts.sum().clamp_min(1.0)  # detached scale -> batch-invariant
+        count_terms.append(count_weight * (chi2.sum() / total))
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
-    # log_ht term is down-weighted by EVENT_WEIGHT relative to the per-pid object
+    # log_ht term is down-weighted by ``event_weight`` relative to the per-pid object
     # terms (scalar * tensor keeps the gradient).
-    EVENT_WEIGHT = 0.1
     terms = (
         list(object_wasserstein_distance.values())
-        + [EVENT_WEIGHT * d for d in event_wasserstein_distance.values()]
+        + [event_weight * d for d in event_wasserstein_distance.values()]
         + count_terms
     )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
         return pred_particles.sum() * 0.0
+
+    # Opt-in per-component breakdown (set MCGEN_LOSS_DEBUG=1) -- the durable
+    # replacement for the old `embed()`: confirms the count terms now sit on the
+    # same O(1) scale as the per-pid object terms instead of dominating.
+    if os.environ.get("MCGEN_LOSS_DEBUG"):
+        obj = {p: float(v) for p, v in object_wasserstein_distance.items()}
+        evt = {k: float(event_weight * v) for k, v in event_wasserstein_distance.items()}
+        cnt = [float(c) for c in count_terms]
+        print(
+            f"[loss] object_sw2={obj} event(w)={evt} count(w)={cnt} "
+            f"total={float(torch.stack(terms).sum()):.4f}",
+            flush=True,
+        )
     return torch.stack(terms).sum()
