@@ -70,7 +70,7 @@ from .data import (
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
 
-from .loss import COUNT_WEIGHT, EVENT_WEIGHT
+from .loss import COUNT_WEIGHT, EVENT_WEIGHT, LOSS_CHOICES
 from .distributed import (
     _cleanup_distributed,
     _init_distributed,
@@ -108,6 +108,19 @@ def main() -> None:
             "learning rate is --lr times its per-parameter 'lr_scale' from the "
             "--param-config file, so this is the single knob for sweeping the "
             "overall step size."
+        ),
+    )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default="wasserstein",
+        choices=list(LOSS_CHOICES),
+        help=(
+            "Training loss. 'wasserstein' (default) is the per-pid sliced "
+            "Wasserstein-2 over [log_E, log_pt, eta] plus a down-weighted "
+            "log(HT) term and expected-count terms. 'soft_hist' is the "
+            "soft-histogram MSE loss summed across observables; DDP-aware "
+            "via differentiable all-reduce on per-rank histograms."
         ),
     )
     parser.add_argument(
@@ -307,6 +320,7 @@ def main() -> None:
         ),
         count_weight=args.count_weight,
         event_weight=args.event_weight,
+        loss_name=args.loss,
     )
 
     if args.history_path is not None and _is_main(rank):

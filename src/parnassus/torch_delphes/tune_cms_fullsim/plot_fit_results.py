@@ -605,7 +605,7 @@ def plot_intermediate_observables(
 
             plot_comparison_with_ratio(
                 distributions=[
-                    (target_np, "target (full sim)", _TARGET_COLOR),
+                    (target_np, "target", _TARGET_COLOR),
                     (init_np, "trainee, initial", _INIT_COLOR),
                     (final_np, "trainee, fitted", _FINAL_COLOR),
                 ],

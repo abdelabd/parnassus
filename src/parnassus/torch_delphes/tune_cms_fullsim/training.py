@@ -22,7 +22,7 @@ from parnassus.torch_delphes.param_config import to_physical
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS, OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_main
-from .loss import COUNT_WEIGHT, EVENT_WEIGHT, per_event_wasserstein_loss
+from .loss import COUNT_WEIGHT, EVENT_WEIGHT, LOSS_CHOICES, get_loss_fn
 
 # =============================================================================
 # Fit loop
@@ -46,6 +46,7 @@ def fit_card_to_fullsim(
     lr_scheduler_factor: float = 0.5,
     count_weight: float = COUNT_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
+    loss_name: str = "wasserstein",
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -98,6 +99,11 @@ def fit_card_to_fullsim(
     event_weight : float
         Scales the per-event ``log(HT)`` Wasserstein term, likewise. Defaults
         to ``EVENT_WEIGHT``; surfaced on the CLI as ``--event-weight``.
+    loss_name : str
+        Selects the training loss. One of :data:`tune_cms_fullsim.loss.LOSS_CHOICES`.
+        ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss (with
+        ``count_weight`` / ``event_weight`` applied); ``"soft_hist"`` uses the
+        soft-histogram MSE loss summed across observables.
 
     Returns
     -------
@@ -108,7 +114,27 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
+    base_loss_fn = get_loss_fn(loss_name)
+    if loss_name == "wasserstein":
+        def loss_fn(
+            pred: dict[str, torch.Tensor],
+            target: dict[str, torch.Tensor],
+        ) -> torch.Tensor:
+            return base_loss_fn(
+                pred,
+                target,
+                count_weight=count_weight,
+                event_weight=event_weight,
+            )
+    else:
+        loss_fn = base_loss_fn
+
     opt = torch.optim.Adam(param_groups)
+    if _is_main(rank):
+        print(
+            f"  training loss: {loss_name!r} "
+            f"(choices: {list(LOSS_CHOICES)})"
+        )
     if _is_main(rank):
         for g in param_groups:
             print(
@@ -240,12 +266,7 @@ def fit_card_to_fullsim(
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-            loss = per_event_wasserstein_loss(
-                pred_observables,
-                target_observables,
-                count_weight=count_weight,
-                event_weight=event_weight,
-            )
+            loss = loss_fn(pred_observables, target_observables)
 
             loss.backward()
             opt.step()
@@ -296,12 +317,7 @@ def fit_card_to_fullsim(
                     pred_observables[pred_key] = out[out_key]
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-                val_loss = per_event_wasserstein_loss(
-                    pred_observables,
-                    target_observables,
-                    count_weight=count_weight,
-                    event_weight=event_weight,
-                )
+                val_loss = loss_fn(pred_observables, target_observables)
                 val_loss_acc += val_loss.detach()
 
                 # Accumulate the flattened, padding/ghost-stripped values for

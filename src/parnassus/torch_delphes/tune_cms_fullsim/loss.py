@@ -20,11 +20,15 @@ This module is the package's self-contained loss layer:
 from __future__ import annotations
 
 import os
+from typing import Callable
 
 import ot
 import torch
+import torch.distributed as dist
+from torch.distributed.nn.functional import all_reduce as diff_all_reduce
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
+from .distributed import _is_dist
 
 # Weight of each differentiable per-species expected-count term relative to the
 # per-pid sliced-Wasserstein terms. The count term is now a dimensionless,
@@ -318,3 +322,192 @@ def per_event_wasserstein_loss(
             flush=True,
         )
     return torch.stack(terms).sum()
+
+
+# =============================================================================
+# Alternative training loss: per-observable soft-histogram MSE
+# =============================================================================
+
+DEFAULT_SOFT_HIST_BIN_EDGES: dict[str, torch.Tensor] = {
+    "pt": torch.linspace(0.0, 200.0, 41, dtype=torch.float64),
+    "eta": torch.linspace(-5.0, 5.0, 41, dtype=torch.float64),
+    "log_pt": torch.linspace(-1.0, 6.0, 41, dtype=torch.float64),
+    "log_E": torch.linspace(-1.0, 7.0, 41, dtype=torch.float64),
+    "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
+    "ht": torch.linspace(0.0, 2000.0, 41, dtype=torch.float64),
+    "log_ht": torch.linspace(0.0, 8.0, 41, dtype=torch.float64),
+}
+
+DEFAULT_SOFT_HIST_WEIGHTS: dict[str, float] = {
+    "pt": 1.0,
+    "eta": 1.0,
+    "log_pt": 0.5,
+    "log_E": 0.5,
+    "multiplicity": 0.1,
+    "ht": 0.1,
+    "log_ht": 0.1,
+}
+
+_PARTICLE_OBSERVABLES: frozenset[str] = frozenset(
+    {"pt", "eta", "phi", "E", "log_E", "log_pt"}
+)
+
+
+def _flatten_obs_for_hist(
+    values: torch.Tensor,
+    pt_mask: torch.Tensor | None,
+) -> torch.Tensor:
+    """Flatten an observable tensor for :func:`soft_histogram` consumption."""
+    if values.ndim >= 2:
+        if pt_mask is None:
+            return values.reshape(-1)
+        return values[pt_mask]
+    return values.reshape(-1)
+
+
+def multi_observable_soft_hist_loss(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    bin_edges: dict[str, torch.Tensor] | None = None,
+    beta: float = 0.15,
+    weights: dict[str, float] | None = None,
+) -> torch.Tensor:
+    """Sum of per-observable soft-histogram MSE losses, optionally weighted."""
+    bin_edges = bin_edges if bin_edges is not None else DEFAULT_SOFT_HIST_BIN_EDGES
+    weights = weights if weights is not None else DEFAULT_SOFT_HIST_WEIGHTS
+
+    pred_pt = pred.get("pt")
+    tgt_pt = target.get("pt")
+    pred_mask = (pred_pt != 0) if (pred_pt is not None and pred_pt.ndim >= 2) else None
+    tgt_mask = (tgt_pt != 0) if (tgt_pt is not None and tgt_pt.ndim >= 2) else None
+
+    any_pred = next(iter(pred.values())) if pred else None
+
+    total: torch.Tensor | None = None
+    for key, edges in bin_edges.items():
+        if key not in pred or key not in target:
+            continue
+        if key not in _PARTICLE_OBSERVABLES and (pred[key].ndim >= 2 or target[key].ndim >= 2):
+            pred_vals = _flatten_obs_for_hist(pred[key], pred_mask)
+            tgt_vals = _flatten_obs_for_hist(target[key], tgt_mask)
+        elif key in _PARTICLE_OBSERVABLES:
+            pred_vals = _flatten_obs_for_hist(pred[key], pred_mask)
+            tgt_vals = _flatten_obs_for_hist(target[key], tgt_mask)
+        else:
+            pred_vals = pred[key].reshape(-1)
+            tgt_vals = target[key].reshape(-1)
+
+        if pred_vals.numel() == 0 or tgt_vals.numel() == 0:
+            continue
+
+        edges_dev = edges.to(device=pred_vals.device, dtype=pred_vals.dtype)
+        w = float(weights.get(key, 1.0))
+        term = w * histogram_mse_loss(pred_vals, tgt_vals, edges_dev, beta=beta)
+        total = term if total is None else total + term
+
+    if total is None:
+        if any_pred is None:
+            return torch.zeros((), dtype=torch.float64)
+        return any_pred.sum() * 0.0
+    return total
+
+
+def multi_observable_soft_hist_loss_distributed(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    bin_edges: dict[str, torch.Tensor] | None = None,
+    beta: float = 0.15,
+    weights: dict[str, float] | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """DDP-aware version of :func:`multi_observable_soft_hist_loss`."""
+    if not _is_dist():
+        return multi_observable_soft_hist_loss(
+            pred, target, bin_edges=bin_edges, beta=beta, weights=weights
+        )
+
+    bin_edges = bin_edges if bin_edges is not None else DEFAULT_SOFT_HIST_BIN_EDGES
+    weights = weights if weights is not None else DEFAULT_SOFT_HIST_WEIGHTS
+
+    pred_pt = pred.get("pt")
+    tgt_pt = target.get("pt")
+    pred_mask = (pred_pt != 0) if (pred_pt is not None and pred_pt.ndim >= 2) else None
+    tgt_mask = (tgt_pt != 0) if (tgt_pt is not None and tgt_pt.ndim >= 2) else None
+
+    any_pred = next(iter(pred.values())) if pred else None
+
+    total: torch.Tensor | None = None
+    for key, edges in bin_edges.items():
+        pred_vals_raw = pred.get(key)
+        tgt_vals_raw = target.get(key)
+        if pred_vals_raw is None or tgt_vals_raw is None:
+            continue
+
+        if pred_vals_raw.ndim >= 2:
+            pred_vals = _flatten_obs_for_hist(pred_vals_raw, pred_mask)
+        else:
+            pred_vals = pred_vals_raw.reshape(-1)
+        if tgt_vals_raw.ndim >= 2:
+            tgt_vals = _flatten_obs_for_hist(tgt_vals_raw, tgt_mask)
+        else:
+            tgt_vals = tgt_vals_raw.reshape(-1)
+
+        edges_dev = edges.to(
+            device=pred_vals.device if pred_vals.numel() else (pred_vals_raw.device),
+            dtype=pred_vals.dtype if pred_vals.numel() else (pred_vals_raw.dtype),
+        )
+
+        n_bins = edges_dev.numel() - 1
+        if pred_vals.numel() > 0:
+            pred_hist_local = soft_histogram(pred_vals, edges_dev, beta=beta)
+        else:
+            pred_hist_local = torch.zeros(
+                n_bins, dtype=edges_dev.dtype, device=edges_dev.device
+            )
+        if tgt_vals.numel() > 0:
+            tgt_hist_local = soft_histogram(tgt_vals.detach(), edges_dev, beta=beta)
+        else:
+            tgt_hist_local = torch.zeros(
+                n_bins, dtype=edges_dev.dtype, device=edges_dev.device
+            )
+
+        pred_hist = diff_all_reduce(pred_hist_local, op=dist.ReduceOp.SUM)
+        tgt_hist = tgt_hist_local.clone()
+        dist.all_reduce(tgt_hist, op=dist.ReduceOp.SUM)
+
+        pred_norm = pred_hist / (pred_hist.sum() + eps)
+        tgt_norm = tgt_hist / (tgt_hist.sum() + eps)
+        loss_key = ((pred_norm - tgt_norm) ** 2).mean()
+
+        w = float(weights.get(key, 1.0))
+        term = w * loss_key
+        total = term if total is None else total + term
+
+    if total is None:
+        if any_pred is None:
+            return torch.zeros((), dtype=torch.float64)
+        return any_pred.sum() * 0.0
+    return total
+
+
+# =============================================================================
+# Loss dispatcher
+# =============================================================================
+
+
+LossFn = Callable[
+    [dict[str, torch.Tensor], dict[str, torch.Tensor]], torch.Tensor
+]
+
+LOSS_CHOICES: tuple[str, ...] = ("wasserstein", "soft_hist")
+
+
+def get_loss_fn(name: str) -> LossFn:
+    """Return the training loss callable selected by ``name``."""
+    if name == "wasserstein":
+        return per_event_wasserstein_loss
+    if name == "soft_hist":
+        return multi_observable_soft_hist_loss_distributed
+    raise ValueError(
+        f"Unknown loss {name!r}. Valid choices: {LOSS_CHOICES}."
+    )
