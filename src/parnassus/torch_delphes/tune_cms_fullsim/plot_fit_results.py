@@ -458,6 +458,7 @@ def _load_target_intermediate_values(
     module_name: str,
     var: str,
     n_events: int,
+    entry_start: int = 0,
 ) -> torch.Tensor | None:
     """Read one debug branch from the pseudodata ROOT file as a flat 1-D tensor.
 
@@ -475,7 +476,8 @@ def _load_target_intermediate_values(
         if branch not in tree:
             return None
         arr = tree[branch].array(  # pyright: ignore[reportAttributeAccessIssue]
-            entry_stop=n_events
+            entry_start=entry_start,
+            entry_stop=entry_start + n_events,
         )
     # Awkward -> numpy via flatten -> torch. Empty events become zero-length
     # subarrays and disappear under flatten, which is what we want.
@@ -646,6 +648,7 @@ def plot_intermediate_observables(
     trainee_final_outputs: dict[str, torch.Tensor],
     output_dir: Path,
     n_events: int,
+    entry_start: int = 0,
 ) -> None:
     """Generate target / init / fitted overlays for every intermediate output.
 
@@ -678,7 +681,11 @@ def plot_intermediate_observables(
         module_has_any = False
         for var in variables:
             target_vals = _load_target_intermediate_values(
-                root_file, module_name, var, n_events=n_events
+                root_file,
+                module_name,
+                var,
+                n_events=n_events,
+                entry_start=entry_start,
             )
             if target_vals is None:
                 n_branches_missing += 1
@@ -765,7 +772,16 @@ def main() -> None:
         default=Path("src/parnassus/tests/benchmark_data/cms_pseudodata.root"),
     )
     parser.add_argument("--output-dir", type=Path, default=Path("doc/figures"))
-    parser.add_argument("--n-events-for-plots", type=int, default=4000)
+    parser.add_argument(
+        "--n-events-for-plots",
+        type=int,
+        default=None,
+        help=(
+            "Optional cap on plotted validation events. If provided and smaller "
+            "than the validation split size, only the first N validation events "
+            "are used for all plots."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--truth-config",
@@ -831,9 +847,35 @@ def main() -> None:
     print("  wrote param_drift_all.pdf")
 
     # ----- 3. Observable histograms (target vs init vs final) -----
-    arrays = load_cms_flow_root(args.root_file, n_events=args.n_events_for_plots)
+    # Fast path: compute the default contiguous validation block boundaries,
+    # then read ONLY that block from ROOT. This avoids loading and densifying
+    # the full dataset just to split it afterward.
+    import uproot
+
+    with uproot.open(str(args.root_file)) as f:
+        n_total_events = int(f["event_tree"].num_entries)
+    val_entry_start = int(0.7 * n_total_events)  # default train_fraction
+    n_val_events = int(0.9*n_total_events) - val_entry_start
+    n_plot_events = n_val_events
+    if (
+        args.n_events_for_plots is not None
+        and args.n_events_for_plots > 0
+        and args.n_events_for_plots < n_val_events
+    ):
+        n_plot_events = int(args.n_events_for_plots)
+
+    arrays = load_cms_flow_root(
+        args.root_file,
+        n_events=n_plot_events,
+        entry_start=val_entry_start,
+    )
     truth_tensor = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
+
+    print(
+        "  plotting on validation split: "
+        f"{n_plot_events} events (entries {val_entry_start}:{val_entry_start + n_plot_events})"
+    )
 
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True)
@@ -918,7 +960,7 @@ def main() -> None:
         pred_init=pred_init,
         pred_final=pred_final,
         output_dir=per_pid_output_dir,
-        n_events=args.n_events_for_plots,
+        n_events=n_plot_events,
     )
 
     # ----- 4. Optional: per-module intermediate observables (--debug) -----
@@ -946,7 +988,8 @@ def main() -> None:
             trainee_init_outputs=init_outputs,
             trainee_final_outputs=final_outputs,
             output_dir=args.output_dir / "intermediate",
-            n_events=args.n_events_for_plots,
+            n_events=n_plot_events,
+            entry_start=val_entry_start,
         )
 
     print(f"Done. {len(list(args.output_dir.glob('*.pdf')))} figures in {args.output_dir}.")

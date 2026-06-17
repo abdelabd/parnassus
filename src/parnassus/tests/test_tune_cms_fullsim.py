@@ -68,13 +68,13 @@ def fixture_root() -> Path:
 
 
 def _make_dataloaders(
-    arrays: dict, device: torch.device, batch_size: int = 8, seed: int = 0
+    arrays: dict, device: torch.device, batch_size: int = 8,
 ) -> tuple[DelphesDataLoader, DelphesDataLoader]:
     """Build train/val dataloaders from loaded ROOT arrays (mirrors the CLI)."""
     truth = load_truth_events_ragged(arrays)
     target = load_pflow_targets_ragged(arrays)
-    tr_truth, va_truth = split_truth_objects_jagged(truth, train_fraction=0.8, seed=seed)
-    tr_tgt, va_tgt = split_pflow_targets_jagged(target, train_fraction=0.8, seed=seed)
+    tr_truth, va_truth, _ = split_truth_objects_jagged(truth, train_fraction=0.7, val_fraction=0.2)
+    tr_tgt, va_tgt, _ = split_pflow_targets_jagged(target, train_fraction=0.7, val_fraction=0.2)
     tr_ds = DelphesDataSet(tr_truth, tr_tgt, device=device)
     va_ds = DelphesDataSet(va_truth, va_tgt, device=device)
     return (
@@ -312,7 +312,7 @@ def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):
     batch sizes)."""
     arrays = load_cms_flow_root(fixture_root, n_events=24)
     device = torch.device("cpu")
-    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8, seed=0)
+    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8)
 
     torch.manual_seed(3)
     card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
@@ -352,7 +352,7 @@ def test_fit_against_committed_pseudodata(tmp_path: Path):
     """
     arrays = load_cms_flow_root(PSEUDODATA_PATH, n_events=150)
     device = torch.device("cpu")
-    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=64, seed=11)
+    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=64)
 
     torch.manual_seed(11)
     card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)

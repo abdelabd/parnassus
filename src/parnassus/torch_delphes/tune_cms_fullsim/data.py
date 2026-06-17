@@ -576,7 +576,7 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
 # Train validation splitting
 # =============================================================================
 
-def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.8, seed: int = 42):
+def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.7, val_fraction: float = 0.2, ):
     """Split the truth tensor into train and validation parts along the event axis.
 
     Uses a contiguous event-axis split: the first ``train_fraction`` block goes
@@ -590,13 +590,13 @@ def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.8,
         ``(n_events_subset, max_n_particles, n_features)``.
     """
     n_events = truth_tensor.shape[0]
-    split_idx = int(train_fraction * n_events)
-    train_tensor = truth_tensor[:split_idx]
-    val_tensor = truth_tensor[split_idx:]
-    return train_tensor, val_tensor
+    train_tensor = truth_tensor[:int(train_fraction * n_events)]
+    val_tensor = truth_tensor[int(train_fraction * n_events):int((train_fraction+val_fraction) * n_events)]
+    test_tensor = truth_tensor[int((train_fraction+val_fraction) * n_events):]
+    return train_tensor, val_tensor, test_tensor
 
 
-def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float = 0.8, seed: int = 42):
+def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float = 0.7, val_fraction: float = 0.2, ):
     """Split the target dict into train and validation parts along the event axis.
 
     Uses a contiguous event-axis split matching :func:`split_truth_objects`.
@@ -610,13 +610,14 @@ def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float =
     """
     n_events = next(iter(target.values())).shape[0]  # number of events from any observable
     split_idx = int(train_fraction * n_events)
-    train_target = {k: v[:split_idx] for k, v in target.items()}
-    val_target = {k: v[split_idx:] for k, v in target.items()}
-    return train_target, val_target
+    train_target = {k: v[:int(train_fraction * n_events)] for k, v in target.items()}
+    val_target = {k: v[int(train_fraction * n_events):int((train_fraction+val_fraction)*n_events)] for k, v in target.items()}
+    test_target = {k: v[int((train_fraction+val_fraction)*n_events):] for k, v in target.items()}
+    return train_target, val_target, test_target
 
 
 def split_truth_objects_jagged(
-    truth_ragged: list[torch.Tensor], train_fraction: float = 0.8, seed: int = 42
+    truth_ragged: list[torch.Tensor], train_fraction: float = 0.7, val_fraction: float = 0.2, 
 ):
     """Ragged counterpart of :func:`split_truth_objects`.
 
@@ -626,13 +627,14 @@ def split_truth_objects_jagged(
     """
     n_events = len(truth_ragged)
     split_idx = int(train_fraction * n_events)
-    train = truth_ragged[:split_idx]
-    val = truth_ragged[split_idx:]
-    return train, val
+    train_tensor = truth_ragged[:int(train_fraction * n_events)]
+    val_tensor = truth_ragged[int(train_fraction * n_events):int((train_fraction+val_fraction) * n_events)]
+    test_tensor = truth_ragged[int((train_fraction+val_fraction) * n_events):]
+    return train_tensor, val_tensor, test_tensor
 
 
 def split_pflow_targets_jagged(
-    target: dict, train_fraction: float = 0.8, seed: int = 42
+    target: dict, train_fraction: float = 0.7, val_fraction: float = 0.2, 
 ):
     """Ragged counterpart of :func:`split_pflow_targets`.
 
@@ -649,6 +651,7 @@ def split_pflow_targets_jagged(
             return v[start:end]
         return v[start:end]
 
-    train_target = {k: _split_one(v, 0, split_idx) for k, v in target.items()}
-    val_target = {k: _split_one(v, split_idx, n_events) for k, v in target.items()}
-    return train_target, val_target
+    train_target = {k: _split_one(v, 0, int(train_fraction * n_events)) for k, v in target.items()}
+    val_target = {k: _split_one(v, int(train_fraction * n_events), int((train_fraction+val_fraction) * n_events)) for k, v in target.items()}
+    test_target = {k: _split_one(v, int((train_fraction+val_fraction) * n_events), n_events) for k, v in target.items()}
+    return train_target, val_target, test_target

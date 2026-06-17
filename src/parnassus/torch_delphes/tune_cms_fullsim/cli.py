@@ -269,8 +269,8 @@ def main() -> None:
     del arrays
     gc.collect()
 
-    train_truth_tensor, val_truth_tensor = split_truth_objects_jagged(truth_ragged, train_fraction=0.8, seed=args.seed)
-    train_target, val_target = split_pflow_targets_jagged(target, train_fraction=0.8, seed=args.seed)
+    train_truth_tensor, val_truth_tensor, _ = split_truth_objects_jagged(truth_ragged, train_fraction=0.7, val_fraction=0.2)
+    train_target, val_target, _ = split_pflow_targets_jagged(target, train_fraction=0.7, val_fraction=0.2)
 
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
