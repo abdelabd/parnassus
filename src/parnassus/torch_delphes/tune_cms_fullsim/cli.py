@@ -321,10 +321,9 @@ def main() -> None:
         if device.type == "cuda":
             ddp_kwargs["device_ids"] = [local_rank]
             ddp_kwargs["output_device"] = local_rank
-        # Under the soft-hist loss some parameter branches may be unused on a
-        # given rank/step (e.g. species absent in that shard), so DDP must
-        # tolerate unused params during bucket reduction.
-        ddp_kwargs["find_unused_parameters"] = (args.loss == "soft_hist")
+        # Keep the fast path: we enforce stable graph usage in training so we
+        # can run with find_unused_parameters disabled.
+        ddp_kwargs["find_unused_parameters"] = False
         trainee = DDP(trainee, **ddp_kwargs)
 
     n_trainable_scalars = sum(1 for spec in param_cfg.values() if spec["trainable"])

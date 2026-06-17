@@ -203,6 +203,24 @@ def fit_card_to_fullsim(
         history["parameters"] = []
 
     underlying_for_snap = card.module if isinstance(card, DDP) else card
+    trainable_params = [p for p in underlying_for_snap.parameters() if p.requires_grad]
+
+    def _soft_hist_graph_anchor() -> torch.Tensor:
+        """Return a zero-weight scalar connected to every trainable parameter.
+
+        Under DDP + DistributedSampler, a rank-local shard can miss some
+        species/objects, so the soft-hist loss may not route gradient through
+        every parameter branch on that rank for a given step. Adding
+        ``0.0 * anchor`` keeps those parameters in the autograd graph with
+        exactly zero gradient, which avoids DDP "unused parameter" reduction
+        errors while keeping the fast ``find_unused_parameters=False`` path.
+        """
+        if not trainable_params:
+            return torch.zeros((), device=device, dtype=torch.float64)
+        anchor = trainable_params[0].sum()
+        for p in trainable_params[1:]:
+            anchor = anchor + p.sum()
+        return anchor * 0.0
 
     def _snapshot() -> dict[str, float]:
         """Record the current post-transform value of every parameter.
@@ -283,6 +301,8 @@ def fit_card_to_fullsim(
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
             loss = loss_fn(pred_observables, target_observables)
+            if loss_name == "soft_hist":
+                loss = loss + _soft_hist_graph_anchor()
 
             loss.backward()
             opt.step()
