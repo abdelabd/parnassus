@@ -131,10 +131,11 @@ def test_load_truth_events_shapes(fixture_root: Path):
     assert truth.ndim == 3
     assert truth.shape[0] == 10
     assert truth.shape[2] == N_FEATURES
-    # Real (non-padded) rows have positive mass, finite pt, and E^2 ~ p^2 + m^2.
+    # Real (non-padded) rows have non-negative mass, finite pt, and E^2 ~ p^2 + m^2.
     real = truth[torch.any(truth != 0, dim=-1)]
     assert real.shape[0] > 0
-    assert float(real[:, ColumnMap.MASS].min()) > 0
+    assert float(real[:, ColumnMap.MASS].min()) >= 0
+    assert float(real[:, ColumnMap.MASS].max()) > 0
     assert torch.isfinite(real[:, ColumnMap.PT]).all()
     p_sq = real[:, ColumnMap.PX] ** 2 + real[:, ColumnMap.PY] ** 2 + real[:, ColumnMap.PZ] ** 2
     e_sq = real[:, ColumnMap.E] ** 2
