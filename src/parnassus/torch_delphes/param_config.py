@@ -338,7 +338,7 @@ def select_trainable(
             mask = torch.tensor(
                 [1.0 if t else 0.0 for t in trainable], dtype=p.dtype, device=p.device
             ).reshape(p.shape)
-            p.register_hook(lambda g, m=mask: g * m)
+            p.register_hook(lambda g, m=mask: (g * m) if g is not None else None)
         lr_scales = {ls for ls, t in zip(spec["lr_scale"], trainable) if t}
         if len(lr_scales) != 1:
             raise ValueError(

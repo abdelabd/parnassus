@@ -12,7 +12,7 @@ which the fit loop then immediately un-pads.
 """
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .config import OBSERVABLES
 
@@ -82,18 +82,31 @@ def delphes_collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
 
 
 class DelphesDataLoader(DataLoader):
-    """DataLoader for Delphes model tuning."""
+    """DataLoader for Delphes model tuning.
+
+    Accepts an optional ``sampler`` so the CLI can plug in a
+    ``torch.utils.data.distributed.DistributedSampler`` under ``srun`` /
+    DDP. When a sampler is provided, ``shuffle`` must be False (PyTorch
+    requires this; the sampler controls the per-epoch order via
+    ``set_epoch``).
+    """
     def __init__(
         self,
         dataset: DelphesDataSet,
         batch_size: int,
         shuffle: bool = True,
         drop_last: bool = False,
+        sampler: Sampler | None = None,
     ) -> None:
+        if sampler is not None:
+            # DataLoader forbids setting both shuffle=True and a custom
+            # sampler; let the sampler own ordering.
+            shuffle = False
         super().__init__(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             drop_last=drop_last,
             collate_fn=delphes_collate_fn,
             # The dataset holds tensors already on ``device``; keep loading in the

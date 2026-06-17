@@ -55,6 +55,8 @@ import socket
 from pathlib import Path
 
 import torch
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
@@ -266,16 +268,36 @@ def main() -> None:
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
 
-    train_dataloader = DelphesDataLoader(train_dataset, batch_size=512, shuffle=True)
-    # drop_last on val so a tiny tail batch (e.g. 20000 % 512 = 32 events) is not
-    # weighted equally with full batches in the per-batch val-loss mean.
+    # If DDP then each rank sees disjoint shard -- keep the jagged split
+    # output as-is and only shard at the DataLoader level.
+    if world_size > 1:
+        train_sampler: DistributedSampler | None = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=args.seed,
+            drop_last=False,
+        )
+        val_sampler: DistributedSampler | None = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
+    else:
+        train_sampler = None
+        val_sampler = None
+
+    train_dataloader = DelphesDataLoader(
+        train_dataset, batch_size=512, shuffle=True, sampler=train_sampler
+    )
     val_dataloader = DelphesDataLoader(
-        val_dataset, batch_size=512, shuffle=False, drop_last=True
+        val_dataset, batch_size=512, shuffle=False, sampler=val_sampler
     )
 
-    # All ranks must use the *same* initial parameters for the manual-
-    # gradient-sync scheme to keep them in sync; ``torch.manual_seed``
-    # with the user seed (not seed+rank!) handles that.
+    # Same initial parameters for DDP
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
 
@@ -292,6 +314,18 @@ def main() -> None:
             f"--param-config {args.param_config} marks no parameter as trainable; "
             "nothing to optimize."
         )
+
+    # Wrap in DDP
+    if world_size > 1:
+        ddp_kwargs: dict = {}
+        if device.type == "cuda":
+            ddp_kwargs["device_ids"] = [local_rank]
+            ddp_kwargs["output_device"] = local_rank
+        # Under the soft-hist loss some parameter branches may be unused on a
+        # given rank/step (e.g. species absent in that shard), so DDP must
+        # tolerate unused params during bucket reduction.
+        ddp_kwargs["find_unused_parameters"] = (args.loss == "soft_hist")
+        trainee = DDP(trainee, **ddp_kwargs)
 
     n_trainable_scalars = sum(1 for spec in param_cfg.values() if spec["trainable"])
     log(
@@ -395,14 +429,17 @@ def main() -> None:
 
     # Print the learned charged-hadron / ECal / HCal scales for a quick sanity
     # check against the generate_pseudodata.py TARGET_*_SCALE values.
-    chad_res = trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
+    # ``trainee`` may be DDP-wrapped under srun; unwrap with ``.module`` so
+    # the attribute lookups below see the real card.
+    trainee_card = trainee.module if isinstance(trainee, DDP) else trainee
+    chad_res = trainee_card.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
     chad_scales = (1.0 + 0.3 * torch.tanh(chad_res.scale_raw)).detach().tolist()
     ecal_scale_vals = (
         (
             1.0
             + 0.3
             * torch.tanh(
-                trainee.ECal.scale_module.scale_raw  # type: ignore[union-attr]
+                trainee_card.ECal.scale_module.scale_raw  # type: ignore[union-attr]
             )
         )
         .detach()
@@ -413,7 +450,7 @@ def main() -> None:
             1.0
             + 0.3
             * torch.tanh(
-                trainee.HCal.scale_module.scale_raw  # type: ignore[union-attr]
+                trainee_card.HCal.scale_module.scale_raw  # type: ignore[union-attr]
             )
         )
         .detach()
