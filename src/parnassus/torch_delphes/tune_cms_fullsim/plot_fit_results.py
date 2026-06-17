@@ -513,6 +513,122 @@ _INIT_COLOR: str = "tab:red"
 _FINAL_COLOR: str = "tab:blue"
 
 
+# Final EFlowObject-by-PID plotting configuration.
+_FINAL_PID_GROUPS: tuple[tuple[str, int, str], ...] = (
+    ("211", 211, "charged hadron"),
+    ("11", 11, "electron"),
+    ("13", 13, "muon"),
+    ("111", 111, "neutral hadron"),
+    ("22", 22, "photon"),
+)
+_FINAL_PID_VARS: tuple[str, ...] = ("Eta", "PT", "P", "E")
+
+
+def _final_pid_values(obs: dict[str, torch.Tensor], pid_abs: int, var: str) -> np.ndarray:
+    """Extract one per-particle final observable for a given PID subgroup.
+
+    ``obs`` is the dict returned by :func:`load_pflow_targets` or
+    :func:`load_pflow_targets_from_tensor`.
+    """
+    if "pid" not in obs or "pt" not in obs:
+        return np.empty(0, dtype=np.float64)
+
+    pid = obs["pid"]
+    pt = obs["pt"]
+    eta = obs["eta"]
+    # Keep only real reconstructed objects (drop zero-padding / ghosts) and
+    # select one PID subgroup.
+    mask = (pt != 0) & (pid.abs() == pid_abs)
+    if not torch.any(mask):
+        return np.empty(0, dtype=np.float64)
+
+    if var == "Eta":
+        vals = eta[mask]
+    elif var == "PT":
+        vals = pt[mask]
+    elif var == "P":
+        vals = pt[mask] * torch.cosh(eta[mask])
+    elif var == "E":
+        vals = torch.exp(obs["log_E"][mask])
+    else:
+        return np.empty(0, dtype=np.float64)
+    return vals.detach().cpu().numpy().astype(np.float64)
+
+
+def _final_pid_suptitle(pid_label: str, n_events: int) -> str:
+    """Two-line title for ``observables/final/<pid>/all.png``."""
+    return f"Final EFlowObject: {pid_label}\n{n_events} events"
+
+
+def plot_final_pid_observables(
+    target: dict[str, torch.Tensor],
+    pred_init: dict[str, torch.Tensor],
+    pred_final: dict[str, torch.Tensor],
+    output_dir: Path,
+    n_events: int,
+) -> None:
+    """Render final observable overlays per PID subgroup.
+
+    For each PID subgroup, writes one PNG per available variable in
+    ``_FINAL_PID_VARS`` and a stitched ``all.png`` under
+    ``<output_dir>/<pid_name>/``.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Writing final per-PID plots to {output_dir}")
+
+    n_total_var_pngs = 0
+    n_total_all_pngs = 0
+
+    for pid_name, pid_abs, pid_label in _FINAL_PID_GROUPS:
+        pid_dir = output_dir / pid_name
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        n_written_this_pid = 0
+
+        for var in _FINAL_PID_VARS:
+            target_np = _final_pid_values(target, pid_abs=pid_abs, var=var)
+            init_np = _final_pid_values(pred_init, pid_abs=pid_abs, var=var)
+            final_np = _final_pid_values(pred_final, pid_abs=pid_abs, var=var)
+
+            if target_np.size == 0 and init_np.size == 0 and final_np.size == 0:
+                continue
+
+            plot_comparison_with_ratio(
+                distributions=[
+                    (target_np, "target", _TARGET_COLOR),
+                    (init_np, "trainee, initial", _INIT_COLOR),
+                    (final_np, "trainee, fitted", _FINAL_COLOR),
+                ],
+                var=var,
+                output_path=pid_dir / f"{var}.png",
+                ratio_ylabel="ratio / target",
+                legend_loc=("upper left" if var != "Eta" else "best"),
+            )
+            n_written_this_pid += 1
+            n_total_var_pngs += 1
+
+        # Stitch the canonical 4-variable view for this PID subgroup.
+        per_var_pngs = [pid_dir / f"{var}.png" for var in _FINAL_PID_VARS]
+        if any(p.exists() for p in per_var_pngs):
+            wrote_all = stitch_pngs(
+                image_paths=per_var_pngs,
+                output_path=pid_dir / "all.png",
+                title=_final_pid_suptitle(pid_label=pid_label, n_events=n_events),
+                title_align="left",
+            )
+            if wrote_all:
+                n_total_all_pngs += 1
+
+        print(
+            f"    {pid_name}: wrote {n_written_this_pid} per-var PNGs"
+            f"{' + all.png' if (pid_dir / 'all.png').exists() else ''}"
+        )
+
+    print(
+        f"  Wrote {n_total_var_pngs} per-var final PID plots and "
+        f"{n_total_all_pngs} stitched all.png pages."
+    )
+
+
 def _intermediate_suptitle(module_name: str, n_events: int) -> str:
     """Two-line title for the per-module ``all.png`` overview.
 
@@ -795,6 +911,15 @@ def main() -> None:
         output_path=args.output_dir / "observable_multiplicity.pdf",
     )
     print("  wrote observable_multiplicity.pdf")
+
+    per_pid_output_dir = args.output_dir / "PID"
+    plot_final_pid_observables(
+        target=target,
+        pred_init=pred_init,
+        pred_final=pred_final,
+        output_dir=per_pid_output_dir,
+        n_events=args.n_events_for_plots,
+    )
 
     # ----- 4. Optional: per-module intermediate observables (--debug) -----
     # Mirrors the --debug branch list of validate_torch_delphes.py: for every
