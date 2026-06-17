@@ -66,8 +66,8 @@ from .data import (
     load_cms_flow_root,
     load_truth_events_ragged,
     load_pflow_targets_ragged,
-    split_truth_objects_ragged,
-    split_pflow_targets_ragged,
+    split_truth_objects_jagged,
+    split_pflow_targets_jagged,
 )
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
@@ -262,8 +262,8 @@ def main() -> None:
     del arrays
     gc.collect()
 
-    train_truth_tensor, val_truth_tensor = split_truth_objects_ragged(truth_ragged, train_fraction=0.8, seed=args.seed)
-    train_target, val_target = split_pflow_targets_ragged(target, train_fraction=0.8, seed=args.seed)
+    train_truth_tensor, val_truth_tensor = split_truth_objects_jagged(truth_ragged, train_fraction=0.8, seed=args.seed)
+    train_target, val_target = split_pflow_targets_jagged(target, train_fraction=0.8, seed=args.seed)
 
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)

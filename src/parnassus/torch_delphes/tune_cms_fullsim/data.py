@@ -569,9 +569,9 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
 def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.8, seed: int = 42):
     """Split the truth tensor into train and validation parts along the event axis.
 
-    The split is deterministic based on the provided random seed. The same split
-    is applied to all events, so the train and validation sets are disjoint at
-    the event level (no event is partially in train and partially in val).
+    Uses a contiguous event-axis split: the first ``train_fraction`` block goes
+    to train and the tail goes to validation. ``seed`` is accepted for API
+    compatibility but is intentionally unused.
 
     Returns
     -------
@@ -580,21 +580,17 @@ def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.8,
         ``(n_events_subset, max_n_particles, n_features)``.
     """
     n_events = truth_tensor.shape[0]
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
     split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
-    train_tensor = truth_tensor[train_indices]
-    val_tensor = truth_tensor[val_indices]
+    train_tensor = truth_tensor[:split_idx]
+    val_tensor = truth_tensor[split_idx:]
     return train_tensor, val_tensor
 
 
 def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float = 0.8, seed: int = 42):
     """Split the target dict into train and validation parts along the event axis.
 
-    The split is deterministic based on the provided random seed. The same split
-    is applied to all observables, so the train and validation sets are disjoint
-    at the event level (no event is partially in train and partially in val).
+    Uses a contiguous event-axis split matching :func:`split_truth_objects`.
+    ``seed`` is accepted for API compatibility but is intentionally unused.
 
     Returns
     -------
@@ -603,56 +599,46 @@ def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float =
         input and tensors with shape ``(n_events_subset, ...)``.
     """
     n_events = next(iter(target.values())).shape[0]  # number of events from any observable
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
     split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
-
-    train_target = {k: v[train_indices] for k, v in target.items()}
-    val_target = {k: v[val_indices] for k, v in target.items()}
+    train_target = {k: v[:split_idx] for k, v in target.items()}
+    val_target = {k: v[split_idx:] for k, v in target.items()}
     return train_target, val_target
 
 
-def split_truth_objects_ragged(
+def split_truth_objects_jagged(
     truth_ragged: list[torch.Tensor], train_fraction: float = 0.8, seed: int = 42
 ):
     """Ragged counterpart of :func:`split_truth_objects`.
 
-    Splits the per-event list along the event axis with the SAME seeded
-    permutation as the dense split (``torch.randperm(len(list))``), so the train
-    / val event membership is identical to the dense path.
+    Uses a contiguous event-axis split: the first ``train_fraction`` block goes
+    to train and the tail goes to validation. ``seed`` is accepted for API
+    compatibility but is intentionally unused.
     """
     n_events = len(truth_ragged)
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
     split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx].tolist()
-    val_indices = indices[split_idx:].tolist()
-    train = [truth_ragged[i] for i in train_indices]
-    val = [truth_ragged[i] for i in val_indices]
+    train = truth_ragged[:split_idx]
+    val = truth_ragged[split_idx:]
     return train, val
 
 
-def split_pflow_targets_ragged(
+def split_pflow_targets_jagged(
     target: dict, train_fraction: float = 0.8, seed: int = 42
 ):
     """Ragged counterpart of :func:`split_pflow_targets`.
 
-    Per-particle entries are ``list`` (indexed by event), per-event entries are
-    dense tensors (fancy-indexed). The seeded permutation matches the dense split
-    (``n_events`` is the full event count, read from the per-event ``multiplicity``
-    tensor), so train / val membership is identical to the dense path.
+    Uses a contiguous event-axis split matching
+    :func:`split_truth_objects_jagged`: per-particle list entries are sliced by
+    event index and per-event tensors are sliced on dim 0. ``seed`` is accepted
+    for API compatibility but is intentionally unused.
     """
     n_events = target["multiplicity"].shape[0]  # full event count (per-event tensor)
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
     split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
 
-    def _split_one(v, idx_tensor):
+    def _split_one(v, start: int, end: int):
         if isinstance(v, list):
-            return [v[i] for i in idx_tensor.tolist()]
-        return v[idx_tensor]
+            return v[start:end]
+        return v[start:end]
 
-    train_target = {k: _split_one(v, train_indices) for k, v in target.items()}
-    val_target = {k: _split_one(v, val_indices) for k, v in target.items()}
+    train_target = {k: _split_one(v, 0, split_idx) for k, v in target.items()}
+    val_target = {k: _split_one(v, split_idx, n_events) for k, v in target.items()}
     return train_target, val_target

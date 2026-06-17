@@ -35,8 +35,8 @@ from parnassus.torch_delphes.tune_cms_fullsim.data import (
     load_truth_events,
     load_truth_events_ragged,
     restore_event_format,
-    split_pflow_targets_ragged,
-    split_truth_objects_ragged,
+    split_pflow_targets_jagged,
+    split_truth_objects_jagged,
 )
 from parnassus.torch_delphes.tune_cms_fullsim.dataloader import (
     DelphesDataLoader,
@@ -73,8 +73,8 @@ def _make_dataloaders(
     """Build train/val dataloaders from loaded ROOT arrays (mirrors the CLI)."""
     truth = load_truth_events_ragged(arrays)
     target = load_pflow_targets_ragged(arrays)
-    tr_truth, va_truth = split_truth_objects_ragged(truth, train_fraction=0.8, seed=seed)
-    tr_tgt, va_tgt = split_pflow_targets_ragged(target, train_fraction=0.8, seed=seed)
+    tr_truth, va_truth = split_truth_objects_jagged(truth, train_fraction=0.8, seed=seed)
+    tr_tgt, va_tgt = split_pflow_targets_jagged(target, train_fraction=0.8, seed=seed)
     tr_ds = DelphesDataSet(tr_truth, tr_tgt, device=device)
     va_ds = DelphesDataSet(va_truth, va_tgt, device=device)
     return (
