@@ -35,8 +35,8 @@ from parnassus.torch_delphes.tune_cms_fullsim.data import (
     load_truth_events,
     load_truth_events_ragged,
     restore_event_format,
-    split_pflow_targets_ragged,
-    split_truth_objects_ragged,
+    split_pflow_targets_jagged,
+    split_truth_objects_jagged,
 )
 from parnassus.torch_delphes.tune_cms_fullsim.dataloader import (
     DelphesDataLoader,
@@ -68,13 +68,13 @@ def fixture_root() -> Path:
 
 
 def _make_dataloaders(
-    arrays: dict, device: torch.device, batch_size: int = 8, seed: int = 0
+    arrays: dict, device: torch.device, batch_size: int = 8,
 ) -> tuple[DelphesDataLoader, DelphesDataLoader]:
     """Build train/val dataloaders from loaded ROOT arrays (mirrors the CLI)."""
     truth = load_truth_events_ragged(arrays)
     target = load_pflow_targets_ragged(arrays)
-    tr_truth, va_truth = split_truth_objects_ragged(truth, train_fraction=0.8, seed=seed)
-    tr_tgt, va_tgt = split_pflow_targets_ragged(target, train_fraction=0.8, seed=seed)
+    tr_truth, va_truth, _ = split_truth_objects_jagged(truth, train_fraction=0.7, val_fraction=0.2)
+    tr_tgt, va_tgt, _ = split_pflow_targets_jagged(target, train_fraction=0.7, val_fraction=0.2)
     tr_ds = DelphesDataSet(tr_truth, tr_tgt, device=device)
     va_ds = DelphesDataSet(va_truth, va_tgt, device=device)
     return (
@@ -110,16 +110,21 @@ def test_fixture_has_expected_branches(fixture_root: Path):
 
     with uproot.open(str(fixture_root)) as f:
         keys = set(f["event_tree"].keys())
-    for branch in TRUTH_BRANCHES + PFLOW_BRANCHES:
+    required_truth = tuple(b for b in TRUTH_BRANCHES if b != "truth_pdgid")
+    for branch in required_truth + PFLOW_BRANCHES:
         assert branch in keys, f"missing branch {branch} in pseudodata"
 
 
 def test_load_cms_flow_root_roundtrip(fixture_root: Path):
     """``load_cms_flow_root`` returns dense per-event numpy arrays."""
     arrays = load_cms_flow_root(fixture_root, n_events=30)
-    for branch in TRUTH_BRANCHES + PFLOW_BRANCHES:
+    required_truth = tuple(b for b in TRUTH_BRANCHES if b != "truth_pdgid")
+    for branch in required_truth + PFLOW_BRANCHES:
         assert branch in arrays
         assert len(arrays[branch]) == 30
+    # Optional modern branch: legacy committed pseudodata may not have it.
+    if "truth_pdgid" in arrays:
+        assert len(arrays["truth_pdgid"]) == 30
     assert arrays["truth_pt"][0].ndim == 1
     assert arrays["pflow_pt"][0].ndim == 1
 
@@ -131,10 +136,11 @@ def test_load_truth_events_shapes(fixture_root: Path):
     assert truth.ndim == 3
     assert truth.shape[0] == 10
     assert truth.shape[2] == N_FEATURES
-    # Real (non-padded) rows have positive mass, finite pt, and E^2 ~ p^2 + m^2.
+    # Real (non-padded) rows have non-negative mass, finite pt, and E^2 ~ p^2 + m^2.
     real = truth[torch.any(truth != 0, dim=-1)]
     assert real.shape[0] > 0
-    assert float(real[:, ColumnMap.MASS].min()) > 0
+    assert float(real[:, ColumnMap.MASS].min()) >= 0
+    assert float(real[:, ColumnMap.MASS].max()) > 0
     assert torch.isfinite(real[:, ColumnMap.PT]).all()
     p_sq = real[:, ColumnMap.PX] ** 2 + real[:, ColumnMap.PY] ** 2 + real[:, ColumnMap.PZ] ** 2
     e_sq = real[:, ColumnMap.E] ** 2
@@ -306,7 +312,7 @@ def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):
     batch sizes)."""
     arrays = load_cms_flow_root(fixture_root, n_events=24)
     device = torch.device("cpu")
-    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8, seed=0)
+    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8)
 
     torch.manual_seed(3)
     card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
@@ -346,7 +352,7 @@ def test_fit_against_committed_pseudodata(tmp_path: Path):
     """
     arrays = load_cms_flow_root(PSEUDODATA_PATH, n_events=150)
     device = torch.device("cpu")
-    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=64, seed=11)
+    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=64)
 
     torch.manual_seed(11)
     card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)

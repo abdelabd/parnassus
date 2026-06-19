@@ -13,7 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
@@ -21,17 +23,26 @@ from parnassus.torch_delphes.param_config import to_physical
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS, OBSERVABLES
 from .data import restore_event_format, load_pflow_targets_from_tensor
-from .distributed import _is_main
+from .distributed import _is_dist, _is_main
 from .loss import (
     CALO_COUNT_WEIGHT,
     COUNT_WEIGHT,
     EVENT_WEIGHT,
-    per_event_wasserstein_loss,
+    LOSS_CHOICES,
+    get_loss_fn,
 )
 
 # =============================================================================
 # Fit loop
 # =============================================================================
+
+
+def _all_reduce_mean(value: torch.Tensor) -> torch.Tensor:
+    """Average ``value`` across ranks in-place; no-op when not under DDP."""
+    if _is_dist():
+        dist.all_reduce(value, op=dist.ReduceOp.SUM)
+        value /= dist.get_world_size()
+    return value
 
 
 def fit_card_to_fullsim(
@@ -52,6 +63,7 @@ def fit_card_to_fullsim(
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
+    loss_name: str = "wasserstein",
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -110,6 +122,11 @@ def fit_card_to_fullsim(
     event_weight : float
         Scales the per-event ``log(HT)`` Wasserstein term, likewise. Defaults
         to ``EVENT_WEIGHT``; surfaced on the CLI as ``--event-weight``.
+    loss_name : str
+        Selects the training loss. One of :data:`tune_cms_fullsim.loss.LOSS_CHOICES`.
+        ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss (with
+        ``count_weight`` / ``event_weight`` applied); ``"soft_hist"`` uses the
+        soft-histogram MSE loss summed across observables.
 
     Returns
     -------
@@ -120,7 +137,28 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
+    base_loss_fn = get_loss_fn(loss_name)
+    if loss_name == "wasserstein":
+        def loss_fn(
+            pred: dict[str, torch.Tensor],
+            target: dict[str, torch.Tensor],
+        ) -> torch.Tensor:
+            return base_loss_fn(
+                pred,
+                target,
+                count_weight=count_weight,
+                calo_count_weight=calo_count_weight,
+                event_weight=event_weight,
+            )
+    else:
+        loss_fn = base_loss_fn
+
     opt = torch.optim.Adam(param_groups)
+    if _is_main(rank):
+        print(
+            f"  training loss: {loss_name!r} "
+            f"(choices: {list(LOSS_CHOICES)})"
+        )
     if _is_main(rank):
         for g in param_groups:
             print(
@@ -179,6 +217,24 @@ def fit_card_to_fullsim(
         history["parameters"] = []
 
     underlying_for_snap = card.module if isinstance(card, DDP) else card
+    trainable_params = [p for p in underlying_for_snap.parameters() if p.requires_grad]
+
+    def _soft_hist_graph_anchor() -> torch.Tensor:
+        """Return a zero-weight scalar connected to every trainable parameter.
+
+        Under DDP + DistributedSampler, a rank-local shard can miss some
+        species/objects, so the soft-hist loss may not route gradient through
+        every parameter branch on that rank for a given step. Adding
+        ``0.0 * anchor`` keeps those parameters in the autograd graph with
+        exactly zero gradient, which avoids DDP "unused parameter" reduction
+        errors while keeping the fast ``find_unused_parameters=False`` path.
+        """
+        if not trainable_params:
+            return torch.zeros((), device=device, dtype=torch.float64)
+        anchor = trainable_params[0].sum()
+        for p in trainable_params[1:]:
+            anchor = anchor + p.sum()
+        return anchor * 0.0
 
     def _snapshot() -> dict[str, float]:
         """Record the current post-transform value of every parameter.
@@ -225,6 +281,12 @@ def fit_card_to_fullsim(
         # card in eval(). The current card has no train/eval-dependent layers,
         # but this keeps the train forward correct if one is ever added.
         card.train()
+
+        # Re-shuffle the per-rank shard each epoch.
+        train_sampler = getattr(train_dataloader, "sampler", None)
+        if isinstance(train_sampler, DistributedSampler):
+            train_sampler.set_epoch(step)
+
         loss_acc = torch.zeros(
             (), dtype=torch.float64, device=device
         )
@@ -252,13 +314,9 @@ def fit_card_to_fullsim(
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-            loss = per_event_wasserstein_loss(
-                pred_observables,
-                target_observables,
-                count_weight=count_weight,
-                calo_count_weight=calo_count_weight,
-                event_weight=event_weight,
-            )
+            loss = loss_fn(pred_observables, target_observables)
+            if loss_name == "soft_hist":
+                loss = loss + _soft_hist_graph_anchor()
 
             loss.backward()
             opt.step()
@@ -266,6 +324,7 @@ def fit_card_to_fullsim(
             loss_acc += loss.detach()
 
         loss_acc /= len(train_dataloader)
+        loss_acc = _all_reduce_mean(loss_acc)
 
         # Record the per-step MEAN over all train batches (mirrors the val
         # side's averaged val_loss_acc), not the noisy last-batch loss.
@@ -309,13 +368,7 @@ def fit_card_to_fullsim(
                     pred_observables[pred_key] = out[out_key]
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-                val_loss = per_event_wasserstein_loss(
-                    pred_observables,
-                    target_observables,
-                    count_weight=count_weight,
-                    calo_count_weight=calo_count_weight,
-                    event_weight=event_weight,
-                )
+                val_loss = loss_fn(pred_observables, target_observables)
                 val_loss_acc += val_loss.detach()
 
                 # Accumulate the flattened, padding/ghost-stripped values for
@@ -336,8 +389,10 @@ def fit_card_to_fullsim(
                         acc_pred.setdefault(key, []).append(pv.detach().cpu())
                         acc_tgt.setdefault(key, []).append(tv.detach().cpu())
             val_loss_acc /= len(val_dataloader)
+            val_loss_acc = _all_reduce_mean(val_loss_acc)
             print_val_loss = float(val_loss_acc)
-            tqdm.write(f"  step {step:3d}/{n_steps}  val_loss = {print_val_loss:.4e}")
+            if _is_main(rank):
+                tqdm.write(f"  step {step:3d}/{n_steps}  val_loss = {print_val_loss:.4e}")
 
         # Record the per-step val loss aligned with step/loss/parameters above
         # (all appended before any early-stopping break, so index i refers to

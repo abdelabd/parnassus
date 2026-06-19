@@ -394,23 +394,8 @@ def _obs_values(obs: dict, key: str) -> torch.Tensor:
     return v.reshape(-1)
 
 
-def _density_histogram(values: torch.Tensor, edges: np.ndarray) -> np.ndarray:
-    """Normalised histogram counts (density, summing to 1).
-
-    Returns
-    -------
-    numpy.ndarray
-        Non-negative array of length ``len(edges) - 1`` summing to 1
-        (or to 0 when ``values`` is empty).
-    """
-    counts, _ = np.histogram(values.detach().cpu().numpy(), bins=edges)
-    total = counts.sum()
-    if total == 0:
-        return counts.astype(np.float64)
-    return counts.astype(np.float64) / total
-
-
 def plot_observable(
+    var: str,
     target_vals: torch.Tensor,
     init_vals: torch.Tensor,
     final_vals: torch.Tensor,
@@ -419,25 +404,28 @@ def plot_observable(
     output_path: Path,
     log_y: bool = False,
 ) -> None:
-    """Overlay target / trainee-init / trainee-final on one axis."""
-    h_tgt = _density_histogram(target_vals, edges)
-    h_init = _density_histogram(init_vals, edges)
-    h_final = _density_histogram(final_vals, edges)
-    centers = 0.5 * (edges[1:] + edges[:-1])
+    """Overlay target / trainee-init / trainee-final with a ratio panel.
 
-    fig, ax = plt.subplots(figsize=(5.5, 4.0))
-    ax.step(centers, h_tgt, where="mid", color="black", label="target")
-    ax.step(centers, h_init, where="mid", color="tab:red", label="trainee, initial")
-    ax.step(centers, h_final, where="mid", color="tab:blue", label="trainee, fitted")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("normalised density")
-    if log_y:
-        ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
+    This uses the same shared helper as the intermediate plots so final
+    observable PDFs also include the lower ratio axis with
+    ``init/target`` and ``fitted/target``.
+    """
+    plot_comparison_with_ratio(
+        distributions=[
+            (target_vals.detach().cpu().numpy(), "target", _TARGET_COLOR),
+            (init_vals.detach().cpu().numpy(), "trainee, initial", _INIT_COLOR),
+            (final_vals.detach().cpu().numpy(), "trainee, fitted", _FINAL_COLOR),
+        ],
+        var=var,
+        output_path=output_path,
+        bins=edges,
+        xlabel=xlabel,
+        ylabel="Counts",
+        ratio_ylabel="ratio / target",
+        figsize=(5.5, 4.8),
+        legend_loc="best",
+        log_y=log_y,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +458,7 @@ def _load_target_intermediate_values(
     module_name: str,
     var: str,
     n_events: int,
+    entry_start: int = 0,
 ) -> torch.Tensor | None:
     """Read one debug branch from the pseudodata ROOT file as a flat 1-D tensor.
 
@@ -487,7 +476,8 @@ def _load_target_intermediate_values(
         if branch not in tree:
             return None
         arr = tree[branch].array(  # pyright: ignore[reportAttributeAccessIssue]
-            entry_stop=n_events
+            entry_start=entry_start,
+            entry_stop=entry_start + n_events,
         )
     # Awkward -> numpy via flatten -> torch. Empty events become zero-length
     # subarrays and disappear under flatten, which is what we want.
@@ -525,6 +515,122 @@ _INIT_COLOR: str = "tab:red"
 _FINAL_COLOR: str = "tab:blue"
 
 
+# Final EFlowObject-by-PID plotting configuration.
+_FINAL_PID_GROUPS: tuple[tuple[str, int, str], ...] = (
+    ("211", 211, "charged hadron"),
+    ("11", 11, "electron"),
+    ("13", 13, "muon"),
+    ("111", 111, "neutral hadron"),
+    ("22", 22, "photon"),
+)
+_FINAL_PID_VARS: tuple[str, ...] = ("Eta", "PT", "P", "E")
+
+
+def _final_pid_values(obs: dict[str, torch.Tensor], pid_abs: int, var: str) -> np.ndarray:
+    """Extract one per-particle final observable for a given PID subgroup.
+
+    ``obs`` is the dict returned by :func:`load_pflow_targets` or
+    :func:`load_pflow_targets_from_tensor`.
+    """
+    if "pid" not in obs or "pt" not in obs:
+        return np.empty(0, dtype=np.float64)
+
+    pid = obs["pid"]
+    pt = obs["pt"]
+    eta = obs["eta"]
+    # Keep only real reconstructed objects (drop zero-padding / ghosts) and
+    # select one PID subgroup.
+    mask = (pt != 0) & (pid.abs() == pid_abs)
+    if not torch.any(mask):
+        return np.empty(0, dtype=np.float64)
+
+    if var == "Eta":
+        vals = eta[mask]
+    elif var == "PT":
+        vals = pt[mask]
+    elif var == "P":
+        vals = pt[mask] * torch.cosh(eta[mask])
+    elif var == "E":
+        vals = torch.exp(obs["log_E"][mask])
+    else:
+        return np.empty(0, dtype=np.float64)
+    return vals.detach().cpu().numpy().astype(np.float64)
+
+
+def _final_pid_suptitle(pid_label: str, n_events: int) -> str:
+    """Two-line title for ``observables/final/<pid>/all.png``."""
+    return f"Final EFlowObject: {pid_label}\n{n_events} events"
+
+
+def plot_final_pid_observables(
+    target: dict[str, torch.Tensor],
+    pred_init: dict[str, torch.Tensor],
+    pred_final: dict[str, torch.Tensor],
+    output_dir: Path,
+    n_events: int,
+) -> None:
+    """Render final observable overlays per PID subgroup.
+
+    For each PID subgroup, writes one PNG per available variable in
+    ``_FINAL_PID_VARS`` and a stitched ``all.png`` under
+    ``<output_dir>/<pid_name>/``.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Writing final per-PID plots to {output_dir}")
+
+    n_total_var_pngs = 0
+    n_total_all_pngs = 0
+
+    for pid_name, pid_abs, pid_label in _FINAL_PID_GROUPS:
+        pid_dir = output_dir / pid_name
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        n_written_this_pid = 0
+
+        for var in _FINAL_PID_VARS:
+            target_np = _final_pid_values(target, pid_abs=pid_abs, var=var)
+            init_np = _final_pid_values(pred_init, pid_abs=pid_abs, var=var)
+            final_np = _final_pid_values(pred_final, pid_abs=pid_abs, var=var)
+
+            if target_np.size == 0 and init_np.size == 0 and final_np.size == 0:
+                continue
+
+            plot_comparison_with_ratio(
+                distributions=[
+                    (target_np, "target", _TARGET_COLOR),
+                    (init_np, "trainee, initial", _INIT_COLOR),
+                    (final_np, "trainee, fitted", _FINAL_COLOR),
+                ],
+                var=var,
+                output_path=pid_dir / f"{var}.png",
+                ratio_ylabel="ratio / target",
+                legend_loc=("upper left" if var != "Eta" else "best"),
+            )
+            n_written_this_pid += 1
+            n_total_var_pngs += 1
+
+        # Stitch the canonical 4-variable view for this PID subgroup.
+        per_var_pngs = [pid_dir / f"{var}.png" for var in _FINAL_PID_VARS]
+        if any(p.exists() for p in per_var_pngs):
+            wrote_all = stitch_pngs(
+                image_paths=per_var_pngs,
+                output_path=pid_dir / "all.png",
+                title=_final_pid_suptitle(pid_label=pid_label, n_events=n_events),
+                title_align="left",
+            )
+            if wrote_all:
+                n_total_all_pngs += 1
+
+        print(
+            f"    {pid_name}: wrote {n_written_this_pid} per-var PNGs"
+            f"{' + all.png' if (pid_dir / 'all.png').exists() else ''}"
+        )
+
+    print(
+        f"  Wrote {n_total_var_pngs} per-var final PID plots and "
+        f"{n_total_all_pngs} stitched all.png pages."
+    )
+
+
 def _intermediate_suptitle(module_name: str, n_events: int) -> str:
     """Two-line title for the per-module ``all.png`` overview.
 
@@ -542,6 +648,7 @@ def plot_intermediate_observables(
     trainee_final_outputs: dict[str, torch.Tensor],
     output_dir: Path,
     n_events: int,
+    entry_start: int = 0,
 ) -> None:
     """Generate target / init / fitted overlays for every intermediate output.
 
@@ -574,7 +681,11 @@ def plot_intermediate_observables(
         module_has_any = False
         for var in variables:
             target_vals = _load_target_intermediate_values(
-                root_file, module_name, var, n_events=n_events
+                root_file,
+                module_name,
+                var,
+                n_events=n_events,
+                entry_start=entry_start,
             )
             if target_vals is None:
                 n_branches_missing += 1
@@ -605,7 +716,7 @@ def plot_intermediate_observables(
 
             plot_comparison_with_ratio(
                 distributions=[
-                    (target_np, "target (full sim)", _TARGET_COLOR),
+                    (target_np, "target", _TARGET_COLOR),
                     (init_np, "trainee, initial", _INIT_COLOR),
                     (final_np, "trainee, fitted", _FINAL_COLOR),
                 ],
@@ -661,7 +772,16 @@ def main() -> None:
         default=Path("src/parnassus/tests/benchmark_data/cms_pseudodata.root"),
     )
     parser.add_argument("--output-dir", type=Path, default=Path("doc/figures"))
-    parser.add_argument("--n-events-for-plots", type=int, default=4000)
+    parser.add_argument(
+        "--n-events-for-plots",
+        type=int,
+        default=None,
+        help=(
+            "Optional cap on plotted validation events. If provided and smaller "
+            "than the validation split size, only the first N validation events "
+            "are used for all plots."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--truth-config",
@@ -727,9 +847,35 @@ def main() -> None:
     print("  wrote param_drift_all.pdf")
 
     # ----- 3. Observable histograms (target vs init vs final) -----
-    arrays = load_cms_flow_root(args.root_file, n_events=args.n_events_for_plots)
+    # Fast path: compute the default contiguous validation block boundaries,
+    # then read ONLY that block from ROOT. This avoids loading and densifying
+    # the full dataset just to split it afterward.
+    import uproot
+
+    with uproot.open(str(args.root_file)) as f:
+        n_total_events = int(f["event_tree"].num_entries)
+    val_entry_start = int(0.7 * n_total_events)  # default train_fraction
+    n_val_events = int(0.9*n_total_events) - val_entry_start
+    n_plot_events = n_val_events
+    if (
+        args.n_events_for_plots is not None
+        and args.n_events_for_plots > 0
+        and args.n_events_for_plots < n_val_events
+    ):
+        n_plot_events = int(args.n_events_for_plots)
+
+    arrays = load_cms_flow_root(
+        args.root_file,
+        n_events=n_plot_events,
+        entry_start=val_entry_start,
+    )
     truth_tensor = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
+
+    print(
+        "  plotting on validation split: "
+        f"{n_plot_events} events (entries {val_entry_start}:{val_entry_start + n_plot_events})"
+    )
 
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True)
@@ -751,6 +897,7 @@ def main() -> None:
     pred_final = _trainee_observables(trainee, truth_tensor)
 
     plot_observable(
+        "PT",
         _obs_values(target, "pt"),
         _obs_values(pred_init, "pt"),
         _obs_values(pred_final, "pt"),
@@ -762,6 +909,7 @@ def main() -> None:
     print("  wrote observable_pt.pdf")
 
     plot_observable(
+        "Eta",
         _obs_values(target, "eta"),
         _obs_values(pred_init, "eta"),
         _obs_values(pred_final, "eta"),
@@ -772,6 +920,7 @@ def main() -> None:
     print("  wrote observable_eta.pdf")
 
     plot_observable(
+        "ht",
         _obs_values(target, "ht"),
         _obs_values(pred_init, "ht"),
         _obs_values(pred_final, "ht"),
@@ -784,6 +933,7 @@ def main() -> None:
     # log(HT) -- the per-event scalar actually in the loss. Keep these edges in
     # sync with DEFAULT_BIN_EDGES["log_ht"] in config.py.
     plot_observable(
+        "log_ht",
         _obs_values(target, "log_ht"),
         _obs_values(pred_init, "log_ht"),
         _obs_values(pred_final, "log_ht"),
@@ -794,14 +944,24 @@ def main() -> None:
     print("  wrote observable_log_ht.pdf")
 
     plot_observable(
+        "multiplicity",
         _obs_values(target, "multiplicity"),
         _obs_values(pred_init, "multiplicity"),
         _obs_values(pred_final, "multiplicity"),
-        edges=np.linspace(0.0, 600.0, 61),
+        edges=np.linspace(0.0, 300.0, 61),
         xlabel=r"PF objects per event",
         output_path=args.output_dir / "observable_multiplicity.pdf",
     )
     print("  wrote observable_multiplicity.pdf")
+
+    per_pid_output_dir = args.output_dir / "PID"
+    plot_final_pid_observables(
+        target=target,
+        pred_init=pred_init,
+        pred_final=pred_final,
+        output_dir=per_pid_output_dir,
+        n_events=n_plot_events,
+    )
 
     # ----- 4. Optional: per-module intermediate observables (--debug) -----
     # Mirrors the --debug branch list of validate_torch_delphes.py: for every
@@ -828,7 +988,8 @@ def main() -> None:
             trainee_init_outputs=init_outputs,
             trainee_final_outputs=final_outputs,
             output_dir=args.output_dir / "intermediate",
-            n_events=args.n_events_for_plots,
+            n_events=n_plot_events,
+            entry_start=val_entry_start,
         )
 
     print(f"Done. {len(list(args.output_dir.glob('*.pdf')))} figures in {args.output_dir}.")

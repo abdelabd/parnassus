@@ -21,7 +21,12 @@ import numpy as np
 import torch
 import uproot
 
-from parnassus.data.particle_io import N_FEATURES, ColumnMap
+from parnassus.data.particle_io import (
+    N_FEATURES,
+    ColumnMap,
+    get_charge_from_pdg_id,
+    get_mass_from_pdg_id,
+)
 from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
 from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
@@ -82,6 +87,12 @@ def load_cms_flow_root(
     Reads the contiguous event range ``[entry_start, entry_start + n_events)``.
     This is used by the DDP code path to give each rank a disjoint shard
     of the file without re-reading the whole tree on every rank.
+
+    Branches in :data:`TRUTH_BRANCHES` / :data:`PFLOW_BRANCHES` that are not
+    present in the tree are silently skipped.
+
+    For older ROOT files that lack the optional ``truth_pdgid`` branch,
+    :func:`load_truth_events` falls back to the lossy ``truth_class`` mapping.
     """
     with uproot.open(str(path)) as f:
         if tree_name not in f:
@@ -92,8 +103,10 @@ def load_cms_flow_root(
         tree = f[tree_name]
         if n_events < 0: # load all events from entry_start to the end of the tree
             n_events = tree.num_entries - entry_start
+        available = set(tree.keys())
+        requested = [b for b in (TRUTH_BRANCHES + PFLOW_BRANCHES) if b in available]
         arrays = tree.arrays(
-            list(TRUTH_BRANCHES + PFLOW_BRANCHES),
+            requested,
             library="np",
             entry_start=entry_start,
             entry_stop=entry_start + n_events,
@@ -115,36 +128,33 @@ def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
     """
     rows_list: list[np.ndarray] = []
     key_0 = arrays.keys().__iter__().__next__()
+    has_pdgid = "truth_pdgid" in arrays
     for i in range(len(arrays[key_0])):
         pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
         phi = np.asarray(arrays["truth_phi"][i], dtype=np.float64)
-        cls = np.asarray(arrays["truth_class"][i], dtype=np.int64)
         n_p = pt.shape[0]
         if n_p == 0:
             continue
-        pids = class_to_pid_vectorized(cls)
-        # Rough masses: electrons/muons use their PDG masses, everything
-        # else uses the charged-pion mass as a stand-in.
-        abs_pid = np.abs(pids)
-        mass = np.where(abs_pid == 11, 0.000511, np.where(abs_pid == 13, 0.10566, 0.13957)).astype(
-            np.float64
-        )
+        # Prefer real PDG IDs (K_L0=130, n=2112, K+/-=321, p=2212, ...).
+        # Fall back to the lossy class -> canonical-PID map for older ROOT
+        # files that don't expose ``truth_pdgid``.
+        if has_pdgid:
+            pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
+        else:
+            cls = np.asarray(arrays["truth_class"][i], dtype=np.int64)
+            pids = class_to_pid_vectorized(cls)
+        # PDG-aware mass and charge so the energy reconstruction and the
+        # B-field track curvature use the correct values per species.
+        mass = get_mass_from_pdg_id(pids)
+        charge = get_charge_from_pdg_id(pids)
+        # Unknown PDGs return -999 (C++ Delphes convention); clamp to neutral
+        # instead of routing unknowns into charged streams.
+        charge = np.where(charge == -999, 0.0, charge).astype(np.float64)
         px = pt * np.cos(phi)
         py = pt * np.sin(phi)
         pz = pt * np.sinh(eta)
         e = np.sqrt(px * px + py * py + pz * pz + mass * mass)
-        charge = np.where(
-            abs_pid == 211,
-            1.0,
-            np.where(
-                abs_pid == 11,
-                -1.0,
-                np.where(abs_pid == 13, -1.0, 0.0),
-            ),
-        ).astype(np.float64)
-        # Sign the charge based on the sign of the underlying PDG (class->PDG
-        # returns positive PIDs, so we conservatively keep |charge| = {0, 1}).
         row = np.zeros((n_p, N_FEATURES), dtype=np.float64)
         row[:, ColumnMap.PID] = pids
         row[:, ColumnMap.STATUS] = 1
@@ -566,12 +576,12 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
 # Train validation splitting
 # =============================================================================
 
-def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.8, seed: int = 42):
+def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.7, val_fraction: float = 0.2, ):
     """Split the truth tensor into train and validation parts along the event axis.
 
-    The split is deterministic based on the provided random seed. The same split
-    is applied to all events, so the train and validation sets are disjoint at
-    the event level (no event is partially in train and partially in val).
+    Uses a contiguous event-axis split: the first ``train_fraction`` block goes
+    to train and the tail goes to validation. ``seed`` is accepted for API
+    compatibility but is intentionally unused.
 
     Returns
     -------
@@ -580,21 +590,17 @@ def split_truth_objects(truth_tensor: torch.Tensor, train_fraction: float = 0.8,
         ``(n_events_subset, max_n_particles, n_features)``.
     """
     n_events = truth_tensor.shape[0]
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
-    split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
-    train_tensor = truth_tensor[train_indices]
-    val_tensor = truth_tensor[val_indices]
-    return train_tensor, val_tensor
+    train_tensor = truth_tensor[:int(train_fraction * n_events)]
+    val_tensor = truth_tensor[int(train_fraction * n_events):int((train_fraction+val_fraction) * n_events)]
+    test_tensor = truth_tensor[int((train_fraction+val_fraction) * n_events):]
+    return train_tensor, val_tensor, test_tensor
 
 
-def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float = 0.8, seed: int = 42):
+def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float = 0.7, val_fraction: float = 0.2, ):
     """Split the target dict into train and validation parts along the event axis.
 
-    The split is deterministic based on the provided random seed. The same split
-    is applied to all observables, so the train and validation sets are disjoint
-    at the event level (no event is partially in train and partially in val).
+    Uses a contiguous event-axis split matching :func:`split_truth_objects`.
+    ``seed`` is accepted for API compatibility but is intentionally unused.
 
     Returns
     -------
@@ -603,56 +609,49 @@ def split_pflow_targets(target: dict[str, torch.Tensor], train_fraction: float =
         input and tensors with shape ``(n_events_subset, ...)``.
     """
     n_events = next(iter(target.values())).shape[0]  # number of events from any observable
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
     split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
-
-    train_target = {k: v[train_indices] for k, v in target.items()}
-    val_target = {k: v[val_indices] for k, v in target.items()}
-    return train_target, val_target
+    train_target = {k: v[:int(train_fraction * n_events)] for k, v in target.items()}
+    val_target = {k: v[int(train_fraction * n_events):int((train_fraction+val_fraction)*n_events)] for k, v in target.items()}
+    test_target = {k: v[int((train_fraction+val_fraction)*n_events):] for k, v in target.items()}
+    return train_target, val_target, test_target
 
 
-def split_truth_objects_ragged(
-    truth_ragged: list[torch.Tensor], train_fraction: float = 0.8, seed: int = 42
+def split_truth_objects_jagged(
+    truth_ragged: list[torch.Tensor], train_fraction: float = 0.7, val_fraction: float = 0.2, 
 ):
     """Ragged counterpart of :func:`split_truth_objects`.
 
-    Splits the per-event list along the event axis with the SAME seeded
-    permutation as the dense split (``torch.randperm(len(list))``), so the train
-    / val event membership is identical to the dense path.
+    Uses a contiguous event-axis split: the first ``train_fraction`` block goes
+    to train and the tail goes to validation. ``seed`` is accepted for API
+    compatibility but is intentionally unused.
     """
     n_events = len(truth_ragged)
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
     split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx].tolist()
-    val_indices = indices[split_idx:].tolist()
-    train = [truth_ragged[i] for i in train_indices]
-    val = [truth_ragged[i] for i in val_indices]
-    return train, val
+    train_tensor = truth_ragged[:int(train_fraction * n_events)]
+    val_tensor = truth_ragged[int(train_fraction * n_events):int((train_fraction+val_fraction) * n_events)]
+    test_tensor = truth_ragged[int((train_fraction+val_fraction) * n_events):]
+    return train_tensor, val_tensor, test_tensor
 
 
-def split_pflow_targets_ragged(
-    target: dict, train_fraction: float = 0.8, seed: int = 42
+def split_pflow_targets_jagged(
+    target: dict, train_fraction: float = 0.7, val_fraction: float = 0.2, 
 ):
     """Ragged counterpart of :func:`split_pflow_targets`.
 
-    Per-particle entries are ``list`` (indexed by event), per-event entries are
-    dense tensors (fancy-indexed). The seeded permutation matches the dense split
-    (``n_events`` is the full event count, read from the per-event ``multiplicity``
-    tensor), so train / val membership is identical to the dense path.
+    Uses a contiguous event-axis split matching
+    :func:`split_truth_objects_jagged`: per-particle list entries are sliced by
+    event index and per-event tensors are sliced on dim 0. ``seed`` is accepted
+    for API compatibility but is intentionally unused.
     """
     n_events = target["multiplicity"].shape[0]  # full event count (per-event tensor)
-    indices = torch.randperm(n_events, generator=torch.Generator().manual_seed(seed))
     split_idx = int(train_fraction * n_events)
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
 
-    def _split_one(v, idx_tensor):
+    def _split_one(v, start: int, end: int):
         if isinstance(v, list):
-            return [v[i] for i in idx_tensor.tolist()]
-        return v[idx_tensor]
+            return v[start:end]
+        return v[start:end]
 
-    train_target = {k: _split_one(v, train_indices) for k, v in target.items()}
-    val_target = {k: _split_one(v, val_indices) for k, v in target.items()}
-    return train_target, val_target
+    train_target = {k: _split_one(v, 0, int(train_fraction * n_events)) for k, v in target.items()}
+    val_target = {k: _split_one(v, int(train_fraction * n_events), int((train_fraction+val_fraction) * n_events)) for k, v in target.items()}
+    test_target = {k: _split_one(v, int((train_fraction+val_fraction) * n_events), n_events) for k, v in target.items()}
+    return train_target, val_target, test_target

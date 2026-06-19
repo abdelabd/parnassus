@@ -19,11 +19,18 @@ array:
 - ``truth_phi`` : generator-level stable-particle azimuth
 - ``truth_class`` : integer particle-type label
   (``0=charged hadron, 1=electron, 2=muon, 3=neutral hadron, 4=photon``)
+- ``truth_pdgid`` : full PDG ID of the truth particle (130 for K_L0, 2112
+    for neutron, 321 for charged kaon, 2212 for proton, ...). Optional but
+    strongly recommended -- when present this is used directly as the trainee
+    card's ``ColumnMap.PID`` so the ECal/HCal energy-fraction LUT routes
+    long-lived neutrals to HCal instead of mis-mapping them to pi0
+    (which would push them through the photon stream).
 - ``pflow_pt`` / ``pflow_eta`` / ``pflow_phi`` / ``pflow_class`` : the
   corresponding CMS particle-flow reconstructed objects that serve as
   the fitting target
 
-Class-to-PDG mapping is done with
+Class-to-PDG mapping (used as a fallback when ``truth_pdgid`` is absent,
+and on the ``pflow_class`` target side) is done with
 :func:`parnassus.utils.class_to_pid_vectorized`.
 
 Usage
@@ -55,6 +62,8 @@ import socket
 from pathlib import Path
 
 import torch
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
@@ -64,13 +73,13 @@ from .data import (
     load_cms_flow_root,
     load_truth_events_ragged,
     load_pflow_targets_ragged,
-    split_truth_objects_ragged,
-    split_pflow_targets_ragged,
+    split_truth_objects_jagged,
+    split_pflow_targets_jagged,
 )
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
 
-from .loss import CALO_COUNT_WEIGHT, COUNT_WEIGHT, EVENT_WEIGHT
+from .loss import CALO_COUNT_WEIGHT, COUNT_WEIGHT, EVENT_WEIGHT, LOSS_CHOICES
 from .distributed import (
     _cleanup_distributed,
     _init_distributed,
@@ -108,6 +117,19 @@ def main() -> None:
             "learning rate is --lr times its per-parameter 'lr_scale' from the "
             "--param-config file, so this is the single knob for sweeping the "
             "overall step size."
+        ),
+    )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default="wasserstein",
+        choices=list(LOSS_CHOICES),
+        help=(
+            "Training loss. 'wasserstein' (default) is the per-pid sliced "
+            "Wasserstein-2 over [log_E, log_pt, eta] plus a down-weighted "
+            "log(HT) term and expected-count terms. 'soft_hist' is the "
+            "soft-histogram MSE loss summed across observables; DDP-aware "
+            "via differentiable all-reduce on per-rank histograms."
         ),
     )
     parser.add_argument(
@@ -171,14 +193,14 @@ def main() -> None:
     parser.add_argument(
         "--intermediate-plot-dir",
         type=str,
-        default="doc/figures/intermediate_plots",
+        default="",
         help=(
             "Directory for per-epoch intermediate observable plots: one "
             "multi-page PDF per epoch (intermediate_epoch_<step>.pdf, one "
             "observable per page) comparing the trainee prediction to the "
             "full-sim target, with each observable's soft-hist MSE in the "
             "page title as a distribution-mismatch diagnostic. Pass an empty "
-            "string to disable. Only the main rank plots."
+            "string to disable (default: disabled). Only the main rank plots."
         ),
     )
     parser.add_argument(
@@ -260,22 +282,42 @@ def main() -> None:
     del arrays
     gc.collect()
 
-    train_truth_tensor, val_truth_tensor = split_truth_objects_ragged(truth_ragged, train_fraction=0.8, seed=args.seed)
-    train_target, val_target = split_pflow_targets_ragged(target, train_fraction=0.8, seed=args.seed)
+    train_truth_tensor, val_truth_tensor, _ = split_truth_objects_jagged(truth_ragged, train_fraction=0.7, val_fraction=0.2)
+    train_target, val_target, _ = split_pflow_targets_jagged(target, train_fraction=0.7, val_fraction=0.2)
 
     train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
     val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
 
-    train_dataloader = DelphesDataLoader(train_dataset, batch_size=512, shuffle=True)
-    # drop_last on val so a tiny tail batch (e.g. 20000 % 512 = 32 events) is not
-    # weighted equally with full batches in the per-batch val-loss mean.
+    # If DDP then each rank sees disjoint shard -- keep the jagged split
+    # output as-is and only shard at the DataLoader level.
+    if world_size > 1:
+        train_sampler: DistributedSampler | None = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=args.seed,
+            drop_last=False,
+        )
+        val_sampler: DistributedSampler | None = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
+    else:
+        train_sampler = None
+        val_sampler = None
+
+    train_dataloader = DelphesDataLoader(
+        train_dataset, batch_size=512, shuffle=True, sampler=train_sampler
+    )
     val_dataloader = DelphesDataLoader(
-        val_dataset, batch_size=512, shuffle=False, drop_last=True
+        val_dataset, batch_size=512, shuffle=False, sampler=val_sampler
     )
 
-    # All ranks must use the *same* initial parameters for the manual-
-    # gradient-sync scheme to keep them in sync; ``torch.manual_seed``
-    # with the user seed (not seed+rank!) handles that.
+    # Same initial parameters for DDP
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
 
@@ -292,6 +334,17 @@ def main() -> None:
             f"--param-config {args.param_config} marks no parameter as trainable; "
             "nothing to optimize."
         )
+
+    # Wrap in DDP
+    if world_size > 1:
+        ddp_kwargs: dict = {}
+        if device.type == "cuda":
+            ddp_kwargs["device_ids"] = [local_rank]
+            ddp_kwargs["output_device"] = local_rank
+        # Keep the fast path: we enforce stable graph usage in training so we
+        # can run with find_unused_parameters disabled.
+        ddp_kwargs["find_unused_parameters"] = False
+        trainee = DDP(trainee, **ddp_kwargs)
 
     n_trainable_scalars = sum(1 for spec in param_cfg.values() if spec["trainable"])
     log(
@@ -321,6 +374,7 @@ def main() -> None:
         count_weight=args.count_weight,
         calo_count_weight=args.calo_count_weight,
         event_weight=args.event_weight,
+        loss_name=args.loss,
     )
 
     if args.history_path is not None and _is_main(rank):
@@ -395,14 +449,17 @@ def main() -> None:
 
     # Print the learned charged-hadron / ECal / HCal scales for a quick sanity
     # check against the generate_pseudodata.py TARGET_*_SCALE values.
-    chad_res = trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
+    # ``trainee`` may be DDP-wrapped under srun; unwrap with ``.module`` so
+    # the attribute lookups below see the real card.
+    trainee_card = trainee.module if isinstance(trainee, DDP) else trainee
+    chad_res = trainee_card.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr]
     chad_scales = (1.0 + 0.3 * torch.tanh(chad_res.scale_raw)).detach().tolist()
     ecal_scale_vals = (
         (
             1.0
             + 0.3
             * torch.tanh(
-                trainee.ECal.scale_module.scale_raw  # type: ignore[union-attr]
+                trainee_card.ECal.scale_module.scale_raw  # type: ignore[union-attr]
             )
         )
         .detach()
@@ -413,7 +470,7 @@ def main() -> None:
             1.0
             + 0.3
             * torch.tanh(
-                trainee.HCal.scale_module.scale_raw  # type: ignore[union-attr]
+                trainee_card.HCal.scale_module.scale_raw  # type: ignore[union-attr]
             )
         )
         .detach()
