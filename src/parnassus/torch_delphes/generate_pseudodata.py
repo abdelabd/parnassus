@@ -356,7 +356,9 @@ def eflow_to_class_arrays(
 def truth_tensor_to_class_arrays(
     truth: torch.Tensor,
     n_events: int,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+) -> tuple[
+    list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray]
+]:
     """Split a per-particle truth tensor into per-event jagged arrays.
 
     The tensor is the direct output of ``pythia_particles_to_tensor``,
@@ -367,7 +369,10 @@ def truth_tensor_to_class_arrays(
     Returns
     -------
     tuple
-        Four per-event jagged lists: pt, eta, phi, class.
+        Five per-event jagged lists: pt, eta, phi, class, pdgid. ``pdgid`` is
+        the real PDG id (int64) carried through unchanged for the
+        ``truth_pdgid`` ROOT branch, so the trainee can route particles by true
+        species instead of the lossy class label.
     """
     status = truth[:, ColumnMap.STATUS].cpu().numpy().astype(np.int64)
     pid = truth[:, ColumnMap.PID].cpu().numpy().astype(np.int64)
@@ -401,7 +406,10 @@ def truth_tensor_to_class_arrays(
     eta_list = [eta_np[ev_np == i] for i in range(n_events)]
     phi_list = [phi_np[ev_np == i] for i in range(n_events)]
     cls_list = [cls_np[ev_np == i] for i in range(n_events)]
-    return pt_list, eta_list, phi_list, cls_list
+    # Real PDG id (int64) carried through unchanged for the ``truth_pdgid``
+    # ROOT branch so the trainee routes by true species, not the lossy class.
+    pid_list = [pid_np[ev_np == i].astype(np.int64) for i in range(n_events)]
+    return pt_list, eta_list, phi_list, cls_list, pid_list
 
 
 def hepmc_to_truth_class_arrays(
@@ -413,8 +421,8 @@ def hepmc_to_truth_class_arrays(
     Each event's final-state particles (HepMC ``status == 1``) are converted to
     a ``(N, N_FEATURES)`` tensor via
     :func:`parnassus.data.particle_io.hepmc_particles_to_tensor` and reduced to
-    the ``(pt, eta, phi, class)`` representation written to the ROOT file --
-    the ONLY thing the trainee ever gets to see. Pre-filtering to ``status ==
+    the ``(pt, eta, phi, class, pdgid)`` representation written to the ROOT file
+    -- what the trainee gets to see. Pre-filtering to ``status ==
     1`` before tensor construction skips the (large) intermediate shower
     history, which is what :func:`truth_tensor_to_class_arrays` would discard
     anyway.
@@ -430,14 +438,15 @@ def hepmc_to_truth_class_arrays(
     Returns
     -------
     dict
-        ``{"truth_pt", "truth_eta", "truth_phi", "truth_class"}`` -> list of
-        per-event numpy arrays, one entry per event (empty events kept as
-        zero-length arrays so the per-event alignment is preserved).
+        ``{"truth_pt", "truth_eta", "truth_phi", "truth_class", "truth_pdgid"}``
+        -> list of per-event numpy arrays, one entry per event (empty events
+        kept as zero-length arrays so the per-event alignment is preserved).
     """
     truth_pt: list[np.ndarray] = []
     truth_eta: list[np.ndarray] = []
     truth_phi: list[np.ndarray] = []
     truth_class: list[np.ndarray] = []
+    truth_pdgid: list[np.ndarray] = []
 
     with pyhepmc.open(str(hepmc_path), "r") as reader:
         for event_idx, event in enumerate(
@@ -455,17 +464,19 @@ def hepmc_to_truth_class_arrays(
             # event splits trivially under truth_tensor_to_class_arrays below.
             final_particles = [p for p in event.particles if p.status == 1]
             truth = hepmc_particles_to_tensor(final_particles, 0, dtype=torch.float64)
-            pts, etas, phis, clss = truth_tensor_to_class_arrays(truth, n_events=1)
+            pts, etas, phis, clss, pids = truth_tensor_to_class_arrays(truth, n_events=1)
             truth_pt.append(pts[0])
             truth_eta.append(etas[0])
             truth_phi.append(phis[0])
             truth_class.append(clss[0])
+            truth_pdgid.append(pids[0])
 
     return {
         "truth_pt": truth_pt,
         "truth_eta": truth_eta,
         "truth_phi": truth_phi,
         "truth_class": truth_class,
+        "truth_pdgid": truth_pdgid,
     }
 
 

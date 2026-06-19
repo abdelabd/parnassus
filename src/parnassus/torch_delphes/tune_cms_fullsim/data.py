@@ -89,10 +89,9 @@ def load_cms_flow_root(
     of the file without re-reading the whole tree on every rank.
 
     Branches in :data:`TRUTH_BRANCHES` / :data:`PFLOW_BRANCHES` that are not
-    present in the tree are silently skipped.
-
-    For older ROOT files that lack the optional ``truth_pdgid`` branch,
-    :func:`load_truth_events` falls back to the lossy ``truth_class`` mapping.
+    present in the tree are silently skipped here; the required ``truth_pdgid``
+    branch is then enforced downstream by :func:`load_truth_events`, which
+    raises if it is absent (regenerate the pseudodata to add it).
     """
     with uproot.open(str(path)) as f:
         if tree_name not in f:
@@ -128,7 +127,14 @@ def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
     """
     rows_list: list[np.ndarray] = []
     key_0 = arrays.keys().__iter__().__next__()
-    has_pdgid = "truth_pdgid" in arrays
+    if "truth_pdgid" not in arrays:
+        raise KeyError(
+            "truth_pdgid branch is required but missing from the loaded ROOT "
+            "arrays. Regenerate the pseudodata with "
+            "parnassus.torch_delphes.generate_pseudodata (which now writes "
+            "truth_pdgid), or point --root-file at a sample that carries the "
+            "real truth PDG ids."
+        )
     for i in range(len(arrays[key_0])):
         pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
@@ -136,14 +142,10 @@ def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
         n_p = pt.shape[0]
         if n_p == 0:
             continue
-        # Prefer real PDG IDs (K_L0=130, n=2112, K+/-=321, p=2212, ...).
-        # Fall back to the lossy class -> canonical-PID map for older ROOT
-        # files that don't expose ``truth_pdgid``.
-        if has_pdgid:
-            pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
-        else:
-            cls = np.asarray(arrays["truth_class"][i], dtype=np.int64)
-            pids = class_to_pid_vectorized(cls)
+        # Real PDG IDs (K_L0=130, n=2112, K+/-=321, p=2212, ...), carried
+        # through unchanged so the ECal/HCal energy-fraction LUT routes each
+        # species correctly instead of collapsing to the lossy class buckets.
+        pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
         # PDG-aware mass and charge so the energy reconstruction and the
         # B-field track curvature use the correct values per species.
         mass = get_mass_from_pdg_id(pids)

@@ -110,21 +110,16 @@ def test_fixture_has_expected_branches(fixture_root: Path):
 
     with uproot.open(str(fixture_root)) as f:
         keys = set(f["event_tree"].keys())
-    required_truth = tuple(b for b in TRUTH_BRANCHES if b != "truth_pdgid")
-    for branch in required_truth + PFLOW_BRANCHES:
+    for branch in TRUTH_BRANCHES + PFLOW_BRANCHES:
         assert branch in keys, f"missing branch {branch} in pseudodata"
 
 
 def test_load_cms_flow_root_roundtrip(fixture_root: Path):
     """``load_cms_flow_root`` returns dense per-event numpy arrays."""
     arrays = load_cms_flow_root(fixture_root, n_events=30)
-    required_truth = tuple(b for b in TRUTH_BRANCHES if b != "truth_pdgid")
-    for branch in required_truth + PFLOW_BRANCHES:
+    for branch in TRUTH_BRANCHES + PFLOW_BRANCHES:
         assert branch in arrays
         assert len(arrays[branch]) == 30
-    # Optional modern branch: legacy committed pseudodata may not have it.
-    if "truth_pdgid" in arrays:
-        assert len(arrays["truth_pdgid"]) == 30
     assert arrays["truth_pt"][0].ndim == 1
     assert arrays["pflow_pt"][0].ndim == 1
 

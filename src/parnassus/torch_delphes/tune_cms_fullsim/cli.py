@@ -20,17 +20,16 @@ array:
 - ``truth_class`` : integer particle-type label
   (``0=charged hadron, 1=electron, 2=muon, 3=neutral hadron, 4=photon``)
 - ``truth_pdgid`` : full PDG ID of the truth particle (130 for K_L0, 2112
-    for neutron, 321 for charged kaon, 2212 for proton, ...). Optional but
-    strongly recommended -- when present this is used directly as the trainee
-    card's ``ColumnMap.PID`` so the ECal/HCal energy-fraction LUT routes
-    long-lived neutrals to HCal instead of mis-mapping them to pi0
-    (which would push them through the photon stream).
+    for neutron, 321 for charged kaon, 2212 for proton, ...). REQUIRED -- it is
+    used directly as the trainee card's ``ColumnMap.PID`` so the ECal/HCal
+    energy-fraction LUT routes long-lived neutrals to HCal instead of
+    mis-mapping them to pi0 (which would push them through the photon stream).
+    Loading raises if it is absent.
 - ``pflow_pt`` / ``pflow_eta`` / ``pflow_phi`` / ``pflow_class`` : the
   corresponding CMS particle-flow reconstructed objects that serve as
   the fitting target
 
-Class-to-PDG mapping (used as a fallback when ``truth_pdgid`` is absent,
-and on the ``pflow_class`` target side) is done with
+Class-to-PDG mapping (used on the ``pflow_class`` target side) is done with
 :func:`parnassus.utils.class_to_pid_vectorized`.
 
 Usage
