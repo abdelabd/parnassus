@@ -36,6 +36,20 @@ from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
 # the CLI --count-weight.
 COUNT_WEIGHT = 0.5
 
+# Weight of the CALO-resolution count terms (CALO_COUNT_TERM_KEYS: ecal_photon,
+# hcal_neutral_hadron) -- kept SEPARATE from COUNT_WEIGHT because these terms have a
+# fundamentally different job. The tracking-efficiency count terms (COUNT_TERM_KEYS)
+# only need to nudge Adam-insensitive eff_logits and have correctly-signed Wasserstein
+# partners, so COUNT_WEIGHT ~ O(1) is right. The calo terms, by contrast, must OUT-VOTE
+# a *wrong-signed* Wasserstein gradient on the forward resolution coefficients
+# (forward_c_E/forward_c_S/common_c_E -- reparameterized autograd is blind to towers
+# leaving the significance cut). Under Adam (step ~ sign(grad)) only their RELATIVE
+# magnitude matters, so the calo count term must dominate -- hence a larger default. A
+# single shared weight cannot do both: raising COUNT_WEIGHT enough to fix the calo sign
+# also inflates the noisy lepton-efficiency count terms (observed to blow the val_loss
+# up and trigger premature early-stopping). Overridable per-call via --calo-count-weight.
+CALO_COUNT_WEIGHT = 10.0
+
 # Weight of the per-event log(HT) sliced-Wasserstein term relative to the per-pid
 # object terms. Overridable per-call via the CLI --event-weight.
 EVENT_WEIGHT = 0.1
@@ -136,6 +150,7 @@ def per_event_wasserstein_loss(
     target: dict[str, torch.Tensor],
     *,
     count_weight: float = COUNT_WEIGHT,
+    calo_count_weight: float = CALO_COUNT_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
 ) -> torch.Tensor:
     """Sliced Wasserstein-2 loss between predicted and target observables.
@@ -146,11 +161,15 @@ def per_event_wasserstein_loss(
     expected-count terms. The target side is detached; gradients flow back to
     the trainee card through ``pred``.
 
-    ``count_weight`` scales every per-species count term and ``event_weight``
-    scales the per-event ``log(HT)`` term, both relative to the unit-weighted
-    per-pid object terms. They default to the module constants
-    :data:`COUNT_WEIGHT` / :data:`EVENT_WEIGHT` and are surfaced on the CLI as
-    ``--count-weight`` / ``--event-weight``.
+    ``count_weight`` scales the tracking-efficiency count terms
+    (:data:`COUNT_TERM_KEYS`); ``calo_count_weight`` scales the calo-resolution
+    count terms (:data:`CALO_COUNT_TERM_KEYS`) -- kept separate because the calo
+    terms must out-vote a wrong-signed Wasserstein gradient on the forward
+    resolution coefficients and so need a larger weight (see
+    :data:`CALO_COUNT_WEIGHT`). ``event_weight`` scales the per-event ``log(HT)``
+    term. All three are relative to the unit-weighted per-pid object terms,
+    default to the module constants, and are surfaced on the CLI as
+    ``--count-weight`` / ``--calo-count-weight`` / ``--event-weight``.
     """
 
     object_level_observables = ["log_E", "log_pt", "eta", "pid"]
@@ -265,18 +284,30 @@ def per_event_wasserstein_loss(
     # efficiency (no truth information is used -- only the trainee's own reco and the
     # reco data).
     #
-    # Weighting is a NORMALIZED chi^2 / Poisson: per region, (pred - tgt)^2 / (tgt + 1)
-    # (the +1 floor keeps an empty bin finite), then the per-species term is the bin SUM
-    # divided by that species' total target count. Dividing the chi^2 sum by the total
-    # count makes each term a *population-weighted squared relative error*
-    # (sum_b (O_b/sum O) * ((pred_b - O_b)/O_b)^2): it KEEPS the chi^2 dense/sparse
-    # cross-bin balancing (dense charged-hadron bins still dominate sparse lepton bins by
-    # population) but is dimensionless and batch-size invariant -- O(1) at init and on the
-    # same scale as the z-scored Wasserstein terms, instead of the old bin-MEAN chi^2 that
-    # was extensive (~f^2 * counts ∝ n_events) and blew up to ~1e4 early in training. The
-    # tracking count terms are gradient-decoupled from every other parameter (migration M
-    # is gradient-free, eff_logits get gradient ONLY here); the calo count terms also feed
-    # the resolution coefficients, which is why their scale matters and is now controllable.
+    # Both forms are NORMALIZED chi^2 / Poisson (per region, (pred - tgt)^2 / (tgt + 1);
+    # the +1 floor keeps an empty bin finite), dimensionless and batch-size invariant
+    # (O(1), unlike the old bin-MEAN chi^2 that was extensive ~f^2*counts and blew up to
+    # ~1e4). But the two ROLES need different cross-region weighting:
+    #
+    #  - Tracking-efficiency terms (COUNT_TERM_KEYS): *population-weighted* squared
+    #    relative error, chi2.sum() / total = sum_b (O_b/sum O)*((pred_b-O_b)/O_b)^2.
+    #    Each region is weighted by its population fraction O_b/sum(O). Correct here:
+    #    dense charged-hadron bins SHOULD dominate sparse lepton bins, and the eff_logit
+    #    gradients are correctly signed (migration M is gradient-free; eff_logits get
+    #    gradient ONLY here).
+    #
+    #  - Calo-resolution terms (CALO_COUNT_TERM_KEYS): *per-region-FAIR* squared relative
+    #    error, mean_b ((pred_b-O_b)/(O_b+1))^2 -- every region weighted EQUALLY (1/n_reg),
+    #    NOT by population. forward_c_E/forward_c_S act ONLY in the forward |eta| region,
+    #    whose population fraction O_fwd/sum(O) is tiny; the population weighting above
+    #    silently divides their (already wrong-sign-fighting) gradient by the central-
+    #    dominated total and lets the wrong-signed Wasserstein gradient win (Adam follows
+    #    sign, not magnitude). Per-region fairness keeps the term O(1) and batch-invariant
+    #    ((O+1)^2 ~ n_events^2 matches the numerator) while restoring the forward region's
+    #    full leverage; together with the larger CALO_COUNT_WEIGHT it re-establishes the
+    #    calo count term's dominance over that wrong-signed gradient -- the dominance that
+    #    batch-averaging the old extensive term had removed.
+    calo_pred_keys = {pred_key for _o, pred_key, _t in CALO_COUNT_TERM_KEYS}
     count_terms: list[torch.Tensor] = []
     for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred_counts = pred.get(pred_key)
@@ -290,9 +321,15 @@ def per_event_wasserstein_loss(
             .detach()
             .to(device=pred_counts.device, dtype=pred_counts.dtype)
         )
-        chi2 = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0)
-        total = tgt_counts.sum().clamp_min(1.0)  # detached scale -> batch-invariant
-        count_terms.append(count_weight * (chi2.sum() / total))
+        if pred_key in calo_pred_keys:
+            # per-region-fair squared relative error (equal weight per region)
+            rel = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0) ** 2
+            count_terms.append(calo_count_weight * rel.mean())
+        else:
+            # population-weighted squared relative error
+            chi2 = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0)
+            total = tgt_counts.sum().clamp_min(1.0)  # detached scale -> batch-invariant
+            count_terms.append(count_weight * (chi2.sum() / total))
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
     # log_ht term is down-weighted by ``event_weight`` relative to the per-pid object

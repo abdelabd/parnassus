@@ -70,7 +70,7 @@ from .data import (
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
 
-from .loss import COUNT_WEIGHT, EVENT_WEIGHT
+from .loss import CALO_COUNT_WEIGHT, COUNT_WEIGHT, EVENT_WEIGHT
 from .distributed import (
     _cleanup_distributed,
     _init_distributed,
@@ -119,7 +119,20 @@ def main() -> None:
             "unit-weighted per-pid object Wasserstein terms. The count term is a "
             "dimensionless, batch-invariant normalized chi^2 (~O(1)), so this is a "
             f"meaningful balance knob. Default {COUNT_WEIGHT}. Set 0 to disable the "
-            "count terms (drops the eff_logits / calo-resolution count gradient)."
+            "tracking-efficiency count terms (drops the eff_logits count gradient)."
+        ),
+    )
+    parser.add_argument(
+        "--calo-count-weight",
+        type=float,
+        default=CALO_COUNT_WEIGHT,
+        help=(
+            "Weight on the CALO-resolution expected-count terms (ecal_photon, "
+            "hcal_neutral_hadron), kept SEPARATE from --count-weight. These must "
+            "out-vote a wrong-signed Wasserstein gradient on the forward resolution "
+            "coefficients (forward_c_E/forward_c_S/common_c_E), so they need a larger "
+            f"weight and a per-region-fair normalization. Default {CALO_COUNT_WEIGHT}. "
+            "Set 0 to disable the calo-resolution count gradient."
         ),
     )
     parser.add_argument(
@@ -306,6 +319,7 @@ def main() -> None:
             args.lr_scheduler_patience if args.lr_scheduler_patience > 0 else None
         ),
         count_weight=args.count_weight,
+        calo_count_weight=args.calo_count_weight,
         event_weight=args.event_weight,
     )
 
