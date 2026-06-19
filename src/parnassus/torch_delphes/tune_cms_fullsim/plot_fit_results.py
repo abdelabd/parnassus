@@ -53,6 +53,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 from pathlib import Path
 
@@ -73,13 +74,15 @@ _DEFAULT_PARAM_CONFIG = (
     Path(pc.__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
 )
 
+from .config import OBSERVABLES
 from .data import (
     load_cms_flow_root,
-    load_pflow_targets,
     load_pflow_targets_from_tensor,
-    load_truth_events,
+    load_pflow_targets_ragged,
+    load_truth_events_ragged,
     restore_event_format,
 )
+from .dataloader import DelphesDataLoader, DelphesDataSet
 from .debug import (
     INTERMEDIATE_BRANCHES,
     debug_branch_name,
@@ -363,21 +366,80 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
             p.copy_(raw.reshape(p.shape).to(p.dtype))
 
 
-def _trainee_observables(card: CMSEnergyFlowDefault, truth_tensor: torch.Tensor) -> dict:
-    """Run the trainee card on padded truth events -> predicted observable dict.
+def _build_val_dataloader(
+    arrays: dict,
+    batch_size: int,
+    device: torch.device,
+) -> DelphesDataLoader:
+    """Build the ragged validation dataloader the plot forwards iterate over.
 
-    Mirrors the fit loop in :mod:`tune_cms_fullsim.training`: drop the padded
-    truth particles, run the card (which expects a flat
+    Mirrors the tuning path (:mod:`tune_cms_fullsim.cli`): keep the truth
+    particles and per-particle targets *ragged* (per-event lists, no global
+    padding) and let :func:`dataloader.delphes_collate_fn` pad each batch to its
+    own max multiplicity. This avoids densifying the whole validation split to
+    the global max multiplicity -- the allocation that, together with the old
+    single-shot forward, OOM-killed this script on a memory-limited node.
+
+    ``shuffle=False`` so the batch order is fixed: re-seeding the RNG before each
+    full pass then gives the init and fitted cards the *same* per-batch noise, so
+    their difference reflects the parameters, not the stochastic smearing.
+    """
+    truth_ragged = load_truth_events_ragged(arrays)
+    target_ragged = load_pflow_targets_ragged(arrays)
+    dataset = DelphesDataSet(truth_ragged, target_ragged, device=device)
+    return DelphesDataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+
+def _trainee_observables(
+    card: CMSEnergyFlowDefault, dataloader: DelphesDataLoader
+) -> tuple[dict, dict]:
+    """Run the trainee batch-by-batch -> (pred, target) flattened observables.
+
+    Mirrors the validation loop in :mod:`tune_cms_fullsim.training`: for each
+    batch drop the padded truth particles, run the card (which expects a flat
     ``(n_particles, n_features)`` tensor), regroup the flat ``EFlowObject``
     output back into per-event format, then extract the observable dict. The
     caller seeds the RNG before calling, since the card's momentum smearing /
     Gumbel-ST efficiency is stochastic.
+
+    Memory note: unlike the old single-shot forward over the whole validation
+    split, this iterates batches so peak memory is bounded by one batch's
+    intermediate detector-sim tensors. The result is therefore NOT bit-identical
+    to the single-shot output (the card draws data-sized randoms per forward, so
+    batching re-chunks the RNG stream), but the pooled histograms are unchanged
+    and init-vs-fitted stays comparable (same seed + fixed batch order).
+
+    Both ``pred`` and ``target`` are returned already flattened to 1-D and
+    co-indexed: per-particle observables (pt/eta/log_E/log_pt/pid) are stripped
+    of padding/ghosts with the same ``pt != 0`` cut the loss uses (so the per-PID
+    plots' element-aligned selection keeps working), and per-event observables
+    pass through. ``*_region_counts`` keys are skipped (no predicted counterpart
+    and never plotted).
     """
-    mask = torch.any(truth_tensor != 0, dim=-1)
+    acc_pred: dict[str, list[torch.Tensor]] = {}
+    acc_tgt: dict[str, list[torch.Tensor]] = {}
     with torch.no_grad():
-        out = card(truth_tensor[mask])
-    eflow_restored = restore_event_format(out["EFlowObject"], mask)
-    return load_pflow_targets_from_tensor(eflow_restored)
+        for batch in dataloader:
+            truth_particles = batch["truth_particles"]
+            mask = torch.any(truth_particles != 0, dim=-1)
+            out = card(truth_particles[mask])
+            eflow_restored = restore_event_format(out["EFlowObject"], mask)
+            pred = load_pflow_targets_from_tensor(eflow_restored)
+            target = {k: batch[k] for k in batch if k != "truth_particles"}
+            for key in OBSERVABLES:
+                if key not in pred or key not in target:
+                    continue  # skips *_region_counts (no predicted counterpart)
+                pv, tv = pred[key], target[key]
+                if pv.ndim >= 2:
+                    pv = pv[pred["pt"] != 0]
+                    tv = tv[target["pt"] != 0]
+                else:
+                    pv, tv = pv.reshape(-1), tv.reshape(-1)
+                acc_pred.setdefault(key, []).append(pv.detach().cpu())
+                acc_tgt.setdefault(key, []).append(tv.detach().cpu())
+    pred_obs = {k: torch.cat(v) for k, v in acc_pred.items()}
+    target_obs = {k: torch.cat(v) for k, v in acc_tgt.items()}
+    return pred_obs, target_obs
 
 
 def _obs_values(obs: dict, key: str) -> torch.Tensor:
@@ -434,7 +496,7 @@ def plot_observable(
 
 
 def _trainee_intermediate_outputs(
-    card: CMSEnergyFlowDefault, truth_tensor: torch.Tensor
+    card: CMSEnergyFlowDefault, dataloader: DelphesDataLoader
 ) -> dict[str, torch.Tensor]:
     """Run a debug-mode trainee card and return its full per-module output dict.
 
@@ -446,11 +508,23 @@ def _trainee_intermediate_outputs(
     :mod:`parnassus.torch_delphes.generate_pseudodata`. The caller seeds the
     RNG before calling, since the card's momentum smearing / Gumbel-ST
     efficiency is stochastic.
+
+    Batched (one pass over ``dataloader``) to bound peak memory: each module's
+    flat output is concatenated across batches, which is exactly the single-shot
+    flat output because the downstream consumers (``filter_valid_rows`` /
+    ``extract_variable``) are row-wise. The per-batch ``EVENT_NUMBER`` column is
+    no longer globally unique after concatenation, but it is never read on this
+    path, so that is harmless.
     """
-    mask = torch.any(truth_tensor != 0, dim=-1)
+    acc: dict[str, list[torch.Tensor]] = {}
     with torch.no_grad():
-        out = card(truth_tensor[mask])
-    return out
+        for batch in dataloader:
+            truth_particles = batch["truth_particles"]
+            mask = torch.any(truth_particles != 0, dim=-1)
+            out = card(truth_particles[mask])
+            for module_name, tensor in out.items():
+                acc.setdefault(module_name, []).append(tensor.detach().cpu())
+    return {k: torch.cat(v, dim=0) for k, v in acc.items()}
 
 
 def _load_target_intermediate_values(
@@ -784,6 +858,17 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--plot-batch-size",
+        type=int,
+        default=2000,
+        help=(
+            "Events per trainee forward batch when building the plot histograms. "
+            "Lower it on a memory-tight node (e.g. a login node), raise it for "
+            "speed on a compute node. Does not affect results -- the histograms "
+            "pool all batches."
+        ),
+    )
+    parser.add_argument(
         "--truth-config",
         type=Path,
         default=_DEFAULT_PARAM_CONFIG,
@@ -869,8 +954,15 @@ def main() -> None:
         n_events=n_plot_events,
         entry_start=val_entry_start,
     )
-    truth_tensor = load_truth_events(arrays)
-    target = load_pflow_targets(arrays)
+    # Ragged loaders + a batched dataloader (same memory-light path as the tuning
+    # loop): the truth/target are never densified to the global max multiplicity,
+    # and each trainee forward below runs one batch at a time. The big ``arrays``
+    # dict is the largest remaining transient -- free it once the dataloader owns
+    # the ragged tensors.
+    device = torch.device("cpu")
+    val_loader = _build_val_dataloader(arrays, args.plot_batch_size, device)
+    del arrays
+    gc.collect()
 
     print(
         "  plotting on validation split: "
@@ -878,8 +970,11 @@ def main() -> None:
     )
 
     torch.manual_seed(args.seed)
-    trainee = CMSEnergyFlowDefault(debug=False, learnable=True)
-    pred_init = _trainee_observables(trainee, truth_tensor)
+    trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+    # The target observables come out of the same batched pass as pred_init (they
+    # are read from each batch's target keys), so they are flattened/co-indexed
+    # identically to the predictions.
+    pred_init, target = _trainee_observables(trainee, val_loader)
 
     # Restore the *best* (min-validation-loss) parameter snapshot and re-run.
     # Early stopping keeps training past the best epoch, so the last snapshot
@@ -894,7 +989,9 @@ def main() -> None:
         )
     _set_trainee_from_snapshot(trainee, best_params)
     torch.manual_seed(args.seed)
-    pred_final = _trainee_observables(trainee, truth_tensor)
+    # Re-run the fitted card over the same fixed-order batches; the target is
+    # identical to the first pass, so discard it.
+    pred_final, _ = _trainee_observables(trainee, val_loader)
 
     plot_observable(
         "PT",
@@ -976,12 +1073,12 @@ def main() -> None:
     if args.debug:
         print("\n  --debug: rendering per-module intermediate-output overlays...")
         torch.manual_seed(args.seed)
-        trainee_dbg = CMSEnergyFlowDefault(debug=True, learnable=True)
-        init_outputs = _trainee_intermediate_outputs(trainee_dbg, truth_tensor)
+        trainee_dbg = CMSEnergyFlowDefault(debug=True, learnable=True).to(device)
+        init_outputs = _trainee_intermediate_outputs(trainee_dbg, val_loader)
 
         _set_trainee_from_snapshot(trainee_dbg, best_params)
         torch.manual_seed(args.seed)
-        final_outputs = _trainee_intermediate_outputs(trainee_dbg, truth_tensor)
+        final_outputs = _trainee_intermediate_outputs(trainee_dbg, val_loader)
 
         plot_intermediate_observables(
             root_file=args.root_file,
