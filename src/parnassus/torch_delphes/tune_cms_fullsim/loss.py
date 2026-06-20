@@ -1,20 +1,26 @@
 """Differentiable distribution-matching losses for ``tune_cms_fullsim``.
 
-This module is the package's self-contained loss layer:
+This module is the package's self-contained loss layer. Two training losses share
+the same per-pid object grouping (:func:`_group_objects_by_pid`) and the same
+per-species expected-count terms (:func:`_count_terms`):
 
-- :func:`per_event_wasserstein_loss` is the active training loss: a sliced
+- :func:`per_event_wasserstein_loss` (``--loss wasserstein``, the default): a sliced
   Wasserstein-2 distance computed per particle type over the standardized
-  ``[log_E, log_pt, eta]`` object clouds, plus a down-weighted event-level term
-  on the ``log(HT)`` distribution. It uses POT's
-  ``ot.sliced_wasserstein_distance`` and stays differentiable w.r.t. the
-  trainee card's predicted object kinematics.
+  ``[log_E, log_pt, eta]`` object clouds, plus a down-weighted event-level term on the
+  ``log(HT)`` distribution, plus the count terms. It uses POT's
+  ``ot.sliced_wasserstein_distance`` and stays differentiable w.r.t. the trainee
+  card's predicted object kinematics.
+- :func:`per_pid_soft_hist_loss` (``--loss soft_hist``): the same structure but with
+  the optimal-transport shape objective replaced by a per-pid, per-observable
+  soft-histogram MSE over ``[log_E, log_pt, eta]`` (plus the ``log(HT)`` and count
+  terms). Directly optimizes histogram shape on a fixed shared bin grid.
+
 - :func:`soft_histogram` and :func:`histogram_mse_loss` are fully-differentiable
-  histogram primitives. They are no longer part of the training loss; they
-  remain only as the diagnostic that
-  :mod:`tune_cms_fullsim.intermediate_plots` uses to annotate each per-epoch
-  plot with a soft-histogram MSE. They are an exact COPY of the same-named
-  functions in :mod:`parnassus.torch_delphes.tuning` (keep the two in sync if
-  you ever change the soft-histogram math).
+  histogram primitives used BOTH by :func:`per_pid_soft_hist_loss` and as the
+  diagnostic that :mod:`tune_cms_fullsim.intermediate_plots` uses to annotate each
+  per-epoch plot with a soft-histogram MSE. They are an exact COPY of the same-named
+  functions in :mod:`parnassus.torch_delphes.tuning` (keep the two in sync if you ever
+  change the soft-histogram math).
 """
 
 from __future__ import annotations
@@ -24,11 +30,8 @@ from typing import Callable
 
 import ot
 import torch
-import torch.distributed as dist
-from torch.distributed.nn.functional import all_reduce as diff_all_reduce
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
-from .distributed import _is_dist
 
 # Weight of each differentiable per-species expected-count term relative to the
 # per-pid sliced-Wasserstein terms. The count term is now a dimensionless,
@@ -145,6 +148,115 @@ def histogram_mse_loss(
 
 
 # =============================================================================
+# Shared object-grouping and count-term helpers (used by both training losses)
+# =============================================================================
+
+# Column order of the per-object feature stack used by the object-level losses; the
+# trailing ``pid`` is the discrete grouping key (off the autograd graph). Shared by
+# per_event_wasserstein_loss and per_pid_soft_hist_loss so the two agree on layout.
+OBJECT_LEVEL_OBSERVABLES: list[str] = ["log_E", "log_pt", "eta", "pid"]
+
+# Column index of each differentiable feature within a grouped ``(n, 3)`` object
+# tensor (the first three columns of OBJECT_LEVEL_OBSERVABLES, in order).
+_OBS_COL: dict[str, int] = {"log_E": 0, "log_pt": 1, "eta": 2}
+
+
+def _group_objects_by_pid(input_tensor: torch.Tensor) -> dict[int, torch.Tensor]:
+    """Flatten ``(n_events, max_n_particles, n_obs)`` -> ``(N, n_obs)``, drop
+    padding / efficiency-killed slots (``pid == 0``), and group the valid particles
+    by integer ``pid``.
+
+    The last column is ``pid`` (discrete, off the autograd graph); columns ``0:3``
+    are the differentiable features ``[log_E, log_pt, eta]``. Boolean-mask indexing
+    is a differentiable gather, so on the pred side the returned feature tensors keep
+    the gradient back to the learnable detector params.
+
+    Returns ``dict`` pid -> ``(num_objects_with_that_pid, 3)`` feature tensor.
+    """
+    flat = input_tensor.reshape(-1, input_tensor.shape[-1])  # (N, n_obs)
+    pid_col = flat[..., -1]  # (N,) pid, no grad
+    valid = pid_col != 0  # padding/ghost -> pid == 0
+    flat = flat[valid]  # differentiable gather
+    pid_valid = pid_col[valid]
+
+    groups: dict[int, torch.Tensor] = {}
+    for pid in torch.unique(pid_valid).tolist():
+        sel = pid_valid == pid
+        groups[int(pid)] = flat[sel][:, :3]  # [log_E, log_pt, eta], keeps grad
+    return groups
+
+
+def _count_terms(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    *,
+    count_weight: float,
+    calo_count_weight: float,
+) -> list[torch.Tensor]:
+    """Differentiable per-species expected-count terms, shared by both training
+    losses: the gradient source for the tracking-efficiency eff_logits and the calo
+    resolution coefficients.
+
+    For each species, ``pred[pred_key]`` is the trainee's differentiable expected
+    reconstructed count per RECO bin (from its reco-bin <- pre-reco-region migration;
+    see CMSEnergyFlowDefault._expected_reco_counts), and ``target[tgt_key]`` is the
+    per-event reconstructed-DATA count of that species in the same reco bins. We match
+    the batch totals; the fixed point is the true per-region efficiency (no truth
+    information is used -- only the trainee's own reco and the reco data).
+
+    Both forms are NORMALIZED chi^2 / Poisson (per region, ``(pred - tgt)^2 / (tgt + 1)``;
+    the +1 floor keeps an empty bin finite), dimensionless and batch-size invariant
+    (O(1), unlike the old bin-MEAN chi^2 that was extensive ~f^2*counts and blew up to
+    ~1e4). But the two ROLES need different cross-region weighting:
+
+     - Tracking-efficiency terms (COUNT_TERM_KEYS): *population-weighted* squared
+       relative error, ``chi2.sum() / total = sum_b (O_b/sum O)*((pred_b-O_b)/O_b)^2``.
+       Each region is weighted by its population fraction O_b/sum(O). Correct here:
+       dense charged-hadron bins SHOULD dominate sparse lepton bins, and the eff_logit
+       gradients are correctly signed (migration M is gradient-free; eff_logits get
+       gradient ONLY here).
+
+     - Calo-resolution terms (CALO_COUNT_TERM_KEYS): *per-region-FAIR* squared relative
+       error, ``mean_b ((pred_b-O_b)/(O_b+1))^2`` -- every region weighted EQUALLY
+       (1/n_reg), NOT by population. forward_c_E/forward_c_S act ONLY in the forward
+       |eta| region, whose population fraction O_fwd/sum(O) is tiny; the population
+       weighting above silently divides their (already wrong-sign-fighting) gradient by
+       the central-dominated total and lets the wrong-signed shape gradient win (Adam
+       follows sign, not magnitude). Per-region fairness keeps the term O(1) and
+       batch-invariant ((O+1)^2 ~ n_events^2 matches the numerator) while restoring the
+       forward region's full leverage; together with the larger CALO_COUNT_WEIGHT it
+       re-establishes the calo count term's dominance over that wrong-signed gradient.
+
+    Returns a list of scalar terms (one per present species); each keeps the gradient
+    to ``pred[pred_key]`` and the target side is detached.
+    """
+    calo_pred_keys = {pred_key for _o, pred_key, _t in CALO_COUNT_TERM_KEYS}
+    count_terms: list[torch.Tensor] = []
+    for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        pred_counts = pred.get(pred_key)
+        if pred_counts is None or tgt_key not in target:
+            continue
+        pred_counts = pred_counts.reshape(-1)  # (n_regions,), differentiable
+        tgt_counts = (
+            target[tgt_key]
+            .reshape(-1, pred_counts.shape[0])
+            .sum(dim=0)
+            .detach()
+            .to(device=pred_counts.device, dtype=pred_counts.dtype)
+        )
+        if pred_key in calo_pred_keys:
+            # per-region-fair squared relative error (equal weight per region)
+            rel = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0) ** 2
+            count_terms.append(calo_count_weight * rel.mean())
+        else:
+            # population-weighted squared relative error
+            chi2 = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0)
+            total = tgt_counts.sum().clamp_min(1.0)  # detached scale -> batch-invariant
+            count_terms.append(count_weight * (chi2.sum() / total))
+    return count_terms
+
+
+# =============================================================================
 # Active training loss: per-event sliced Wasserstein
 # =============================================================================
 
@@ -176,39 +288,17 @@ def per_event_wasserstein_loss(
     ``--count-weight`` / ``--calo-count-weight`` / ``--event-weight``.
     """
 
-    object_level_observables = ["log_E", "log_pt", "eta", "pid"]
-
-    pred_particles = torch.stack([pred[k] for k in object_level_observables], dim=-1) # shape (n_events, max_n_particles, n_observables)
-    target_particles = torch.stack([target[k] for k in object_level_observables], dim=-1)
-
-    def get_object_groups(input_tensor: torch.Tensor) -> dict[int, torch.Tensor]:
-        """Flatten ``(n_events, max_n_particles, n_obs)`` -> ``(N, n_obs)``, drop
-        padding / efficiency-killed slots (``pid == 0``), and group the valid
-        particles by integer ``pid``.
-
-        The last column is ``pid`` (discrete, off the autograd graph); columns
-        ``0:3`` are the differentiable features ``[log_E, log_pt, eta]``. Boolean-
-        mask indexing is a differentiable gather, so on the pred side the returned
-        feature tensors keep the gradient back to the learnable detector params.
-
-        Returns ``dict`` pid -> ``(num_objects_with_that_pid, 3)`` feature tensor.
-        """
-        flat = input_tensor.reshape(-1, input_tensor.shape[-1])  # (N, n_obs)
-        pid_col = flat[..., -1]  # (N,) pid, no grad
-        valid = pid_col != 0  # padding/ghost -> pid == 0
-        flat = flat[valid]  # differentiable gather
-        pid_valid = pid_col[valid]
-
-        groups: dict[int, torch.Tensor] = {}
-        for pid in torch.unique(pid_valid).tolist():
-            sel = pid_valid == pid
-            groups[int(pid)] = flat[sel][:, :3]  # [log_E, log_pt, eta], keeps grad
-        return groups
+    pred_particles = torch.stack(
+        [pred[k] for k in OBJECT_LEVEL_OBSERVABLES], dim=-1
+    )  # (n_events, max_n_particles, n_observables)
+    target_particles = torch.stack(
+        [target[k] for k in OBJECT_LEVEL_OBSERVABLES], dim=-1
+    )
 
     # Group both sides across the whole batch. Pred keeps its graph; the target is a
     # fixed reference, so detach it.
-    pred_groups = get_object_groups(pred_particles)
-    target_groups = get_object_groups(target_particles.detach())
+    pred_groups = _group_objects_by_pid(pred_particles)
+    target_groups = _group_objects_by_pid(target_particles.detach())
 
     def sliced_sw2(
         x_pred: torch.Tensor, y_tgt: torch.Tensor, scale: torch.Tensor
@@ -279,61 +369,12 @@ def per_event_wasserstein_loss(
         )
         event_wasserstein_distance[key] = sliced_sw2(pv, tv, event_scale)
 
-    # Differentiable per-species expected-count terms: the gradient source for the
-    # tracking-efficiency eff_logits. For each species, pred[...] is the trainee's
-    # differentiable expected reconstructed count per RECO bin (from its reco-bin <-
-    # pre-reco-region migration; see CMSEnergyFlowDefault._expected_reco_counts), and
-    # target[...] is the per-event reconstructed-DATA count of that species in the same
-    # reco bins. We match the batch totals; the fixed point is the true per-region
-    # efficiency (no truth information is used -- only the trainee's own reco and the
-    # reco data).
-    #
-    # Both forms are NORMALIZED chi^2 / Poisson (per region, (pred - tgt)^2 / (tgt + 1);
-    # the +1 floor keeps an empty bin finite), dimensionless and batch-size invariant
-    # (O(1), unlike the old bin-MEAN chi^2 that was extensive ~f^2*counts and blew up to
-    # ~1e4). But the two ROLES need different cross-region weighting:
-    #
-    #  - Tracking-efficiency terms (COUNT_TERM_KEYS): *population-weighted* squared
-    #    relative error, chi2.sum() / total = sum_b (O_b/sum O)*((pred_b-O_b)/O_b)^2.
-    #    Each region is weighted by its population fraction O_b/sum(O). Correct here:
-    #    dense charged-hadron bins SHOULD dominate sparse lepton bins, and the eff_logit
-    #    gradients are correctly signed (migration M is gradient-free; eff_logits get
-    #    gradient ONLY here).
-    #
-    #  - Calo-resolution terms (CALO_COUNT_TERM_KEYS): *per-region-FAIR* squared relative
-    #    error, mean_b ((pred_b-O_b)/(O_b+1))^2 -- every region weighted EQUALLY (1/n_reg),
-    #    NOT by population. forward_c_E/forward_c_S act ONLY in the forward |eta| region,
-    #    whose population fraction O_fwd/sum(O) is tiny; the population weighting above
-    #    silently divides their (already wrong-sign-fighting) gradient by the central-
-    #    dominated total and lets the wrong-signed Wasserstein gradient win (Adam follows
-    #    sign, not magnitude). Per-region fairness keeps the term O(1) and batch-invariant
-    #    ((O+1)^2 ~ n_events^2 matches the numerator) while restoring the forward region's
-    #    full leverage; together with the larger CALO_COUNT_WEIGHT it re-establishes the
-    #    calo count term's dominance over that wrong-signed gradient -- the dominance that
-    #    batch-averaging the old extensive term had removed.
-    calo_pred_keys = {pred_key for _o, pred_key, _t in CALO_COUNT_TERM_KEYS}
-    count_terms: list[torch.Tensor] = []
-    for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
-        pred_counts = pred.get(pred_key)
-        if pred_counts is None or tgt_key not in target:
-            continue
-        pred_counts = pred_counts.reshape(-1)  # (n_regions,), differentiable
-        tgt_counts = (
-            target[tgt_key]
-            .reshape(-1, pred_counts.shape[0])
-            .sum(dim=0)
-            .detach()
-            .to(device=pred_counts.device, dtype=pred_counts.dtype)
-        )
-        if pred_key in calo_pred_keys:
-            # per-region-fair squared relative error (equal weight per region)
-            rel = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0) ** 2
-            count_terms.append(calo_count_weight * rel.mean())
-        else:
-            # population-weighted squared relative error
-            chi2 = (pred_counts - tgt_counts) ** 2 / (tgt_counts + 1.0)
-            total = tgt_counts.sum().clamp_min(1.0)  # detached scale -> batch-invariant
-            count_terms.append(count_weight * (chi2.sum() / total))
+    # Differentiable per-species expected-count terms (tracking-efficiency eff_logits
+    # and calo-resolution coefficients). See :func:`_count_terms` for the
+    # population-weighted (tracking) vs per-region-fair (calo) normalization.
+    count_terms = _count_terms(
+        pred, target, count_weight=count_weight, calo_count_weight=calo_count_weight
+    )
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
     # log_ht term is down-weighted by ``event_weight`` relative to the per-pid object
@@ -375,156 +416,127 @@ DEFAULT_SOFT_HIST_BIN_EDGES: dict[str, torch.Tensor] = {
     "log_ht": torch.linspace(0.0, 8.0, 41, dtype=torch.float64),
 }
 
-DEFAULT_SOFT_HIST_WEIGHTS: dict[str, float] = {
-    "pt": 1.0,
-    "eta": 1.0,
-    "log_pt": 0.5,
+# Relative weight of each per-pid kinematic observable in the per-pid soft-histogram
+# loss. Mirrors the convention of the (removed) pooled soft-hist loss: eta -- the axis
+# that most directly constrains acceptance/shape -- at unit weight, the two correlated
+# energy axes down-weighted. Each pid contributes the full obs-weighted set, and pids
+# are unit-weighted relative to each other (as in the per-pid Wasserstein loss).
+DEFAULT_PID_HIST_OBS_WEIGHTS: dict[str, float] = {
     "log_E": 0.5,
-    "multiplicity": 0.1,
-    "ht": 0.1,
-    "log_ht": 0.1,
+    "log_pt": 0.5,
+    "eta": 1.0,
 }
 
-_PARTICLE_OBSERVABLES: frozenset[str] = frozenset(
-    {"pt", "eta", "phi", "E", "log_E", "log_pt"}
-)
 
-
-def _flatten_obs_for_hist(
-    values: torch.Tensor,
-    pt_mask: torch.Tensor | None,
-) -> torch.Tensor:
-    """Flatten an observable tensor for :func:`soft_histogram` consumption."""
-    if values.ndim >= 2:
-        if pt_mask is None:
-            return values.reshape(-1)
-        return values[pt_mask]
-    return values.reshape(-1)
-
-
-def multi_observable_soft_hist_loss(
+def per_pid_soft_hist_loss(
     pred: dict[str, torch.Tensor],
     target: dict[str, torch.Tensor],
-    bin_edges: dict[str, torch.Tensor] | None = None,
+    *,
+    count_weight: float = COUNT_WEIGHT,
+    calo_count_weight: float = CALO_COUNT_WEIGHT,
+    event_weight: float = EVENT_WEIGHT,
     beta: float = 0.15,
-    weights: dict[str, float] | None = None,
-) -> torch.Tensor:
-    """Sum of per-observable soft-histogram MSE losses, optionally weighted."""
-    bin_edges = bin_edges if bin_edges is not None else DEFAULT_SOFT_HIST_BIN_EDGES
-    weights = weights if weights is not None else DEFAULT_SOFT_HIST_WEIGHTS
-
-    pred_pt = pred.get("pt")
-    tgt_pt = target.get("pt")
-    pred_mask = (pred_pt != 0) if (pred_pt is not None and pred_pt.ndim >= 2) else None
-    tgt_mask = (tgt_pt != 0) if (tgt_pt is not None and tgt_pt.ndim >= 2) else None
-
-    any_pred = next(iter(pred.values())) if pred else None
-
-    total: torch.Tensor | None = None
-    for key, edges in bin_edges.items():
-        if key not in pred or key not in target:
-            continue
-        if key not in _PARTICLE_OBSERVABLES and (pred[key].ndim >= 2 or target[key].ndim >= 2):
-            pred_vals = _flatten_obs_for_hist(pred[key], pred_mask)
-            tgt_vals = _flatten_obs_for_hist(target[key], tgt_mask)
-        elif key in _PARTICLE_OBSERVABLES:
-            pred_vals = _flatten_obs_for_hist(pred[key], pred_mask)
-            tgt_vals = _flatten_obs_for_hist(target[key], tgt_mask)
-        else:
-            pred_vals = pred[key].reshape(-1)
-            tgt_vals = target[key].reshape(-1)
-
-        if pred_vals.numel() == 0 or tgt_vals.numel() == 0:
-            continue
-
-        edges_dev = edges.to(device=pred_vals.device, dtype=pred_vals.dtype)
-        w = float(weights.get(key, 1.0))
-        term = w * histogram_mse_loss(pred_vals, tgt_vals, edges_dev, beta=beta)
-        total = term if total is None else total + term
-
-    if total is None:
-        if any_pred is None:
-            return torch.zeros((), dtype=torch.float64)
-        return any_pred.sum() * 0.0
-    return total
-
-
-def multi_observable_soft_hist_loss_distributed(
-    pred: dict[str, torch.Tensor],
-    target: dict[str, torch.Tensor],
     bin_edges: dict[str, torch.Tensor] | None = None,
-    beta: float = 0.15,
-    weights: dict[str, float] | None = None,
-    eps: float = 1e-8,
+    obj_weights: dict[str, float] | None = None,
 ) -> torch.Tensor:
-    """DDP-aware version of :func:`multi_observable_soft_hist_loss`."""
-    if not _is_dist():
-        return multi_observable_soft_hist_loss(
-            pred, target, bin_edges=bin_edges, beta=beta, weights=weights
-        )
+    """Per-PID, per-observable soft-histogram MSE loss (feature parity with
+    :func:`per_event_wasserstein_loss`).
 
+    One soft-histogram MSE term for every particle type ``pid`` present on BOTH sides
+    and every kinematic observable in ``(log_E, log_pt, eta)``, over a fixed shared bin
+    grid; plus a down-weighted per-event ``log(HT)`` soft-histogram term; plus the same
+    per-species expected-count terms as the Wasserstein loss (scaled by ``count_weight``
+    / ``calo_count_weight``). The target side is detached; gradients flow back to the
+    trainee card through ``pred``.
+
+    The per-``(pid, obs)`` histograms are NORMALIZED to densities inside
+    :func:`histogram_mse_loss`, so each term matches *shape only* -- exactly like the
+    standardized per-pid Wasserstein object terms. Absolute multiplicity / membership is
+    carried by the count terms, which is precisely why they are included. Consequently
+    this loss does NOT fix the calo ``c_E``/``c_S`` membership bias any better than the
+    Wasserstein loss does: it swaps the optimal-transport shape objective for a
+    histogram shape objective on the same kinematics while keeping the identical
+    count-term gradient on ``eff_logits`` and the calo resolution coefficients.
+
+    ``bin_edges`` defaults to :data:`DEFAULT_SOFT_HIST_BIN_EDGES` -- a single fixed grid
+    shared across all pids, so pred and target always sit on the same axis and the
+    objective is stationary across batches (rare pids merely under-populate bins).
+    ``obj_weights`` defaults to :data:`DEFAULT_PID_HIST_OBS_WEIGHTS`; ``beta`` is the
+    soft-histogram softness (small -> near-hard bins with flatter gradients, large ->
+    smoother gradients with more bin bleed). All three are overridable.
+
+    DDP note: this is a per-rank loss (matching :func:`per_event_wasserstein_loss`); the
+    scalar is averaged across ranks by the training loop. A DDP-synced per-pid variant
+    would have to all-gather the union of present pids before reducing each
+    ``(pid, obs)`` histogram -- deferred until a multi-rank run actually needs it.
+    """
     bin_edges = bin_edges if bin_edges is not None else DEFAULT_SOFT_HIST_BIN_EDGES
-    weights = weights if weights is not None else DEFAULT_SOFT_HIST_WEIGHTS
+    obj_weights = (
+        obj_weights if obj_weights is not None else DEFAULT_PID_HIST_OBS_WEIGHTS
+    )
 
-    pred_pt = pred.get("pt")
-    tgt_pt = target.get("pt")
-    pred_mask = (pred_pt != 0) if (pred_pt is not None and pred_pt.ndim >= 2) else None
-    tgt_mask = (tgt_pt != 0) if (tgt_pt is not None and tgt_pt.ndim >= 2) else None
+    pred_particles = torch.stack(
+        [pred[k] for k in OBJECT_LEVEL_OBSERVABLES], dim=-1
+    )  # (n_events, max_n_particles, n_observables)
+    target_particles = torch.stack(
+        [target[k] for k in OBJECT_LEVEL_OBSERVABLES], dim=-1
+    )
 
-    any_pred = next(iter(pred.values())) if pred else None
+    # Group both sides by pid; pred keeps its graph, the target is a detached reference.
+    pred_groups = _group_objects_by_pid(pred_particles)
+    target_groups = _group_objects_by_pid(target_particles.detach())
 
-    total: torch.Tensor | None = None
-    for key, edges in bin_edges.items():
-        pred_vals_raw = pred.get(key)
-        tgt_vals_raw = target.get(key)
-        if pred_vals_raw is None or tgt_vals_raw is None:
+    # Per-pid, per-observable soft-histogram SHAPE terms (normalized densities).
+    pid_obs_terms: dict[str, torch.Tensor] = {}
+    for pid in sorted(set(pred_groups) & set(target_groups)):
+        x = pred_groups[pid]  # (n_pred, 3), differentiable
+        y = target_groups[pid]  # (n_tgt, 3), reference (detached inside histogram_mse_loss)
+        if x.shape[0] == 0 or y.shape[0] == 0:  # nothing to match on one side
             continue
+        for obs in ("log_E", "log_pt", "eta"):
+            col = _OBS_COL[obs]
+            edges = bin_edges[obs].to(device=x.device, dtype=x.dtype)
+            pid_obs_terms[f"{pid}:{obs}"] = float(
+                obj_weights.get(obs, 1.0)
+            ) * histogram_mse_loss(x[:, col], y[:, col], edges, beta=beta)
 
-        if pred_vals_raw.ndim >= 2:
-            pred_vals = _flatten_obs_for_hist(pred_vals_raw, pred_mask)
-        else:
-            pred_vals = pred_vals_raw.reshape(-1)
-        if tgt_vals_raw.ndim >= 2:
-            tgt_vals = _flatten_obs_for_hist(tgt_vals_raw, tgt_mask)
-        else:
-            tgt_vals = tgt_vals_raw.reshape(-1)
+    # Event-level term: soft-histogram MSE on the per-event log(HT) distribution,
+    # down-weighted by event_weight (mirrors the Wasserstein event term; multiplicity is
+    # intentionally excluded -- a hard pt != 0 count with no gradient).
+    event_term: torch.Tensor | None = None
+    pv = pred["log_ht"].reshape(-1)
+    tv = target["log_ht"].reshape(-1)
+    if pv.numel() and tv.numel():
+        edges = bin_edges["log_ht"].to(device=pv.device, dtype=pv.dtype)
+        event_term = event_weight * histogram_mse_loss(pv, tv, edges, beta=beta)
 
-        edges_dev = edges.to(
-            device=pred_vals.device if pred_vals.numel() else (pred_vals_raw.device),
-            dtype=pred_vals.dtype if pred_vals.numel() else (pred_vals_raw.dtype),
+    # Same per-species expected-count terms as the Wasserstein loss: the gradient source
+    # for eff_logits and the calo resolution coefficients (the histogram shape terms are
+    # count-blind, so these carry the absolute multiplicity / membership signal).
+    count_terms = _count_terms(
+        pred, target, count_weight=count_weight, calo_count_weight=calo_count_weight
+    )
+
+    terms = (
+        list(pid_obs_terms.values())
+        + ([event_term] if event_term is not None else [])
+        + count_terms
+    )
+    if not terms:  # degenerate empty batch: keep a graph-connected zero
+        return pred_particles.sum() * 0.0
+
+    # Opt-in per-component breakdown (set MCGEN_LOSS_DEBUG=1), mirroring the Wasserstein
+    # loss: confirms the count terms sit on the same O(1) scale as the per-pid hist terms.
+    if os.environ.get("MCGEN_LOSS_DEBUG"):
+        pidh = {k: float(v) for k, v in pid_obs_terms.items()}
+        evt = float(event_term) if event_term is not None else 0.0
+        cnt = [float(c) for c in count_terms]
+        print(
+            f"[loss] pid_hist={pidh} event(w)={evt:.4f} count(w)={cnt} "
+            f"total={float(torch.stack(terms).sum()):.4f}",
+            flush=True,
         )
-
-        n_bins = edges_dev.numel() - 1
-        if pred_vals.numel() > 0:
-            pred_hist_local = soft_histogram(pred_vals, edges_dev, beta=beta)
-        else:
-            pred_hist_local = torch.zeros(
-                n_bins, dtype=edges_dev.dtype, device=edges_dev.device
-            )
-        if tgt_vals.numel() > 0:
-            tgt_hist_local = soft_histogram(tgt_vals.detach(), edges_dev, beta=beta)
-        else:
-            tgt_hist_local = torch.zeros(
-                n_bins, dtype=edges_dev.dtype, device=edges_dev.device
-            )
-
-        pred_hist = diff_all_reduce(pred_hist_local, op=dist.ReduceOp.SUM)
-        tgt_hist = tgt_hist_local.clone()
-        dist.all_reduce(tgt_hist, op=dist.ReduceOp.SUM)
-
-        pred_norm = pred_hist / (pred_hist.sum() + eps)
-        tgt_norm = tgt_hist / (tgt_hist.sum() + eps)
-        loss_key = ((pred_norm - tgt_norm) ** 2).mean()
-
-        w = float(weights.get(key, 1.0))
-        term = w * loss_key
-        total = term if total is None else total + term
-
-    if total is None:
-        if any_pred is None:
-            return torch.zeros((), dtype=torch.float64)
-        return any_pred.sum() * 0.0
-    return total
+    return torch.stack(terms).sum()
 
 
 # =============================================================================
@@ -544,7 +556,7 @@ def get_loss_fn(name: str) -> LossFn:
     if name == "wasserstein":
         return per_event_wasserstein_loss
     if name == "soft_hist":
-        return multi_observable_soft_hist_loss_distributed
+        return per_pid_soft_hist_loss
     raise ValueError(
         f"Unknown loss {name!r}. Valid choices: {LOSS_CHOICES}."
     )

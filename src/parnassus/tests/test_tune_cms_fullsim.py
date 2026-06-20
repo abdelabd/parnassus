@@ -43,8 +43,17 @@ from parnassus.torch_delphes.tune_cms_fullsim.dataloader import (
     DelphesDataSet,
     delphes_collate_fn,
 )
-from parnassus.torch_delphes.tune_cms_fullsim.config import COUNT_TERM_KEYS
-from parnassus.torch_delphes.tune_cms_fullsim.loss import per_event_wasserstein_loss
+from parnassus.torch_delphes.tune_cms_fullsim.config import (
+    CALO_COUNT_TERM_KEYS,
+    COUNT_TERM_KEYS,
+)
+from parnassus.torch_delphes.tune_cms_fullsim.loss import (
+    LOSS_CHOICES,
+    _count_terms,
+    get_loss_fn,
+    per_event_wasserstein_loss,
+    per_pid_soft_hist_loss,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +333,189 @@ def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):
     assert len(history["val_loss"]) == 3
     for loss in history["loss"]:
         assert loss == loss  # not NaN
+
+
+# ---------------------------------------------------------------------------
+# Per-pid soft-histogram loss (--loss soft_hist)
+# ---------------------------------------------------------------------------
+
+
+def test_get_loss_fn_dispatch():
+    """The dispatcher maps each loss name to the right callable (no data needed)."""
+    assert "wasserstein" in LOSS_CHOICES and "soft_hist" in LOSS_CHOICES
+    assert get_loss_fn("wasserstein") is per_event_wasserstein_loss
+    assert get_loss_fn("soft_hist") is per_pid_soft_hist_loss
+    with pytest.raises(ValueError):
+        get_loss_fn("not_a_loss")
+
+
+def test_soft_hist_one_step_gradient_is_finite(fixture_root: Path):
+    """A forward + backward step under the per-pid soft-histogram loss gives a finite
+    loss and finite gradients, and the shared count terms still reach the
+    tracking-efficiency logits (their only gradient path)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+
+    torch.manual_seed(7)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+
+    mask = torch.any(truth != 0, dim=-1)
+    out = card(truth[mask])
+    eflow = restore_event_format(out["EFlowObject"], mask)
+    pred = load_pflow_targets_from_tensor(eflow)
+    # Inject BOTH the tracking and calo expected counts so every count term fires,
+    # exactly as training.py does.
+    for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        pred[pred_key] = out[out_key]
+
+    loss = per_pid_soft_hist_loss(pred, target)
+    assert torch.isfinite(loss)
+    loss.backward()
+
+    grads = [p.grad for p in card.parameters() if p.grad is not None]
+    assert grads, "no parameter received a gradient"
+    for name, p in card.named_parameters():
+        if p.grad is not None:
+            assert torch.isfinite(p.grad).all(), f"{name} has non-finite gradient"
+
+    # The shared count terms must reach the tracking-efficiency logits.
+    params = dict(card.named_parameters())
+    for mod in (
+        "ChargedHadronTrackingEfficiency",
+        "ElectronTrackingEfficiency",
+        "MuonTrackingEfficiency",
+    ):
+        g = params[f"{mod}.eff_logits"].grad
+        assert g is not None and float(g.abs().sum()) > 0, f"{mod}.eff_logits got no count grad"
+
+
+def test_count_terms_shared_between_losses(fixture_root: Path):
+    """Both training losses add the SAME shared ``_count_terms`` contribution -- the
+    additive count-term sub-sum equals ``_count_terms(...).sum()`` for each loss,
+    locking in that the helper extraction is shared (not duplicated/divergent)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+
+    torch.manual_seed(7)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    mask = torch.any(truth != 0, dim=-1)
+    out = card(truth[mask])
+    eflow = restore_event_format(out["EFlowObject"], mask)
+    pred = load_pflow_targets_from_tensor(eflow)
+    for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        pred[pred_key] = out[out_key]
+
+    cw, ccw = 0.5, 10.0
+    shared = float(
+        torch.stack(
+            _count_terms(pred, target, count_weight=cw, calo_count_weight=ccw)
+        ).sum()
+    )
+    assert shared > 0  # the pseudodata populates several reco bins
+
+    # Each loss is deterministic for a fixed pred (Wasserstein uses a fixed SW seed;
+    # the soft-hist loss has no RNG), so loss(with counts) - loss(counts zeroed) is
+    # exactly the count contribution for that loss.
+    w_with = float(
+        per_event_wasserstein_loss(pred, target, count_weight=cw, calo_count_weight=ccw)
+    )
+    w_without = float(
+        per_event_wasserstein_loss(pred, target, count_weight=0.0, calo_count_weight=0.0)
+    )
+    h_with = float(
+        per_pid_soft_hist_loss(pred, target, count_weight=cw, calo_count_weight=ccw)
+    )
+    h_without = float(
+        per_pid_soft_hist_loss(pred, target, count_weight=0.0, calo_count_weight=0.0)
+    )
+
+    assert (w_with - w_without) == pytest.approx(shared, rel=1e-6)
+    assert (h_with - h_without) == pytest.approx(shared, rel=1e-6)
+
+
+def test_fit_soft_hist_runs(fixture_root: Path, tmp_path: Path):
+    """The fit loop runs a few steps under ``--loss soft_hist`` without errors and
+    returns a finite history (exercises the weight-injecting closure + the graph
+    anchor end-to-end)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=24)
+    device = torch.device("cpu")
+    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8)
+
+    torch.manual_seed(3)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+    cfg = _trainable_config(
+        card, tmp_path, ["ChargedHadronMomentumSmearing.resolution_module.scale_raw"]
+    )
+    _, param_groups = pc.select_trainable(card, cfg, global_lr=1e-1)
+
+    history = fit_card_to_fullsim(
+        card,
+        train_dl,
+        val_dl,
+        param_groups=param_groups,
+        n_steps=3,
+        log_every=0,
+        loss_name="soft_hist",
+    )
+    assert len(history["step"]) == 3
+    for loss in history["loss"]:
+        assert loss == loss  # not NaN
+    for vloss in history["val_loss"]:
+        assert vloss == vloss
+
+
+def test_intermediate_plots_include_per_pid_pages(tmp_path: Path):
+    """The per-epoch intermediate PDF gains one per-PID page per particle type when
+    the aligned ``pid`` array is present, and degrades gracefully (combined pages
+    only) when it is not. Uses synthetic aligned arrays -- no ROOT data needed."""
+    import re
+
+    from parnassus.torch_delphes.tune_cms_fullsim import OBSERVABLES
+    from parnassus.torch_delphes.tune_cms_fullsim.intermediate_plots import (
+        _PID_GROUPS,
+        save_intermediate_observable_plots,
+    )
+
+    def _page_count(pdf_path: Path) -> int:
+        # Count page objects in the matplotlib PDF (page dicts are uncompressed).
+        return len(re.findall(rb"/Type\s*/Page\b(?!s)", pdf_path.read_bytes()))
+
+    torch.manual_seed(0)
+    n = 4000
+    pids = torch.tensor([g[1] for g in _PID_GROUPS], dtype=torch.float64)
+    pid = pids[torch.randint(0, len(pids), (n,))]
+    pt = torch.rand(n, dtype=torch.float64) * 50 + 1.0
+    eta = (torch.rand(n, dtype=torch.float64) - 0.5) * 6.0
+    log_pt = torch.log(pt)
+    log_E = torch.log(pt * torch.cosh(eta) + 0.5)
+    log_ht = torch.rand(200, dtype=torch.float64) * 3 + 3  # per-event
+
+    def mk(shift: float) -> dict:
+        return {
+            "pt": pt + shift,
+            "eta": eta,
+            "log_pt": log_pt + 0.01 * shift,
+            "log_E": log_E + 0.01 * shift,
+            "pid": pid,
+            "log_ht": log_ht + 0.01 * shift,
+        }
+
+    target, pred, init = mk(0.0), mk(0.5), mk(1.0)
+
+    p_pid = save_intermediate_observable_plots(
+        pred, target, OBSERVABLES, step=3, output_dir=tmp_path, val_loss=1.0, init_by_key=init
+    )
+    # Same data minus the pid column -> combined pages only.
+    drop = lambda d: {k: v for k, v in d.items() if k != "pid"}
+    p_nopid = save_intermediate_observable_plots(
+        drop(pred), drop(target), OBSERVABLES, step=4, output_dir=tmp_path, init_by_key=drop(init)
+    )
+
+    assert p_pid.exists() and p_nopid.exists()
+    # Every PID group is populated, so we get exactly one extra page per group.
+    assert _page_count(p_pid) - _page_count(p_nopid) == len(_PID_GROUPS)
 
 
 # ---------------------------------------------------------------------------

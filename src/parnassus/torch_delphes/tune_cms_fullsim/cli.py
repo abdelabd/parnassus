@@ -126,9 +126,12 @@ def main() -> None:
         help=(
             "Training loss. 'wasserstein' (default) is the per-pid sliced "
             "Wasserstein-2 over [log_E, log_pt, eta] plus a down-weighted "
-            "log(HT) term and expected-count terms. 'soft_hist' is the "
-            "soft-histogram MSE loss summed across observables; DDP-aware "
-            "via differentiable all-reduce on per-rank histograms."
+            "log(HT) term and expected-count terms. 'soft_hist' is the same "
+            "structure with a per-pid, per-observable soft-histogram MSE over "
+            "[log_E, log_pt, eta] in place of the optimal-transport term, plus "
+            "the same log(HT) and expected-count terms (it directly optimizes "
+            "histogram shape). Both honor --count-weight/--calo-count-weight/"
+            "--event-weight."
         ),
     )
     parser.add_argument(
@@ -195,12 +198,14 @@ def main() -> None:
         default="doc/fit_results/intermediate_plots",
         help=(
             "Directory for per-epoch intermediate observable plots: one "
-            "multi-page PDF per epoch (intermediate_epoch_<step>.pdf, one "
-            "observable per page) comparing the trainee prediction to the "
-            "full-sim target, with each observable's soft-hist MSE in the "
-            "page title as a distribution-mismatch diagnostic. Pass an empty "
-            "string to disable (default: doc/fit_results/intermediate_plots). "
-            "Only the main rank plots."
+            "multi-page PDF per epoch (intermediate_epoch_<step>.pdf) comparing "
+            "the trainee prediction to the full-sim target -- combined (all-PID) "
+            "observables one per page, then one per-PID page per particle type "
+            "(charged hadron/electron/muon/neutral hadron/photon) gridding "
+            "log_pt/log_E/eta/pt -- with each panel's soft-hist MSE in the title "
+            "as a distribution-mismatch diagnostic. Pass an empty string to "
+            "disable (default: doc/fit_results/intermediate_plots). Only the main "
+            "rank plots."
         ),
     )
     parser.add_argument(

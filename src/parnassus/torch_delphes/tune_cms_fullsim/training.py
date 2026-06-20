@@ -124,9 +124,9 @@ def fit_card_to_fullsim(
         to ``EVENT_WEIGHT``; surfaced on the CLI as ``--event-weight``.
     loss_name : str
         Selects the training loss. One of :data:`tune_cms_fullsim.loss.LOSS_CHOICES`.
-        ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss (with
-        ``count_weight`` / ``event_weight`` applied); ``"soft_hist"`` uses the
-        soft-histogram MSE loss summed across observables.
+        ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss; ``"soft_hist"``
+        uses the per-pid, per-observable soft-histogram MSE loss. Both apply the same
+        ``count_weight`` / ``calo_count_weight`` / ``event_weight`` knobs.
 
     Returns
     -------
@@ -137,21 +137,22 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
+    # Both training losses ("wasserstein" and "soft_hist") accept the same
+    # count_weight / calo_count_weight / event_weight knobs, so wrap unconditionally
+    # to inject them.
     base_loss_fn = get_loss_fn(loss_name)
-    if loss_name == "wasserstein":
-        def loss_fn(
-            pred: dict[str, torch.Tensor],
-            target: dict[str, torch.Tensor],
-        ) -> torch.Tensor:
-            return base_loss_fn(
-                pred,
-                target,
-                count_weight=count_weight,
-                calo_count_weight=calo_count_weight,
-                event_weight=event_weight,
-            )
-    else:
-        loss_fn = base_loss_fn
+
+    def loss_fn(
+        pred: dict[str, torch.Tensor],
+        target: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        return base_loss_fn(
+            pred,
+            target,
+            count_weight=count_weight,
+            calo_count_weight=calo_count_weight,
+            event_weight=event_weight,
+        )
 
     opt = torch.optim.Adam(param_groups)
     if _is_main(rank):
