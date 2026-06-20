@@ -78,7 +78,14 @@ from .data import (
 
 from .dataloader import DelphesDataSet, DelphesDataLoader
 
-from .loss import CALO_COUNT_WEIGHT, COUNT_WEIGHT, EVENT_WEIGHT, LOSS_CHOICES
+from .loss import (
+    CALO_COUNT_WEIGHT,
+    COUNT_RATE_FLOOR,
+    COUNT_WEIGHT,
+    EVENT_WEIGHT,
+    LOSS_CHOICES,
+    PID_WEIGHTING_CHOICES,
+)
 from .distributed import (
     _cleanup_distributed,
     _init_distributed,
@@ -130,8 +137,15 @@ def main() -> None:
             "structure with a per-pid, per-observable soft-histogram MSE over "
             "[log_E, log_pt, eta] in place of the optimal-transport term, plus "
             "the same log(HT) and expected-count terms (it directly optimizes "
-            "histogram shape). Both honor --count-weight/--calo-count-weight/"
-            "--event-weight."
+            "histogram shape on a fixed bin grid). 'wasserstein_1d' keeps the same "
+            "per-pid/per-observable scaffolding but matches each axis with the exact "
+            "BIN-FREE 1D Wasserstein distance via quantiles (no histogram, no bin grid, "
+            "no range, no softness; deterministic, with no random projections -- so it "
+            "avoids both the manual binning of soft_hist and the instability of the "
+            "point-cloud sliced Wasserstein); same log(HT) and count terms. NOTE: its "
+            "standardized shape-term scale differs from soft_hist's MSE, so re-check the "
+            "count/shape balance with MCGEN_LOSS_DEBUG=1 before a production fit. All "
+            "three honor --count-weight/--calo-count-weight/--event-weight."
         ),
     )
     parser.add_argument(
@@ -139,11 +153,13 @@ def main() -> None:
         type=float,
         default=COUNT_WEIGHT,
         help=(
-            "Weight on every per-species expected-count term, relative to the "
-            "unit-weighted per-pid object Wasserstein terms. The count term is a "
-            "dimensionless, batch-invariant normalized chi^2 (~O(1)), so this is a "
-            f"meaningful balance knob. Default {COUNT_WEIGHT}. Set 0 to disable the "
-            "tracking-efficiency count terms (drops the eff_logits count gradient)."
+            "Weight on the tracking-efficiency per-species expected-count terms, "
+            "relative to the unit-weighted per-pid object Wasserstein terms. The count "
+            "term is a normalized relative chi^2 on per-event rates with a fixed rate "
+            "floor (--count-rate-floor), making it dimensionless and batch-size invariant "
+            f"(~O(1)), so this is a meaningful balance knob. Default {COUNT_WEIGHT}. Set 0 "
+            "to disable the tracking-efficiency count terms (drops the eff_logits count "
+            "gradient)."
         ),
     )
     parser.add_argument(
@@ -160,12 +176,57 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--count-rate-floor",
+        type=float,
+        default=COUNT_RATE_FLOOR,
+        help=(
+            "Per-event-RATE floor in the count-term Pearson denominators (shared by the "
+            "tracking and calo count terms). The count terms are evaluated on per-event "
+            "rates (counts / batch event count); this fixed floor is what makes them "
+            "batch-size INVARIANT. The old constant '+1' count floor had an effective "
+            "rate floor 1/N that shrank with batch size N, so sparse data regions (lepton "
+            "bins, forward |eta| HCal neutral hadrons) where the trainee still predicted a "
+            "count grew with N. A region with rate << this floor is regularized; a region "
+            f"with rate >> it is unchanged. Default {COUNT_RATE_FLOOR}. Re-validate the "
+            "count/shape balance with MCGEN_LOSS_DEBUG=1 if you change it."
+        ),
+    )
+    parser.add_argument(
         "--event-weight",
         type=float,
         default=EVENT_WEIGHT,
         help=(
             "Weight on the per-event log(HT) Wasserstein term, relative to the "
             f"per-pid object terms. Default {EVENT_WEIGHT}."
+        ),
+    )
+    parser.add_argument(
+        "--pid-weighting",
+        type=str,
+        default="equal",
+        choices=list(PID_WEIGHTING_CHOICES),
+        help=(
+            "Per-pid population weighting of the per-species SHAPE terms (count and "
+            "log(HT) terms are untouched). 'equal' (default) weights every particle type "
+            "the same -- so rare species (muon ~0.2%%, electron ~0.5%%) cost the optimizer "
+            "as much as the abundant charged/neutral hadrons and photons. 'fraction' "
+            "down-weights each pid by its population fraction (aggressive: rare species "
+            "~100-250x lighter, which effectively FREEZES their momentum-smearing params). "
+            "'sqrt_fraction' down-weights by sqrt(fraction) (gentle: rare species ~8-20x "
+            "lighter but still learnable -- the recommended mode when training "
+            "muon/electron smearing). Weights are mean-1 normalized, so only the "
+            "cross-species balance changes, not the overall shape-vs-count balance."
+        ),
+    )
+    parser.add_argument(
+        "--pid-weight-floor",
+        type=float,
+        default=0.0,
+        help=(
+            "Lower clamp on the per-pid shape weight (default 0.0 = off), re-normalized to "
+            "keep the mean-1 invariant. A small floor (e.g. 0.1) protects a rare species' "
+            "gradient in a low-statistics batch. Only meaningful with --pid-weighting "
+            "fraction/sqrt_fraction."
         ),
     )
     parser.add_argument(
@@ -316,10 +377,10 @@ def main() -> None:
         val_sampler = None
 
     train_dataloader = DelphesDataLoader(
-        train_dataset, batch_size=512, shuffle=True, sampler=train_sampler
+        train_dataset, batch_size=4096, shuffle=True, sampler=train_sampler
     )
     val_dataloader = DelphesDataLoader(
-        val_dataset, batch_size=512, shuffle=False, sampler=val_sampler
+        val_dataset, batch_size=4096, shuffle=False, sampler=val_sampler
     )
 
     # Same initial parameters for DDP
@@ -378,8 +439,11 @@ def main() -> None:
         ),
         count_weight=args.count_weight,
         calo_count_weight=args.calo_count_weight,
+        count_rate_floor=args.count_rate_floor,
         event_weight=args.event_weight,
         loss_name=args.loss,
+        pid_weighting=args.pid_weighting,
+        pid_weight_floor=args.pid_weight_floor,
     )
 
     if args.history_path is not None and _is_main(rank):

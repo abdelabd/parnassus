@@ -26,6 +26,7 @@ from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_dist, _is_main
 from .loss import (
     CALO_COUNT_WEIGHT,
+    COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
     EVENT_WEIGHT,
     LOSS_CHOICES,
@@ -62,8 +63,11 @@ def fit_card_to_fullsim(
     lr_scheduler_factor: float = 0.5,
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
+    count_rate_floor: float = COUNT_RATE_FLOOR,
     event_weight: float = EVENT_WEIGHT,
     loss_name: str = "wasserstein",
+    pid_weighting: str = "equal",
+    pid_weight_floor: float = 0.0,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -119,14 +123,34 @@ def fit_card_to_fullsim(
         must out-vote a wrong-signed Wasserstein gradient on the forward
         resolution coefficients. Defaults to the loss module's
         ``CALO_COUNT_WEIGHT``; surfaced on the CLI as ``--calo-count-weight``.
+    count_rate_floor : float
+        Per-event-rate floor in the count-term Pearson denominators that makes the
+        count terms batch-size invariant (the count terms are evaluated on per-event
+        rates = counts / batch event count). Defaults to the loss module's
+        ``COUNT_RATE_FLOOR``; surfaced on the CLI as ``--count-rate-floor``.
     event_weight : float
         Scales the per-event ``log(HT)`` Wasserstein term, likewise. Defaults
         to ``EVENT_WEIGHT``; surfaced on the CLI as ``--event-weight``.
     loss_name : str
         Selects the training loss. One of :data:`tune_cms_fullsim.loss.LOSS_CHOICES`.
         ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss; ``"soft_hist"``
-        uses the per-pid, per-observable soft-histogram MSE loss. Both apply the same
-        ``count_weight`` / ``calo_count_weight`` / ``event_weight`` knobs.
+        uses the per-pid, per-observable soft-histogram MSE loss; ``"wasserstein_1d"``
+        uses the per-pid, per-observable bin-free 1D quantile-Wasserstein loss
+        (deterministic, no histogram / bin grid at all). All three apply the same
+        ``count_weight`` / ``calo_count_weight`` / ``event_weight`` knobs. The two per-pid
+        shape losses (``soft_hist`` / ``wasserstein_1d``) additionally get the DDP graph
+        anchor below.
+    pid_weighting : str
+        Per-pid population weighting of the SHAPE terms, one of
+        :data:`tune_cms_fullsim.loss.PID_WEIGHTING_CHOICES`. ``"equal"`` (default) weights
+        every species the same (no-op); ``"sqrt_fraction"`` / ``"fraction"`` down-weight
+        rare species (muon, electron) by their population fraction so they do not dominate
+        the shape match. Count and ``log(HT)`` terms are untouched. Surfaced on the CLI as
+        ``--pid-weighting``.
+    pid_weight_floor : float
+        Lower clamp on the per-pid shape weight (default 0.0 = off), re-normalized to keep
+        the mean-1 invariant -- protects a rare species' gradient in a low-stat batch.
+        Surfaced on the CLI as ``--pid-weight-floor``.
 
     Returns
     -------
@@ -137,9 +161,9 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
-    # Both training losses ("wasserstein" and "soft_hist") accept the same
-    # count_weight / calo_count_weight / event_weight knobs, so wrap unconditionally
-    # to inject them.
+    # All training losses accept the same count_weight / calo_count_weight / event_weight
+    # and per-pid pid_weighting / pid_weight_floor knobs, so wrap unconditionally to inject
+    # them.
     base_loss_fn = get_loss_fn(loss_name)
 
     def loss_fn(
@@ -151,7 +175,10 @@ def fit_card_to_fullsim(
             target,
             count_weight=count_weight,
             calo_count_weight=calo_count_weight,
+            count_rate_floor=count_rate_floor,
             event_weight=event_weight,
+            pid_weighting=pid_weighting,
+            pid_weight_floor=pid_weight_floor,
         )
 
     opt = torch.optim.Adam(param_groups)
@@ -316,7 +343,7 @@ def fit_card_to_fullsim(
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
             loss = loss_fn(pred_observables, target_observables)
-            if loss_name == "soft_hist":
+            if loss_name in ("soft_hist", "wasserstein_1d"):
                 loss = loss + _soft_hist_graph_anchor()
 
             loss.backward()
