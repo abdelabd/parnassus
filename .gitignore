@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 doc/fig*/
+doc/pseudodata_results/*
+doc/fullsim_results/*
 
 # Distribution / packaging
 .Python

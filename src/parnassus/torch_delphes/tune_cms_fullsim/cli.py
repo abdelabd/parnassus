@@ -55,8 +55,6 @@ only re-runs the trainee on the truth input.
 from __future__ import annotations
 
 import argparse
-import gc
-import json
 import socket
 from pathlib import Path
 
@@ -68,15 +66,10 @@ from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
 from .config import _DEFAULT_LR
-from .data import (
-    load_cms_flow_root,
-    load_truth_events_ragged,
-    load_pflow_targets_ragged,
-    split_truth_objects_jagged,
-    split_pflow_targets_jagged,
-)
 
-from .dataloader import DelphesDataSet, DelphesDataLoader
+from .dataloader import DelphesDataLoader
+
+from .runner import load_split_datasets, write_history_json
 
 from .loss import (
     CALO_COUNT_WEIGHT,
@@ -330,29 +323,15 @@ def main() -> None:
         )
     log(f"Loading full-simulation events from {root_file}")
 
-    arrays = load_cms_flow_root(
-        root_file, n_events=args.n_events
-    )
     # Ragged (no global padding): truth particles are kept as a per-event list and
     # each batch is padded to its own max in delphes_collate_fn. Padding every event
-    # to the GLOBAL max multiplicity here would allocate ~50 GB at 100k events -- and
-    # the fit loop un-pads it on the very next line anyway.
-    truth_ragged = load_truth_events_ragged(arrays)
-    # ``target`` carries the per-reco-bin per-species counts (chad/electron/muon
-    # _region_counts) the differentiable count terms match the trainee's reco-bin
-    # migration against.
-    target = load_pflow_targets_ragged(arrays)
-
-    # The uproot arrays dict is the largest remaining transient; free it before the
-    # train/val split so peak RSS stays low.
-    del arrays
-    gc.collect()
-
-    train_truth_tensor, val_truth_tensor, _ = split_truth_objects_jagged(truth_ragged, train_fraction=0.7, val_fraction=0.2)
-    train_target, val_target, _ = split_pflow_targets_jagged(target, train_fraction=0.7, val_fraction=0.2)
-
-    train_dataset = DelphesDataSet(train_truth_tensor, train_target, device=device)
-    val_dataset = DelphesDataSet(val_truth_tensor, val_target, device=device)
+    # to the GLOBAL max multiplicity here would allocate ~50 GB at 100k events. The
+    # target carries the per-reco-bin per-species counts (chad/electron/muon
+    # _region_counts) the differentiable count terms match against. Shared with the
+    # Optuna search via tune_cms_fullsim.runner.
+    train_dataset, val_dataset = load_split_datasets(
+        root_file, n_events=args.n_events, device=device
+    )
 
     # If DDP then each rank sees disjoint shard -- keep the jagged split
     # output as-is and only shard at the DataLoader level.
@@ -447,14 +426,6 @@ def main() -> None:
     )
 
     if args.history_path is not None and _is_main(rank):
-        args.history_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Pull the index-aligned per-epoch lists returned by the fit loop.
-        steps = history["step"]
-        losses = history["loss"]
-        val_losses = history.get("val_loss", [])
-        params_list = history.get("parameters", [])
-
         # Metadata: the run-level scalars. --lr is the global magnitude; each
         # parameter's effective Adam lr is --lr * its config lr_scale, recorded
         # as the distinct optimizer-group lrs that were actually used.
@@ -471,49 +442,10 @@ def main() -> None:
             "early_stopping_patience": max(0, args.early_stopping_patience),
             "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
         }
-
-        # Per-epoch history keyed "epoch_{step}". Each step here is a full
-        # pass over the train dataloader, so "epoch" is accurate.
-        history_dict = {
-            f"epoch_{steps[i]}": {
-                "step": steps[i],
-                "train_loss": losses[i],
-                "val_loss": val_losses[i] if i < len(val_losses) else None,
-                "parameters": params_list[i] if i < len(params_list) else {},
-            }
-            for i in range(len(steps))
-        }
-
-        # Best epoch = minimum validation loss; fall back to the last epoch
-        # when no val loss was recorded.
-        if val_losses:
-            best_i = min(range(len(val_losses)), key=lambda i: val_losses[i])
-        elif steps:
-            best_i = len(steps) - 1
-        else:
-            best_i = None
-
-        if best_i is None:
-            best_result: dict = {}
-        else:
-            best_result = {
-                "epoch": f"epoch_{steps[best_i]}",
-                "step": steps[best_i],
-                "train_loss": losses[best_i],
-                "val_loss": val_losses[best_i] if best_i < len(val_losses) else None,
-                "parameters": params_list[best_i] if best_i < len(params_list) else {},
-            }
-
-        with args.history_path.open("w") as f:
-            json.dump(
-                {
-                    "metadata": metadata,
-                    "history": history_dict,
-                    "best_result": best_result,
-                },
-                f,
-                indent=2,
-            )
+        # The {metadata, history, best_result} schema (best = min val loss) is the
+        # single source of truth shared with the Optuna search and consumed by
+        # plot_fit_results; see tune_cms_fullsim.runner.
+        write_history_json(args.history_path, history, metadata)
         log(f"Wrote training history to {args.history_path}")
 
     # Print the learned charged-hadron / ECal / HCal scales for a quick sanity
