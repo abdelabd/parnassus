@@ -273,8 +273,9 @@ to `--history-path`, so **Step 3 works on it unchanged**.
 It runs as **one** Optuna process. With **N GPUs** (launched via `torchrun`, see
 [Running across N GPUs](#running-across-n-gpus--run_optunash)) the trials run **sequentially** and each
 trial's fit is **data-parallel across all N GPUs** (DDP) — so the dataset loads once, there is a single
-sampler, and the study is in-memory (no shared database to coordinate). A plain
-`python -m ...optuna_search` (no launcher) runs on one GPU.
+sampler, and a single study writer (rank 0). `run_optuna.sh` persists the study to a SQLite file so a
+re-run **resumes / adds more trials** (see [Resume / add more trials](#resume--add-more-trials)). A
+plain `python -m ...optuna_search` (no launcher) runs on one GPU.
 
 Each trial samples: one **init value per learnable scalar** (within its range), one **`lr_scale` per
 parameter group** (resolution / scale / efficiency), the **global lr**, and the **batch size**. It
@@ -333,8 +334,8 @@ parameters:
 | `--n-steps` | int | `200` | Adam steps **per trial**. |
 | `--seed` | int | `0` | Torch RNG seed, fixed across trials so they differ only by the sampled hyperparameters. |
 | `--plot-every` | int | `10` | Per-round intermediate-plot cadence (the final/early-stopped/pruned epoch is always plotted). |
-| `--storage` | str | `None` (in-memory) | Optional Optuna storage URL for a resumable/inspectable study. The N-GPU launch needs **no** storage (single in-memory study on rank 0). |
-| `--study-name` | str | `tune_cms_fullsim` | Study name (cosmetic for the default in-memory study). |
+| `--storage` | str | `None` (in-memory) | Optuna storage URL, e.g. `sqlite:///<dir>/study.db`. Set it to make the study **persistent / resumable** — a re-run with the same storage + `--study-name` adds `--n-trials` more (`run_optuna.sh` sets this). |
+| `--study-name` | str | `tune_cms_fullsim` | Study name; identifies the study within `--storage` on resume. |
 | `--loss`, `--pid-weighting`, `--pid-weight-floor`, `--count-weight`, `--calo-count-weight`, `--count-rate-floor`, `--event-weight` | | same as Step 2 | Forwarded unchanged to every trial's fit. |
 | `--early-stopping-patience`, `--lr-scheduler-patience` | int | `10` / `4` | Per-trial early stopping / LR decay (pass `<=0` to disable). |
 
@@ -366,14 +367,31 @@ active **pseudodata** block and a commented-out **full CMS sim** block (comment/
 | `STUDY_NAME` | `pseudo_100k` | Study name (full-sim preset: `fullsim_100k`). |
 | `N_EVENTS` | `-1` | Events to load (`-1` = all). |
 | `N_STEPS` | `100` | Adam steps per trial. |
-| `N_TRIALS` | `50` | Total trials (sequential; each uses all N GPUs). |
+| `N_TRIALS` | `50` | Trials **added per run** (re-run to add more; sequential, each uses all N GPUs). |
 | `LOSS` / `PID_WEIGHTING` | `wasserstein_1d` / `sqrt_fraction` | Forwarded to each fit. |
 | `HISTORY_PATH` | `<OUTPUT_BASE>/all_optuna.json` | Best-trial history copy (feed to Step 3). |
+| `STORAGE` | `sqlite:///<OUTPUT_BASE>/study.db` | Persistent study DB — re-running resumes it (see below). |
 | `PYTHON` | the repo's uv-env python | Interpreter (runs `torch.distributed.run`). |
 
 The launch line is `"$PYTHON" -m torch.distributed.run --standalone --nproc-per-node="$N_GPUS" -m
 ...optuna_search ...`. Each rank uses `cuda:LOCAL_RANK` (all N GPUs are visible on the node). The script
 also sets `PYTHONUNBUFFERED=1` (live log) and `OMP_NUM_THREADS` (CPU threads per rank).
+
+### Resume / add more trials
+
+`run_optuna.sh` writes the study to `<OUTPUT_BASE>/study.db` (via `--storage`), so it is **persistent**:
+
+- **Add more trials** — just run `./run_optuna.sh` again. Each run adds `N_TRIALS` more trials to the
+  same study (the TPE sampler keeps the earlier results), and the new `round_<n>/` dirs continue the
+  numbering (e.g. 50, then 50 more → 100 total).
+- **Resume after an interrupt** — re-run `./run_optuna.sh`. It loads the already-finished trials (it
+  does **not** restart at 0) and runs `N_TRIALS` more from there; the single trial that was in flight
+  when it stopped is left as a stale entry and skipped. To land on an exact total, set `N_TRIALS` to
+  the remaining count for that run.
+- **Start fresh** — delete `<OUTPUT_BASE>/study.db` (or change `STUDY_NAME`).
+
+Safe even on GPFS: only **rank 0** writes the study (single writer → no concurrent-write contention).
+The best history is re-copied to `HISTORY_PATH` over the full study after every run.
 
 ### GPU memory
 

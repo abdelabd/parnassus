@@ -36,6 +36,15 @@ The copied history keeps ``metadata.param_config`` pointing at the best round's
 ``materialized_config.yaml``, so ``plot_fit_results`` draws the honest
 "before-fit" baseline from the values that trial actually started from.
 
+Resume / add more trials
+------------------------
+Pass ``--storage sqlite:///<path>/study.db --study-name <name>`` to make the study
+**persistent**: re-running with the same storage + name loads the existing trials
+and runs ``--n-trials`` MORE (so a re-run resumes an interrupted study from where
+it stopped, and lets you add trials later). New trials keep numbering, so the
+``round_<n>/`` dirs continue. Without ``--storage`` the study is in-memory (a fresh
+run every time). To start over, delete the ``study.db`` or change ``--study-name``.
+
 Multiple GPUs (one study, N-GPU fit per trial)
 ----------------------------------------------
 Launch with ``torchrun`` on a node with N GPUs (single-node; forks N ranks with no
@@ -628,16 +637,25 @@ def main() -> None:
             raise optuna.TrialPruned
         return best_val
 
-    sampler = TPESampler(multivariate=True, group=True, n_startup_trials=10, seed=sampler_seed)
     pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=15, interval_steps=1)
     study = optuna.create_study(
         direction="minimize",
-        sampler=sampler,
+        sampler=TPESampler(multivariate=True, group=True, n_startup_trials=10, seed=sampler_seed),
         pruner=pruner,
         study_name=args.study_name,
         storage=args.storage,
         load_if_exists=args.storage is not None,
     )
+    # On RESUME (a persistent study that already has trials), re-seed the sampler by
+    # the number of existing trials. Otherwise a fresh ``TPESampler(seed)`` would
+    # replay the same random startup draws as the previous run and duplicate its
+    # first configs while the study is still in the random-startup phase.
+    n_existing = len(study.trials)
+    if n_existing > 0:
+        log(f"[optuna] resuming study {args.study_name!r}: {n_existing} existing trials")
+        study.sampler = TPESampler(
+            multivariate=True, group=True, n_startup_trials=10, seed=sampler_seed + n_existing
+        )
     study.optimize(objective, n_trials=n_trials)
 
     # Release the mirror-loop ranks.
