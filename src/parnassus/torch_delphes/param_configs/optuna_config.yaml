@@ -1,0 +1,135 @@
+# Optuna hyperparameter-search config for tune_cms_fullsim.optuna_search.
+#
+# NEW FORMAT (different from the value/trainable/lr_scale per-scalar configs read
+# by param_config.load_param_config). Two top-level sections:
+#
+#   search:      the global study knobs + the search space for the optimizer
+#                hyperparameters (global lr, batch size, per-GROUP lr_scale).
+#   parameters:  the per-scalar INIT search space. Each entry is either
+#                  {low, high, log}   -> the init value is SAMPLED in [low, high]
+#                                        each trial (the parameter is trainable), or
+#                  {value: <float>}   -> the parameter is PINNED (trainable: false).
+#
+# Every trial samples one init value per parameter + one lr_scale per group + a
+# global lr + a batch size, materializes a normal {value, trainable, lr_scale}
+# config, runs the existing Adam fit, and is scored by its best (min) validation
+# loss. The best trial's history is copied to --history-path for plot_fit_results.
+#
+# RANGE GUARDS (param_config.to_raw raises if violated; ranges below respect them):
+#   - trainable logit (efficiency / fraction) init must be in the OPEN (0.1, 0.9)
+#   - scale init must be in the OPEN (0.7, 1.3)            [1 + 0.3*tanh param.]
+#   - softplus coefficients (a/b/c/rate) must be > 0
+# The ranges are deliberately BROAD and truth-AGNOSTIC (set by parameter type, not
+# centered on the pseudodata truth). WIDEN/retune them for a real-data fit.
+#
+# All 66 card scalars are tunable here (per the design decision), including
+# ECal.resolution_func.barrel_a (normally pinned to break the exact ECal
+# barrel/endcap sigma degeneracy) and the dead lepton-eff / muon-rate / k0s /
+# lambda params. Expect barrel_a and the dead params to wander or sit idle.
+#
+# Run:
+#   python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
+#     --root-file /global/cfs/cdirs/m3246/Runze/MCGen/data/train_1000.root \
+#     --n-events 100000 --n-steps 200 \
+#     --optuna-config src/parnassus/torch_delphes/param_configs/optuna_config.yaml \
+#     --loss wasserstein_1d --pid-weighting sqrt_fraction \
+#     --output-base doc/fit_results --history-path doc/fit_results/all_v2.json
+
+search:
+  n_trials: 50              # overridable with --n-trials
+  seed: 0                   # TPE sampler seed (reproducible study)
+  lr: {low: 1.0e-4, high: 1.0e-2, log: true}        # global Adam lr magnitude
+  batch_size: {choices: [512, 1024, 2048, 4096]}   # train/val batch size
+  # Per-GROUP lr_scale (the effective Adam lr of a parameter = global lr * its
+  # group lr_scale). Groups: resolution (a/b/c softplus coeffs), scale (tanh
+  # momentum/calo scales), efficiency (sigmoid efficiencies/fractions + rate_raw).
+  lr_scale:
+    resolution: {low: 0.1, high: 10.0, log: true}
+    scale:      {low: 0.1, high: 10.0, log: true}
+    efficiency: {low: 0.1, high: 10.0, log: true}
+
+parameters:
+  # ===== Tracking efficiency (logit; init in (0.1, 0.9)) =====
+  ChargedHadronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}
+  ChargedHadronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.85}
+  ChargedHadronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.85}
+  ChargedHadronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.85}
+  ElectronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}
+  ElectronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.85}
+  ElectronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.85}
+  ElectronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.85}
+  ElectronTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.85}
+  ElectronTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.85}
+  MuonTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}
+  MuonTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.85}
+  MuonTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.85}
+  MuonTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.85}
+  MuonTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.85}
+  MuonTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.85}
+  # Muon high-pt roll-off rate (softplus; small positive)
+  MuonTrackingEfficiency.rate_raw[0]: {low: 1.0e-4, high: 1.0e-2, log: true}
+  MuonTrackingEfficiency.rate_raw[1]: {low: 1.0e-4, high: 1.0e-2, log: true}
+
+  # ===== Charged-hadron momentum smearing (a/b softplus, scale tanh) =====
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[1]: {low: 5.0e-3, high: 0.5, log: true}
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[2]: {low: 5.0e-3, high: 0.5, log: true}
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]: {low: 0.75, high: 1.28}
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]: {low: 0.75, high: 1.28}
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
+
+  # ===== Electron momentum smearing =====
+  ElectronMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
+  ElectronMomentumSmearing.resolution_module.a_raw[1]: {low: 5.0e-3, high: 0.5, log: true}
+  ElectronMomentumSmearing.resolution_module.a_raw[2]: {low: 5.0e-3, high: 0.5, log: true}
+  ElectronMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  ElectronMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  ElectronMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  ElectronMomentumSmearing.resolution_module.scale_raw[0]: {low: 0.75, high: 1.28}
+  ElectronMomentumSmearing.resolution_module.scale_raw[1]: {low: 0.75, high: 1.28}
+  ElectronMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
+
+  # ===== Muon momentum smearing =====
+  MuonMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
+  MuonMomentumSmearing.resolution_module.a_raw[1]: {low: 5.0e-3, high: 0.5, log: true}
+  MuonMomentumSmearing.resolution_module.a_raw[2]: {low: 5.0e-3, high: 0.5, log: true}
+  MuonMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  MuonMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  MuonMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  MuonMomentumSmearing.resolution_module.scale_raw[0]: {low: 0.75, high: 1.28}
+  MuonMomentumSmearing.resolution_module.scale_raw[1]: {low: 0.75, high: 1.28}
+  MuonMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
+
+  # ===== Hadron fractions (logit; init in (0.1, 0.9)) =====
+  HadronFractions.chad_logit: {low: 0.15, high: 0.85}
+  HadronFractions.k0s_logit: {low: 0.15, high: 0.85}
+  HadronFractions.lambda_logit: {low: 0.15, high: 0.85}
+
+  # ===== ECal energy scale (tanh, init in (0.7, 1.3)) =====
+  ECal.scale_module.scale_raw[0]: {low: 0.75, high: 1.28}
+  ECal.scale_module.scale_raw[1]: {low: 0.75, high: 1.28}
+  ECal.scale_module.scale_raw[2]: {low: 0.75, high: 1.28}
+
+  # ===== ECal resolution (softplus) =====
+  ECal.resolution_func.common_c_E: {low: 5.0e-3, high: 0.5, log: true}
+  ECal.resolution_func.common_c_S: {low: 5.0e-2, high: 5.0, log: true}
+  ECal.resolution_func.common_c_N: {low: 5.0e-2, high: 2.0, log: true}
+  ECal.resolution_func.barrel_a: {low: 0.3, high: 8.0, log: true}   # now tunable (reintroduces ECal degeneracy)
+  ECal.resolution_func.barrel_b: {low: 0.3, high: 8.0, log: true}
+  ECal.resolution_func.endcap_a: {low: 0.3, high: 8.0, log: true}
+  ECal.resolution_func.endcap_b: {low: 0.3, high: 8.0, log: true}
+  ECal.resolution_func.forward_c_E: {low: 5.0e-3, high: 0.5, log: true}
+  ECal.resolution_func.forward_c_S: {low: 5.0e-2, high: 5.0, log: true}
+
+  # ===== HCal energy scale (tanh) =====
+  HCal.scale_module.scale_raw[0]: {low: 0.75, high: 1.28}
+  HCal.scale_module.scale_raw[1]: {low: 0.75, high: 1.28}
+
+  # ===== HCal resolution (softplus) =====
+  HCal.resolution_func.central_c_E: {low: 5.0e-3, high: 0.5, log: true}
+  HCal.resolution_func.central_c_S: {low: 5.0e-2, high: 5.0, log: true}
+  HCal.resolution_func.forward_c_E: {low: 5.0e-3, high: 0.5, log: true}
+  HCal.resolution_func.forward_c_S: {low: 5.0e-2, high: 5.0, log: true}

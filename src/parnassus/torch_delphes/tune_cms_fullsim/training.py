@@ -10,6 +10,7 @@ This module holds the training machinery proper:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -26,6 +27,7 @@ from .data import restore_event_format, load_pflow_targets_from_tensor
 from .distributed import _is_dist, _is_main
 from .loss import (
     CALO_COUNT_WEIGHT,
+    COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
     EVENT_WEIGHT,
     LOSS_CHOICES,
@@ -62,8 +64,12 @@ def fit_card_to_fullsim(
     lr_scheduler_factor: float = 0.5,
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
+    count_rate_floor: float = COUNT_RATE_FLOOR,
     event_weight: float = EVENT_WEIGHT,
     loss_name: str = "wasserstein",
+    pid_weighting: str = "equal",
+    pid_weight_floor: float = 0.0,
+    epoch_callback: Callable[[int, float], bool] | None = None,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -119,14 +125,42 @@ def fit_card_to_fullsim(
         must out-vote a wrong-signed Wasserstein gradient on the forward
         resolution coefficients. Defaults to the loss module's
         ``CALO_COUNT_WEIGHT``; surfaced on the CLI as ``--calo-count-weight``.
+    count_rate_floor : float
+        Per-event-rate floor in the count-term Pearson denominators that makes the
+        count terms batch-size invariant (the count terms are evaluated on per-event
+        rates = counts / batch event count). Defaults to the loss module's
+        ``COUNT_RATE_FLOOR``; surfaced on the CLI as ``--count-rate-floor``.
     event_weight : float
         Scales the per-event ``log(HT)`` Wasserstein term, likewise. Defaults
         to ``EVENT_WEIGHT``; surfaced on the CLI as ``--event-weight``.
     loss_name : str
         Selects the training loss. One of :data:`tune_cms_fullsim.loss.LOSS_CHOICES`.
-        ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss (with
-        ``count_weight`` / ``event_weight`` applied); ``"soft_hist"`` uses the
-        soft-histogram MSE loss summed across observables.
+        ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss; ``"soft_hist"``
+        uses the per-pid, per-observable soft-histogram MSE loss; ``"wasserstein_1d"``
+        uses the per-pid, per-observable bin-free 1D quantile-Wasserstein loss
+        (deterministic, no histogram / bin grid at all). All three apply the same
+        ``count_weight`` / ``calo_count_weight`` / ``event_weight`` knobs. The two per-pid
+        shape losses (``soft_hist`` / ``wasserstein_1d``) additionally get the DDP graph
+        anchor below.
+    pid_weighting : str
+        Per-pid population weighting of the SHAPE terms, one of
+        :data:`tune_cms_fullsim.loss.PID_WEIGHTING_CHOICES`. ``"equal"`` (default) weights
+        every species the same (no-op); ``"sqrt_fraction"`` / ``"fraction"`` down-weight
+        rare species (muon, electron) by their population fraction so they do not dominate
+        the shape match. Count and ``log(HT)`` terms are untouched. Surfaced on the CLI as
+        ``--pid-weighting``.
+    pid_weight_floor : float
+        Lower clamp on the per-pid shape weight (default 0.0 = off), re-normalized to keep
+        the mean-1 invariant -- protects a rare species' gradient in a low-stat batch.
+        Surfaced on the CLI as ``--pid-weight-floor``.
+    epoch_callback : Callable[[int, float], bool] | None
+        Optional per-epoch hook called as ``epoch_callback(step, val_loss)`` right
+        after the validation loss for that epoch is computed (and after any
+        intermediate plot is rendered). If it returns ``True`` the fit loop breaks
+        immediately -- the same clean exit as early stopping, so the partial
+        ``history`` accumulated so far is still returned intact. Used by the Optuna
+        search (:mod:`.optuna_search`) to report the val-loss trajectory to a trial
+        and stop pruned trials early; ``None`` (default) is a no-op.
 
     Returns
     -------
@@ -137,21 +171,25 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
+    # All training losses accept the same count_weight / calo_count_weight / event_weight
+    # and per-pid pid_weighting / pid_weight_floor knobs, so wrap unconditionally to inject
+    # them.
     base_loss_fn = get_loss_fn(loss_name)
-    if loss_name == "wasserstein":
-        def loss_fn(
-            pred: dict[str, torch.Tensor],
-            target: dict[str, torch.Tensor],
-        ) -> torch.Tensor:
-            return base_loss_fn(
-                pred,
-                target,
-                count_weight=count_weight,
-                calo_count_weight=calo_count_weight,
-                event_weight=event_weight,
-            )
-    else:
-        loss_fn = base_loss_fn
+
+    def loss_fn(
+        pred: dict[str, torch.Tensor],
+        target: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        return base_loss_fn(
+            pred,
+            target,
+            count_weight=count_weight,
+            calo_count_weight=calo_count_weight,
+            count_rate_floor=count_rate_floor,
+            event_weight=event_weight,
+            pid_weighting=pid_weighting,
+            pid_weight_floor=pid_weight_floor,
+        )
 
     opt = torch.optim.Adam(param_groups)
     if _is_main(rank):
@@ -211,6 +249,39 @@ def fit_card_to_fullsim(
             val_loss=val_loss,
             init_by_key=init_pred_by_key,
         )
+
+    def _render_with_gather(
+        acc_pred: dict[str, list[torch.Tensor]],
+        acc_tgt: dict[str, list[torch.Tensor]],
+        step: int,
+        val_loss: float,
+    ) -> None:
+        """Render the intermediate plot using the FULL validation set under DDP.
+
+        Each rank only iterates its ``DistributedSampler`` shard, so its
+        ``acc_pred``/``acc_tgt`` cover ~1/world_size of the validation data. To
+        plot the full distribution we ``all_gather_object`` every rank's
+        (CPU-tensor) shard lists and concatenate them on the main rank before
+        rendering. This is a collective, so all ranks must reach it on the same
+        epoch (they do: the plot-epoch / early-stop / callback breaks are decided
+        from the all-reduced ``val_loss``, identically on every rank). Outside DDP
+        it just renders the single-process observables directly.
+        """
+        if _is_dist() and dist.get_world_size() > 1:
+            gathered: list = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, (acc_pred, acc_tgt))
+            if not _is_main(rank):
+                return
+            merged_pred: dict[str, list[torch.Tensor]] = {}
+            merged_tgt: dict[str, list[torch.Tensor]] = {}
+            for gp, gt in gathered:
+                for k, v in gp.items():
+                    merged_pred.setdefault(k, []).extend(v)
+                for k, v in gt.items():
+                    merged_tgt.setdefault(k, []).extend(v)
+            _render_intermediate(merged_pred, merged_tgt, step, val_loss)
+        elif _is_main(rank):
+            _render_intermediate(acc_pred, acc_tgt, step, val_loss)
 
     history: dict[str, list] = {"step": [], "loss": [], "val_loss": []}
     if snapshot_parameters:
@@ -315,7 +386,7 @@ def fit_card_to_fullsim(
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
             loss = loss_fn(pred_observables, target_observables)
-            if loss_name == "soft_hist":
+            if loss_name in ("soft_hist", "wasserstein_1d"):
                 loss = loss + _soft_hist_graph_anchor()
 
             loss.backward()
@@ -338,11 +409,13 @@ def fit_card_to_fullsim(
         if _is_main(rank) and log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
             tqdm.write(f"  step {step:3d}/{n_steps}  loss = {print_loss:.4e}")
 
-        # Per-epoch intermediate plots: collect the full validation set's
-        # observables on the main rank so we can render below. We collect on
-        # every plot-enabled epoch (not just scheduled ones) so the early-
-        # stopped epoch can always be rendered before the break.
-        collect_obs = plot_dir is not None and _is_main(rank)
+        # Per-epoch intermediate plots: collect this rank's validation-shard
+        # observables so we can render below. Under DDP every rank collects its
+        # shard and `_render_with_gather` all-gathers them to the main rank, so the
+        # plot uses the FULL validation set (not just rank 0's 1/world_size shard).
+        # We collect on every plot-enabled epoch (not just scheduled ones) so the
+        # early-stopped / pruned epoch can always be rendered before the break.
+        collect_obs = plot_dir is not None
         plot_this_epoch = collect_obs and (step % plot_every == 0 or step == n_steps - 1)
         acc_pred: dict[str, list[torch.Tensor]] = {}
         acc_tgt: dict[str, list[torch.Tensor]] = {}
@@ -406,8 +479,22 @@ def fit_card_to_fullsim(
         # Save the per-epoch intermediate observable plots (scheduled epochs).
         rendered = False
         if plot_this_epoch:
-            _render_intermediate(acc_pred, acc_tgt, step, print_val_loss)
+            _render_with_gather(acc_pred, acc_tgt, step, print_val_loss)
             rendered = True
+
+        # Per-epoch hook (e.g. Optuna trial report + median pruning). Returning
+        # True breaks the loop with the same clean exit as early stopping, so the
+        # partial `history` is returned intact. Render this (final) epoch first if
+        # it was not a scheduled plot epoch, mirroring the early-stopping path.
+        if epoch_callback is not None and epoch_callback(step, print_val_loss):
+            if collect_obs and not rendered:
+                _render_with_gather(acc_pred, acc_tgt, step, print_val_loss)
+            if _is_main(rank):
+                tqdm.write(
+                    f"Stopping at step {step} via epoch_callback "
+                    f"(val_loss {print_val_loss:.4e})"
+                )
+            break
 
         # early stopping check
         if val_loss_acc < min_loss:
@@ -419,7 +506,7 @@ def fit_card_to_fullsim(
                 # Always render the final (early-stopped) epoch, even when it is
                 # not a scheduled plot_every epoch.
                 if collect_obs and not rendered:
-                    _render_intermediate(acc_pred, acc_tgt, step, print_val_loss)
+                    _render_with_gather(acc_pred, acc_tgt, step, print_val_loss)
                 if _is_main(rank):
                     tqdm.write(f"Early stopping at step {step} with val_loss {print_val_loss:.4e}")
                 break

@@ -43,8 +43,21 @@ from parnassus.torch_delphes.tune_cms_fullsim.dataloader import (
     DelphesDataSet,
     delphes_collate_fn,
 )
-from parnassus.torch_delphes.tune_cms_fullsim.config import COUNT_TERM_KEYS
-from parnassus.torch_delphes.tune_cms_fullsim.loss import per_event_wasserstein_loss
+from parnassus.torch_delphes.tune_cms_fullsim.config import (
+    CALO_COUNT_TERM_KEYS,
+    COUNT_TERM_KEYS,
+)
+from parnassus.torch_delphes.tune_cms_fullsim.loss import (
+    LOSS_CHOICES,
+    PID_WEIGHTING_CHOICES,
+    _count_terms,
+    _pid_population_weights,
+    get_loss_fn,
+    per_event_wasserstein_loss,
+    per_pid_soft_hist_loss,
+    per_pid_wasserstein_1d_loss,
+    quantile_wasserstein_distance,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +337,506 @@ def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):
     assert len(history["val_loss"]) == 3
     for loss in history["loss"]:
         assert loss == loss  # not NaN
+
+
+# ---------------------------------------------------------------------------
+# Per-pid soft-histogram loss (--loss soft_hist)
+# ---------------------------------------------------------------------------
+
+
+def test_get_loss_fn_dispatch():
+    """The dispatcher maps each loss name to the right callable (no data needed)."""
+    assert "wasserstein" in LOSS_CHOICES and "soft_hist" in LOSS_CHOICES
+    assert "wasserstein_1d" in LOSS_CHOICES
+    assert get_loss_fn("wasserstein") is per_event_wasserstein_loss
+    assert get_loss_fn("soft_hist") is per_pid_soft_hist_loss
+    assert get_loss_fn("wasserstein_1d") is per_pid_wasserstein_1d_loss
+    with pytest.raises(ValueError):
+        get_loss_fn("not_a_loss")
+
+
+def test_quantile_wasserstein_distance_math():
+    """Pure-math properties of the bin-free 1D quantile-Wasserstein primitive (no data).
+
+    With default ``p=2`` the distance is the SQUARED W2: identical clouds give ~0; a rigid
+    shift by ``delta`` gives ``delta**2``; it is symmetric in its two arguments; it handles
+    unequal sample sizes; and it is differentiable in the pred (first) argument."""
+    torch.manual_seed(0)
+    base = torch.randn(500, dtype=torch.float64)
+    delta = 1.3
+    shifted = base + delta
+
+    # Identical clouds -> ~0.
+    assert float(quantile_wasserstein_distance(base, base)) == pytest.approx(0.0, abs=1e-9)
+
+    # Rigid shift by delta -> squared-W2 == delta**2 (no scale standardization here).
+    d = quantile_wasserstein_distance(base, shifted)
+    assert float(d) == pytest.approx(delta**2, rel=1e-3)
+
+    # p=1 -> W1 == |delta|.
+    d1 = quantile_wasserstein_distance(base, shifted, p=1)
+    assert float(d1) == pytest.approx(abs(delta), rel=1e-3)
+
+    # Symmetric in the two clouds.
+    rev = quantile_wasserstein_distance(shifted, base)
+    assert float(d) == pytest.approx(float(rev), rel=1e-9)
+
+    # Handles unequal sample sizes (no binning / common axis required).
+    other = torch.randn(317, dtype=torch.float64) + delta
+    assert torch.isfinite(quantile_wasserstein_distance(base, other))
+
+    # Differentiable in the pred (first) argument; target detached.
+    x = base.clone().requires_grad_(True)
+    quantile_wasserstein_distance(x, shifted).backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all() and float(x.grad.abs().sum()) > 0
+
+
+def test_wasserstein_1d_one_step_gradient_is_finite(fixture_root: Path):
+    """A forward + backward step under the per-pid bin-free 1D-Wasserstein loss gives a
+    finite loss and finite gradients, and the shared count terms still reach the
+    tracking-efficiency logits (their only gradient path)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+
+    torch.manual_seed(7)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+
+    mask = torch.any(truth != 0, dim=-1)
+    out = card(truth[mask])
+    eflow = restore_event_format(out["EFlowObject"], mask)
+    pred = load_pflow_targets_from_tensor(eflow)
+    for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        pred[pred_key] = out[out_key]
+
+    loss = per_pid_wasserstein_1d_loss(pred, target)
+    assert torch.isfinite(loss)
+    loss.backward()
+
+    grads = [p.grad for p in card.parameters() if p.grad is not None]
+    assert grads, "no parameter received a gradient"
+    for name, p in card.named_parameters():
+        if p.grad is not None:
+            assert torch.isfinite(p.grad).all(), f"{name} has non-finite gradient"
+
+    # The shared count terms must reach the tracking-efficiency logits.
+    params = dict(card.named_parameters())
+    for mod in (
+        "ChargedHadronTrackingEfficiency",
+        "ElectronTrackingEfficiency",
+        "MuonTrackingEfficiency",
+    ):
+        g = params[f"{mod}.eff_logits"].grad
+        assert g is not None and float(g.abs().sum()) > 0, f"{mod}.eff_logits got no count grad"
+
+
+def test_soft_hist_one_step_gradient_is_finite(fixture_root: Path):
+    """A forward + backward step under the per-pid soft-histogram loss gives a finite
+    loss and finite gradients, and the shared count terms still reach the
+    tracking-efficiency logits (their only gradient path)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+
+    torch.manual_seed(7)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+
+    mask = torch.any(truth != 0, dim=-1)
+    out = card(truth[mask])
+    eflow = restore_event_format(out["EFlowObject"], mask)
+    pred = load_pflow_targets_from_tensor(eflow)
+    # Inject BOTH the tracking and calo expected counts so every count term fires,
+    # exactly as training.py does.
+    for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        pred[pred_key] = out[out_key]
+
+    loss = per_pid_soft_hist_loss(pred, target)
+    assert torch.isfinite(loss)
+    loss.backward()
+
+    grads = [p.grad for p in card.parameters() if p.grad is not None]
+    assert grads, "no parameter received a gradient"
+    for name, p in card.named_parameters():
+        if p.grad is not None:
+            assert torch.isfinite(p.grad).all(), f"{name} has non-finite gradient"
+
+    # The shared count terms must reach the tracking-efficiency logits.
+    params = dict(card.named_parameters())
+    for mod in (
+        "ChargedHadronTrackingEfficiency",
+        "ElectronTrackingEfficiency",
+        "MuonTrackingEfficiency",
+    ):
+        g = params[f"{mod}.eff_logits"].grad
+        assert g is not None and float(g.abs().sum()) > 0, f"{mod}.eff_logits got no count grad"
+
+
+def test_pid_population_weights_math():
+    """Pure-math properties of the per-pid population weighting helper (no data).
+
+    target_groups uses .shape[0] as the per-pid count; weights are mean-1 normalized over
+    the present pids and down-weight rare species, with 'equal' an exact no-op."""
+    # Abundant 211 (1000), rarer 11 (10), rarest 13 (4). Only shape[0] matters.
+    tg = {211: torch.zeros(1000, 3), 11: torch.zeros(10, 3), 13: torch.zeros(4, 3)}
+    present = [211, 11, 13]
+    P = len(present)
+
+    # 'equal' -> all exactly 1.0.
+    w_eq = _pid_population_weights(tg, present, mode="equal")
+    assert w_eq == {211: 1.0, 11: 1.0, 13: 1.0}
+
+    # Every mode: positive, and mean-1 (sum == P) over present pids.
+    for mode in PID_WEIGHTING_CHOICES:
+        w = _pid_population_weights(tg, present, mode=mode)
+        assert all(v > 0 for v in w.values())
+        assert sum(w.values()) == pytest.approx(P, rel=1e-9)
+
+    # Non-equal modes: abundant pid up-weighted, rare pid down-weighted.
+    w_frac = _pid_population_weights(tg, present, mode="fraction")
+    w_sqrt = _pid_population_weights(tg, present, mode="sqrt_fraction")
+    for w in (w_frac, w_sqrt):
+        assert w[211] > 1.0 > w[11] > w[13]  # rarer -> smaller
+
+    # 'fraction' suppresses the rare pid MORE than 'sqrt_fraction' (monotone in strength).
+    assert w_frac[13] < w_sqrt[13] < 1.0
+    assert w_frac[11] < w_sqrt[11] < 1.0
+
+    # A floor lifts the rare pids (re-normalized, so still mean-1).
+    w_floor = _pid_population_weights(tg, present, mode="sqrt_fraction", floor=0.3)
+    assert w_floor[13] > w_sqrt[13] and w_floor[11] > w_sqrt[11]
+    assert sum(w_floor.values()) == pytest.approx(P, rel=1e-9)
+
+    # Degenerate: empty present set -> empty dict (no divide-by-zero).
+    assert _pid_population_weights(tg, [], mode="fraction") == {}
+
+
+@pytest.mark.parametrize(
+    "loss_fn",
+    [per_event_wasserstein_loss, per_pid_soft_hist_loss, per_pid_wasserstein_1d_loss],
+)
+def test_pid_weighting_wired_and_equal_default(fixture_root: Path, loss_fn):
+    """For every loss: pid_weighting='equal' equals the default (the default IS equal, and
+    the equal weights are literal 1.0 -- see test_pid_population_weights_math, so it is a
+    no-op), while 'sqrt_fraction' actually CHANGES the real-data loss (the knob is wired
+    through to the shape terms). Each loss is deterministic for a fixed pred (Wasserstein
+    uses a fixed SW seed; the hist/quantile losses have no RNG)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+
+    torch.manual_seed(7)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    mask = torch.any(truth != 0, dim=-1)
+    out = card(truth[mask])
+    pred = load_pflow_targets_from_tensor(restore_event_format(out["EFlowObject"], mask))
+    for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        pred[pred_key] = out[out_key]
+
+    default = float(loss_fn(pred, target))
+    explicit_equal = float(loss_fn(pred, target, pid_weighting="equal"))
+    sqrt_frac = float(loss_fn(pred, target, pid_weighting="sqrt_fraction"))
+    assert default == explicit_equal  # default is 'equal'
+    assert sqrt_frac != explicit_equal  # the knob reaches the shape terms
+
+
+@pytest.mark.parametrize(
+    "loss_fn",
+    [per_event_wasserstein_loss, per_pid_soft_hist_loss, per_pid_wasserstein_1d_loss],
+)
+def test_pid_weighting_downweights_rare_pid(loss_fn):
+    """When only a RARE pid's pred shape is mismatched (the abundant pid matches exactly),
+    down-weighting that rare pid lowers the loss: fraction < sqrt_fraction < equal. Uses a
+    synthetic 2-pid batch and zeroes the count/event terms to isolate the shape sum."""
+    torch.manual_seed(0)
+    n_abundant, n_rare = 2000, 8
+
+    def make_particles(shift_rare: float):
+        # One event, (1, n_abundant + n_rare, 4) = [log_E, log_pt, eta, pid].
+        ab = torch.randn(n_abundant, 3, dtype=torch.float64)
+        ra = torch.randn(n_rare, 3, dtype=torch.float64)
+        ra = ra + shift_rare  # shift the rare species' kinematics
+        ab = torch.cat([ab, torch.full((n_abundant, 1), 211.0, dtype=torch.float64)], dim=1)
+        ra = torch.cat([ra, torch.full((n_rare, 1), 13.0, dtype=torch.float64)], dim=1)
+        return torch.cat([ab, ra], dim=0).unsqueeze(0)
+
+    # Shared target; pred matches the abundant pid exactly and shifts only the rare pid.
+    torch.manual_seed(1)
+    tgt_parts = make_particles(0.0)
+    pred_parts = tgt_parts.clone()
+    pred_parts[0, n_abundant:, :3] += 1.0  # shift only the rare (pid 13) cloud in pred
+
+    def to_obs(parts):
+        d = {
+            "log_E": parts[..., 0],
+            "log_pt": parts[..., 1],
+            "eta": parts[..., 2],
+            "pid": parts[..., 3],
+        }
+        # per-event log_ht: matched on both sides so the event term is ~0 anyway.
+        d["log_ht"] = parts[..., 1].sum(dim=1)
+        return d
+
+    pred, target = to_obs(pred_parts), to_obs(tgt_parts)
+    kw = dict(count_weight=0.0, calo_count_weight=0.0, event_weight=0.0)
+
+    eq = float(loss_fn(pred, target, pid_weighting="equal", **kw))
+    sq = float(loss_fn(pred, target, pid_weighting="sqrt_fraction", **kw))
+    fr = float(loss_fn(pred, target, pid_weighting="fraction", **kw))
+    assert fr < sq < eq  # the rare-pid mismatch is progressively down-weighted
+
+
+def test_pid_weighting_keeps_leptons_learnable(fixture_root: Path):
+    """Under 'sqrt_fraction' the muon/electron momentum-smearing params still receive a
+    finite, nonzero gradient (their only gradient path is the shape term), and under the
+    aggressive 'fraction' mode that same gradient is SMALLER -- confirming the per-pid
+    weight actually reaches the parameter gradient."""
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+
+    smearing_prefixes = ("MuonMomentumSmearing", "ElectronMomentumSmearing")
+
+    def lepton_smearing_grad_norm(mode: str) -> float:
+        torch.manual_seed(7)
+        card = CMSEnergyFlowDefault(debug=False, learnable=True)
+        mask = torch.any(truth != 0, dim=-1)
+        out = card(truth[mask])
+        pred = load_pflow_targets_from_tensor(restore_event_format(out["EFlowObject"], mask))
+        for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+            pred[pred_key] = out[out_key]
+        loss = per_pid_wasserstein_1d_loss(pred, target, pid_weighting=mode)
+        assert torch.isfinite(loss)
+        loss.backward()
+        total = 0.0
+        for name, p in card.named_parameters():
+            if any(name.startswith(pre) for pre in smearing_prefixes) and p.grad is not None:
+                assert torch.isfinite(p.grad).all(), f"{name} non-finite grad"
+                total += float(p.grad.abs().sum())
+        return total
+
+    g_sqrt = lepton_smearing_grad_norm("sqrt_fraction")
+    g_equal = lepton_smearing_grad_norm("equal")
+    g_fraction = lepton_smearing_grad_norm("fraction")
+
+    # sqrt_fraction keeps the lepton smearing params learnable (nonzero gradient)...
+    assert g_sqrt > 0
+    # ...but down-weighted vs equal, and 'fraction' suppresses them even further.
+    assert g_fraction < g_sqrt < g_equal
+
+
+def test_count_terms_shared_between_losses(fixture_root: Path):
+    """Both training losses add the SAME shared ``_count_terms`` contribution -- the
+    additive count-term sub-sum equals ``_count_terms(...).sum()`` for each loss,
+    locking in that the helper extraction is shared (not duplicated/divergent)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=300)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+
+    torch.manual_seed(7)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    mask = torch.any(truth != 0, dim=-1)
+    out = card(truth[mask])
+    eflow = restore_event_format(out["EFlowObject"], mask)
+    pred = load_pflow_targets_from_tensor(eflow)
+    for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        pred[pred_key] = out[out_key]
+
+    cw, ccw = 0.5, 10.0
+    shared = float(
+        torch.stack(
+            _count_terms(pred, target, count_weight=cw, calo_count_weight=ccw)
+        ).sum()
+    )
+    assert shared > 0  # the pseudodata populates several reco bins
+
+    # Each loss is deterministic for a fixed pred (Wasserstein uses a fixed SW seed;
+    # the histogram losses have no RNG), so loss(with counts) - loss(counts zeroed) is
+    # exactly the count contribution for that loss.
+    w_with = float(
+        per_event_wasserstein_loss(pred, target, count_weight=cw, calo_count_weight=ccw)
+    )
+    w_without = float(
+        per_event_wasserstein_loss(pred, target, count_weight=0.0, calo_count_weight=0.0)
+    )
+    h_with = float(
+        per_pid_soft_hist_loss(pred, target, count_weight=cw, calo_count_weight=ccw)
+    )
+    h_without = float(
+        per_pid_soft_hist_loss(pred, target, count_weight=0.0, calo_count_weight=0.0)
+    )
+    wh_with = float(
+        per_pid_wasserstein_1d_loss(
+            pred, target, count_weight=cw, calo_count_weight=ccw
+        )
+    )
+    wh_without = float(
+        per_pid_wasserstein_1d_loss(
+            pred, target, count_weight=0.0, calo_count_weight=0.0
+        )
+    )
+
+    assert (w_with - w_without) == pytest.approx(shared, rel=1e-6)
+    assert (h_with - h_without) == pytest.approx(shared, rel=1e-6)
+    assert (wh_with - wh_without) == pytest.approx(shared, rel=1e-6)
+
+
+def test_count_terms_batch_size_invariant():
+    """Every per-species count term is batch-size INVARIANT: evaluating ``_count_terms``
+    on the same per-event count distribution replicated to a larger batch returns the same
+    per-term values. This locks the regression where the old constant ``+1`` Pearson floor
+    (effective rate floor ``1/N``) let sparse/empty data regions grow ~linearly (tracking,
+    after ``/total``) to ~quadratically (calo) with batch size N.
+
+    Fully synthetic (no fixture): ``target[tgt]`` is the realistic ``(n_events, n_regions)``
+    per-event count tensor and ``pred[pred]`` is the ``(n_regions,)`` batch SUM (so it scales
+    with the event count, exactly like ``_expected_reco_counts`` / the calo soft count).
+    Region 0 is deliberately a STRUCTURALLY-EMPTY data region (target == 0) while the model
+    still predicts a nonzero count there -- the exact batch-growth trigger -- which the
+    per-event-rate floor must keep finite and invariant. The two batch sizes are built by
+    tiling the same base events, so each term is expected to match (near-)exactly.
+    """
+    torch.manual_seed(0)
+    cw, ccw = 0.5, 10.0
+    n_base, n_reg = 50, 4
+
+    # Per-key base per-event target and a per-event predicted rate (model batch sum / N).
+    base_target: dict[str, torch.Tensor] = {}
+    per_event_pred_rate: dict[str, torch.Tensor] = {}
+    for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        counts = torch.randint(0, 5, (n_base, n_reg), dtype=torch.float64)
+        counts[:, 0] = 0.0  # region 0: empty in the data, but the model still predicts there
+        base_target[tgt_key] = counts
+        per_event_pred_rate[pred_key] = torch.rand(n_reg, dtype=torch.float64) + 0.1
+
+    def terms_at(n_tiles: int) -> list[float]:
+        n_events = n_base * n_tiles
+        target = {k: v.repeat(n_tiles, 1) for k, v in base_target.items()}
+        pred = {k: rate * n_events for k, rate in per_event_pred_rate.items()}
+        return [
+            float(t)
+            for t in _count_terms(pred, target, count_weight=cw, calo_count_weight=ccw)
+        ]
+
+    small = terms_at(1)
+    large = terms_at(8)  # 8x the events, identical per-event distribution
+    assert len(small) == len(large) == len(COUNT_TERM_KEYS) + len(CALO_COUNT_TERM_KEYS)
+    for s, l in zip(small, large):
+        assert s > 0  # empty-region + populated-region mismatch both contribute
+        assert s == pytest.approx(l, rel=1e-9), (s, l)
+
+
+def test_fit_soft_hist_runs(fixture_root: Path, tmp_path: Path):
+    """The fit loop runs a few steps under ``--loss soft_hist`` without errors and
+    returns a finite history (exercises the weight-injecting closure + the graph
+    anchor end-to-end)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=24)
+    device = torch.device("cpu")
+    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8)
+
+    torch.manual_seed(3)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+    cfg = _trainable_config(
+        card, tmp_path, ["ChargedHadronMomentumSmearing.resolution_module.scale_raw"]
+    )
+    _, param_groups = pc.select_trainable(card, cfg, global_lr=1e-1)
+
+    history = fit_card_to_fullsim(
+        card,
+        train_dl,
+        val_dl,
+        param_groups=param_groups,
+        n_steps=3,
+        log_every=0,
+        loss_name="soft_hist",
+    )
+    assert len(history["step"]) == 3
+    for loss in history["loss"]:
+        assert loss == loss  # not NaN
+    for vloss in history["val_loss"]:
+        assert vloss == vloss
+
+
+def test_fit_wasserstein_1d_runs(fixture_root: Path, tmp_path: Path):
+    """The fit loop runs a few steps under ``--loss wasserstein_1d`` without errors and
+    returns a finite history (exercises the weight-injecting closure + the shared graph
+    anchor branch end-to-end, mirroring ``test_fit_soft_hist_runs``)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=24)
+    device = torch.device("cpu")
+    train_dl, val_dl = _make_dataloaders(arrays, device, batch_size=8)
+
+    torch.manual_seed(3)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+    cfg = _trainable_config(
+        card, tmp_path, ["ChargedHadronMomentumSmearing.resolution_module.scale_raw"]
+    )
+    _, param_groups = pc.select_trainable(card, cfg, global_lr=1e-1)
+
+    history = fit_card_to_fullsim(
+        card,
+        train_dl,
+        val_dl,
+        param_groups=param_groups,
+        n_steps=3,
+        log_every=0,
+        loss_name="wasserstein_1d",
+    )
+    assert len(history["step"]) == 3
+    for loss in history["loss"]:
+        assert loss == loss  # not NaN
+    for vloss in history["val_loss"]:
+        assert vloss == vloss
+
+
+def test_intermediate_plots_include_per_pid_pages(tmp_path: Path):
+    """The per-epoch intermediate PDF gains one per-PID page per particle type when
+    the aligned ``pid`` array is present, and degrades gracefully (combined pages
+    only) when it is not. Uses synthetic aligned arrays -- no ROOT data needed."""
+    import re
+
+    from parnassus.torch_delphes.tune_cms_fullsim import OBSERVABLES
+    from parnassus.torch_delphes.tune_cms_fullsim.intermediate_plots import (
+        _PID_GROUPS,
+        save_intermediate_observable_plots,
+    )
+
+    def _page_count(pdf_path: Path) -> int:
+        # Count page objects in the matplotlib PDF (page dicts are uncompressed).
+        return len(re.findall(rb"/Type\s*/Page\b(?!s)", pdf_path.read_bytes()))
+
+    torch.manual_seed(0)
+    n = 4000
+    pids = torch.tensor([g[1] for g in _PID_GROUPS], dtype=torch.float64)
+    pid = pids[torch.randint(0, len(pids), (n,))]
+    pt = torch.rand(n, dtype=torch.float64) * 50 + 1.0
+    eta = (torch.rand(n, dtype=torch.float64) - 0.5) * 6.0
+    log_pt = torch.log(pt)
+    log_E = torch.log(pt * torch.cosh(eta) + 0.5)
+    log_ht = torch.rand(200, dtype=torch.float64) * 3 + 3  # per-event
+
+    def mk(shift: float) -> dict:
+        return {
+            "pt": pt + shift,
+            "eta": eta,
+            "log_pt": log_pt + 0.01 * shift,
+            "log_E": log_E + 0.01 * shift,
+            "pid": pid,
+            "log_ht": log_ht + 0.01 * shift,
+        }
+
+    target, pred, init = mk(0.0), mk(0.5), mk(1.0)
+
+    p_pid = save_intermediate_observable_plots(
+        pred, target, OBSERVABLES, step=3, output_dir=tmp_path, val_loss=1.0, init_by_key=init
+    )
+    # Same data minus the pid column -> combined pages only.
+    drop = lambda d: {k: v for k, v in d.items() if k != "pid"}
+    p_nopid = save_intermediate_observable_plots(
+        drop(pred), drop(target), OBSERVABLES, step=4, output_dir=tmp_path, init_by_key=drop(init)
+    )
+
+    assert p_pid.exists() and p_nopid.exists()
+    # Every PID group is populated, so we get exactly one extra page per group.
+    assert _page_count(p_pid) - _page_count(p_nopid) == len(_PID_GROUPS)
 
 
 # ---------------------------------------------------------------------------
