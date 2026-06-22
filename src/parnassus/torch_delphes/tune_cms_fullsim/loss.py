@@ -25,6 +25,7 @@ from typing import Callable
 import ot
 import torch
 import torch.distributed as dist
+from torch.distributed.nn.functional import all_gather as diff_all_gather
 from torch.distributed.nn.functional import all_reduce as diff_all_reduce
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
@@ -142,6 +143,96 @@ def histogram_mse_loss(
     pred_norm = pred_hist / (pred_hist.sum() + eps)
     target_norm = target_hist / (target_hist.sum() + eps)
     return ((pred_norm - target_norm) ** 2).mean()
+
+
+# =============================================================================
+# DDP gather helpers for set-to-set losses
+# =============================================================================
+
+
+def _all_gather_varlen(
+    tensor_1d: torch.Tensor,
+    *,
+    differentiable: bool = False,
+) -> torch.Tensor:
+    """All-gather a 1-D tensor whose length may differ across ranks.
+
+    Under DDP + ``DistributedSampler`` each rank processes a different shard,
+    so the number of valid particles / events in a batch can differ.  This
+    helper pads every rank's local tensor to the global maximum length,
+    gathers the padded tensors, and then slices out the valid parts so that
+    the caller receives the concatenation of every rank's real data.
+
+    When ``differentiable=True`` the gather uses
+    ``torch.distributed.nn.functional.all_gather`` so that gradients flow
+    back from the combined loss to each rank's local forward pass.  For
+    target-side data pass ``differentiable=False`` **and** detach before
+    calling.
+
+    Parameters
+    ----------
+    tensor_1d : torch.Tensor
+        1-D tensor of local data on this rank.
+    differentiable : bool
+        If True, the gather stays on the autograd graph.
+
+    Returns
+    -------
+    torch.Tensor
+        Concatenation of the valid parts from all ranks (rank 0, rank 1,
+        …).  If every rank's tensor is empty the result is an empty tensor
+        of the same dtype and device.
+    """
+    world_size = dist.get_world_size()
+
+    # ---- gather sizes -------------------------------------------------------
+    local_size = torch.tensor(
+        [tensor_1d.numel()], dtype=torch.int64, device=tensor_1d.device
+    )
+    size_list = [
+        torch.zeros(1, dtype=torch.int64, device=tensor_1d.device)
+        for _ in range(world_size)
+    ]
+    dist.all_gather(size_list, local_size)
+    sizes = [int(s.item()) for s in size_list]
+    max_size = max(sizes)
+
+    if max_size == 0:
+        return torch.zeros(0, dtype=tensor_1d.dtype, device=tensor_1d.device)
+
+    # ---- pad to global max --------------------------------------------------
+    if tensor_1d.numel() < max_size:
+        pad = torch.zeros(
+            max_size - tensor_1d.numel(),
+            dtype=tensor_1d.dtype,
+            device=tensor_1d.device,
+        )
+        padded = torch.cat([tensor_1d, pad])
+    else:
+        padded = tensor_1d
+
+    # ---- gather padded tensors ----------------------------------------------
+    if differentiable:
+        # ``diff_all_gather`` returns a tuple/list of per-rank tensors in some
+        # PyTorch versions; ``torch.cat`` handles both.
+        gathered_flat = torch.cat(diff_all_gather(padded))
+    else:
+        gathered_list = [
+            torch.zeros(max_size, dtype=tensor_1d.dtype, device=tensor_1d.device)
+            for _ in range(world_size)
+        ]
+        dist.all_gather(gathered_list, padded)
+        gathered_flat = torch.cat(gathered_list)  # (world_size * max_size,)
+
+    # ---- slice out valid parts ----------------------------------------------
+    parts: list[torch.Tensor] = []
+    for r, sz in enumerate(sizes):
+        if sz > 0:
+            parts.append(gathered_flat[r * max_size : r * max_size + sz])
+
+    if parts:
+        return torch.cat(parts)
+    return torch.zeros(0, dtype=tensor_1d.dtype, device=tensor_1d.device)
 
 
 # =============================================================================
@@ -361,6 +452,93 @@ def per_event_wasserstein_loss(
     return torch.stack(terms).sum()
 
 
+def per_event_wasserstein_loss_distributed(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    *,
+    count_weight: float = COUNT_WEIGHT,
+    calo_count_weight: float = CALO_COUNT_WEIGHT,
+    event_weight: float = EVENT_WEIGHT,
+) -> torch.Tensor:
+    """DDP-aware wrapper: gathers pred/target across ranks before computing loss.
+
+    The sliced Wasserstein distance is a *set-to-set* loss —
+    :math:`SW_2(A \\cup B, C \\cup D) \\neq SW_2(A,C) + SW_2(B,D)`.  When
+    each DDP rank computes the loss on its local shard and the results are
+    averaged, the mathematical value differs from the non-distributed loss
+    computed on the full batch.  This wrapper fixes that by gathering every
+    rank's predicted and target observables (via :func:`_all_gather_varlen`)
+    so the loss is always computed on the union of all shards, making the
+    DDP and single-process loss **identical** for the same underlying data.
+    """
+    if not _is_dist():
+        return per_event_wasserstein_loss(
+            pred,
+            target,
+            count_weight=count_weight,
+            calo_count_weight=calo_count_weight,
+            event_weight=event_weight,
+        )
+
+    pred_gathered: dict[str, torch.Tensor] = {}
+    target_gathered: dict[str, torch.Tensor] = {}
+
+    # ---- per-particle observables ------------------------------------------
+    # Extract valid (non-padding, non-efficiency-killed) particles from each
+    # rank, gather them into a single cloud, and repack as (1, n_total) so the
+    # loss sees "one event" with all particles — the event structure is
+    # irrelevant since the loss immediately flattens and groups by pid.
+    pred_pid = pred["pid"]
+    tgt_pid = target["pid"].detach()
+    pred_valid = (pred_pid != 0).reshape(-1)
+    tgt_valid = (tgt_pid != 0).reshape(-1)
+
+    for key in ("log_E", "log_pt", "eta", "pid"):
+        pv = pred[key].reshape(-1)[pred_valid]
+        tv = target[key].reshape(-1)[tgt_valid]
+
+        pred_gathered[key] = _all_gather_varlen(pv, differentiable=True).unsqueeze(0)
+        target_gathered[key] = _all_gather_varlen(tv, differentiable=False).unsqueeze(0)
+
+    # ---- per-event observable: log(HT) -------------------------------------
+    if "log_ht" in pred and "log_ht" in target:
+        pred_gathered["log_ht"] = _all_gather_varlen(
+            pred["log_ht"].reshape(-1), differentiable=True
+        )
+        target_gathered["log_ht"] = _all_gather_varlen(
+            target["log_ht"].detach().reshape(-1), differentiable=False
+        )
+
+    # ---- differentiable expected-count terms --------------------------------
+    # Pred counts come from the card already *batch-aggregated* as (n_regions,),
+    # so we all-reduce (sum) them across ranks.  Target counts are per-event
+    # (n_events_rank, n_regions) — gather and concatenate so the loss sums
+    # them over the full combined batch, matching the aggregated pred.
+    for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+        if pred_key not in pred or tgt_key not in target:
+            continue
+        pv = pred[pred_key]                     # (n_regions,) — batch-aggregated
+        tv = target[tgt_key].detach()           # (n_events_rank, n_regions)
+
+        # Pred: all-reduce sum (same shape on every rank, preserves autograd).
+        pred_gathered[pred_key] = diff_all_reduce(pv, op=dist.ReduceOp.SUM)
+
+        # Target: flatten, gather variable-length, reshape back.
+        n_regions = tv.shape[1]
+        tv_flat = tv.reshape(-1)                # (n_events_rank * n_regions,)
+        target_gathered[tgt_key] = _all_gather_varlen(
+            tv_flat, differentiable=False
+        ).reshape(-1, n_regions)                # (total_events, n_regions)
+
+    return per_event_wasserstein_loss(
+        pred_gathered,
+        target_gathered,
+        count_weight=count_weight,
+        calo_count_weight=calo_count_weight,
+        event_weight=event_weight,
+    )
+
+
 # =============================================================================
 # Alternative training loss: per-observable soft-histogram MSE
 # =============================================================================
@@ -542,7 +720,7 @@ LOSS_CHOICES: tuple[str, ...] = ("wasserstein", "soft_hist")
 def get_loss_fn(name: str) -> LossFn:
     """Return the training loss callable selected by ``name``."""
     if name == "wasserstein":
-        return per_event_wasserstein_loss
+        return per_event_wasserstein_loss_distributed
     if name == "soft_hist":
         return multi_observable_soft_hist_loss_distributed
     raise ValueError(

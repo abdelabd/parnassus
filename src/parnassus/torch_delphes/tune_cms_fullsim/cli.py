@@ -310,11 +310,15 @@ def main() -> None:
         train_sampler = None
         val_sampler = None
 
+    # Per-rank batch size: divide by world_size so that after all_gather the
+    # combined batch has the same size as the single-process case.
+    per_rank_batch_size = max(1, 512 // world_size)
+
     train_dataloader = DelphesDataLoader(
-        train_dataset, batch_size=512, shuffle=True, sampler=train_sampler
+        train_dataset, batch_size=per_rank_batch_size, shuffle=True, sampler=train_sampler
     )
     val_dataloader = DelphesDataLoader(
-        val_dataset, batch_size=512, shuffle=False, sampler=val_sampler
+        val_dataset, batch_size=per_rank_batch_size, shuffle=False, sampler=val_sampler
     )
 
     # Same initial parameters for DDP
