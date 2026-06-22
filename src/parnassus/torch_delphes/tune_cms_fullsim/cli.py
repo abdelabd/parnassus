@@ -83,6 +83,7 @@ from .distributed import (
     _cleanup_distributed,
     _init_distributed,
     _is_main,
+    _is_dist,
 )
 from .training import fit_card_to_fullsim
 
@@ -349,6 +350,10 @@ def main() -> None:
         # can run with find_unused_parameters disabled.
         ddp_kwargs["find_unused_parameters"] = False
         trainee = DDP(trainee, **ddp_kwargs)
+        if _is_dist():
+            torch.manual_seed(args.seed + rank)
+            import numpy as np
+            np.random.seed(args.seed + rank)
 
     n_trainable_scalars = sum(1 for spec in param_cfg.values() if spec["trainable"])
     log(

@@ -317,7 +317,7 @@ def per_event_wasserstein_loss(
         """
         y = y_tgt.detach().to(device=x_pred.device, dtype=x_pred.dtype)
         return ot.sliced_wasserstein_distance(
-            x_pred / scale, y / scale, n_projections=100, p=2, seed=0
+            x_pred / scale, y / scale, n_projections=100//dist.get_world_size(), p=2, seed=0
         )
 
     # Per-feature scale for the object terms: the std of each of the 3 features
