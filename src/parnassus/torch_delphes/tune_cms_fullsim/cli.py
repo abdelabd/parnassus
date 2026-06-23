@@ -311,15 +311,20 @@ def main() -> None:
         train_sampler = None
         val_sampler = None
 
-    # Per-rank batch size: divide by world_size so that after all_gather the
-    # combined batch has the same size as the single-process case.
-    per_rank_batch_size = max(1, 512 // world_size)
+    # Batch size: for wasserstein, divide by world_size so that after
+    # all_gather the combined batch matches the single-process case. For
+    # soft_hist, use the full batch size — the loss already all-reduces
+    # histograms and benefits from larger per-rank batches.
+    if args.loss == "wasserstein":
+        batch_size = max(1, 512 // world_size)
+    else:
+        batch_size = 512
 
     train_dataloader = DelphesDataLoader(
-        train_dataset, batch_size=per_rank_batch_size, shuffle=True, sampler=train_sampler
+        train_dataset, batch_size=batch_size, shuffle=True, sampler=train_sampler
     )
     val_dataloader = DelphesDataLoader(
-        val_dataset, batch_size=per_rank_batch_size, shuffle=False, sampler=val_sampler
+        val_dataset, batch_size=batch_size, shuffle=False, sampler=val_sampler
     )
 
     # Same initial parameters for DDP
@@ -350,7 +355,8 @@ def main() -> None:
         # can run with find_unused_parameters disabled.
         ddp_kwargs["find_unused_parameters"] = False
         trainee = DDP(trainee, **ddp_kwargs)
-        if _is_dist():
+        # For Wasserstein+DDP, use separate RNGs to efficiently sample unit-vectors
+        if args.loss == "wasserstein" and _is_dist():
             torch.manual_seed(args.seed + rank)
             import numpy as np
             np.random.seed(args.seed + rank)
