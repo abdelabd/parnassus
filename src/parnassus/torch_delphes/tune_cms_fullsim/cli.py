@@ -82,6 +82,7 @@ from .loss import (
 from .distributed import (
     _cleanup_distributed,
     _init_distributed,
+    _is_dist,
     _is_main,
 )
 from .training import fit_card_to_fullsim
@@ -355,11 +356,20 @@ def main() -> None:
         train_sampler = None
         val_sampler = None
 
+    # Batch size: for wasserstein / wasserstein_1d, divide by world_size so
+    # that after all_gather the combined batch matches the single-process
+    # case. For soft_hist, use the full batch size — the loss does not need
+    # all_gather and benefits from larger per-rank batches.
+    if args.loss in ("wasserstein", "wasserstein_1d"):
+        batch_size = max(1, 4096 // world_size)
+    else:
+        batch_size = 4096
+
     train_dataloader = DelphesDataLoader(
-        train_dataset, batch_size=4096, shuffle=True, sampler=train_sampler
+        train_dataset, batch_size=batch_size, shuffle=True, sampler=train_sampler
     )
     val_dataloader = DelphesDataLoader(
-        val_dataset, batch_size=4096, shuffle=False, sampler=val_sampler
+        val_dataset, batch_size=batch_size, shuffle=False, sampler=val_sampler
     )
 
     # Same initial parameters for DDP
@@ -390,6 +400,11 @@ def main() -> None:
         # can run with find_unused_parameters disabled.
         ddp_kwargs["find_unused_parameters"] = False
         trainee = DDP(trainee, **ddp_kwargs)
+        # For Wasserstein+DDP, use separate RNGs to efficiently sample unit-vectors
+        if args.loss in ("wasserstein", "wasserstein_1d") and _is_dist():
+            torch.manual_seed(args.seed + rank)
+            import numpy as np
+            np.random.seed(args.seed + rank)
 
     n_trainable_scalars = sum(1 for spec in param_cfg.values() if spec["trainable"])
     log(
