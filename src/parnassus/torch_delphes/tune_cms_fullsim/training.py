@@ -13,8 +13,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-import numpy as np
-
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -402,16 +400,17 @@ def fit_card_to_fullsim(
             opt.step()
 
             # --- Langevin Noise Injection to Model Parameters ---
+            # Standard SGLD: θ ← θ − η∇L + √(2ηT)·ε,  ε ~ N(0,I)
+            # where η is the per-parameter effective learning rate.
+            # Using the group lr (already lr * lr_scale) keeps noise
+            # proportional to each parameter's step size, preventing
+            # small parameters (rate_raw ~ 1e-4) from being drowned.
             with torch.no_grad():
                 if temperature > 1e-8:
-                    # Use a dedicated Generator with FIXED seed so all ranks
-                    # add IDENTICAL noise. The global RNG (per-rank seed+rank
-                    # for wasserstein projections) is never touched, so it
-                    # stays correct for the next batch's loss computation.
-                    noise_std = np.sqrt(2 * 0.1 * temperature) 
                     gen = torch.Generator(device=device)
                     gen.manual_seed(42)
                     for group in param_groups:
+                        noise_std = (2.0 * group['lr'] * temperature) ** 0.5
                         for param in group['params']:
                             noise = torch.randn(
                                 param.shape, generator=gen,
