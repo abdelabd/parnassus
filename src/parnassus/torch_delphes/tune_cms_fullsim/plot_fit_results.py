@@ -167,7 +167,7 @@ def plot_loss(history: dict, output_path: Path) -> None:
             alpha=0.6,
             label=f"best (min val) @ step {best_step}",
         )
-    ax.set_xlabel("Adam step")
+    ax.set_xlabel("Epoch")
     ax.set_ylabel("loss")
     ax.set_title("Loss trajectory")
     ax.grid(True, which="both", alpha=0.3)
@@ -243,7 +243,7 @@ def plot_all_param_drift(
                 ax.axhline(truth[key], color=line.get_color(), linestyle="--", alpha=0.4)
         ax.set_title(_abbrev_tensor(base), fontsize=7)
         ax.tick_params(labelsize=6)
-        ax.set_xlabel("Adam step", fontsize=6)
+        ax.set_xlabel("Epoch", fontsize=6)
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=5, ncol=2 if len(keys) > 3 else 1)
     # Hide the trailing empty grid cells.
@@ -308,7 +308,7 @@ def plot_top_param_drift(
         v0 = trajectory[0]
         (line,) = ax.plot(steps, trajectory, label=f"{key}  (Δ/|init|={rel:.2g})")
         ax.axhline(v0, color=line.get_color(), linestyle="--", alpha=0.4)
-    ax.set_xlabel("Adam step")
+    ax.set_xlabel("Epoch")
     ax.set_ylabel("post-transform parameter value")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=8)
