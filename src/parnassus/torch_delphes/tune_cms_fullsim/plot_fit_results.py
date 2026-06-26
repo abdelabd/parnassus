@@ -366,6 +366,38 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
             p.copy_(raw.reshape(p.shape).to(p.dtype))
 
 
+def _load_init_snapshot(
+    param_config: Path | None, history: dict
+) -> tuple[dict[str, float] | None, str]:
+    """Resolve the trainee-init parameter snapshot for the "before fit" curves.
+
+    The honest "before fit" baseline is the perturbed STARTING config the fit was
+    launched from -- NOT the card's hardcoded constructor defaults (which are
+    neither the start nor the truth). The config path is taken from
+    ``param_config`` if given, else from the history metadata (``param_config``,
+    recorded by the tuning CLI). Config ``value`` fields are physical, the same
+    convention :func:`_set_trainee_from_snapshot` inverts, so the returned dict can
+    be fed straight to it.
+
+    Returns ``(snapshot, source)``. ``snapshot`` is ``None`` when no config can be
+    resolved -- the caller then falls back to constructor defaults; ``source`` is a
+    human-readable description for logging.
+    """
+    cfg = param_config
+    if cfg is None:
+        meta_cfg = history.get("metadata", {}).get("param_config")
+        cfg = Path(meta_cfg) if meta_cfg else None
+    if cfg is None:
+        return None, "constructor defaults (no --param-config and none in history metadata)"
+    # Resolve: as given (CWD-relative), else by basename next to the packaged configs.
+    pkg_configs = Path(pc.__file__).resolve().parent / "param_configs"
+    for cand in (cfg, pkg_configs / cfg.name):
+        if cand.exists():
+            snap = {k: spec["value"] for k, spec in pc.load_param_config(cand).items()}
+            return snap, str(cand)
+    return None, f"constructor defaults ({cfg} not found)"
+
+
 def _build_val_dataloader(
     arrays: dict,
     batch_size: int,
@@ -882,6 +914,20 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--param-config",
+        type=Path,
+        default=None,
+        help=(
+            "The perturbed STARTING config the fit was launched from. Its 'value' "
+            "fields define the honest 'trainee, initial' (before-fit) curves -- "
+            "WITHOUT this the init trainee uses the card's hardcoded constructor "
+            "defaults, which are neither your perturbed start nor the truth, so the "
+            "'before' curve is misleading. If omitted, the path recorded in the "
+            "history metadata ('param_config') is used; if that is missing/unfound, "
+            "falls back to constructor defaults with a warning."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help=(
@@ -916,6 +962,11 @@ def main() -> None:
             "to --truth-config instead."
         )
     truth = {k: spec["value"] for k, spec in flat_truth_cfg.items()}
+
+    # Honest "before fit" baseline: the perturbed starting config the fit began
+    # from (NOT the card's constructor defaults). None => fall back to defaults.
+    init_snapshot, init_source = _load_init_snapshot(args.param_config, history)
+    print(f"  trainee 'initial' (before-fit) params: {init_source}")
 
     print(f"Writing figures to {args.output_dir}")
 
@@ -971,6 +1022,10 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+    # Set the init trainee to the perturbed STARTING config (the honest before-fit
+    # baseline). Without this it would keep the card's constructor defaults.
+    if init_snapshot is not None:
+        _set_trainee_from_snapshot(trainee, init_snapshot)
     # The target observables come out of the same batched pass as pred_init (they
     # are read from each batch's target keys), so they are flattened/co-indexed
     # identically to the predictions.
@@ -1074,6 +1129,8 @@ def main() -> None:
         print("\n  --debug: rendering per-module intermediate-output overlays...")
         torch.manual_seed(args.seed)
         trainee_dbg = CMSEnergyFlowDefault(debug=True, learnable=True).to(device)
+        if init_snapshot is not None:
+            _set_trainee_from_snapshot(trainee_dbg, init_snapshot)
         init_outputs = _trainee_intermediate_outputs(trainee_dbg, val_loader)
 
         _set_trainee_from_snapshot(trainee_dbg, best_params)

@@ -82,12 +82,16 @@ Key files in this directory:
 | [generate_pseudodata.py](generate_pseudodata.py) | Step 1 — Pythia8 + frozen target card → pseudodata ROOT file |
 | [tune_cms_fullsim/](tune_cms_fullsim/) | Step 2 — fit the trainee card to the pseudodata |
 | [tune_cms_fullsim/cli.py](tune_cms_fullsim/cli.py) | tuning entry point (`python -m parnassus.torch_delphes.tune_cms_fullsim`) |
-| [tune_cms_fullsim/training.py](tune_cms_fullsim/training.py) | Adam loop, scheduler, early stopping |
+| [tune_cms_fullsim/training.py](tune_cms_fullsim/training.py) | Adam loop, scheduler, early stopping, per-epoch `epoch_callback` hook |
 | [tune_cms_fullsim/loss.py](tune_cms_fullsim/loss.py) | per-event sliced-Wasserstein loss (+ soft-hist diagnostic) |
 | [tune_cms_fullsim/data.py](tune_cms_fullsim/data.py) | ROOT loading, padding, train/val split, observable extraction |
+| [tune_cms_fullsim/runner.py](tune_cms_fullsim/runner.py) | shared data-load + history-write helpers (used by `cli.py` and `optuna_search.py`) |
+| [tune_cms_fullsim/optuna_search.py](tune_cms_fullsim/optuna_search.py) | Step 2b — Optuna hyperparameter search (TPE + median pruning) |
 | [tune_cms_fullsim/plot_fit_results.py](tune_cms_fullsim/plot_fit_results.py) | Step 3 — validation plots |
 | [param_config.py](param_config.py) | YAML loader, raw↔physical transforms, `select_trainable` |
 | [param_configs/](param_configs/) | shipped configs + [make_default_configs.py](param_configs/make_default_configs.py) |
+| [param_configs/optuna_config.yaml](param_configs/optuna_config.yaml) | Optuna search-space config (a **range** per parameter, not a single value) |
+| [run_optuna.sh](run_optuna.sh) | multi-GPU launcher for Step 2b (`torchrun`; one study, DDP fit per trial) |
 | [defaults/](defaults/) | the `CMSEnergyFlowDefault` detector card definition |
 
 ---
@@ -201,6 +205,10 @@ the LR decay is recommended for single-parameter closure fits, where the stochas
 loss otherwise makes the scheduler collapse the LR before convergence. DDP-aware: under SLURM
 `srun` it shards across ranks, and only rank 0 logs, plots, and writes history.
 
+> The converged fit is sensitive to the parameter **initialization**, the global **learning rate**,
+> and the **batch size**. To search those automatically instead of hand-picking them, use the Optuna
+> wrapper in [Step 2b](#step-2b--optuna-hyperparameter-search-optional).
+
 ### Flags
 
 | Flag | Type | Default | Meaning |
@@ -246,6 +254,171 @@ When `--history-path` is set, the written JSON has three top-level keys:
 - `history` — one entry per epoch (`epoch_<step>`) with `step`, `train_loss`, `val_loss`, and a
   `parameters` snapshot (physical, post-transform values keyed `name[i]`).
 - `best_result` — the epoch with the minimum validation loss, including its final parameter values.
+
+---
+
+## Step 2b — Optuna hyperparameter search (optional)
+
+`uv run python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search`
+([tune_cms_fullsim/optuna_search.py](tune_cms_fullsim/optuna_search.py))
+
+The manual Step 2 fit depends strongly on the parameter **initialization**, global **learning rate**,
+and **batch size**. This wraps the *same* Adam fit in an [Optuna](https://optuna.org/) study: each
+trial samples those hyperparameters, runs the fit, and is scored by the fit's **best (minimum)
+validation loss**. A **TPE** (Bayesian) sampler proposes the trials and a **median pruner** stops
+clearly-unpromising ones early via the per-epoch val-loss trajectory (using the `epoch_callback` hook
+in [training.py](tune_cms_fullsim/training.py)). After the study, the best trial's history is copied
+to `--history-path`, so **Step 3 works on it unchanged**.
+
+It runs as **one** Optuna process. With **N GPUs** (launched via `torchrun`, see
+[Running across N GPUs](#running-across-n-gpus--run_optunash)) the trials run **sequentially** and each
+trial's fit is **data-parallel across all N GPUs** (DDP) — so the dataset loads once, there is a single
+sampler, and a single study writer (rank 0). `run_optuna.sh` persists the study to a SQLite file so a
+re-run **resumes / adds more trials** (see [Resume / add more trials](#resume--add-more-trials)). A
+plain `python -m ...optuna_search` (no launcher) runs on one GPU.
+
+Each trial samples: one **init value per learnable scalar** (within its range), one **`lr_scale` per
+parameter group** (resolution / scale / efficiency), the **global lr**, and the **batch size**. It
+writes a self-contained per-trial directory and, after the study, copies the best trial's history out:
+
+```
+<output-base>/round_<n>/materialized_config.yaml   # the concrete {value,trainable,lr_scale} this trial used
+<output-base>/round_<n>/history.json               # {metadata, history, best_result} (same schema as Step 2)
+<output-base>/round_<n>/intermediate_plots/...      # per-epoch observable PDFs
+<output-base>/<history-path basename>               # copy of the BEST trial's history.json
+```
+
+### The `optuna_config.yaml` search space
+
+A **new format** ([param_configs/optuna_config.yaml](param_configs/optuna_config.yaml)), distinct from
+the Step-2 param-config: each parameter gives a **range** (sampled per trial) instead of a single
+`value`. Two top-level sections:
+
+```yaml
+search:
+  n_trials: 50
+  seed: 0                                              # TPE sampler seed (reproducible study)
+  lr: {low: 1.0e-4, high: 1.0e-2, log: true}          # global Adam lr magnitude
+  batch_size: {choices: [512, 1024, 2048, 4096]}      # train/val batch size
+  lr_scale:                                           # per-GROUP; effective lr = global lr * group lr_scale
+    resolution: {low: 0.1, high: 10.0, log: true}
+    scale:      {low: 0.1, high: 10.0, log: true}
+    efficiency: {low: 0.1, high: 10.0, log: true}
+
+parameters:
+  ChargedHadronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}            # sampled init (trainable)
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
+  ECal.resolution_func.barrel_a: {value: 1.0}                                       # {value} => pinned (frozen)
+```
+
+- Each `parameters:` entry is either `{low, high, log}` (**sampled init**, trainable) or `{value}`
+  (**pinned**, frozen). The shipped config makes all 66 scalars tunable.
+- Ranges must respect the same guards as the Step-2 transforms (see
+  [Param-config reference](#param-config-reference)): trainable logit init in `(0.1, 0.9)`, scale in
+  `(0.7, 1.3)`, softplus `> 0`. The loader validates **both endpoints** of every range up front and
+  fails fast with a clear message (a materialized config with an out-of-window init would otherwise
+  break Step 3).
+- The three `lr_scale` groups mirror `default_lr_scale`: `scale` (tanh scales), `efficiency` (sigmoid
+  efficiencies/fractions and `rate_raw`), `resolution` (every other softplus coefficient).
+
+### Flags
+
+| Flag | Type | Default | Meaning |
+|---|---|---|---|
+| `--root-file` | path | **required** | Full-sim pseudodata ROOT file. Loaded **once** and reused across all trials. |
+| `--optuna-config` | path | `param_configs/optuna_config.yaml` | The search-space YAML above. |
+| `--n-trials` | int | `search.n_trials` (50) | Number of trials (overrides the YAML). |
+| `--output-base` | path | `doc/fit_results` | Base dir; each trial writes `<base>/round_<n>/…`. |
+| `--history-path` | path | `doc/fit_results/all_v2.json` | Where the **best** trial's history.json is copied (the file Step 3 reads). |
+| `--n-events` | int | `-1` | Events to load (`-1` = all). |
+| `--n-steps` | int | `200` | Adam steps **per trial**. |
+| `--seed` | int | `0` | Torch RNG seed, fixed across trials so they differ only by the sampled hyperparameters. |
+| `--plot-every` | int | `10` | Per-round intermediate-plot cadence (the final/early-stopped/pruned epoch is always plotted). |
+| `--storage` | str | `None` (in-memory) | Optuna storage URL, e.g. `sqlite:///<dir>/study.db`. Set it to make the study **persistent / resumable** — a re-run with the same storage + `--study-name` adds `--n-trials` more (`run_optuna.sh` sets this). |
+| `--study-name` | str | `tune_cms_fullsim` | Study name; identifies the study within `--storage` on resume. |
+| `--loss`, `--pid-weighting`, `--pid-weight-floor`, `--count-weight`, `--calo-count-weight`, `--count-rate-floor`, `--event-weight` | | same as Step 2 | Forwarded unchanged to every trial's fit. |
+| `--early-stopping-patience`, `--lr-scheduler-patience` | int | `10` / `4` | Per-trial early stopping / LR decay (pass `<=0` to disable). |
+
+### Running across N GPUs — `run_optuna.sh`
+
+[run_optuna.sh](run_optuna.sh) launches **one** Optuna process across N GPUs with **`torchrun`**
+(`torchrun --standalone --nproc-per-node=N`): the N ranks join a single process group, **rank 0 owns
+the study**, and every trial's fit runs **data-parallel (DDP)** across all N GPUs. `torchrun` forks the
+ranks directly (no SLURM job step), so it works on an interactive node even when the allocation permits
+only one `srun` task. Run it **on a node that has N GPUs** (`salloc`/`sbatch`); the script `cd`s to the
+repo root itself:
+
+```bash
+salloc -N1 -C gpu --gpus=4 -t 04:00:00 -A m3246 -q interactive   # (example NERSC allocation)
+./src/parnassus/torch_delphes/run_optuna.sh        # 4 GPUs (default)
+./src/parnassus/torch_delphes/run_optuna.sh 2      # 2 GPUs
+```
+
+(For **multi-node** instead, launch with `srun -n N ... -m ...optuna_search` — `_init_distributed`
+supports both; `run_optuna.sh` uses `torchrun` for the common single-node case.)
+
+The script is a short, plain config block — edit the variables directly. It ships **two presets**: the
+active **pseudodata** block and a commented-out **full CMS sim** block (comment/uncomment to switch):
+
+| Variable | Pseudodata preset | Meaning |
+|---|---|---|
+| `ROOT_FILE` | `…/cms_pseudodata_100k.root` | Input ROOT file (full-sim preset: `train_1000.root`). |
+| `OUTPUT_BASE` | `doc/pseudodata_results` | Holds `round_<n>/` (full-sim preset: `doc/fullsim_results`). |
+| `STUDY_NAME` | `pseudo_100k` | Study name (full-sim preset: `fullsim_100k`). |
+| `N_EVENTS` | `-1` | Events to load (`-1` = all). |
+| `N_STEPS` | `100` | Adam steps per trial. |
+| `N_TRIALS` | `50` | Trials **added per run** (re-run to add more; sequential, each uses all N GPUs). |
+| `LOSS` / `PID_WEIGHTING` | `wasserstein_1d` / `sqrt_fraction` | Forwarded to each fit. |
+| `HISTORY_PATH` | `<OUTPUT_BASE>/all_optuna.json` | Best-trial history copy (feed to Step 3). |
+| `STORAGE` | `sqlite:///<OUTPUT_BASE>/study.db` | Persistent study DB — re-running resumes it (see below). |
+| `PYTHON` | the repo's uv-env python | Interpreter (runs `torch.distributed.run`). |
+
+The launch line is `"$PYTHON" -m torch.distributed.run --standalone --nproc-per-node="$N_GPUS" -m
+...optuna_search ...`. Each rank uses `cuda:LOCAL_RANK` (all N GPUs are visible on the node). The script
+also sets `PYTHONUNBUFFERED=1` (live log) and `OMP_NUM_THREADS` (CPU threads per rank).
+
+### Resume / add more trials
+
+`run_optuna.sh` writes the study to `<OUTPUT_BASE>/study.db` (via `--storage`), so it is **persistent**:
+
+- **Add more trials** — just run `./run_optuna.sh` again. Each run adds `N_TRIALS` more trials to the
+  same study (the TPE sampler keeps the earlier results), and the new `round_<n>/` dirs continue the
+  numbering (e.g. 50, then 50 more → 100 total).
+- **Resume after an interrupt** — re-run `./run_optuna.sh`. It loads the already-finished trials (it
+  does **not** restart at 0) and runs `N_TRIALS` more from there; the single trial that was in flight
+  when it stopped is left as a stale entry and skipped. To land on an exact total, set `N_TRIALS` to
+  the remaining count for that run.
+- **Start fresh** — delete `<OUTPUT_BASE>/study.db` (or change `STUDY_NAME`).
+
+Safe even on GPFS: only **rank 0** writes the study (single writer → no concurrent-write contention).
+The best history is re-copied to `HISTORY_PATH` over the full study after every run.
+
+### GPU memory
+
+- The calorimeter forward is the memory peak and runs in **float64**, so it scales with the **per-rank**
+  `batch_size`: the proven working point is batch **4096** (~11 GB per GPU); batch **8192** needs ~34 GB
+  and OOMs a 40 GB card. That is why the shipped `batch_size` choices stop at 4096.
+- Each rank holds the full dataset on its GPU and processes its `DistributedSampler` shard each epoch.
+  The intermediate plots are **all-gathered across ranks** before rendering, so they use the **full**
+  validation set (not one rank's shard) — same statistics as a single-GPU run.
+- The first per-rank data load is a one-time CPU/IO-bound step; **0% GPU during it is normal** (no
+  forward has run yet). Watch progress in the live `torchrun` output.
+
+### Validate the best trial
+
+Step 3 is unchanged; point it at the copied best history:
+
+```bash
+uv run python -m parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results \
+    --history doc/pseudodata_results/all_optuna.json \
+    --root-file /global/cfs/cdirs/m3246/Runze/MCGen/data/cms_pseudodata_100k.root \
+    --output-dir doc/figures \
+    --truth-config src/parnassus/torch_delphes/param_configs/cms_target_default.yaml --debug
+```
+
+The copied history keeps `metadata.param_config` pointing at the best round's
+`materialized_config.yaml`, so the plotter's "before-fit" baseline is the values that trial actually
+started from (not the card's constructor defaults).
 
 ---
 
@@ -345,6 +518,9 @@ programmatically, see [param_configs/make_default_configs.py](param_configs/make
 | Large pseudodata ROOT (SLURM) | `/global/cfs/cdirs/m3246/Runze/MCGen/data/cms_pseudodata_100k.root` | Step 1 batch (`slurm_scripts/`) |
 | Training history JSON | (set via `--history-path`, e.g. `doc/fit_results/all66_history.json`) | Step 2 |
 | Per-epoch diagnostic PDFs | `doc/figures/intermediate_plots/intermediate_epoch_<step>.pdf` | Step 2 (`--intermediate-plot-dir`) |
+| Optuna per-trial dirs | `<output-base>/round_<n>/{materialized_config.yaml, history.json, intermediate_plots/}` | Step 2b |
+| Optuna best history | `<output-base>/<history-path>` (default `doc/pseudodata_results/all_optuna.json`) | Step 2b |
+| Optuna intermediate plots | `<output-base>/round_<n>/intermediate_plots/intermediate_epoch_<step>.pdf` | Step 2b |
 | Validation PDFs | `doc/figures/*.pdf` | Step 3 (`--output-dir`) |
 
 ---

@@ -21,6 +21,7 @@ dependencies = [
     "joblib",
     "pythia8mc==8.316.0",
     "pot>=0.9.6.post1",
+    "optuna>=4.0",
 ]
 
 [project.scripts]
