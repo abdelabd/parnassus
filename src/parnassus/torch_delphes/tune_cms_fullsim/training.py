@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -69,6 +71,8 @@ def fit_card_to_fullsim(
     loss_name: str = "wasserstein",
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
+    temperature: float = 1e-2,
+    cooling_rate: float = 0.95,
     epoch_callback: Callable[[int, float], bool] | None = None,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
@@ -347,6 +351,9 @@ def fit_card_to_fullsim(
         early_stopping_patience is not None and early_stopping_patience > 0
     )
 
+    if _is_main(rank):
+        print(f"  SLGD initial temperature = {temperature:.3e}, cooling_rate = {cooling_rate:.3f}")
+    
     for step in pbar:
         # Re-enter train mode each step: the validation block below leaves the
         # card in eval(). The current card has no train/eval-dependent layers,
@@ -386,13 +393,35 @@ def fit_card_to_fullsim(
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
             loss = loss_fn(pred_observables, target_observables)
-            if loss_name in ("soft_hist", "wasserstein_1d"):
-                loss = loss + _soft_hist_graph_anchor()
+            # Graph anchor: ensures every trainable parameter is connected
+            # to the autograd graph (with 0.0 * sum(params)) so DDP's
+            # find_unused_parameters=False path never sees a "missing" grad.
+            loss = loss + _soft_hist_graph_anchor()
 
             loss.backward()
             opt.step()
 
+            # --- Langevin Noise Injection to Model Parameters ---
+            with torch.no_grad():
+                if temperature > 1e-8:
+                    # Use a dedicated Generator with FIXED seed so all ranks
+                    # add IDENTICAL noise. The global RNG (per-rank seed+rank
+                    # for wasserstein projections) is never touched, so it
+                    # stays correct for the next batch's loss computation.
+                    noise_std = np.sqrt(2 * 0.1 * temperature) 
+                    gen = torch.Generator(device=device)
+                    gen.manual_seed(42)
+                    for group in param_groups:
+                        for param in group['params']:
+                            noise = torch.randn(
+                                param.shape, generator=gen,
+                                device=param.device, dtype=param.dtype,
+                            ) * noise_std
+                            param.add_(noise)
+                        
             loss_acc += loss.detach()
+
+        temperature *= cooling_rate  
 
         loss_acc /= len(train_dataloader)
         loss_acc = _all_reduce_mean(loss_acc)
