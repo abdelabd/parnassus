@@ -40,6 +40,9 @@ search:
   seed: 0                   # TPE sampler seed (reproducible study)
   lr: {low: 1.0e-4, high: 1.0e-2, log: true}        # global Adam lr magnitude
   batch_size: {choices: [512, 1024, 2048, 4096]}   # train/val batch size
+  # SGLD (Langevin) noise hyperparameters. temperature=0 disables noise entirely.
+  temperature: {low: 1e-8, high: 0.1}               # initial noise temperature
+  cooling_rate: {low: 0.5, high: 0.999, log: true}  # per-epoch multiplicative cooling
   # Per-GROUP lr_scale (the effective Adam lr of a parameter = global lr * its
   # group lr_scale). Groups: resolution (a/b/c softplus coeffs), scale (tanh
   # momentum/calo scales), efficiency (sigmoid efficiencies/fractions + rate_raw).

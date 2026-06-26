@@ -10,7 +10,7 @@
 set -euo pipefail
 
 N_GPUS="${1:-4}"
-PYTHON=/global/cfs/cdirs/m3246/Runze/MCGen/envs/parnassus/bin/python
+PYTHON=/pscratch/sd/a/aelabd/parnassus/parnassus_env/bin/python
 
 # # ===== preset: pseudodata (active) =====
 # ROOT_FILE=/global/cfs/cdirs/m3246/diff_delphes/cms_pseudodata_100k.root
@@ -20,14 +20,14 @@ PYTHON=/global/cfs/cdirs/m3246/Runze/MCGen/envs/parnassus/bin/python
 
 # ===== preset: full CMS sim (uncomment this, comment the block above) =====
 ROOT_FILE=/global/cfs/cdirs/m3246/diff_delphes/train_1000.root
-N_EVENTS=100000
-OUTPUT_BASE=doc/fullsim_results
-STUDY_NAME=fullsim_100k
+N_EVENTS=100_000
+OUTPUT_BASE=doc/figures/sh_fullsim_slgd_optuna
+STUDY_NAME=sh_fullsim_slgd_optuna
 
 # ===== shared knobs =====
 N_STEPS=100
 N_TRIALS=50          # trials ADDED per run (re-run to add 50 more; resumes the study below)
-LOSS=wasserstein_1d  # can be "soft_hist"
+LOSS=soft_hist  # can be "soft_hist"
 PID_WEIGHTING=sqrt_fraction
 OPTUNA_CONFIG=src/parnassus/torch_delphes/param_configs/optuna_config.yaml
 HISTORY_PATH="$OUTPUT_BASE/all_optuna.json"

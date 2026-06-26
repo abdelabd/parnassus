@@ -201,6 +201,11 @@ def load_search_config(path: str | Path) -> tuple[dict, dict]:
     bs = search.get("batch_size", {})
     if "choices" not in bs or not bs["choices"]:
         raise SystemExit(f"{path}: search.batch_size must give a non-empty 'choices' list.")
+    # SGLD noise hyperparameters (optional; default to 0.0 = disabled, backward-compatible).
+    if "temperature" in search:
+        _parse_range("search.temperature", search["temperature"])
+    if "cooling_rate" in search:
+        _parse_range("search.cooling_rate", search["cooling_rate"])
     lr_scale = search.get("lr_scale", {})
     for g in LR_SCALE_GROUPS:
         if g not in lr_scale:
@@ -273,12 +278,12 @@ def _midpoint(key: str, spec: dict) -> float:
 
 def sample_trial(
     trial: optuna.Trial, search: dict, parameters: dict
-) -> tuple[dict[str, dict], float, int, dict[str, float]]:
+) -> tuple[dict[str, dict], float, int, dict[str, float], float, float]:
     """Sample one full hyperparameter point for a trial.
 
     Returns
     -------
-    (flat_cfg, lr, batch_size, group_lr_scale)
+    (flat_cfg, lr, batch_size, group_lr_scale, temperature, cooling_rate)
         ``flat_cfg`` is the materialized ``{key: {value, trainable, lr_scale}}``
         config (the exact format :func:`param_config.load_param_config` returns),
         ready for :func:`param_config.apply_param_config` /
@@ -287,6 +292,14 @@ def sample_trial(
     lr_lo, lr_hi, lr_log = _parse_range("search.lr", search["lr"])
     lr = trial.suggest_float("lr", lr_lo, lr_hi, log=lr_log)
     batch_size = int(trial.suggest_categorical("batch_size", list(search["batch_size"]["choices"])))
+
+    # SGLD noise hyperparameters (optional; default 0.0 = disabled).
+    temp_spec = search.get("temperature", {"low": 0.0, "high": 0.0})
+    temp_lo, temp_hi, _temp_log = _parse_range("search.temperature", temp_spec)
+    temperature = trial.suggest_float("temperature", temp_lo, temp_hi)
+    cool_spec = search.get("cooling_rate", {"low": 0.95, "high": 0.95})
+    cool_lo, cool_hi, cool_log = _parse_range("search.cooling_rate", cool_spec)
+    cooling_rate = trial.suggest_float("cooling_rate", cool_lo, cool_hi, log=cool_log)
 
     group_lr_scale: dict[str, float] = {}
     for g in LR_SCALE_GROUPS:
@@ -308,7 +321,7 @@ def sample_trial(
             "trainable": trainable,
             "lr_scale": group_lr_scale[_group_of(base)],
         }
-    return flat_cfg, lr, batch_size, group_lr_scale
+    return flat_cfg, lr, batch_size, group_lr_scale, temperature, cooling_rate
 
 
 def _dump_flat_config(flat_cfg: dict[str, dict], path: Path) -> None:
@@ -481,6 +494,8 @@ def main() -> None:
         cfg: dict,
         lr: float,
         batch_size: int,
+        temperature: float,
+        cooling_rate: float,
         round_dir: Path,
         trial: optuna.Trial | None,
     ) -> tuple[dict, bool]:
@@ -566,6 +581,8 @@ def main() -> None:
             loss_name=args.loss,
             pid_weighting=args.pid_weighting,
             pid_weight_floor=args.pid_weight_floor,
+            temperature=temperature,
+            cooling_rate=cooling_rate,
             epoch_callback=epoch_callback,
         )
         return history, state["pruned"]
@@ -581,6 +598,8 @@ def main() -> None:
                 break
             _run_fit_collective(
                 payload["cfg"], payload["lr"], payload["batch_size"],
+                payload.get("temperature", 0.0),
+                payload.get("cooling_rate", 0.95),
                 Path(payload["round_dir"]), trial=None,
             )
         _cleanup_distributed()
@@ -590,22 +609,26 @@ def main() -> None:
     args.output_base.mkdir(parents=True, exist_ok=True)
 
     def objective(trial: optuna.Trial) -> float:
-        flat_cfg, lr, batch_size, group_lr_scale = sample_trial(trial, search, parameters)
+        flat_cfg, lr, batch_size, group_lr_scale, temperature, cooling_rate = sample_trial(trial, search, parameters)
         round_dir = args.output_base / f"round_{trial.number}"
         round_dir.mkdir(parents=True, exist_ok=True)
         _dump_flat_config(flat_cfg, round_dir / "materialized_config.yaml")
         log(
             f"[optuna] trial {trial.number}: lr={lr:.3e} batch={batch_size} "
+            f"T={temperature:.3f} cool={cooling_rate:.3f} "
             f"lr_scale={{{', '.join(f'{g}={v:.2g}' for g, v in group_lr_scale.items())}}}"
         )
         # Hand this trial's config to the other ranks before fitting it together.
         if world_size > 1:
             dist.broadcast_object_list(
                 [{"stop": False, "cfg": flat_cfg, "lr": lr,
-                  "batch_size": batch_size, "round_dir": str(round_dir)}],
+                  "batch_size": batch_size, "round_dir": str(round_dir),
+                  "temperature": temperature, "cooling_rate": cooling_rate}],
                 src=0,
             )
-        history, pruned = _run_fit_collective(flat_cfg, lr, batch_size, round_dir, trial)
+        history, pruned = _run_fit_collective(
+            flat_cfg, lr, batch_size, temperature, cooling_rate, round_dir, trial
+        )
 
         val_losses = [v for v in history.get("val_loss", []) if v is not None]
         best_val = min(val_losses) if val_losses else float("inf")
