@@ -348,8 +348,15 @@ def quantile_wasserstein_distance(
     """
     x = pred_values.reshape(-1)
     y = target_values.detach().reshape(-1).to(device=x.device, dtype=x.dtype)
+    # Drop non-finite samples before the quantile: torch.quantile linearly interpolates
+    # the order statistics, so a single -inf (e.g. log(0) from a pt == 0 object) makes an
+    # interpolated quantile evaluate -inf + frac*(finite - (-inf)) = -inf + inf = NaN and
+    # poisons the whole loss. The boolean gather keeps the surviving samples' gradient
+    # (mirrors the isfinite filter used for the pooled scale in _pooled_target_obs_std).
+    x = x[torch.isfinite(x)]
+    y = y[torch.isfinite(y)]
     if x.numel() == 0 or y.numel() == 0:  # nothing to match: graph-connected zero
-        return x.sum() * 0.0
+        return pred_values.sum() * 0.0
     if scale is not None:
         s = scale.to(device=x.device, dtype=x.dtype)
         x = x / s
@@ -1166,6 +1173,8 @@ def _pooled_target_obs_std(
     ).detach()
     flat = target_particles.reshape(-1, target_particles.shape[-1])
     valid = flat[flat[..., -1] != 0]  # drop pid == 0 padding/ghosts
+    # remove any invalid values
+    valid = valid[torch.isfinite(valid).all(dim=-1)]
     scales: dict[str, torch.Tensor] = {}
     for obs in ("log_E", "log_pt", "eta"):
         col = _OBS_COL[obs]
