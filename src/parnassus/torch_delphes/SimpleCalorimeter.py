@@ -389,18 +389,30 @@ class SimpleCalorimeter(nn.Module):
 
         # Compute final tower time: time = time_weighted_sum / weight_sum
         # Set to 0 if weight is too small (matching C++ check: fTowerTimeWeight < 1.0E-09)
-        # Safe-denominator pattern: pre-mask the bad branch so the gradient
-        # of the division does not produce NaN in learnable mode.
+        # Safe-denominator pattern: pre-mask the bad branch so the forward value
+        # of the division stays finite.
         tower_time_weight_safe = torch.where(
             tower_time_weight > 1e-9,
             tower_time_weight,
             torch.ones_like(tower_time_weight),
         )
+        # ``tower_time`` is an E^2-weighted readout time written ONLY to the
+        # ``ColumnMap.T`` output column. The tuning loss fits energy / pt / eta /
+        # counts, never time, so the upstream gradient on the time column is
+        # exactly zero -- yet the division's DivBackward still evaluates
+        # ``-num / den**2 * grad_out``; with ``grad_out == 0`` and a tiny (or
+        # overflowing) ``num / den**2`` that is ``0 * inf == NaN``. Because
+        # ``den = sum E**2`` depends on the learnable energy scales / hadron
+        # fractions, that NaN flows straight back into params like
+        # ``HadronFractions.chad_logit`` and poisons the whole fit (train loss
+        # NaN, while the anchor-free validation loss stays finite). The time
+        # readout is non-differentiable by construction, so detach it: the
+        # forward value is unchanged, but no spurious gradient is ever built.
         tower_time = torch.where(
             tower_time_weight > 1e-9,
             tower_time_weighted / tower_time_weight_safe,
             torch.zeros_like(tower_time_weighted),
-        )
+        ).detach()
 
         # Extract event_idx, eta_bin, and phi_bin from global tower index
         # Global tower index = event_idx * n_towers_per_event + eta_bin * max_phi_bins + phi_bin
