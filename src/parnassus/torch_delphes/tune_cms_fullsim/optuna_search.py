@@ -165,8 +165,8 @@ def _parse_range(name: str, spec: dict) -> tuple[float, float, bool]:
         raise ValueError(f"{name}: range spec must have 'low' and 'high' (got {spec}).")
     low, high = float(spec["low"]), float(spec["high"])
     log = bool(spec.get("log"))
-    if not low < high:
-        raise ValueError(f"{name}: range 'low' ({low}) must be < 'high' ({high}).")
+    if not low <= high:
+        raise ValueError(f"{name}: range 'low' ({low}) must be <= 'high' ({high}).")
     if log and low <= 0:
         raise ValueError(f"{name}: log-scale range needs 'low' > 0 (got {low}).")
     return low, high, log
@@ -311,15 +311,23 @@ def sample_trial(
         base = key.split("[", 1)[0]
         if "value" in spec:
             value = float(spec["value"])
-            trainable = False
+            # Respect explicit trainable / lr_scale keys when present
+            # (allows pinning search-space params while still passing
+            # through a per-param config from e.g. debug_all_params_v2.yaml).
+            trainable = bool(spec.get("trainable", False))
+            lr_scale = spec.get("lr_scale")
         else:
             lo, hi, log = _parse_range(key, spec)
             value = trial.suggest_float(key, lo, hi, log=log)
             trainable = True
+            lr_scale = None
         flat_cfg[key] = {
             "value": value,
             "trainable": trainable,
-            "lr_scale": group_lr_scale[_group_of(base)],
+            "lr_scale": (
+                float(lr_scale) if lr_scale is not None
+                else group_lr_scale[_group_of(base)]
+            ),
         }
     return flat_cfg, lr, batch_size, group_lr_scale, temperature, cooling_rate
 
