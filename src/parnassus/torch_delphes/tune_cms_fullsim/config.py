@@ -32,7 +32,8 @@ TRUTH_BRANCHES: tuple[str, ...] = (
     "truth_eta",
     "truth_phi",
     "truth_class",
-    "truth_pdgid",
+    # "truth_pdgid",
+    "truth_pdgId",
 )
 PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_class")
 

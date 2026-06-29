@@ -79,7 +79,7 @@ def _calo_eta_region_masks(abs_eta: np.ndarray, upper_edges: tuple[float, ...]) 
 def load_cms_flow_root(
     path: Path,
     n_events: int,
-    tree_name: str = "event_tree",
+    tree_name: str = "evt_tree",
     entry_start: int = 0,
 ) -> dict[str, np.ndarray]:
     """Load up to ``n_events`` events from a cms-flow-format ROOT file.
@@ -127,14 +127,14 @@ def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
     """
     rows_list: list[np.ndarray] = []
     key_0 = arrays.keys().__iter__().__next__()
-    if "truth_pdgid" not in arrays:
-        raise KeyError(
-            "truth_pdgid branch is required but missing from the loaded ROOT "
-            "arrays. Regenerate the pseudodata with "
-            "parnassus.torch_delphes.generate_pseudodata (which now writes "
-            "truth_pdgid), or point --root-file at a sample that carries the "
-            "real truth PDG ids."
-        )
+    # if "truth_pdgid" not in arrays:
+    #     raise KeyError(
+    #         "truth_pdgid branch is required but missing from the loaded ROOT "
+    #         "arrays. Regenerate the pseudodata with "
+    #         "parnassus.torch_delphes.generate_pseudodata (which now writes "
+    #         "truth_pdgid), or point --root-file at a sample that carries the "
+    #         "real truth PDG ids."
+    #     )
     for i in range(len(arrays[key_0])):
         pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
@@ -145,7 +145,14 @@ def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
         # Real PDG IDs (K_L0=130, n=2112, K+/-=321, p=2212, ...), carried
         # through unchanged so the ECal/HCal energy-fraction LUT routes each
         # species correctly instead of collapsing to the lossy class buckets.
-        pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
+        if "truth_pdgid" in arrays:
+            pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
+        elif "truth_pdgId" in arrays:
+            pids = np.asarray(arrays["truth_pdgId"][i], dtype=np.int64)
+        else:
+            raise KeyError(
+                "Neither 'truth_pdgid' nor 'truth_pdgId' branch is present in the loaded ROOT arrays."
+            )
         # PDG-aware mass and charge so the energy reconstruction and the
         # B-field track curvature use the correct values per species.
         mass = get_mass_from_pdg_id(pids)
