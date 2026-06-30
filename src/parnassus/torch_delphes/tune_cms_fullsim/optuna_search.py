@@ -127,13 +127,18 @@ def _group_of(base: str) -> str:
     """Return the lr_scale group of a parameter (by its base name).
 
     Mirrors :func:`param_config.default_lr_scale`: ``scale`` (tanh scales),
-    ``efficiency`` (sigmoid efficiencies/fractions and the softplus ``rate_raw``),
-    or ``resolution`` (every other softplus coefficient: a/b/c_*).
+    ``efficiency`` (sigmoid efficiencies/fractions, the softplus ``rate_raw``, and
+    the softplus calo zero-suppression thresholds ``energy_min_raw`` /
+    ``energy_sig_min_raw``), or ``resolution`` (every other softplus coefficient:
+    a/b/c_*).
     """
     kind = pc.param_transform_kind(base)
     if kind == "scale":
         return "scale"
-    if kind == "logit" or base.endswith("rate_raw"):
+    if (
+        kind == "logit"
+        or base.endswith(("rate_raw", "energy_min_raw", "energy_sig_min_raw"))
+    ):
         return "efficiency"
     return "resolution"
 

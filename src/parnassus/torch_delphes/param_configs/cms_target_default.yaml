@@ -262,3 +262,19 @@ HCal.resolution_func.forward_c_S:
   value: 2.7
   trainable: false
   lr_scale: 0.1
+ECal.threshold_module.energy_min_raw:
+  value: 0.5
+  trainable: false
+  lr_scale: 1.0
+ECal.threshold_module.energy_sig_min_raw:
+  value: 2.0
+  trainable: false
+  lr_scale: 1.0
+HCal.threshold_module.energy_min_raw:
+  value: 1.0
+  trainable: false
+  lr_scale: 1.0
+HCal.threshold_module.energy_sig_min_raw:
+  value: 1.0
+  trainable: false
+  lr_scale: 1.0

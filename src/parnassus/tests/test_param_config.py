@@ -38,7 +38,7 @@ def test_dump_load_apply_roundtrip(tmp_path: Path) -> None:
     pc.dump_param_config(src, cfg_path)
 
     flat = pc.load_param_config(cfg_path)
-    assert len(flat) == 66  # one entry per learnable scalar
+    assert len(flat) == 70  # one entry per learnable scalar
 
     dst = _fresh_card()
     # Perturb dst so apply has to actually do something.

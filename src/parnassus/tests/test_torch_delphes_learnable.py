@@ -7,7 +7,7 @@ associated ``nn.Module`` wrappers in
 
 The tests verify:
 
-1. **Parameter inventory**: the learnable card exposes exactly the 66
+1. **Parameter inventory**: the learnable card exposes exactly the 70
    ``nn.Parameter``s promised in the design document, and the legacy card
    exposes zero.
 2. **Numeric defaults**: a freshly constructed learnable card (with no
@@ -114,7 +114,7 @@ def test_legacy_card_has_no_parameters():
 
 
 def test_learnable_card_parameter_count_matches_inventory():
-    """The design doc promises exactly 66 learnable CMS parameters.
+    """The design doc promises exactly 70 learnable CMS parameters.
 
     Breakdown (see docs/review discussion and ``learnable.py``):
 
@@ -126,12 +126,13 @@ def test_learnable_card_parameter_count_matches_inventory():
     - ECal scale:                  3
     - HCal scale:                  2
     - Hadron fractions:            3
+    - Calo thresholds:             4   (ECal + HCal x (energy_min, energy_sig_min))
     ------------------------------------
-    - Total:                      66
+    - Total:                      70
     """
     card = CMSEnergyFlowDefault(debug=False, learnable=True)
     total = sum(p.numel() for p in card.parameters())
-    assert total == 66, f"expected 66 learnable params, got {total}"
+    assert total == 70, f"expected 70 learnable params, got {total}"
 
 
 def test_learnable_parameter_defaults_match_static_formulas():
@@ -282,6 +283,11 @@ def test_gradient_flows_to_all_reachable_parameters():
     detached_fragments = (
         "TrackingEfficiency.eff_logits",   # charged-hadron / electron / muon
         "MuonTrackingEfficiency.rate_raw",
+        # Calo zero-suppression thresholds: the hard cuts are boolean comparisons
+        # (no grad), so they are fit only via the per-region count term, not this
+        # momentum-path loss (see test_count_term_gradient_flows_to_calo_thresholds).
+        "threshold_module.energy_min_raw",
+        "threshold_module.energy_sig_min_raw",
     )
 
     # Every other parameter must have a finite gradient.
@@ -413,6 +419,44 @@ def test_count_term_gradient_flows_to_eff_logits() -> None:
             assert float(g[r]) == 0.0, f"{mod}.eff_logits[{r}] should be empty (zero grad)"
         any_nonzero = any_nonzero or float(g.abs().sum()) > 0
     assert any_nonzero, "no eff_logit received a count-term gradient"
+
+
+def test_count_term_gradient_flows_to_calo_thresholds() -> None:
+    """Backprop through the calo expected-count outputs gives a finite gradient on the
+    learnable zero-suppression thresholds.
+
+    This is the whole point of making the thresholds learnable: the hard cuts are
+    boolean (no gradient), so the only path to ``energy_min_raw`` /
+    ``energy_sig_min_raw`` is the differentiable per-region soft count. The
+    ``energy_min`` (absolute-floor) gradient must be non-positive: raising the floor
+    can only *remove* towers, so d(count)/d(energy_min) <= 0 (and softplus is
+    increasing, so d(count)/d(raw) <= 0). This is the sign that lets the count term
+    lower the floor to cure the multiplicity deficit.
+    """
+    torch.manual_seed(123)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    out = card(_make_batch(n=400, seed=123))
+
+    loss = out["EcalPhotonExpectedCounts"].sum() + out["HcalNeutralHadronExpectedCounts"].sum()
+    loss.backward()
+
+    params = dict(card.named_parameters())
+    emins = [
+        params["ECal.threshold_module.energy_min_raw"].grad,
+        params["HCal.threshold_module.energy_min_raw"].grad,
+    ]
+    esigs = [
+        params["ECal.threshold_module.energy_sig_min_raw"].grad,
+        params["HCal.threshold_module.energy_sig_min_raw"].grad,
+    ]
+    # Every threshold param is reachable from the count loss with a finite gradient.
+    for g in (*emins, *esigs):
+        assert g is not None and torch.isfinite(g).all()
+    # The absolute floors carry the deficit-fixing signal (non-positive, non-trivial).
+    assert all(float(g) <= 1e-9 for g in emins), "energy_min count gradient must be <= 0"
+    assert sum(float(g.abs()) for g in emins) > 0, (
+        "no energy_min threshold received a count-term gradient"
+    )
 
 
 # ---------------------------------------------------------------------------

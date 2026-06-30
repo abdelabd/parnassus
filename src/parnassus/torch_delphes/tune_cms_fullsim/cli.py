@@ -1,6 +1,6 @@
 r"""Tune the learnable CMS TorchDelphes card against CMS full-simulation reco.
 
-This script fits the 66 learnable parameters of
+This script fits the 70 learnable parameters of
 :class:`parnassus.torch_delphes.defaults.CMSEnergyFlowDefault` so that its
 reconstructed observable distributions match a CMS full-simulation sample.
 It is designed to read the ROOT-file format used by the Parnassus paper

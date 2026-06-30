@@ -38,7 +38,9 @@ from parnassus.torch_delphes.learnable import (
     LearnableHadronFractions,
     LearnableHcalCMSResolution,
     make_cms_ecal_scale,
+    make_cms_ecal_threshold,
     make_cms_hcal_scale,
+    make_cms_hcal_threshold,
     make_cms_track_resolution,
 )
 from parnassus.torch_delphes.Merger import Merger
@@ -582,14 +584,17 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         ecal_res: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
         ecal_scale_fn: Callable[[torch.Tensor], torch.Tensor] | None
         learnable_fractions: nn.Module | None
+        ecal_threshold: nn.Module | None
         if self.learnable:
             ecal_res = LearnableEcalCMSResolution()
             ecal_scale_fn = make_cms_ecal_scale()
             learnable_fractions = self.HadronFractions
+            ecal_threshold = make_cms_ecal_threshold()
         else:
             ecal_res = "ecal_cms"
             ecal_scale_fn = None
             learnable_fractions = None
+            ecal_threshold = None
 
         self.ECal = SimpleCalorimeter(
             eta_bins=eta_bins,
@@ -602,6 +607,9 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             smear_tower_center=True,  # Match C++ Delphes: SmearTowerCenter true
             scale_fn=ecal_scale_fn,
             learnable_fractions=learnable_fractions,
+            # Learnable zero-suppression thresholds (None => float fallback /
+            # byte-identical generation). Fit via the count term below.
+            threshold_module=ecal_threshold,
             # Differentiable per-region count term: on exactly in learnable mode,
             # mirroring the efficiency count term (off => generation byte-identical).
             compute_soft_count=self.learnable,
@@ -737,14 +745,17 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         hcal_res: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
         hcal_scale_fn: Callable[[torch.Tensor], torch.Tensor] | None
         learnable_fractions: nn.Module | None
+        hcal_threshold: nn.Module | None
         if self.learnable:
             hcal_res = LearnableHcalCMSResolution()
             hcal_scale_fn = make_cms_hcal_scale()
             learnable_fractions = self.HadronFractions
+            hcal_threshold = make_cms_hcal_threshold()
         else:
             hcal_res = "hcal_cms"
             hcal_scale_fn = None
             learnable_fractions = None
+            hcal_threshold = None
 
         self.HCal = SimpleCalorimeter(
             eta_bins=eta_bins,
@@ -757,5 +768,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             smear_tower_center=True,
             scale_fn=hcal_scale_fn,
             learnable_fractions=learnable_fractions,
+            threshold_module=hcal_threshold,
             compute_soft_count=self.learnable,
         )

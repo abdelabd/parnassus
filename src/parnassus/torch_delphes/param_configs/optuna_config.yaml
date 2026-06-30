@@ -22,7 +22,8 @@
 # The ranges are deliberately BROAD and truth-AGNOSTIC (set by parameter type, not
 # centered on the pseudodata truth). WIDEN/retune them for a real-data fit.
 #
-# All 66 card scalars are tunable here (per the design decision), including
+# Of the 70 card scalars, all are tunable here (per the design decision) EXCEPT the two
+# calo energy_sig_min thresholds (pinned at truth -- see below), including
 # ECal.resolution_func.barrel_a (normally pinned to break the exact ECal
 # barrel/endcap sigma degeneracy) and the dead lepton-eff / muon-rate / k0s /
 # lambda params. Expect barrel_a and the dead params to wander or sit idle.
@@ -133,3 +134,13 @@ parameters:
   HCal.resolution_func.central_c_S: {low: 5.0e-2, high: 5.0, log: true}
   HCal.resolution_func.forward_c_E: {low: 5.0e-3, high: 0.5, log: true}
   HCal.resolution_func.forward_c_S: {low: 5.0e-2, high: 5.0, log: true}
+
+  # ===== Calo zero-suppression thresholds (softplus; >0) =====
+  # energy_min is the absolute GeV floor -> sampled/trainable (the count-driven knob
+  # that fixes the multiplicity deficit). energy_sig_min (the N-sigma floor) is PINNED
+  # at truth: it is degenerate with forward_c_S in the count term and has no shape
+  # leverage, so neither searching its init nor training it is well-posed yet.
+  ECal.threshold_module.energy_min_raw:     {low: 0.1, high: 3.0, log: true}
+  ECal.threshold_module.energy_sig_min_raw: {value: 2.0}
+  HCal.threshold_module.energy_min_raw:     {low: 0.1, high: 3.0, log: true}
+  HCal.threshold_module.energy_sig_min_raw: {value: 1.0}

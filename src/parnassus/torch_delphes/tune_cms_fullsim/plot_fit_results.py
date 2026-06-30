@@ -356,7 +356,13 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
             elif name.endswith((".eff_logits", "_logit")):
                 y = vals.clamp(1e-6, 1.0 - 1e-6)
                 raw = torch.log(y / (1.0 - y))
-            elif name.endswith((".rate_raw", ".a_raw", ".b_raw")) or name.startswith((
+            elif name.endswith((
+                ".rate_raw",
+                ".a_raw",
+                ".b_raw",
+                ".energy_min_raw",
+                ".energy_sig_min_raw",
+            )) or name.startswith((
                 "ECal.resolution_func",
                 "HCal.resolution_func",
             )):

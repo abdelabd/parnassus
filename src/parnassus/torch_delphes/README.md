@@ -312,7 +312,8 @@ parameters:
 ```
 
 - Each `parameters:` entry is either `{low, high, log}` (**sampled init**, trainable) or `{value}`
-  (**pinned**, frozen). The shipped config makes all 66 scalars tunable.
+  (**pinned**, frozen). The shipped config makes 68 of the 70 scalars tunable (the two calo
+  `energy_sig_min` thresholds are pinned at truth).
 - Ranges must respect the same guards as the Step-2 transforms (see
   [Param-config reference](#param-config-reference)): trainable logit init in `(0.1, 0.9)`, scale in
   `(0.7, 1.3)`, softplus `> 0`. The loader validates **both endpoints** of every range up front and

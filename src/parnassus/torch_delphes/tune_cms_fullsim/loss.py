@@ -54,7 +54,7 @@ from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
 # receive the Wasserstein energy-shape gradient), so the balance genuinely matters
 # there -- not only for the Adam-insensitive eff_logits. Overridable per-call via
 # the CLI --count-weight.
-COUNT_WEIGHT = 0.1
+COUNT_WEIGHT = 1.0
 
 # Weight of the CALO-resolution count terms (CALO_COUNT_TERM_KEYS: ecal_photon,
 # hcal_neutral_hadron) -- kept SEPARATE from COUNT_WEIGHT because these terms have a

@@ -55,13 +55,17 @@ class SimpleCalorimeter(nn.Module):
         compute_phi_bins_fn: Callable | None = None,  # Custom phi bin computation function
         scale_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
         learnable_fractions: nn.Module | None = None,
+        threshold_module: nn.Module | None = None,
         disable_significance_cut: bool = False,
         compute_soft_count: bool = False,
         count_tau_rel: float = 0.05,
     ) -> None:
         super().__init__()
 
-        # Store configuration
+        # Store configuration. ``energy_min`` / ``energy_sig_min`` are the
+        # non-learnable float fallback (used in generation); when a learnable
+        # ``threshold_module`` is provided, ``forward`` reads the live (softplus)
+        # threshold tensors from it instead (see ``_effective_thresholds``).
         self.energy_min = energy_min
         self.energy_sig_min = energy_sig_min
         self.is_ecal = is_ecal
@@ -108,6 +112,20 @@ class SimpleCalorimeter(nn.Module):
                 f"learnable_fractions must be an nn.Module or None, got {type(learnable_fractions)}"
             )
 
+        # Optional learnable zero-suppression thresholds. When present, the two
+        # significance cuts read the live softplus thresholds from it; when None,
+        # the float ``energy_min`` / ``energy_sig_min`` above are used (so
+        # non-learnable generation stays byte-identical).
+        self.threshold_module: nn.Module | None
+        if threshold_module is None:
+            self.threshold_module = None
+        elif isinstance(threshold_module, nn.Module):
+            self.threshold_module = threshold_module
+        else:
+            raise ValueError(
+                f"threshold_module must be an nn.Module or None, got {type(threshold_module)}"
+            )
+
         # Store eta bins as tensor
         self.eta_bins = nn.Buffer(torch.tensor(eta_bins, dtype=torch.float64))  # (n_eta_bins,)
 
@@ -142,6 +160,22 @@ class SimpleCalorimeter(nn.Module):
 
         # Optional custom phi bin computation function
         self._custom_compute_phi_bins_fn = compute_phi_bins_fn
+
+    def _effective_thresholds(
+        self, dtype: torch.dtype
+    ) -> tuple[torch.Tensor | float, torch.Tensor | float]:
+        """Return the ``(energy_min, energy_sig_min)`` used by the cuts.
+
+        When a learnable :class:`LearnableCaloThreshold` is attached, returns the
+        live softplus thresholds (carrying gradient to ``*_raw``); otherwise the
+        non-learnable float fallback, so generation stays byte-identical.
+        """
+        if self.threshold_module is not None:
+            return (
+                self.threshold_module.get_energy_min().to(dtype),
+                self.threshold_module.get_energy_sig_min().to(dtype),
+            )
+        return self.energy_min, self.energy_sig_min
 
     def _setup_phi_bins_2d(self, phi_bins: list[list[float]]) -> None:
         """Setup phi bins as a padded 2D tensor for vectorized lookups.
@@ -479,10 +513,16 @@ class SimpleCalorimeter(nn.Module):
         # Recompute sigma with smeared energy - still using bin CENTER
         sigma_after = self.resolution_func(tower_eta_center, tower_energy_smeared)
 
+        # Effective thresholds (learnable tensors or float fallback). Computed once
+        # here so they are in scope for both significance cuts and the soft-count
+        # block below. The hard cuts use them only in boolean comparisons (no
+        # gradient); the soft-count gates carry the d(count)/d(threshold) gradient.
+        energy_min_eff, energy_sig_min_eff = self._effective_thresholds(tower_energy.dtype)
+
         # Apply energy thresholds
         # Tower energy is zeroed if below minimum or below significance threshold
-        below_min = tower_energy_smeared < self.energy_min
-        below_sig = tower_energy_smeared < self.energy_sig_min * sigma_after
+        below_min = tower_energy_smeared < energy_min_eff
+        below_sig = tower_energy_smeared < energy_sig_min_eff * sigma_after
         if self.disable_significance_cut:
             # Diagnostic: drop the sigma-dependent significance cut, keep the
             # absolute-energy floor. Isolates the selection-gradient term.
@@ -636,10 +676,10 @@ class SimpleCalorimeter(nn.Module):
         if self.disable_significance_cut:
             # Diagnostic: drop the sigma-dependent neutral significance factor,
             # keep the absolute-energy floor (matches the tower cut above).
-            significant_neutral = neutral_energy > self.energy_min
+            significant_neutral = neutral_energy > energy_min_eff
         else:
-            significant_neutral = (neutral_energy > self.energy_min) & (
-                neutral_sigma > self.energy_sig_min
+            significant_neutral = (neutral_energy > energy_min_eff) & (
+                neutral_sigma > energy_sig_min_eff
             )
 
         # Case B: Neutral excess is NOT significant but has track energy
@@ -721,10 +761,10 @@ class SimpleCalorimeter(nn.Module):
             # significance ratio, so a zero-energy tower maps to sigmoid(-1/tau) with no
             # division blow-up.
             gate_tower = torch.sigmoid(
-                (e_smeared_d - self.energy_min) / (tau * self.energy_min)
+                (e_smeared_d - energy_min_eff) / (tau * energy_min_eff)
             ) * torch.sigmoid(
-                (e_smeared_d - self.energy_sig_min * sigma_after_c)
-                / (tau * self.energy_sig_min * sigma_after_c)
+                (e_smeared_d - energy_sig_min_eff * sigma_after_c)
+                / (tau * energy_sig_min_eff * sigma_after_c)
             )
             neutral_energy_soft = torch.clamp(
                 gate_tower * e_smeared_d - track_e_d, min=0.0
@@ -735,9 +775,9 @@ class SimpleCalorimeter(nn.Module):
             neutral_sigma_soft = neutral_energy_soft / denom_c
             # Soft neutral-object cut (neutral_sigma is already dimensionless E/sigma).
             gate = torch.sigmoid(
-                (neutral_energy_soft - self.energy_min) / (tau * self.energy_min)
+                (neutral_energy_soft - energy_min_eff) / (tau * energy_min_eff)
             ) * torch.sigmoid(
-                (neutral_sigma_soft - self.energy_sig_min) / (tau * self.energy_sig_min)
+                (neutral_sigma_soft - energy_sig_min_eff) / (tau * energy_sig_min_eff)
             )
             # Straight-through: hard forward value == today's exact count, soft backward.
             gate_st = significant_neutral.to(gate.dtype).detach() + (gate - gate.detach())

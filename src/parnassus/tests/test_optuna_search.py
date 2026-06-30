@@ -45,7 +45,7 @@ def fixture_root() -> Path:
 
 
 def test_shipped_config_parses_and_covers_card():
-    """The shipped optuna_config.yaml parses and exactly covers the 66 card scalars."""
+    """The shipped optuna_config.yaml parses and exactly covers the 70 card scalars."""
     search, parameters = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)
     assert {"lr", "batch_size", "lr_scale"} <= set(search)
     for g in osearch.LR_SCALE_GROUPS:
@@ -56,7 +56,7 @@ def test_shipped_config_parses_and_covers_card():
     for name, p in card.named_parameters():
         card_keys |= set(pc._scalar_keys(name, p))
     assert set(parameters) == card_keys
-    assert len(parameters) == 66
+    assert len(parameters) == 70
 
 
 def test_group_classification():
@@ -70,6 +70,8 @@ def test_group_classification():
         "ChargedHadronTrackingEfficiency.eff_logits": "efficiency",
         "HadronFractions.chad_logit": "efficiency",
         "MuonTrackingEfficiency.rate_raw": "efficiency",
+        "ECal.threshold_module.energy_min_raw": "efficiency",
+        "HCal.threshold_module.energy_sig_min_raw": "efficiency",
     }
     for base, expected in cases.items():
         assert osearch._group_of(base) == expected, base
@@ -124,7 +126,10 @@ def test_sample_trial_produces_valid_config(tmp_path: Path):
     def objective(trial: optuna.Trial) -> float:
         flat_cfg, lr, batch_size, group_lr_scale = osearch.sample_trial(trial, search, parameters)
         assert set(flat_cfg) == set(parameters)
-        assert all(spec["trainable"] for spec in flat_cfg.values())  # all 66 tunable
+        # A param is trainable iff its search spec is a range (not a {value: ...} pin,
+        # e.g. the calo energy_sig_min thresholds, which are pinned at truth).
+        for key, spec in flat_cfg.items():
+            assert spec["trainable"] == ("value" not in parameters[key]), key
         assert batch_size in search["batch_size"]["choices"]
         assert set(group_lr_scale) == set(osearch.LR_SCALE_GROUPS)
 
@@ -233,7 +238,7 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
         plots = list((rd / "intermediate_plots").glob("*.pdf"))
         assert plots, f"no intermediate plots in {rd}"
         # The materialized config is a normal, loadable param config.
-        assert len(pc.load_param_config(rd / "materialized_config.yaml")) == 66
+        assert len(pc.load_param_config(rd / "materialized_config.yaml")) == 70
 
     # Canonical best history exists and is accepted by the plot pipeline.
     assert history_path.exists()

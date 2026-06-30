@@ -19,9 +19,9 @@ PYTHON=/global/cfs/cdirs/m3246/Runze/MCGen/envs/parnassus/bin/python
 # STUDY_NAME=pseudo_100k
 
 # ===== preset: full CMS sim (uncomment this, comment the block above) =====
-ROOT_FILE=/global/cfs/cdirs/m3246/Runze/MCGen/data/cms_nopileup_sim.root
+ROOT_FILE=/global/cfs/cdirs/m3246/Runze/MCGen/data/cms_nopileup_sim_pt2500to3000.root
 N_EVENTS=100000
-OUTPUT_BASE=doc/fullsim_results_nopu
+OUTPUT_BASE=doc/figure_fullsim_nopu_25003000
 STUDY_NAME=nopu_fullsim_100k
 
 # ===== shared knobs =====

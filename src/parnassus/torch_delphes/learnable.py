@@ -827,6 +827,60 @@ def make_cms_hcal_scale() -> LearnableCaloScale:
 
 
 # =============================================================================
+# Calorimeter zero-suppression thresholds (the "how small a tower survives" knob)
+# =============================================================================
+
+
+class LearnableCaloThreshold(nn.Module):
+    """Learnable zero-suppression thresholds for a calorimeter.
+
+    Holds the two scalar thresholds used by the
+    :class:`~parnassus.torch_delphes.SimpleCalorimeter.SimpleCalorimeter` cuts:
+
+    - ``energy_min``: the absolute energy floor (GeV) -- a tower (or neutral
+      excess) below it is dropped.
+    - ``energy_sig_min``: the N-sigma significance floor -- a tower is dropped
+      unless its measured energy exceeds ``energy_sig_min * sigma``.
+
+    Both are stored as raw parameters exposed through ``F.softplus`` to stay
+    strictly positive (mirroring the resolution coefficients). One scalar pair
+    per calorimeter, matching the Delphes CMS card (a single ``EnergyMin`` /
+    ``EnergySignificanceMin`` per calorimeter).
+
+    The hard significance cuts in ``SimpleCalorimeter.forward`` are boolean
+    comparisons, so these parameters carry **no** gradient through the
+    shape/selection path. They are fit purely through the differentiable
+    per-region expected-object-count term (``compute_soft_count``), exactly as
+    the tracking-efficiency logits are fit through their count term.
+    """
+
+    def __init__(self, energy_min: float = 0.5, energy_sig_min: float = 2.0) -> None:
+        super().__init__()
+        self.energy_min_raw = nn.Parameter(
+            _softplus_inv(torch.tensor(energy_min, dtype=torch.float64))
+        )
+        self.energy_sig_min_raw = nn.Parameter(
+            _softplus_inv(torch.tensor(energy_sig_min, dtype=torch.float64))
+        )
+
+    def get_energy_min(self) -> torch.Tensor:
+        return F.softplus(self.energy_min_raw)
+
+    def get_energy_sig_min(self) -> torch.Tensor:
+        return F.softplus(self.energy_sig_min_raw)
+
+
+def make_cms_ecal_threshold() -> LearnableCaloThreshold:
+    """Build the default CMS ECal thresholds (``energy_min=0.5``, ``energy_sig_min=2.0``)."""
+    return LearnableCaloThreshold(energy_min=0.5, energy_sig_min=2.0)
+
+
+def make_cms_hcal_threshold() -> LearnableCaloThreshold:
+    """Build the default CMS HCal thresholds (``energy_min=1.0``, ``energy_sig_min=1.0``)."""
+    return LearnableCaloThreshold(energy_min=1.0, energy_sig_min=1.0)
+
+
+# =============================================================================
 # Hadronic energy fractions (the "pion / kaon leaves different amounts" knob)
 # =============================================================================
 

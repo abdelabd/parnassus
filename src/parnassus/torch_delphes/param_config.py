@@ -83,8 +83,11 @@ def param_transform_kind(name: str) -> str:
         return "scale"
     if name.endswith((".eff_logits", "_logit")):
         return "logit"
-    if name.endswith((".rate_raw", ".a_raw", ".b_raw")) or name.startswith(
-        ("ECal.resolution_func", "HCal.resolution_func")
+    if (
+        name.endswith(
+            (".rate_raw", ".a_raw", ".b_raw", ".energy_min_raw", ".energy_sig_min_raw")
+        )
+        or name.startswith(("ECal.resolution_func", "HCal.resolution_func"))
     ):
         return "softplus"
     return "identity"
@@ -167,6 +170,8 @@ def default_lr_scale(name: str) -> float:
         return 1.0
     if name.endswith(("eff_logits", "rate_raw")):
         return 1.0
+    if name.endswith(("energy_min_raw", "energy_sig_min_raw")):
+        return 1.0  # calo zero-suppression thresholds: count-driven, like eff_logits
     if "HadronFractions" in name:
         return 1.0
     return 0.1  # resolution: a_raw, b_raw, ECal/HCal resolution_func.*

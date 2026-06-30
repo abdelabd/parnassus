@@ -409,7 +409,7 @@ def main() -> None:
     particles = make_synthetic_particles(n=1500, seed=1)
 
     # Only train the charged-hadron scale parameters for a focused demo
-    # (the full 66-parameter loop works too; this isolates the signal).
+    # (the full 70-parameter loop works too; this isolates the signal).
     trainee_chad_res: LearnableMomentumResolution = (
         trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr,assignment]
     )
