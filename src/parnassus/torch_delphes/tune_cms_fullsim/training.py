@@ -179,7 +179,11 @@ def fit_card_to_fullsim(
     def loss_fn(
         pred: dict[str, torch.Tensor],
         target: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
+        want_breakdown: bool = False,
+    ):
+        # With want_breakdown=True the loss returns (scalar, list[LossComponent]) for
+        # the per-epoch component print; otherwise it returns the bare scalar exactly
+        # as before (val and any other caller).
         return base_loss_fn(
             pred,
             target,
@@ -189,6 +193,7 @@ def fit_card_to_fullsim(
             event_weight=event_weight,
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
+            return_breakdown=want_breakdown,
         )
 
     opt = torch.optim.Adam(param_groups)
@@ -361,6 +366,14 @@ def fit_card_to_fullsim(
         loss_acc = torch.zeros(
             (), dtype=torch.float64, device=device
         )
+        # Per-epoch labeled loss-component breakdown: sum each component's raw
+        # (pre-weight) and weighted (post-weight) value over the epoch's train
+        # batches, keyed by (category, label); divided by the batch count below.
+        # Absent terms (a rare pid missing from a batch) contribute 0, so the grand
+        # total of the means reconciles with the per-epoch mean train loss.
+        bd_raw: dict[tuple[str, str], float] = {}
+        bd_wtd: dict[tuple[str, str], float] = {}
+        bd_w: dict[tuple[str, str], float] = {}  # last-seen configured weight (fallback)
         for batch in train_dataloader:
 
             opt.zero_grad()
@@ -385,7 +398,9 @@ def fit_card_to_fullsim(
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-            loss = loss_fn(pred_observables, target_observables)
+            loss, breakdown = loss_fn(
+                pred_observables, target_observables, want_breakdown=True
+            )
             if loss_name in ("soft_hist", "wasserstein_1d"):
                 loss = loss + _soft_hist_graph_anchor()
 
@@ -393,6 +408,13 @@ def fit_card_to_fullsim(
             opt.step()
 
             loss_acc += loss.detach()
+            # Accumulate the labeled component breakdown (the graph anchor above adds
+            # 0.0 and is intentionally not a component, so the totals still reconcile).
+            for c in breakdown:
+                key = (c.category, c.label)
+                bd_raw[key] = bd_raw.get(key, 0.0) + c.raw
+                bd_wtd[key] = bd_wtd.get(key, 0.0) + c.weighted
+                bd_w[key] = c.weight
 
         loss_acc /= len(train_dataloader)
         loss_acc = _all_reduce_mean(loss_acc)
@@ -408,6 +430,43 @@ def fit_card_to_fullsim(
             pbar.set_postfix(loss=f"{print_loss:.4e}", refresh=False)
         if _is_main(rank) and log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
             tqdm.write(f"  step {step:3d}/{n_steps}  loss = {print_loss:.4e}")
+            # Labeled per-component breakdown (mean over the epoch's train batches).
+            # raw = before weight; weight = effective mean_weighted/mean_raw (exact for
+            # the constant event/count weights, population-weighted-effective for the
+            # per-batch-varying pid weights); weighted = after weight. The grand total
+            # of the weighted means reconciles with the mean train loss above.
+            n_b = len(train_dataloader)
+            tqdm.write(
+                f"  step {step:3d}/{n_steps}  LOSS BREAKDOWN "
+                f"(raw=pre-weight, weighted=post-weight; mean over {n_b} batches)"
+            )
+            grand = 0.0
+            for cat in ("pid_shape", "event", "count"):
+                keys = sorted(k for k in bd_wtd if k[0] == cat)
+                if not keys:
+                    continue
+                tqdm.write(f"    [{cat}]")
+                sub = 0.0
+                for k in keys:
+                    mraw = bd_raw[k] / n_b
+                    mwtd = bd_wtd[k] / n_b
+                    # Effective weight = mean_weighted / mean_raw (exact for the
+                    # constant event/count weights, population-weighted-effective for
+                    # the per-batch pid weights). When the term is identically zero
+                    # this epoch (mraw == 0, since every shape/count metric is >= 0),
+                    # fall back to the configured weight (which multiplied a zero).
+                    eff_w = (mwtd / mraw) if mraw != 0 else bd_w[k]
+                    sub += mwtd
+                    tqdm.write(
+                        f"      {k[1]:<22} raw={mraw:.4e}  weight={eff_w:.3g}  "
+                        f"weighted={mwtd:.4e}"
+                    )
+                grand += sub
+                tqdm.write(f"      {'subtotal':<22} weighted={sub:.4e}")
+            tqdm.write(
+                f"    GRAND TOTAL weighted={grand:.4e}  "
+                f"(mean train loss={print_loss:.4e})"
+            )
 
         # Per-epoch intermediate plots: collect this rank's validation-shard
         # observables so we can render below. Under DDP every rank collects its
