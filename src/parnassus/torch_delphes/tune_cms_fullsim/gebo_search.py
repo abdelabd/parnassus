@@ -683,23 +683,26 @@ def run_gebo(
     if state_path is not None and state_path.exists():
         ckpt = torch.load(state_path, map_location="cpu", weights_only=True)
         n_done = ckpt.get("iteration", 0)
-        n_iterations += n_done # Add the number of already-done iterations to the total requested
-        
-        train_X = ckpt["train_X"].to(dtype=torch.float64)
-        train_Y = ckpt["train_Y"].to(dtype=torch.float64)
-        history = ckpt.get("history", [])
-        start_iteration = n_done + 1
-        resumed = True
-        if verbose:
-            print(
-                f"[gebo] RESUMING from {state_path}: "
-                f"{train_X.shape[0]} points, {n_done}/{n_iterations} iterations done"
-            )
-        # Re-derive prev_candidate from the last BO point.
-        if train_X.shape[0] > n_initial:
-            prev_candidate = train_X[-1].clone()
-        else:
-            prev_candidate = None
+        # Only resume if the checkpoint has actual training data (not just the
+        # initial metadata seed written by main()).
+        has_data = "train_X" in ckpt and n_done > 0
+        if has_data:
+            n_iterations += n_done
+            train_X = ckpt["train_X"].to(dtype=torch.float64)
+            train_Y = ckpt["train_Y"].to(dtype=torch.float64)
+            history = ckpt.get("history", [])
+            start_iteration = n_done + 1
+            resumed = True
+            if verbose:
+                print(
+                    f"[gebo] RESUMING from {state_path}: "
+                    f"{train_X.shape[0]} points, {n_done}/{n_iterations} iterations done"
+                )
+            # Re-derive prev_candidate from the last BO point.
+            if train_X.shape[0] > n_initial:
+                prev_candidate = train_X[-1].clone()
+            else:
+                prev_candidate = None
 
 
     if not resumed:
@@ -938,13 +941,20 @@ def run_gebo(
 
         # --- save checkpoint after every iteration ---------------------------
         if state_path is not None:
-            torch.save({
+            ckpt_data = {
                 "train_X": train_X.cpu(),
                 "train_Y": train_Y.cpu(),
                 "history": history,
                 "iteration": iteration,
                 "n_initial": n_initial,
-            }, state_path)
+            }
+            # Preserve metadata (args, comet_key) from any existing state so
+            # resume comparison and Comet reconnection keep working.
+            if state_path.exists():
+                old = torch.load(state_path, map_location="cpu", weights_only=True)
+                ckpt_data["args"] = old.get("args", {})
+                ckpt_data["comet_key"] = old.get("comet_key")
+            torch.save(ckpt_data, state_path)
 
     return {
         "train_X": train_X,       # (n_total, dim)
@@ -954,6 +964,21 @@ def run_gebo(
         "best_params": train_X[best_idx],
         "history": history,
     }
+
+
+def _serializable_args(args: argparse.Namespace) -> dict:
+    """Convert ``vars(args)`` to a plain dict safe for ``torch.save``.
+
+    ``Path`` objects are converted to strings so ``torch.load(weights_only=True)``
+    can deserialize them on any platform.
+    """
+    out: dict = {}
+    for k, v in vars(args).items():
+        if isinstance(v, Path):
+            out[k] = str(v)
+        else:
+            out[k] = v
+    return out
 
 
 # =============================================================================
@@ -1057,18 +1082,73 @@ def main() -> None:
 
     # --- Comet setup ---------------------------------------------------------
     comet_exp = None
+    comet_key: str | None = None
     if not args.comet_disabled and _HAS_COMET and os.environ.get("COMET_API_KEY"):
         comet_exp = comet_ml.Experiment(
             api_key=os.environ["COMET_API_KEY"],
             project_name="DiffDelphes",
             workspace=os.environ.get("COMET_WORKSPACE", ""),
         )
+        comet_key = comet_exp.get_key()
         comet_exp.log_parameters(vars(args))
         print(f"[gebo] Comet experiment: {comet_exp.url}")
     elif args.comet_disabled:
         print("[gebo] Comet logging disabled via --comet-disabled.")
     else:
         print("[gebo] Comet logging disabled (no API key or comet_ml not installed).")
+
+    # --- state / resume logic ------------------------------------------------
+    state_path = args.output_dir / "gebo_state.pt"
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if state_path.exists():
+        # Resume: load original args, compare, and reuse the Comet experiment.
+        old_state = torch.load(state_path, map_location="cpu", weights_only=True)
+        old_args = old_state.get("args", {})
+
+        # Build a set of keys that differ between old and new runs (exclude
+        # output_dir since it's often the same, and n_iterations which gets
+        # auto-incremented on resume).
+        _skip_compare = {"output_dir", "n_iterations", "comet_disabled",
+                         "machine_debug"}
+        diffs: list[str] = []
+        new_args = vars(args)
+        for k in sorted(set(list(old_args) + list(new_args))):
+            if k in _skip_compare:
+                continue
+            ov = old_args.get(k)
+            nv = new_args.get(k)
+            if str(ov) != str(nv):
+                diffs.append(f"  {k}: {ov!r} → {nv!r}")
+
+        if diffs:
+            print("[gebo] ⚠ hyperparameter changes since original run:")
+            for d in diffs:
+                print(d)
+        else:
+            print("[gebo] resume: all hyperparameters match original run")
+
+        # Reuse the original Comet experiment key so metrics stay in one
+        # continuous experiment across resumes.
+        saved_comet_key = old_state.get("comet_key")
+        if saved_comet_key and _HAS_COMET and os.environ.get("COMET_API_KEY"):
+            if comet_exp is not None:
+                comet_exp.end()  # discard the new experiment we just created
+            comet_exp = comet_ml.ExistingExperiment(
+                api_key=os.environ["COMET_API_KEY"],
+                previous_experiment=saved_comet_key,
+            )
+            comet_key = saved_comet_key
+            print(f"[gebo] reconnected to Comet experiment: {comet_exp.url}")
+    else:
+        # Fresh run: seed the state file with args + comet key so the
+        # resume path has something to compare against.
+        print("[gebo] no checkpoint yet — starting fresh")
+        torch.save({
+            "args": _serializable_args(args),
+            "comet_key": comet_key,
+            "iteration": 0,
+        }, state_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[gebo] device = {device}")
@@ -1130,18 +1210,14 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
 
     machine_debug_path = args.output_dir / "gebo_debug.yaml" if args.machine_debug else None
-    state_path = args.output_dir / "gebo_state.pt"  # always save/load
-
     if machine_debug_path is not None:
-        is_resuming = state_path.exists()
+        is_resuming = state_path.exists() and torch.load(
+            state_path, map_location="cpu", weights_only=True
+        ).get("iteration", 0) > 0
         if not is_resuming:
             machine_debug_path.write_text("")  # fresh run: truncate
         print(f"[gebo] machine-debug YAML -> {machine_debug_path}" +
               (" (appending to existing)" if is_resuming else ""))
-    if state_path.exists():
-        print(f"[gebo] found checkpoint; will resume from {state_path}")
-    else:
-        print(f"[gebo] no checkpoint yet — starting fresh")
 
     result = run_gebo(
         objective=objective,
