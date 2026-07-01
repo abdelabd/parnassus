@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 
 import gpytorch
+import numpy as np
 import torch
 import yaml
 from botorch.acquisition import (
@@ -635,6 +636,9 @@ def run_gebo(
     comet_exp: "comet_ml.Experiment | None" = None,
     machine_debug_path: Path | None = None,
     state_path: Path | None = None,
+    tr_schedule: str = "cosine",
+    tr_radius_min_frac: float = 0.01,
+    tr_t0: int | None = None,
 ) -> dict:
     """Run the gradient-enhanced Bayesian optimization loop.
 
@@ -752,18 +756,28 @@ def run_gebo(
     train_X = train_X.to(dtype=torch.float64)
     train_Y = train_Y.to(device=device, dtype=torch.float64)
 
-    # --- trust region (TuRBO-style) -----------------------------------------
+    # --- trust region -------------------------------------------------------
     # The trust region constrains how far the acquisition optimizer can stray
-    # from the current best point, acting as a "learning rate" for BO.  It
-    # starts wide (covering the full space) and shrinks when the GP fails to
-    # find improvements, forcing smoother parameter trajectories and preventing
-    # the jagged jumps the user sees in param_drift_all.pdf.
+    # from the current best point, acting as a "learning rate" for BO.
+    #
+    # Two schedules:
+    #   "cosine"   — cosine annealing WITH warm restarts (PyTorch-style).
+    #                Each cycle: radius decays init→min over T_cur iterations,
+    #                then resets to init.  T_cur doubles after each restart.
+    #                Periodically forces re-exploration to escape local minima.
+    #   "adaptive" — TuRBO-style: radius doubles on 3 consecutive improvements,
+    #                halves on 3 consecutive failures.
+    #
+    # The initial radius spans the full search space.
     tr_radius_init = 0.5 * (bounds[:, 1] - bounds[:, 0]).norm().item()
+    tr_radius_min = tr_radius_min_frac * tr_radius_init
     tr_radius = tr_radius_init
-    tr_radius_min = 0.01 * tr_radius_init
     tr_success_count = 0
     tr_failure_count = 0
     tr_center = train_X[best_idx].clone()  # best point in raw space
+    # Warm-restart state (cosine schedule).
+    tr_cycle_len = tr_t0 if tr_t0 is not None else max(n_iterations // 4, 5)
+    tr_step_in_cycle = 0
 
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
@@ -902,29 +916,46 @@ def run_gebo(
         best_idx = train_Y[:, 0].argmin().item()
         best_loss = float(train_Y[best_idx, 0])
 
-        # --- trust region update (TuRBO-style) ------------------------------
-        # If we found a new best, expand the region; otherwise shrink it.
-        # Uses a simple success/failure counter: 3 consecutive successes →
-        # double radius; 3 consecutive failures → halve radius.
-        old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
-        improved = best_loss < old_best_loss - 1e-8
-        if improved:
-            tr_center = train_X[best_idx].clone()
-            tr_success_count += 1
-            tr_failure_count = 0
-            if tr_success_count >= 3 and tr_radius < tr_radius_init:
-                tr_radius = min(tr_radius * 2.0, tr_radius_init)
-                tr_success_count = 0
+        # --- trust region update -------------------------------------------
+        tr_center = train_X[best_idx].clone()  # always follow the best point
+        if tr_schedule == "cosine":
+            # Cosine annealing with warm restarts (like PyTorch
+            # CosineAnnealingWarmRestarts).  Each cycle decays the radius
+            # init→min, then resets to init with a longer period.
+            tr_step_in_cycle += 1
+            if tr_step_in_cycle >= tr_cycle_len:
+                # Restart: reset to init radius, double the cycle length.
+                tr_step_in_cycle = 0
+                tr_cycle_len *= 2
                 if verbose:
-                    print(f"[gebo]         trust region expanded → radius={tr_radius:.2f}")
-        else:
-            tr_success_count = 0
-            tr_failure_count += 1
-            if tr_failure_count >= 3 and tr_radius > tr_radius_min:
-                tr_radius = max(tr_radius / 2.0, tr_radius_min)
+                    print(
+                        f"[gebo]         cosine restart → "
+                        f"radius reset to {tr_radius_init:.1f}, "
+                        f"next cycle={tr_cycle_len} iters"
+                    )
+            progress = tr_step_in_cycle / max(tr_cycle_len, 1)
+            tr_radius = tr_radius_min + 0.5 * (tr_radius_init - tr_radius_min) * (
+                1.0 + np.cos(np.pi * progress)
+            )
+        elif tr_schedule == "adaptive":
+            old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
+            improved = best_loss < old_best_loss - 1e-8
+            if improved:
+                tr_success_count += 1
                 tr_failure_count = 0
-                if verbose:
-                    print(f"[gebo]         trust region shrunk  → radius={tr_radius:.2f}")
+                if tr_success_count >= 3 and tr_radius < tr_radius_init:
+                    tr_radius = min(tr_radius * 2.0, tr_radius_init)
+                    tr_success_count = 0
+                    if verbose:
+                        print(f"[gebo]         trust region expanded → radius={tr_radius:.2f}")
+            else:
+                tr_success_count = 0
+                tr_failure_count += 1
+                if tr_failure_count >= 3 and tr_radius > tr_radius_min:
+                    tr_radius = max(tr_radius / 2.0, tr_radius_min)
+                    tr_failure_count = 0
+                    if verbose:
+                        print(f"[gebo]         trust region shrunk  → radius={tr_radius:.2f}")
 
         # --- diagnostics: candidate distance from previous -------------------
         cand_dist = None
@@ -1125,6 +1156,28 @@ def main() -> None:
         default=False,
         help="Write per-iteration diagnostic YAML to --output-dir/gebo_debug.yaml.",
     )
+    parser.add_argument(
+        "--tr-schedule",
+        type=str,
+        default="cosine",
+        choices=["cosine", "adaptive"],
+        help="Trust region schedule: 'cosine' decays smoothly (default), "
+             "'adaptive' expands/shrinks based on success/failure.",
+    )
+    parser.add_argument(
+        "--tr-radius-min-frac",
+        type=float,
+        default=0.01,
+        help="Minimum trust region radius as a fraction of the initial radius "
+             "(default 0.01).",
+    )
+    parser.add_argument(
+        "--tr-t0",
+        type=int,
+        default=None,
+        help="Initial cosine cycle length in iterations (default: n_iterations // 4). "
+             "Each restart doubles the period.",
+    )
     args = parser.parse_args()
 
     # --- Comet setup ---------------------------------------------------------
@@ -1278,6 +1331,9 @@ def main() -> None:
         comet_exp=comet_exp,
         machine_debug_path=machine_debug_path,
         state_path=state_path,
+        tr_schedule=args.tr_schedule,
+        tr_radius_min_frac=args.tr_radius_min_frac,
+        tr_t0=args.tr_t0,
     )
 
     # --- save results --------------------------------------------------------
