@@ -771,13 +771,17 @@ def run_gebo(
     # The initial radius spans the full search space.
     tr_radius_init = 0.5 * (bounds[:, 1] - bounds[:, 0]).norm().item()
     tr_radius_min = tr_radius_min_frac * tr_radius_init
-    tr_radius = tr_radius_init
-    tr_success_count = 0
-    tr_failure_count = 0
+    # Per-dimension radii (scalar for cosine, (d,) for adaptive).
+    tr_radius = torch.full((dim,), tr_radius_init, dtype=torch.float64)
+    # Per-dimension success/failure counters (adaptive schedule only).
+    tr_success_count = torch.zeros(dim, dtype=torch.int32)
+    tr_failure_count = torch.zeros(dim, dtype=torch.int32)
     tr_center = train_X[best_idx].clone()  # best point in raw space
     # Warm-restart state (cosine schedule).
     tr_cycle_len = tr_t0 if tr_t0 is not None else max(n_iterations // 4, 5)
     tr_step_in_cycle = 0
+    # Per-dimension bound widths for normalising movement (adaptive schedule).
+    _bound_widths = (bounds[:, 1] - bounds[:, 0]).clamp(min=1e-8)
 
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
@@ -879,8 +883,9 @@ def run_gebo(
         #     the current best point (in standardized space) ------------------
         tr_center_stdz = ((tr_center.to(device=device, dtype=dtype) - X_mean.squeeze(0))
                           / X_std.squeeze(0))
-        tr_lower = torch.clamp(tr_center_stdz - tr_radius, min=bounds_stdz[:, 0])
-        tr_upper = torch.clamp(tr_center_stdz + tr_radius, max=bounds_stdz[:, 1])
+        tr_radius_dev = tr_radius.to(device=device, dtype=dtype)
+        tr_lower = torch.clamp(tr_center_stdz - tr_radius_dev, min=bounds_stdz[:, 0])
+        tr_upper = torch.clamp(tr_center_stdz + tr_radius_dev, max=bounds_stdz[:, 1])
         tr_bounds = torch.stack([tr_lower, tr_upper], dim=-1)  # (d, 2)
 
         # --- optimize acquisition in standardized space (trust-region bounded)
@@ -919,12 +924,10 @@ def run_gebo(
         # --- trust region update -------------------------------------------
         tr_center = train_X[best_idx].clone()  # always follow the best point
         if tr_schedule == "cosine":
-            # Cosine annealing with warm restarts (like PyTorch
-            # CosineAnnealingWarmRestarts).  Each cycle decays the radius
-            # init→min, then resets to init with a longer period.
+            # Cosine annealing with warm restarts: scalar radius broadcast to
+            # all dimensions (identical constraint per dimension).
             tr_step_in_cycle += 1
             if tr_step_in_cycle >= tr_cycle_len:
-                # Restart: reset to init radius, double the cycle length.
                 tr_step_in_cycle = 0
                 tr_cycle_len *= 2
                 if verbose:
@@ -934,28 +937,43 @@ def run_gebo(
                         f"next cycle={tr_cycle_len} iters"
                     )
             progress = tr_step_in_cycle / max(tr_cycle_len, 1)
-            tr_radius = tr_radius_min + 0.5 * (tr_radius_init - tr_radius_min) * (
+            r = tr_radius_min + 0.5 * (tr_radius_init - tr_radius_min) * (
                 1.0 + np.cos(np.pi * progress)
             )
+            tr_radius.fill_(r)
         elif tr_schedule == "adaptive":
-            old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
-            improved = best_loss < old_best_loss - 1e-8
-            if improved:
-                tr_success_count += 1
-                tr_failure_count = 0
-                if tr_success_count >= 3 and tr_radius < tr_radius_init:
-                    tr_radius = min(tr_radius * 2.0, tr_radius_init)
-                    tr_success_count = 0
-                    if verbose:
-                        print(f"[gebo]         trust region expanded → radius={tr_radius:.2f}")
-            else:
-                tr_success_count = 0
-                tr_failure_count += 1
-                if tr_failure_count >= 3 and tr_radius > tr_radius_min:
-                    tr_radius = max(tr_radius / 2.0, tr_radius_min)
-                    tr_failure_count = 0
-                    if verbose:
-                        print(f"[gebo]         trust region shrunk  → radius={tr_radius:.2f}")
+            # Per-dimension adaptive radii.  Each dimension independently
+            # expands/shrinks based on how much the candidate moved in that
+            # dimension relative to the current best point.  A dimension that
+            # keeps moving stays wide (still learning); one that stalls gets
+            # narrowed (converged).
+            per_dim_movement = (candidate.squeeze(0) - tr_center).abs()  # (d,)
+            rel_movement = per_dim_movement / _bound_widths  # (d,) in [0, 1]
+            active = rel_movement > 0.01  # at least 1% of bound width moves
+
+            for j in range(dim):
+                if active[j].item():
+                    tr_success_count[j] += 1
+                    tr_failure_count[j] = 0
+                    if tr_success_count[j] >= 3 and tr_radius[j] < tr_radius_init:
+                        tr_radius[j] = min(tr_radius[j].item() * 2.0, tr_radius_init)
+                        tr_success_count[j] = 0
+                else:
+                    tr_success_count[j] = 0
+                    tr_failure_count[j] += 1
+                    if tr_failure_count[j] >= 3 and tr_radius[j] > tr_radius_min:
+                        tr_radius[j] = max(tr_radius[j].item() / 2.0, tr_radius_min)
+                        tr_failure_count[j] = 0
+
+            # Log summary stats for the per-dim radii.
+            if verbose and iteration % 5 == 0:
+                r = tr_radius
+                print(
+                    f"[gebo]         tr radii: "
+                    f"min={r.min().item():.1f}  med={r.median().item():.1f}  "
+                    f"max={r.max().item():.1f}  "
+                    f"({(r < tr_radius_init * 0.1).sum().item()}/{dim} below 10%)"
+                )
 
         # --- diagnostics: candidate distance from previous -------------------
         cand_dist = None
@@ -988,7 +1006,8 @@ def run_gebo(
             comet_exp.log_metric("n_unique_losses", n_unique, step=iteration)
             if cand_dist is not None:
                 comet_exp.log_metric("candidate_distance", cand_dist, step=iteration)
-            comet_exp.log_metric("tr_radius", tr_radius, step=iteration)
+            comet_exp.log_metric("tr_radius_median", tr_radius.median().item(), step=iteration)
+            comet_exp.log_metric("tr_radius_min", tr_radius.min().item(), step=iteration)
 
         # --- machine-debug: append per-iteration YAML -------------------------
         if machine_debug_path is not None:
@@ -1001,7 +1020,10 @@ def run_gebo(
                 "n_unique_losses": n_unique,
                 "n_total_points": int(train_X.shape[0]),
                 "elapsed_s": elapsed,
-                "tr_radius": tr_radius,
+                "tr_radius_median": tr_radius.median().item(),
+                "tr_radius_min": tr_radius.min().item(),
+                "tr_radius_max": tr_radius.max().item(),
+                "tr_radii_below_10pct": int((tr_radius < tr_radius_init * 0.1).sum().item()),
             }
             if cand_dist is not None:
                 debug_entry["candidate_distance"] = cand_dist
