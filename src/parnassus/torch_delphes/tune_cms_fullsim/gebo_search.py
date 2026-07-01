@@ -639,6 +639,7 @@ def run_gebo(
     tr_schedule: str = "cosine",
     tr_radius_min_frac: float = 0.01,
     tr_t0: int | None = None,
+    tr_patience: int = 15,
 ) -> dict:
     """Run the gradient-enhanced Bayesian optimization loop.
 
@@ -765,24 +766,24 @@ def run_gebo(
     #                Each cycle: radius decays init→min over T_cur iterations,
     #                then resets to init.  T_cur doubles after each restart.
     #                Periodically forces re-exploration to escape local minima.
-    #   "adaptive" — TuRBO-style: per-dimension radii double on 3 consecutive
-    #                improvements, halve on 3 consecutive failures.
+    #   "adaptive" — TuRBO-style (Eriksson et al. 2019): global success/failure
+    #                based on whether the new point improves the best loss.
+    #                After tr_patience consecutive successes, ALL dimensions'
+    #                radii double; after tr_patience consecutive failures, ALL halve.
     #   "none"     — no trust region; global bounds only (vanilla BO).
     #
     # The initial radius spans the full search space.
     tr_radius_init = 0.5 * (bounds[:, 1] - bounds[:, 0]).norm().item()
     tr_radius_min = tr_radius_min_frac * tr_radius_init
-    # Per-dimension radii (scalar for cosine, (d,) for adaptive).
+    # Per-dimension radii (same value broadcast for all schedules).
     tr_radius = torch.full((dim,), tr_radius_init, dtype=torch.float64)
-    # Per-dimension success/failure counters (adaptive schedule only).
-    tr_success_count = torch.zeros(dim, dtype=torch.int32)
-    tr_failure_count = torch.zeros(dim, dtype=torch.int32)
+    # Success/failure counters (adaptive schedule only; global, not per-dim).
+    tr_success_count = 0
+    tr_failure_count = 0
     tr_center = train_X[best_idx].clone()  # best point in raw space
     # Warm-restart state (cosine schedule).
     tr_cycle_len = tr_t0 if tr_t0 is not None else max(n_iterations // 4, 5)
     tr_step_in_cycle = 0
-    # Per-dimension bound widths for normalising movement (adaptive schedule).
-    _bound_widths = (bounds[:, 1] - bounds[:, 0]).clamp(min=1e-8)
 
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
@@ -948,28 +949,34 @@ def run_gebo(
             )
             tr_radius.fill_(r)
         elif tr_schedule == "adaptive":
-            # Per-dimension adaptive radii.  Each dimension independently
-            # expands/shrinks based on how much the candidate moved in that
-            # dimension relative to the current best point.  A dimension that
-            # keeps moving stays wide (still learning); one that stalls gets
-            # narrowed (converged).
-            per_dim_movement = (candidate.squeeze(0) - tr_center).abs()  # (d,)
-            rel_movement = per_dim_movement / _bound_widths  # (d,) in [0, 1]
-            active = rel_movement > 0.01  # at least 1% of bound width moves
-
-            for j in range(dim):
-                if active[j].item():
-                    tr_success_count[j] += 1
-                    tr_failure_count[j] = 0
-                    if tr_success_count[j] >= 3 and tr_radius[j] < tr_radius_init:
-                        tr_radius[j] = min(tr_radius[j].item() * 2.0, tr_radius_init)
-                        tr_success_count[j] = 0
-                else:
-                    tr_success_count[j] = 0
-                    tr_failure_count[j] += 1
-                    if tr_failure_count[j] >= 3 and tr_radius[j] > tr_radius_min:
-                        tr_radius[j] = max(tr_radius[j].item() / 2.0, tr_radius_min)
-                        tr_failure_count[j] = 0
+            # TuRBO (Eriksson et al. 2019): global success/failure measured by
+            # whether the new candidate beats the current best loss.  On
+            # τ_success=3 consecutive successes, ALL dimensions' radii double;
+            # on τ_failure=3 consecutive failures, ALL halve.
+            old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
+            improved = best_loss < old_best_loss - 1e-8
+            if improved:
+                tr_success_count += 1
+                tr_failure_count = 0
+                if tr_success_count >= tr_patience:
+                    tr_radius = torch.clamp(tr_radius * 2.0, max=tr_radius_init)
+                    tr_success_count = 0
+                    if verbose:
+                        print(
+                            f"[gebo]         TR expanded → "
+                            f"med={tr_radius.median().item():.1f}"
+                        )
+            else:
+                tr_success_count = 0
+                tr_failure_count += 1
+                if tr_failure_count >= tr_patience:
+                    tr_radius = torch.clamp(tr_radius / 2.0, min=tr_radius_min)
+                    tr_failure_count = 0
+                    if verbose:
+                        print(
+                            f"[gebo]         TR shrunk  → "
+                            f"med={tr_radius.median().item():.1f}"
+                        )
 
             # Log summary stats for the per-dim radii.
             if verbose and iteration % 5 == 0:
@@ -1206,6 +1213,13 @@ def main() -> None:
         help="Initial cosine cycle length in iterations (default: n_iterations // 4). "
              "Each restart doubles the period.",
     )
+    parser.add_argument(
+        "--tr-patience",
+        type=int,
+        default=15,
+        help="Number of consecutive successes/failures before expanding/shrinking "
+             "the trust region (adaptive schedule only, default 15).",
+    )
     args = parser.parse_args()
 
     # --- Comet setup ---------------------------------------------------------
@@ -1362,6 +1376,7 @@ def main() -> None:
         tr_schedule=args.tr_schedule,
         tr_radius_min_frac=args.tr_radius_min_frac,
         tr_t0=args.tr_t0,
+        tr_patience=args.tr_patience,
     )
 
     # --- save results --------------------------------------------------------
