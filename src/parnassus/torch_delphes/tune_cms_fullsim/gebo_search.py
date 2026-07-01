@@ -43,6 +43,9 @@ import time
 from pathlib import Path
 
 import gpytorch
+import matplotlib as mpl
+mpl.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
@@ -620,6 +623,262 @@ def _append_machine_debug_entry(yaml_path: Path, entry: dict) -> None:
 
 
 # =============================================================================
+# Intermediate validation plots (called from within the BO loop)
+# =============================================================================
+
+_TENSOR_TITLE_ABBREV: tuple[tuple[str, str], ...] = (
+    ("MomentumSmearing.resolution_module", "MS"),
+    ("TrackingEfficiency", "TrkEff"),
+    ("HadronFractions", "HadFrac"),
+    ("scale_module.", ""),
+    ("resolution_func.", ""),
+)
+
+
+def _abbrev_tensor(base: str) -> str:
+    for long, short in _TENSOR_TITLE_ABBREV:
+        base = base.replace(long, short)
+    return base
+
+
+def _save_incremental_summary(
+    output_dir: Path,
+    train_X: torch.Tensor,
+    train_Y: torch.Tensor,
+    history: list[dict],
+    param_names: list[str] | None,
+    n_initial: int,
+    dim: int,
+    bounds: torch.Tensor,
+) -> None:
+    """Save ``gebo_summary.json`` and ``gebo_data.pt`` after each iteration."""
+    best_idx = int(train_Y[:, 0].argmin().item())
+    best_loss = float(train_Y[best_idx, 0])
+    best_raw = {param_names[j]: float(train_X[best_idx, j]) for j in range(dim)} if param_names else {}
+
+    summary = {
+        "best_loss": best_loss,
+        "best_idx": best_idx,
+        "best_raw_params": best_raw,
+        "n_total_points": int(train_X.shape[0]),
+        "dimension": dim,
+        "bounds": {
+            "low": [float(bounds[i, 0]) for i in range(dim)],
+            "high": [float(bounds[i, 1]) for i in range(dim)],
+        },
+        "history": history,
+        "n_initial": n_initial,
+    }
+    with open(output_dir / "gebo_summary.json", "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+
+    torch.save({
+        "train_X": train_X.cpu(),
+        "train_Y": train_Y.cpu(),
+        "param_names": param_names,
+    }, output_dir / "gebo_data.pt")
+
+
+def _plot_intermediate_best(
+    val_loader: "DelphesDataLoader",
+    best_raw_params: dict[str, float],
+    output_dir: Path,
+    iteration: int,
+    best_loss: float,
+    seed: int,
+    pred_init: dict | None = None,
+) -> None:
+    """Generate observable + PID overlay plots for the current best params."""
+    from .gebo_plotting import (
+        build_card_from_raw_params,
+        obs_values,
+        plot_observable_best_only,
+        plot_pid_observables,
+        trainee_observables,
+    )
+
+    device = torch.device("cpu")
+    torch.manual_seed(seed)
+    card = build_card_from_raw_params(best_raw_params, device)
+    pred, target = trainee_observables(card, val_loader)
+
+    iter_dir = output_dir / f"iter_{iteration:04d}"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_observable_best_only(
+        "PT", obs_values(target, "pt"), obs_values(pred, "pt"),
+        edges=np.linspace(0.0, 100.0, 51),
+        xlabel=r"PF object $p_\mathrm{T}$ [GeV]",
+        output_path=iter_dir / "pt.pdf", log_y=True, iteration=iteration,
+        init_vals=obs_values(pred_init, "pt") if pred_init is not None else None,
+    )
+    plot_observable_best_only(
+        "Eta", obs_values(target, "eta"), obs_values(pred, "eta"),
+        edges=np.linspace(-5.0, 5.0, 51),
+        xlabel=r"PF object $\eta$",
+        output_path=iter_dir / "eta.pdf", iteration=iteration,
+        init_vals=obs_values(pred_init, "eta") if pred_init is not None else None,
+    )
+    plot_observable_best_only(
+        "ht", obs_values(target, "ht"), obs_values(pred, "ht"),
+        edges=np.linspace(0.0, 1000.0, 51),
+        xlabel=r"PF scalar $H_\mathrm{T}$ [GeV]",
+        output_path=iter_dir / "ht.pdf", iteration=iteration,
+        init_vals=obs_values(pred_init, "ht") if pred_init is not None else None,
+    )
+    plot_observable_best_only(
+        "log_ht", obs_values(target, "log_ht"), obs_values(pred, "log_ht"),
+        edges=np.linspace(4.5, 7.5, 51),
+        xlabel=r"PF scalar $\log\,H_\mathrm{T}$",
+        output_path=iter_dir / "log_ht.pdf", iteration=iteration,
+        init_vals=obs_values(pred_init, "log_ht") if pred_init is not None else None,
+    )
+    plot_observable_best_only(
+        "multiplicity", obs_values(target, "multiplicity"),
+        obs_values(pred, "multiplicity"),
+        edges=np.linspace(0.0, 300.0, 61),
+        xlabel=r"PF objects per event",
+        output_path=iter_dir / "multiplicity.pdf", iteration=iteration,
+        init_vals=obs_values(pred_init, "multiplicity") if pred_init is not None else None,
+    )
+
+    # Per-PID plots.
+    pid_dir = iter_dir / "PID"
+    n_val_events = len(val_loader.dataset)
+    plot_pid_observables(target, pred, pid_dir, n_val_events, iteration=iteration,
+                         pred_init=pred_init)
+
+    print(
+        f"[gebo]         intermediate plots → {iter_dir}/  "
+        f"(loss={best_loss:.4e})"
+    )
+
+
+def _plot_iteration_diagnostics(
+    history: list[dict],
+    train_X: torch.Tensor,
+    train_Y: torch.Tensor,
+    param_names: list[str],
+    n_initial: int,
+    truth: dict[str, float],
+    output_dir: Path,
+) -> None:
+    """Regenerate diagnostic plots after every BO iteration."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n_total = n_initial + len(history)
+
+    # ---- loss trajectory ----
+    if history:
+        iters = [h["iteration"] for h in history]
+        best = [h["best_loss"] for h in history]
+        cand = [h["candidate_loss"] for h in history]
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        ax.semilogy(iters, best, color="tab:blue", label="best loss so far", linewidth=2)
+        ax.scatter(iters, cand, color="tab:orange", s=18, alpha=0.7,
+                   label="candidate loss", zorder=5)
+        ax.set_xlabel("BO iteration")
+        ax.set_ylabel("loss (log scale)")
+        ax.set_title(f"GEBO loss trajectory  (best = {min(best):.4e})")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(loc="upper right")
+        fig.tight_layout()
+        fig.savefig(output_dir / "loss_trajectory.pdf")
+        plt.close(fig)
+
+    # ---- acquisition history ----
+    if history:
+        acq_vals = [h.get("acq_value") for h in history if "acq_value" in h]
+        if acq_vals:
+            ai = [h["iteration"] for h in history if "acq_value" in h]
+            fig, ax = plt.subplots(figsize=(7, 4.0))
+            ax.plot(ai, acq_vals, color="tab:green", marker="o", markersize=4,
+                    linewidth=1.5)
+            ax.set_xlabel("BO iteration")
+            ax.set_ylabel("acquisition value")
+            ax.set_title("Acquisition function value")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(output_dir / "acquisition_history.pdf")
+            plt.close(fig)
+
+    # ---- loss scatter ----
+    losses = train_Y[:, 0].cpu().numpy()
+    best_idx = int(np.argmin(losses))
+    n_pts = len(losses)
+    fig, ax = plt.subplots(figsize=(7, 4.0))
+    colors = [
+        "tab:red" if i == best_idx else
+        "tab:gray" if i < n_initial else "tab:blue"
+        for i in range(n_pts)
+    ]
+    ax.scatter(range(n_pts), losses, c=colors, s=20, alpha=0.7, edgecolors="none")
+    ax.axhline(losses[best_idx], color="tab:red", linestyle="--", alpha=0.5,
+               label=f"best = {losses[best_idx]:.4e}")
+    if n_initial < n_pts:
+        ax.axvline(n_initial - 0.5, color="gray", linestyle=":", alpha=0.5,
+                   label=f"initial ({n_initial} Sobol)")
+    ax.set_xlabel("query index")
+    ax.set_ylabel("loss")
+    ax.set_yscale("log")
+    ax.set_title(f"All {n_pts} queried points  (best @ idx {best_idx})")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / "loss_scatter.pdf")
+    plt.close(fig)
+
+    # ---- param drift ----
+    phys_trajectories: dict[str, list[float]] = {name: [] for name in param_names}
+    for i_row in range(train_X.shape[0]):
+        vec = train_X[i_row]
+        for j, name in enumerate(param_names):
+            base = name.rsplit("[", 1)[0] if name.endswith("]") else name
+            phys_trajectories[name].append(float(pc.to_physical(base, vec[j].unsqueeze(0))))
+
+    def _idx(key: str) -> int:
+        return int(key[key.rindex("[") + 1:-1]) if key.endswith("]") else -1
+
+    groups: dict[str, list[str]] = {}
+    for name in param_names:
+        base = name.rsplit("[", 1)[0] if name.endswith("]") else name
+        groups.setdefault(base, []).append(name)
+
+    ncols = 4
+    n = len(groups)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.5 * ncols, 2.6 * nrows),
+                             squeeze=False)
+    queries = list(range(train_X.shape[0]))
+    flat_axes = axes.flatten()
+    for ax, (base, keys) in zip(flat_axes, groups.items()):
+        for key in sorted(keys, key=_idx):
+            trajectory = phys_trajectories[key]
+            label = f"[{_idx(key)}]" if key.endswith("]") else "value"
+            (line,) = ax.plot(queries, trajectory, label=label, linewidth=1.2)
+            if key in truth:
+                ax.axhline(truth[key], color=line.get_color(),
+                           linestyle="--", alpha=0.4)
+        if n_initial < train_X.shape[0]:
+            ax.axvline(n_initial - 1, color="gray", linestyle=":", alpha=0.5,
+                       linewidth=0.8)
+        ax.set_title(_abbrev_tensor(base), fontsize=7)
+        ax.tick_params(labelsize=6)
+        ax.set_xlabel("Query index", fontsize=6)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=5, ncol=2 if len(keys) > 3 else 1)
+    for ax in flat_axes[n:]:
+        ax.set_visible(False)
+    fig.suptitle(
+        f"Parameter trajectories ({len(param_names)} params, "
+        f"{n_initial} init + {train_X.shape[0] - n_initial} BO)",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.99))
+    fig.savefig(output_dir / "param_drift_all.pdf")
+    plt.close(fig)
+
+
+# =============================================================================
 # GEBO loop
 # =============================================================================
 
@@ -640,6 +899,10 @@ def run_gebo(
     tr_radius_min_frac: float = 0.01,
     tr_t0: int | None = None,
     tr_patience: int = 15,
+    val_loader: "DelphesDataLoader | None" = None,
+    plot_output_dir: Path | None = None,
+    param_names: list[str] | None = None,
+    truth: dict[str, float] | None = None,
 ) -> dict:
     """Run the gradient-enhanced Bayesian optimization loop.
 
@@ -684,6 +947,7 @@ def run_gebo(
     train_X: torch.Tensor | None = None
     train_Y: torch.Tensor | None = None
     history: list[dict] = []
+    pred_init: dict | None = None  # initial trainee preds (best Sobol point)
 
     if state_path is not None and state_path.exists():
         ckpt = torch.load(state_path, map_location="cpu", weights_only=True)
@@ -748,6 +1012,23 @@ def run_gebo(
         })
 
         prev_candidate = None
+
+        # --- compute initial trainee predictions from best Sobol point -------
+        if val_loader is not None and param_names is not None:
+            from .gebo_plotting import build_card_from_raw_params, trainee_observables
+            best_sobol_idx = int(init_Y[:, 0].argmin().item())
+            best_sobol_raw = {
+                param_names[j]: float(init_X[best_sobol_idx, j])
+                for j in range(dim)
+            }
+            torch.manual_seed(seed)
+            init_card = build_card_from_raw_params(best_sobol_raw, torch.device("cpu"))
+            pred_init, _ = trainee_observables(init_card, val_loader)
+            if verbose:
+                print(
+                    f"[gebo] computed init trainee preds from best Sobol point "
+                    f"(idx={best_sobol_idx}, loss={init_Y[best_sobol_idx, 0].item():.4e})"
+                )
 
     # --- common setup for both fresh and resumed paths -----------------------
     best_idx = int(train_Y[:, 0].argmin().item())
@@ -988,6 +1269,23 @@ def run_gebo(
                     f"({(r < tr_radius_init * 0.1).sum().item()}/{dim} below 10%)"
                 )
 
+        # --- intermediate plots on every new best loss -----------------------
+        if plot_output_dir is not None and val_loader is not None and param_names is not None:
+            old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
+            if best_loss < old_best_loss - 1e-8:
+                _plot_intermediate_best(
+                    val_loader=val_loader,
+                    best_raw_params={
+                        param_names[j]: float(train_X[best_idx, j])
+                        for j in range(dim)
+                    },
+                    output_dir=plot_output_dir,
+                    iteration=iteration,
+                    best_loss=best_loss,
+                    seed=seed,
+                    pred_init=pred_init,
+                )
+
         # --- diagnostics: candidate distance from previous -------------------
         cand_dist = None
         if prev_candidate is not None:
@@ -1051,6 +1349,31 @@ def run_gebo(
             "best_idx": best_idx,
             "acq_value": float(acq_value),
         })
+
+        # --- per-iteration diagnostic plots --------------------------------
+        if plot_output_dir is not None and param_names is not None:
+            _plot_iteration_diagnostics(
+                history=history,
+                train_X=train_X,
+                train_Y=train_Y,
+                param_names=param_names,
+                n_initial=n_initial,
+                truth=truth or {},
+                output_dir=plot_output_dir,
+            )
+
+        # --- save incremental summary JSON ----------------------------------
+        if plot_output_dir is not None:
+            _save_incremental_summary(
+                output_dir=plot_output_dir,
+                train_X=train_X,
+                train_Y=train_Y,
+                history=history,
+                param_names=param_names,
+                n_initial=n_initial,
+                dim=dim,
+                bounds=bounds,
+            )
 
         # --- save checkpoint after every iteration ---------------------------
         if state_path is not None:
@@ -1220,6 +1543,31 @@ def main() -> None:
         help="Number of consecutive successes/failures before expanding/shrinking "
              "the trust region (adaptive schedule only, default 15).",
     )
+    parser.add_argument(
+        "--plot-every-best",
+        action="store_true",
+        default=False,
+        help="Generate observable overlay plots every time a new best loss is "
+             "found.  Plots land in --output-dir/intermediate/.",
+    )
+    parser.add_argument(
+        "--n-plot-events",
+        type=int,
+        default=20_000,
+        help="Number of validation events for intermediate plots (default 2000).",
+    )
+    parser.add_argument(
+        "--plot-batch-size",
+        type=int,
+        default=2000,
+        help="Batch size for intermediate plot forward passes (default 2000).",
+    )
+    parser.add_argument(
+        "--truth-config",
+        type=Path,
+        default="src/parnassus/torch_delphes/param_configs/cms_target_default.yaml",
+        help="YAML config with ground-truth parameter values for drift plots.",
+    )
     args = parser.parse_args()
 
     # --- Comet setup ---------------------------------------------------------
@@ -1361,6 +1709,28 @@ def main() -> None:
         print(f"[gebo] machine-debug YAML -> {machine_debug_path}" +
               (" (appending to existing)" if is_resuming else ""))
 
+    # --- build validation dataloader for intermediate plots ------------------
+    val_loader = None
+    if args.plot_every_best:
+        from .gebo_plotting import build_val_dataloader
+        val_loader, val_start, n_val_plot = build_val_dataloader(
+            args.root_file, args.n_plot_events, args.plot_batch_size,
+            device=torch.device("cpu"),
+        )
+        print(
+            f"[gebo] intermediate plots enabled: {n_val_plot} validation events "
+            f"(entries {val_start}:{val_start + n_val_plot})"
+        )
+
+    truth: dict[str, float] = {}
+    if args.plot_every_best and args.truth_config:
+        flat_truth = pc.load_param_config(args.truth_config)
+        truth = {k: spec["value"] for k, spec in flat_truth.items()}
+        print(f"[gebo] truth config: {args.truth_config} ({len(truth)} params)")
+    elif args.plot_every_best:
+        print("[gebo] warning: --plot-every-best without --truth-config; "
+              "param_drift_all.pdf will have no truth lines")
+
     result = run_gebo(
         objective=objective,
         dim=vectorizer.dim,
@@ -1377,6 +1747,10 @@ def main() -> None:
         tr_radius_min_frac=args.tr_radius_min_frac,
         tr_t0=args.tr_t0,
         tr_patience=args.tr_patience,
+        val_loader=val_loader,
+        plot_output_dir=args.output_dir / "intermediate" if args.plot_every_best else None,
+        param_names=vectorizer.param_names(),
+        truth=truth if args.plot_every_best and args.truth_config else None,
     )
 
     # --- save results --------------------------------------------------------
