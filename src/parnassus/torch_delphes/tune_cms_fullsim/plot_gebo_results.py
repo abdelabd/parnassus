@@ -56,30 +56,24 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from .config import OBSERVABLES
 from .data import (
     load_cms_flow_root,
-    load_pflow_targets_from_tensor,
     load_pflow_targets_ragged,
     load_truth_events_ragged,
-    restore_event_format,
 )
 from .dataloader import DelphesDataLoader, DelphesDataSet
-from parnassus.torch_delphes.plotting import plot_comparison_with_ratio
-
-# ---- Styling (matches plot_fit_results.py) ----
-plt.rcParams.update({
-    "figure.dpi": 120,
-    "savefig.dpi": 200,
-    "font.size": 11,
-    "axes.labelsize": 12,
-    "axes.titlesize": 13,
-    "legend.fontsize": 10,
-    "lines.linewidth": 1.6,
-    "lines.markersize": 5,
-})
-
-# Colour scheme: matches plot_fit_results.py
-_TARGET_COLOR: str = "gold"
-_INIT_COLOR: str = "tab:red"
-_FINAL_COLOR: str = "tab:blue"
+from .gebo_plotting import (
+    TARGET_COLOR,
+    INIT_COLOR,
+    FINAL_COLOR,
+    build_card_from_raw_params,
+    build_val_dataloader,
+    obs_values,
+    trainee_observables,
+)
+from parnassus.torch_delphes.plotting import (
+    plot_comparison_with_ratio,
+    stitch_pngs,
+    combined_vars_for,
+)
 
 # Default truth config (matches plot_fit_results.py).
 _DEFAULT_TRUTH_CONFIG = (
@@ -108,32 +102,6 @@ def _load_gebo_data(path: Path) -> dict | None:
 # =============================================================================
 # Helper: build a card from raw parameter dict
 # =============================================================================
-
-
-def _build_card_from_raw_params(
-    raw_params: dict[str, float], device: torch.device
-) -> CMSEnergyFlowDefault:
-    """Build a card and set its parameters from a raw-parameter dict.
-
-    ``raw_params`` maps ``"param_name[i]"`` → raw (pre-transform) value,
-    exactly as stored in ``gebo_summary.json["best_raw_params"]``.
-    """
-    card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
-    with torch.no_grad():
-        for name, p in card.named_parameters():
-            keys = [k for k in raw_params if k.startswith(name)]
-            if not keys:
-                continue
-            if len(keys) == 1 and not keys[0].endswith("]"):
-                raw_val = torch.tensor(raw_params[keys[0]], dtype=p.dtype, device=device)
-                p.copy_(raw_val.reshape(p.shape))
-            else:
-                vals = torch.zeros(p.numel(), dtype=p.dtype, device=device)
-                for k in keys:
-                    i = int(k[k.rfind("[") + 1:k.rfind("]")])
-                    vals[i] = raw_params[k]
-                p.copy_(vals.reshape(p.shape))
-    return card
 
 
 # =============================================================================
@@ -360,51 +328,6 @@ def plot_param_drift(
 # =============================================================================
 # Helpers: batched trainee forward
 # =============================================================================
-
-
-def _build_val_dataloader(
-    arrays: dict, batch_size: int, device: torch.device,
-) -> DelphesDataLoader:
-    truth_ragged = load_truth_events_ragged(arrays)
-    target_ragged = load_pflow_targets_ragged(arrays)
-    dataset = DelphesDataSet(truth_ragged, target_ragged, device=device)
-    return DelphesDataLoader(dataset, batch_size=batch_size, shuffle=False)
-
-
-def _trainee_observables(
-    card: CMSEnergyFlowDefault, dataloader: DelphesDataLoader
-) -> tuple[dict, dict]:
-    acc_pred: dict[str, list[torch.Tensor]] = {}
-    acc_tgt: dict[str, list[torch.Tensor]] = {}
-    with torch.no_grad():
-        for batch in dataloader:
-            truth_particles = batch["truth_particles"]
-            mask = torch.any(truth_particles != 0, dim=-1)
-            out = card(truth_particles[mask])
-            eflow_restored = restore_event_format(out["EFlowObject"], mask)
-            pred = load_pflow_targets_from_tensor(eflow_restored)
-            target = {k: batch[k] for k in batch if k != "truth_particles"}
-            for key in OBSERVABLES:
-                if key not in pred or key not in target:
-                    continue
-                pv, tv = pred[key], target[key]
-                if pv.ndim >= 2:
-                    pv = pv[pred["pt"] != 0]
-                    tv = tv[target["pt"] != 0]
-                else:
-                    pv, tv = pv.reshape(-1), tv.reshape(-1)
-                acc_pred.setdefault(key, []).append(pv.detach().cpu())
-                acc_tgt.setdefault(key, []).append(tv.detach().cpu())
-    pred_obs = {k: torch.cat(v) for k, v in acc_pred.items()}
-    target_obs = {k: torch.cat(v) for k, v in acc_tgt.items()}
-    return pred_obs, target_obs
-
-
-def _obs_values(obs: dict, key: str) -> torch.Tensor:
-    v = obs[key]
-    if v.ndim >= 2:
-        return v[obs["pt"] != 0]
-    return v.reshape(-1)
 
 
 # =============================================================================
@@ -744,7 +667,10 @@ def main() -> None:
         args.root_file, n_events=n_plot_events, entry_start=val_entry_start,
     )
     device = torch.device("cpu")
-    val_loader = _build_val_dataloader(arrays, args.plot_batch_size, device)
+    truth_ragged = load_truth_events_ragged(arrays)
+    target_ragged = load_pflow_targets_ragged(arrays)
+    dataset = DelphesDataSet(truth_ragged, target_ragged, device=device)
+    val_loader = DelphesDataLoader(dataset, batch_size=args.plot_batch_size, shuffle=False)
     del arrays
     gc.collect()
 
@@ -759,22 +685,22 @@ def main() -> None:
     trainee_init = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
     if init_snapshot is not None:
         _set_trainee_from_snapshot(trainee_init, init_snapshot)
-    pred_init, target = _trainee_observables(trainee_init, val_loader)
+    pred_init, target = trainee_observables(trainee_init, val_loader)
 
     # --- Fitted trainee (from GEBO best) ---
     best_raw = summary.get("best_raw_params", {})
     if not best_raw:
         raise SystemExit("gebo_summary.json has no 'best_raw_params'")
-    trainee_final = _build_card_from_raw_params(best_raw, device)
+    trainee_final = build_card_from_raw_params(best_raw, device)
     torch.manual_seed(args.seed)
-    pred_final, _ = _trainee_observables(trainee_final, val_loader)
+    pred_final, _ = trainee_observables(trainee_final, val_loader)
 
     # Observable plots.
     plot_observable(
         "PT",
-        _obs_values(target, "pt"),
-        _obs_values(pred_init, "pt"),
-        _obs_values(pred_final, "pt"),
+        obs_values(target, "pt"),
+        obs_values(pred_init, "pt"),
+        obs_values(pred_final, "pt"),
         edges=np.linspace(0.0, 100.0, 51),
         xlabel=r"PF object $p_\mathrm{T}$ [GeV]",
         output_path=output_dir / "observable_pt.pdf",
@@ -784,9 +710,9 @@ def main() -> None:
 
     plot_observable(
         "Eta",
-        _obs_values(target, "eta"),
-        _obs_values(pred_init, "eta"),
-        _obs_values(pred_final, "eta"),
+        obs_values(target, "eta"),
+        obs_values(pred_init, "eta"),
+        obs_values(pred_final, "eta"),
         edges=np.linspace(-5.0, 5.0, 51),
         xlabel=r"PF object $\eta$",
         output_path=output_dir / "observable_eta.pdf",
@@ -795,9 +721,9 @@ def main() -> None:
 
     plot_observable(
         "ht",
-        _obs_values(target, "ht"),
-        _obs_values(pred_init, "ht"),
-        _obs_values(pred_final, "ht"),
+        obs_values(target, "ht"),
+        obs_values(pred_init, "ht"),
+        obs_values(pred_final, "ht"),
         edges=np.linspace(0.0, 1000.0, 51),
         xlabel=r"PF scalar $H_\mathrm{T}$ [GeV]",
         output_path=output_dir / "observable_ht.pdf",
@@ -806,9 +732,9 @@ def main() -> None:
 
     plot_observable(
         "log_ht",
-        _obs_values(target, "log_ht"),
-        _obs_values(pred_init, "log_ht"),
-        _obs_values(pred_final, "log_ht"),
+        obs_values(target, "log_ht"),
+        obs_values(pred_init, "log_ht"),
+        obs_values(pred_final, "log_ht"),
         edges=np.linspace(4.5, 7.5, 51),
         xlabel=r"PF scalar $\log\,H_\mathrm{T}$",
         output_path=output_dir / "observable_log_ht.pdf",
@@ -817,9 +743,9 @@ def main() -> None:
 
     plot_observable(
         "multiplicity",
-        _obs_values(target, "multiplicity"),
-        _obs_values(pred_init, "multiplicity"),
-        _obs_values(pred_final, "multiplicity"),
+        obs_values(target, "multiplicity"),
+        obs_values(pred_init, "multiplicity"),
+        obs_values(pred_final, "multiplicity"),
         edges=np.linspace(0.0, 300.0, 61),
         xlabel=r"PF objects per event",
         output_path=output_dir / "observable_multiplicity.pdf",
