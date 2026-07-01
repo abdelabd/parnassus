@@ -760,13 +760,14 @@ def run_gebo(
     # The trust region constrains how far the acquisition optimizer can stray
     # from the current best point, acting as a "learning rate" for BO.
     #
-    # Two schedules:
+    # Three schedules:
     #   "cosine"   — cosine annealing WITH warm restarts (PyTorch-style).
     #                Each cycle: radius decays init→min over T_cur iterations,
     #                then resets to init.  T_cur doubles after each restart.
     #                Periodically forces re-exploration to escape local minima.
-    #   "adaptive" — TuRBO-style: radius doubles on 3 consecutive improvements,
-    #                halves on 3 consecutive failures.
+    #   "adaptive" — TuRBO-style: per-dimension radii double on 3 consecutive
+    #                improvements, halve on 3 consecutive failures.
+    #   "none"     — no trust region; global bounds only (vanilla BO).
     #
     # The initial radius spans the full search space.
     tr_radius_init = 0.5 * (bounds[:, 1] - bounds[:, 0]).norm().item()
@@ -881,12 +882,15 @@ def run_gebo(
 
         # --- trust region: intersect global bounds with hyperrectangle around
         #     the current best point (in standardized space) ------------------
-        tr_center_stdz = ((tr_center.to(device=device, dtype=dtype) - X_mean.squeeze(0))
-                          / X_std.squeeze(0))
-        tr_radius_dev = tr_radius.to(device=device, dtype=dtype)
-        tr_lower = torch.clamp(tr_center_stdz - tr_radius_dev, min=bounds_stdz[:, 0])
-        tr_upper = torch.clamp(tr_center_stdz + tr_radius_dev, max=bounds_stdz[:, 1])
-        tr_bounds = torch.stack([tr_lower, tr_upper], dim=-1)  # (d, 2)
+        if tr_schedule == "none":
+            tr_bounds = bounds_stdz  # (d, 2) — full global bounds
+        else:
+            tr_center_stdz = ((tr_center.to(device=device, dtype=dtype) - X_mean.squeeze(0))
+                              / X_std.squeeze(0))
+            tr_radius_dev = tr_radius.to(device=device, dtype=dtype)
+            tr_lower = torch.clamp(tr_center_stdz - tr_radius_dev, min=bounds_stdz[:, 0])
+            tr_upper = torch.clamp(tr_center_stdz + tr_radius_dev, max=bounds_stdz[:, 1])
+            tr_bounds = torch.stack([tr_lower, tr_upper], dim=-1)  # (d, 2)
 
         # --- optimize acquisition in standardized space (trust-region bounded)
         candidate_stdz, acq_value = optimize_acqf(
@@ -923,7 +927,9 @@ def run_gebo(
 
         # --- trust region update -------------------------------------------
         tr_center = train_X[best_idx].clone()  # always follow the best point
-        if tr_schedule == "cosine":
+        if tr_schedule == "none":
+            pass  # no trust region — nothing to update
+        elif tr_schedule == "cosine":
             # Cosine annealing with warm restarts: scalar radius broadcast to
             # all dimensions (identical constraint per dimension).
             tr_step_in_cycle += 1
@@ -1182,7 +1188,7 @@ def main() -> None:
         "--tr-schedule",
         type=str,
         default="cosine",
-        choices=["cosine", "adaptive"],
+        choices=["cosine", "adaptive", "none"],
         help="Trust region schedule: 'cosine' decays smoothly (default), "
              "'adaptive' expands/shrinks based on success/failure.",
     )
