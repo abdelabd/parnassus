@@ -275,6 +275,7 @@ def plot_param_drift(
     n_initial: int,
     output_path: Path,
     ncols: int = 4,
+    smooth_window: int = 5,
 ) -> None:
     """Plot every parameter's physical value vs query index, with truth lines.
 
@@ -311,11 +312,22 @@ def plot_param_drift(
         nrows, ncols, figsize=(3.5 * ncols, 2.6 * nrows), squeeze=False
     )
 
+    def _sliding_mean(values: list[float], window: int) -> np.ndarray:
+        arr = np.asarray(values, dtype=float)
+        if window <= 1 or arr.size == 0:
+            return arr
+        window = max(1, int(window))
+        pad_left = window // 2
+        pad_right = window - 1 - pad_left
+        padded = np.pad(arr, (pad_left, pad_right), mode="edge")
+        kernel = np.ones(window, dtype=float) / float(window)
+        return np.convolve(padded, kernel, mode="valid")
+
     queries = list(range(n_total))
     flat_axes = axes.flatten()
     for ax, (base, keys) in zip(flat_axes, groups.items()):
         for key in sorted(keys, key=_idx):
-            trajectory = phys_trajectories[key]
+            trajectory = _sliding_mean(phys_trajectories[key], smooth_window)
             label = f"[{_idx(key)}]" if key.endswith("]") else "value"
             (line,) = ax.plot(queries, trajectory, label=label, linewidth=1.2)
             if key in truth:
@@ -327,7 +339,7 @@ def plot_param_drift(
                        linewidth=0.8)
         ax.set_title(_abbrev_tensor(base), fontsize=7)
         ax.tick_params(labelsize=6)
-        ax.set_xlabel("Query index", fontsize=6)
+        ax.set_xlabel("Iteration", fontsize=6)
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=5, ncol=2 if len(keys) > 3 else 1)
 
@@ -336,7 +348,7 @@ def plot_param_drift(
 
     fig.suptitle(
         f"Parameter trajectories during GEBO  ({len(param_names)} parameters, "
-        f"{n_initial} initial + {n_total - n_initial} BO)",
+        f"{n_initial} initial + {n_total - n_initial} BO), \n mean-smoothed over {smooth_window} iterations",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.99))
@@ -558,6 +570,8 @@ def plot_final_pid_observables(
             ax_top.legend(loc=("upper left" if var != "Eta" else "best"), fontsize=8)
             ax_top.grid(True, alpha=0.3)
             ax_top.set_title(f"{pid_label}  {var}")
+            if var in ("PT", "P", "E"):
+                ax_top.set_yscale("log")
 
             with np.errstate(divide="ignore", invalid="ignore"):
                 ratio_init = np.where(h_target > 0, h_init / h_target, np.nan)
@@ -634,6 +648,7 @@ def plot_loss_scatter(data: dict, n_initial: int, output_path: Path) -> None:
                    label=f"initial ({n_initial} Sobol)")
     ax.set_xlabel("query index")
     ax.set_ylabel("loss")
+    ax.set_yscale("log")
     ax.set_title(f"All {n} queried points  (best @ idx {best_idx})")
     ax.grid(True, alpha=0.3)
     ax.legend()
