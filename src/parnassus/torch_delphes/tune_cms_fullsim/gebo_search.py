@@ -683,28 +683,24 @@ def run_gebo(
     if state_path is not None and state_path.exists():
         ckpt = torch.load(state_path, map_location="cpu", weights_only=True)
         n_done = ckpt.get("iteration", 0)
-        if 0 < n_done < n_iterations:
-            train_X = ckpt["train_X"].to(dtype=torch.float64)
-            train_Y = ckpt["train_Y"].to(dtype=torch.float64)
-            history = ckpt.get("history", [])
-            start_iteration = n_done + 1
-            resumed = True
-            if verbose:
-                print(
-                    f"[gebo] RESUMING from {state_path}: "
-                    f"{train_X.shape[0]} points, {n_done}/{n_iterations} iterations done"
-                )
-            # Re-derive prev_candidate from the last BO point.
-            if train_X.shape[0] > n_initial:
-                prev_candidate = train_X[-1].clone()
-            else:
-                prev_candidate = None
+        n_iterations += n_done # Add the number of already-done iterations to the total requested
+        
+        train_X = ckpt["train_X"].to(dtype=torch.float64)
+        train_Y = ckpt["train_Y"].to(dtype=torch.float64)
+        history = ckpt.get("history", [])
+        start_iteration = n_done + 1
+        resumed = True
+        if verbose:
+            print(
+                f"[gebo] RESUMING from {state_path}: "
+                f"{train_X.shape[0]} points, {n_done}/{n_iterations} iterations done"
+            )
+        # Re-derive prev_candidate from the last BO point.
+        if train_X.shape[0] > n_initial:
+            prev_candidate = train_X[-1].clone()
         else:
-            if verbose and n_done >= n_iterations:
-                print(
-                    f"[gebo] state file has {n_done} iterations (>= {n_iterations}); "
-                    "starting fresh."
-                )
+            prev_candidate = None
+
 
     if not resumed:
         # --- generate initial points via Sobol -------------------------------
