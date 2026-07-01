@@ -752,6 +752,19 @@ def run_gebo(
     train_X = train_X.to(dtype=torch.float64)
     train_Y = train_Y.to(device=device, dtype=torch.float64)
 
+    # --- trust region (TuRBO-style) -----------------------------------------
+    # The trust region constrains how far the acquisition optimizer can stray
+    # from the current best point, acting as a "learning rate" for BO.  It
+    # starts wide (covering the full space) and shrinks when the GP fails to
+    # find improvements, forcing smoother parameter trajectories and preventing
+    # the jagged jumps the user sees in param_drift_all.pdf.
+    tr_radius_init = 0.5 * (bounds[:, 1] - bounds[:, 0]).norm().item()
+    tr_radius = tr_radius_init
+    tr_radius_min = 0.01 * tr_radius_init
+    tr_success_count = 0
+    tr_failure_count = 0
+    tr_center = train_X[best_idx].clone()  # best point in raw space
+
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
 
@@ -848,10 +861,18 @@ def run_gebo(
                 maximize=False,
             )
 
-        # --- optimize acquisition in standardized space -----------------------
+        # --- trust region: intersect global bounds with hyperrectangle around
+        #     the current best point (in standardized space) ------------------
+        tr_center_stdz = ((tr_center.to(device=device, dtype=dtype) - X_mean.squeeze(0))
+                          / X_std.squeeze(0))
+        tr_lower = torch.clamp(tr_center_stdz - tr_radius, min=bounds_stdz[:, 0])
+        tr_upper = torch.clamp(tr_center_stdz + tr_radius, max=bounds_stdz[:, 1])
+        tr_bounds = torch.stack([tr_lower, tr_upper], dim=-1)  # (d, 2)
+
+        # --- optimize acquisition in standardized space (trust-region bounded)
         candidate_stdz, acq_value = optimize_acqf(
             acq_function=acq_func,
-            bounds=bounds_stdz.T.to(dtype=torch.float64),
+            bounds=tr_bounds.T.to(dtype=torch.float64),
             q=1,
             num_restarts=20,
             raw_samples=4096,
@@ -880,6 +901,30 @@ def run_gebo(
 
         best_idx = train_Y[:, 0].argmin().item()
         best_loss = float(train_Y[best_idx, 0])
+
+        # --- trust region update (TuRBO-style) ------------------------------
+        # If we found a new best, expand the region; otherwise shrink it.
+        # Uses a simple success/failure counter: 3 consecutive successes →
+        # double radius; 3 consecutive failures → halve radius.
+        old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
+        improved = best_loss < old_best_loss - 1e-8
+        if improved:
+            tr_center = train_X[best_idx].clone()
+            tr_success_count += 1
+            tr_failure_count = 0
+            if tr_success_count >= 3 and tr_radius < tr_radius_init:
+                tr_radius = min(tr_radius * 2.0, tr_radius_init)
+                tr_success_count = 0
+                if verbose:
+                    print(f"[gebo]         trust region expanded → radius={tr_radius:.2f}")
+        else:
+            tr_success_count = 0
+            tr_failure_count += 1
+            if tr_failure_count >= 3 and tr_radius > tr_radius_min:
+                tr_radius = max(tr_radius / 2.0, tr_radius_min)
+                tr_failure_count = 0
+                if verbose:
+                    print(f"[gebo]         trust region shrunk  → radius={tr_radius:.2f}")
 
         # --- diagnostics: candidate distance from previous -------------------
         cand_dist = None
@@ -912,6 +957,7 @@ def run_gebo(
             comet_exp.log_metric("n_unique_losses", n_unique, step=iteration)
             if cand_dist is not None:
                 comet_exp.log_metric("candidate_distance", cand_dist, step=iteration)
+            comet_exp.log_metric("tr_radius", tr_radius, step=iteration)
 
         # --- machine-debug: append per-iteration YAML -------------------------
         if machine_debug_path is not None:
@@ -924,6 +970,7 @@ def run_gebo(
                 "n_unique_losses": n_unique,
                 "n_total_points": int(train_X.shape[0]),
                 "elapsed_s": elapsed,
+                "tr_radius": tr_radius,
             }
             if cand_dist is not None:
                 debug_entry["candidate_distance"] = cand_dist
