@@ -1254,6 +1254,24 @@ def run_gebo(
         best_idx = train_Y[:, 0].argmin().item()
         best_loss = float(train_Y[best_idx, 0])
 
+        # --- cap training set at the most recent MAX_TRAIN_POINTS -----------
+        MAX_TRAIN_POINTS = 80
+        if train_X.shape[0] > MAX_TRAIN_POINTS:
+            keep = torch.zeros(train_X.shape[0], dtype=torch.bool)
+            # keep the most recent (MAX_TRAIN_POINTS - 1) points ...
+            keep[- (MAX_TRAIN_POINTS - 1):] = True
+            # ... and always keep the best point
+            keep[best_idx] = True
+            train_X = train_X[keep]
+            train_Y = train_Y[keep]
+            best_idx = train_Y[:, 0].argmin().item()
+            best_loss = float(train_Y[best_idx, 0])
+            if verbose:
+                print(
+                    f"[gebo]         capped train set at {MAX_TRAIN_POINTS} points "
+                    f"(dropped {keep.numel() - keep.sum().item()} old, best at idx {best_idx})"
+                )
+
         # --- trust region update -------------------------------------------
         tr_center = train_X[best_idx].clone()  # always follow the best point
         if tr_schedule == "none":
