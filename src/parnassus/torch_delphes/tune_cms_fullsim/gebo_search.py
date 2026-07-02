@@ -244,6 +244,39 @@ def load_bounds_from_optuna_config(
     return bounds_t
 
 
+def load_lr_scale_from_param_config(
+    config_path: str | Path,
+    vectorizer: ParamVectorizer,
+) -> torch.Tensor:
+    """Read a param config YAML and return a ``(dim,)`` tensor of ``lr_scale`` values.
+
+    Each entry in the returned tensor corresponds to one dimension of the
+    vectorizer, in the same order as ``vectorizer.param_names()``.  Per-element
+    indices ``[i]`` inherit their base parameter's ``lr_scale``.
+
+    Parameters not found in the config default to ``1.0``.
+    """
+    with open(config_path) as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        raise ValueError(f"{config_path}: top-level YAML must be a mapping.")
+
+    scales: list[float] = []
+    for name in vectorizer.param_names():
+        # Match the full scalar key (e.g. "eff_logits[0]") or fall back to
+        # a cached base-name→lr_scale lookup.
+        if name in raw:
+            spec = raw[name]
+            if isinstance(spec, dict) and "lr_scale" in spec:
+                scales.append(float(spec["lr_scale"]))
+            else:
+                scales.append(1.0)
+        else:
+            scales.append(1.0)
+
+    return torch.tensor(scales, dtype=torch.float64)
+
+
 # =============================================================================
 # Objective function – evaluates loss + gradient for a given parameter vector
 # =============================================================================
@@ -899,6 +932,7 @@ def run_gebo(
     tr_radius_min_frac: float = 0.01,
     tr_t0: int | None = None,
     tr_patience: int = 15,
+    tr_scales: torch.Tensor | None = None,
     val_loader: "DelphesDataLoader | None" = None,
     plot_output_dir: Path | None = None,
     param_names: list[str] | None = None,
@@ -931,6 +965,11 @@ def run_gebo(
         if the file exists and contains a valid state with fewer than
         ``n_iterations`` completed, resume from the saved state instead of
         generating fresh initial points.
+    tr_scales : torch.Tensor | None
+        Optional ``(dim,)`` tensor of per-dimension TR radius multipliers.
+        If provided, each dimension's TR radius is scaled independently
+        (e.g. ``lr_scale=0.5`` → half the base radius).  ``None`` means
+        all dimensions share the same radius (current behaviour).
 
     Returns
     -------
@@ -1056,8 +1095,16 @@ def run_gebo(
     # The initial radius spans the full search space.
     tr_radius_init = 0.5 * (bounds[:, 1] - bounds[:, 0]).norm().item()
     tr_radius_min = tr_radius_min_frac * tr_radius_init
-    # Per-dimension radii (same value broadcast for all schedules).
-    tr_radius = torch.full((dim,), tr_radius_init, dtype=torch.float64)
+    # Per-dimension scaling (default 1.0 = no per-dim scaling).
+    _tr_scales = (
+        tr_scales.to(dtype=torch.float64)
+        if tr_scales is not None
+        else torch.ones(dim, dtype=torch.float64)
+    )
+    # Per-dimension radii, scaled independently.
+    tr_radius = torch.full((dim,), tr_radius_init, dtype=torch.float64) * _tr_scales
+    tr_radius_max = tr_radius_init * _tr_scales  # per-dim maximum
+    tr_radius_min_vec = tr_radius_min * _tr_scales  # per-dim minimum
     # Success/failure counters (adaptive schedule only; global, not per-dim).
     tr_success_count = 0
     tr_failure_count = 0
@@ -1212,8 +1259,8 @@ def run_gebo(
         if tr_schedule == "none":
             pass  # no trust region — nothing to update
         elif tr_schedule == "cosine":
-            # Cosine annealing with warm restarts: scalar radius broadcast to
-            # all dimensions (identical constraint per dimension).
+            # Cosine annealing with warm restarts: per-dimension radii decay
+            # independently (each dim has its own min/max from tr_scales).
             tr_step_in_cycle += 1
             if tr_step_in_cycle >= tr_cycle_len:
                 tr_step_in_cycle = 0
@@ -1221,26 +1268,25 @@ def run_gebo(
                 if verbose:
                     print(
                         f"[gebo]         cosine restart → "
-                        f"radius reset to {tr_radius_init:.1f}, "
+                        f"radius reset to per-dim max, "
                         f"next cycle={tr_cycle_len} iters"
                     )
             progress = tr_step_in_cycle / max(tr_cycle_len, 1)
-            r = tr_radius_min + 0.5 * (tr_radius_init - tr_radius_min) * (
-                1.0 + np.cos(np.pi * progress)
-            )
-            tr_radius.fill_(r)
+            r = 0.5 * (1.0 + np.cos(np.pi * progress))  # in [0, 1]
+            tr_radius = tr_radius_min_vec + (tr_radius_max - tr_radius_min_vec) * r
         elif tr_schedule == "adaptive":
             # TuRBO (Eriksson et al. 2019): global success/failure measured by
             # whether the new candidate beats the current best loss.  On
-            # τ_success=3 consecutive successes, ALL dimensions' radii double;
-            # on τ_failure=3 consecutive failures, ALL halve.
+            # tr_patience consecutive successes, ALL dimensions' radii double;
+            # on tr_patience consecutive failures, ALL halve.  Per-dimension
+            # scaling (tr_scales) is preserved through independent clamping.
             old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
             improved = best_loss < old_best_loss - 1e-8
             if improved:
                 tr_success_count += 1
                 tr_failure_count = 0
                 if tr_success_count >= tr_patience:
-                    tr_radius = torch.clamp(tr_radius * 2.0, max=tr_radius_init)
+                    tr_radius = torch.clamp(tr_radius * 2.0, max=tr_radius_max)
                     tr_success_count = 0
                     if verbose:
                         print(
@@ -1251,7 +1297,7 @@ def run_gebo(
                 tr_success_count = 0
                 tr_failure_count += 1
                 if tr_failure_count >= tr_patience:
-                    tr_radius = torch.clamp(tr_radius / 2.0, min=tr_radius_min)
+                    tr_radius = torch.clamp(tr_radius / 2.0, min=tr_radius_min_vec)
                     tr_failure_count = 0
                     if verbose:
                         print(
@@ -1266,7 +1312,7 @@ def run_gebo(
                     f"[gebo]         tr radii: "
                     f"min={r.min().item():.1f}  med={r.median().item():.1f}  "
                     f"max={r.max().item():.1f}  "
-                    f"({(r < tr_radius_init * 0.1).sum().item()}/{dim} below 10%)"
+                    f"({(r < tr_radius_max * 0.1).sum().item()}/{dim} below 10% of max)"
                 )
 
         # --- intermediate plots on every new best loss -----------------------
@@ -1334,7 +1380,7 @@ def run_gebo(
                 "tr_radius_median": tr_radius.median().item(),
                 "tr_radius_min": tr_radius.min().item(),
                 "tr_radius_max": tr_radius.max().item(),
-                "tr_radii_below_10pct": int((tr_radius < tr_radius_init * 0.1).sum().item()),
+                "tr_radii_below_10pct": int((tr_radius < tr_radius_max * 0.1).sum().item()),
             }
             if cand_dist is not None:
                 debug_entry["candidate_distance"] = cand_dist
@@ -1544,6 +1590,15 @@ def main() -> None:
              "the trust region (adaptive schedule only, default 15).",
     )
     parser.add_argument(
+        "--param-config",
+        type=Path,
+        default=None,
+        help="Optional param-config YAML (e.g. debug_all_params_v2.yaml). "
+             "If provided, each parameter's lr_scale is used to scale its "
+             "trust-region radius (lr_scale=0.5 → half the base radius). "
+             "Pinned params (trainable: false) get a tiny radius.",
+    )
+    parser.add_argument(
         "--plot-every-best",
         action="store_true",
         default=False,
@@ -1731,6 +1786,17 @@ def main() -> None:
         print("[gebo] warning: --plot-every-best without --truth-config; "
               "param_drift_all.pdf will have no truth lines")
 
+    # --- per-dimension TR scaling from param config --------------------------
+    tr_scales = None
+    if args.param_config is not None:
+        tr_scales = load_lr_scale_from_param_config(args.param_config, vectorizer)
+        print(
+            f"[gebo] TR per-dim scaling from {args.param_config}: "
+            f"min={tr_scales.min().item():.3f}  "
+            f"med={tr_scales.median().item():.3f}  "
+            f"max={tr_scales.max().item():.3f}"
+        )
+
     result = run_gebo(
         objective=objective,
         dim=vectorizer.dim,
@@ -1747,6 +1813,7 @@ def main() -> None:
         tr_radius_min_frac=args.tr_radius_min_frac,
         tr_t0=args.tr_t0,
         tr_patience=args.tr_patience,
+        tr_scales=tr_scales,
         val_loader=val_loader,
         plot_output_dir=args.output_dir / "intermediate" if args.plot_every_best else None,
         param_names=vectorizer.param_names(),
