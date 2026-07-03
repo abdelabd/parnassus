@@ -56,6 +56,7 @@ from botorch.acquisition import (
 )
 from botorch.acquisition.objective import ScalarizedPosteriorTransform
 from botorch.fit import fit_gpytorch_mll
+from botorch.models import SingleTaskGP
 from botorch.models.gpytorch import GPyTorchModel
 from botorch.optim import optimize_acqf
 from botorch.utils.sampling import draw_sobol_samples
@@ -569,7 +570,8 @@ def _collect_gp_diagnostics(
                 diag["gp_noise"] = noise.item()
 
         model.train()
-        diag["gp_mll"] = mll(model(train_X_stdz), train_Y_stdz).detach().item()
+        mll_val = mll(model(train_X_stdz), train_Y_stdz).detach()
+        diag["gp_mll"] = mll_val.sum().item() if mll_val.numel() > 1 else mll_val.item()
         model.eval()
     return diag
 
@@ -933,6 +935,7 @@ def run_gebo(
     tr_t0: int | None = None,
     tr_patience: int = 15,
     tr_scales: torch.Tensor | None = None,
+    no_grad: bool = False,
     val_loader: "DelphesDataLoader | None" = None,
     plot_output_dir: Path | None = None,
     param_names: list[str] | None = None,
@@ -1147,28 +1150,89 @@ def run_gebo(
         ], dim=-1)  # (d, 2)
 
 
-        # --- fit the gradient-enhanced GP (on standardized data) -------------
-        num_tasks = dim + 1
-        likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-            num_tasks=num_tasks,
-            rank=0,
-            has_task_noise=False,  # single shared noise — prevents GP from
-                                   # decoupling loss from gradients
-            noise_constraint=gpytorch.constraints.GreaterThan(5e-2),
-        ).to(device=device, dtype=torch.float64)
-        model = GradientGPModel(train_X_stdz, train_Y_stdz, likelihood).to(
-            device=device, dtype=torch.float64
-        )
+        # --- fit the GP (on standardized data) -------------------------------
+        if no_grad:
+            # Loss-only GP — ignore gradient columns, use standard SingleTaskGP.
+            train_Y_no_grad = ((Y_loss - Y_mean) / Y_std).unsqueeze(-1)  # (n, 1)
+            model = SingleTaskGP(
+                train_X_stdz, train_Y_no_grad,
+                covar_module=gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.RBFKernel(
+                        lengthscale_prior=gpytorch.priors.GammaPrior(3.0, 0.3),
+                    ),
+                    outputscale_prior=gpytorch.priors.GammaPrior(2.0, 0.5),
+                ),
+            ).to(device=device, dtype=torch.float64)
+            model.covar_module.base_kernel.lengthscale = dim ** 0.5
+            likelihood = model.likelihood
+            mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+            fit_gpytorch_mll(mll)
 
-        mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
-        fit_gpytorch_mll(mll)
+            best_f = train_Y_no_grad.min()
+
+            if acq_name == "LogEI":
+                acq_func = LogExpectedImprovement(model, best_f=best_f, maximize=False)
+            elif acq_name == "qLNEI":
+                acq_func = qLogNoisyExpectedImprovement(
+                    model=model, X_baseline=train_X_stdz, prune_baseline=True,
+                )
+            else:
+                acq_func = ExpectedImprovement(model, best_f=best_f, maximize=False)
+        else:
+            # Gradient-enhanced GP (RBFKernelGrad).
+            num_tasks = dim + 1
+            likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+                num_tasks=num_tasks,
+                rank=0,
+                has_task_noise=False,  # single shared noise — prevents GP from
+                                       # decoupling loss from gradients
+                noise_constraint=gpytorch.constraints.GreaterThan(5e-2),
+            ).to(device=device, dtype=torch.float64)
+            model = GradientGPModel(train_X_stdz, train_Y_stdz, likelihood).to(
+                device=device, dtype=torch.float64
+            )
+
+            mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+            fit_gpytorch_mll(mll)
+
+            best_f = train_Y_stdz[:, 0].min()
+
+            select_loss = ScalarizedPosteriorTransform(
+                weights=torch.cat([
+                    torch.ones(1, device=device, dtype=torch.float64),
+                    torch.zeros(dim, device=device, dtype=torch.float64),
+                ])
+            )
+
+            if acq_name == "LogEI":
+                acq_func = LogExpectedImprovement(
+                    model,
+                    best_f=best_f,
+                    posterior_transform=select_loss,
+                    maximize=False,
+                )
+            elif acq_name == "qLNEI":
+                acq_func = qLogNoisyExpectedImprovement(
+                    model=model,
+                    X_baseline=train_X_stdz,
+                    posterior_transform=select_loss,
+                    prune_baseline=True,
+                )
+            else:
+                acq_func = ExpectedImprovement(
+                    model,
+                    best_f=best_f,
+                    posterior_transform=select_loss,
+                    maximize=False,
+                )
 
         # --- diagnostics: GP hyperparameters ---------------------------------
+        _diag_Y = train_Y_no_grad if no_grad else train_Y_stdz
         gp_diag = _log_gp_diagnostics(
             model=model,
             likelihood=likelihood,
             train_X_stdz=train_X_stdz,
-            train_Y_stdz=train_Y_stdz,
+            train_Y_stdz=_diag_Y,
             bounds_stdz=bounds_stdz,
             dim=dim,
             device=device,
@@ -1176,38 +1240,6 @@ def run_gebo(
             mll=mll,
             comet_exp=comet_exp,
         )
-
-        # --- acquisition function (works in standardized space) ---------------
-        best_f = train_Y_stdz[:, 0].min()
-
-        select_loss = ScalarizedPosteriorTransform(
-            weights=torch.cat([
-                torch.ones(1, device=device, dtype=torch.float64),
-                torch.zeros(dim, device=device, dtype=torch.float64),
-            ])
-        )
-
-        if acq_name == "LogEI":
-            acq_func = LogExpectedImprovement(
-                model,
-                best_f=best_f,
-                posterior_transform=select_loss,
-                maximize=False,
-            )
-        elif acq_name == "qLNEI":
-            acq_func = qLogNoisyExpectedImprovement(
-                model=model,
-                X_baseline=train_X_stdz,
-                posterior_transform=select_loss,
-                prune_baseline=True,
-            )
-        else:
-            acq_func = ExpectedImprovement(
-                model,
-                best_f=best_f,
-                posterior_transform=select_loss,
-                maximize=False,
-            )
 
         # --- trust region: intersect global bounds with hyperrectangle around
         #     the current best point (in standardized space) ------------------
@@ -1255,11 +1287,13 @@ def run_gebo(
         best_loss = float(train_Y[best_idx, 0])
 
         # --- cap training set at the most recent MAX_TRAIN_POINTS -----------
-        MAX_TRAIN_POINTS = 80
-        if train_X.shape[0] > MAX_TRAIN_POINTS:
+        # In no-grad mode the GP Cholesky is O(n³) instead of O((67n)³), so
+        # it can comfortably handle many more points.  Use a generous cap.
+        _max_pts = 500 if no_grad else 80
+        if train_X.shape[0] > _max_pts:
             keep = torch.zeros(train_X.shape[0], dtype=torch.bool)
-            # keep the most recent (MAX_TRAIN_POINTS - 1) points ...
-            keep[- (MAX_TRAIN_POINTS - 1):] = True
+            # keep the most recent (_max_pts - 1) points ...
+            keep[- (_max_pts - 1):] = True
             # ... and always keep the best point
             keep[best_idx] = True
             train_X = train_X[keep]
@@ -1268,7 +1302,7 @@ def run_gebo(
             best_loss = float(train_Y[best_idx, 0])
             if verbose:
                 print(
-                    f"[gebo]         capped train set at {MAX_TRAIN_POINTS} points "
+                    f"[gebo]         capped train set at {_max_pts} points "
                     f"(dropped {keep.numel() - keep.sum().item()} old, best at idx {best_idx})"
                 )
 
@@ -1617,6 +1651,14 @@ def main() -> None:
              "Pinned params (trainable: false) get a tiny radius.",
     )
     parser.add_argument(
+        "--no-grad",
+        action="store_true",
+        default=False,
+        help="Use a loss-only GP (SingleTaskGP, no gradient observations). "
+             "This is the ablation baseline for measuring how much the "
+             "gradient information helps.",
+    )
+    parser.add_argument(
         "--plot-every-best",
         action="store_true",
         default=False,
@@ -1832,6 +1874,7 @@ def main() -> None:
         tr_t0=args.tr_t0,
         tr_patience=args.tr_patience,
         tr_scales=tr_scales,
+        no_grad=args.no_grad,
         val_loader=val_loader,
         plot_output_dir=args.output_dir / "intermediate" if args.plot_every_best else None,
         param_names=vectorizer.param_names(),
