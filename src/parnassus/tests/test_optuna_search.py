@@ -130,7 +130,11 @@ def test_sample_trial_produces_valid_config(tmp_path: Path):
     def objective(trial: optuna.Trial) -> float:
         flat_cfg, lr, batch_size, group_lr_scale = osearch.sample_trial(trial, search, parameters)
         assert set(flat_cfg) == set(parameters)
-        assert all(spec["trainable"] for spec in flat_cfg.values())  # all 66 tunable
+        # Every searched scalar is tunable; {value: ...} entries (chad_logit,
+        # pinned at the believed-truth 0.0 so round 0 stays below the
+        # SimpleCalorimeter fraction-bypass cutoff) are not.
+        pinned = {k for k, s in parameters.items() if "value" in s}
+        assert all(spec["trainable"] == (key not in pinned) for key, spec in flat_cfg.items())
         assert batch_size in search["batch_size"]["choices"]
         assert set(group_lr_scale) == set(osearch.LR_SCALE_GROUPS)
 
@@ -165,7 +169,7 @@ def test_sample_trial_produces_valid_config(tmp_path: Path):
 
 
 def test_build_warm_start_params_shipped_configs():
-    """cms_target_default seeds every searched scalar; only chad_logit needs clamping."""
+    """cms_target_default seeds every searched scalar with no clamping needed."""
     _, parameters = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)
     init_cfg = pc.load_param_config(PARAM_CONFIGS / "cms_target_default.yaml")
 
@@ -179,12 +183,15 @@ def test_build_warm_start_params_shipped_configs():
         low, high, _ = osearch._parse_range(key, parameters[key])
         assert low <= value <= high, key
 
-    # The believed chad ECal fraction is 0.0 (stored clipped as 1e-6), which no
-    # trainable sigmoid can represent -> clamped to the range low. Everything
-    # else -- including the 0.9-0.99 efficiencies and the small muon b
-    # coefficients the ranges were widened for -- passes through exactly.
-    assert [key for key, _, _ in clamped] == ["HadronFractions.chad_logit"]
-    assert enqueue_params["HadronFractions.chad_logit"] == pytest.approx(0.02)
+    # The believed chad ECal fraction is 0.0, which no trainable sigmoid can
+    # represent; chad_logit is therefore PINNED in the shipped config (excluded
+    # from the search and from the warm start) instead of clamped up to an
+    # active fraction -- a clamped 0.02 warm start used to push every charged
+    # hadron through the ECal rescale and spike the round-0 pT spectrum.
+    # Everything else -- including the 0.9-0.99 efficiencies and the small muon
+    # b coefficients the ranges were widened for -- passes through exactly.
+    assert clamped == []
+    assert "HadronFractions.chad_logit" not in enqueue_params
     assert enqueue_params["ChargedHadronTrackingEfficiency.eff_logits[0]"] == pytest.approx(0.7)
     assert enqueue_params["MuonTrackingEfficiency.eff_logits[1]"] == pytest.approx(0.99)
     assert enqueue_params["MuonMomentumSmearing.resolution_module.b_raw[0]"] == pytest.approx(
@@ -378,11 +385,13 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
         # The materialized config is a normal, loadable param config.
         assert len(pc.load_param_config(rd / "materialized_config.yaml")) == 66
 
-    # Trial 0 was warm-started from --init-config (chad_logit clamped to 0.02).
+    # Trial 0 was warm-started from --init-config (chad_logit pinned at 0.0,
+    # below the SimpleCalorimeter fraction-bypass cutoff -> ECal path off).
     round0 = pc.load_param_config(out_base / "round_0" / "materialized_config.yaml")
     assert round0["ChargedHadronTrackingEfficiency.eff_logits[0]"]["value"] == pytest.approx(0.7)
     assert round0["MuonTrackingEfficiency.eff_logits[1]"]["value"] == pytest.approx(0.99)
-    assert round0["HadronFractions.chad_logit"]["value"] == pytest.approx(0.02)
+    assert round0["HadronFractions.chad_logit"]["value"] == pytest.approx(0.0)
+    assert round0["HadronFractions.chad_logit"]["trainable"] is False
 
     # Canonical best history exists and is accepted by the plot pipeline.
     assert history_path.exists()

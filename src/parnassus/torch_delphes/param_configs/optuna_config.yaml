@@ -107,10 +107,18 @@ parameters:
   MuonMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
 
   # ===== Hadron fractions (logit; init in (0.005, 0.995)) =====
-  # chad low=0.02: the believed truth is 0.0 (all charged-hadron energy to HCal),
-  # which no trainable sigmoid can represent (dead gradient); 0.02 is the
-  # closest well-conditioned init. A warm start clamps 1e-6 -> 0.02.
-  HadronFractions.chad_logit: {low: 0.02, high: 0.85}
+  # chad PINNED at 0.0 (all charged-hadron energy to HCal, the CMS-card truth).
+  # SimpleCalorimeter bypasses the tower/rescale path for fractions < 1e-4
+  # (C++ parity: the card's 0.0 routes chad tracks straight to EFlowTrack), and
+  # the trainable-logit init guard forbids a search range reaching that low.
+  # The old {low: 0.02, high: 0.85} clamped the 1e-6 warm start up to 0.02,
+  # which pushed every charged hadron through the ECal rescale against an
+  # always-zeroed tower and imprinted sharp pT spikes at ~2-3 GeV (fold of
+  # wT/(wT+wC)) plus a 4-9 GeV depletion that C++ Delphes does not produce.
+  # To make the ECal fraction searchable again, use a range inside
+  # (0.005, 0.995) -- every sampled value then legitimately activates the
+  # ECal path -- but round 0 / the believed truth needs the pin below.
+  HadronFractions.chad_logit: {value: 0.0}
   HadronFractions.k0s_logit: {low: 0.15, high: 0.85}
   HadronFractions.lambda_logit: {low: 0.15, high: 0.85}
 
