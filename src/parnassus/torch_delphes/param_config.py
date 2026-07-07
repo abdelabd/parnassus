@@ -52,12 +52,15 @@ _SCALE_MAX = _SCALE_CENTER + _SCALE_HALF_WIDTH  # 1.3
 # Allowed initial range for *trainable* ``logit`` parameters. A trainable
 # efficiency/fraction initialized at (or near) 0/1 maps to a raw logit with a
 # vanishing sigmoid Jacobian -- ``d eff / d logit = eff*(1-eff)`` -- so Adam gets
-# essentially no gradient and the parameter is stuck. Initializing a *fitted*
-# logit inside (0.1, 0.9) keeps that Jacobian >= 0.09 (well-conditioned). Fixed
-# (``trainable: false``) logit params are unconstrained in [0, 1] (e.g. a truth
-# efficiency of 0.99 or a 1e-6 fraction is fine -- they never move).
-_TRAINABLE_LOGIT_MIN = 0.1
-_TRAINABLE_LOGIT_MAX = 0.9
+# essentially no gradient and the parameter is stuck. The window (0.005, 0.995)
+# is deliberately wide so a fit can start at a believed-truth efficiency of
+# 0.95-0.99: the Jacobian there is weak (~0.01) but still consistent in sign,
+# which Adam's RMS normalization follows; truly dead inits (1e-6, 0.999) are
+# rejected. Fixed (``trainable: false``) logit params are unconstrained in
+# [0, 1] (e.g. a truth efficiency of 0.99 or a 1e-6 fraction is fine -- they
+# never move).
+_TRAINABLE_LOGIT_MIN = 0.005
+_TRAINABLE_LOGIT_MAX = 0.995
 
 _DTYPE = torch.float64
 
@@ -224,8 +227,9 @@ def load_param_config(path: str | Path) -> dict[str, dict]:
         trainable = bool(spec.get("trainable", False))
         # Guard trainable logit params away from the dead-gradient sigmoid tails.
         # A non-trainable logit may sit anywhere in [0, 1] (it never moves), but a
-        # *fitted* one initialized outside (0.1, 0.9) starts where the sigmoid
-        # Jacobian ~ 0, so Adam cannot move it (e.g. value 1.0 -> raw logit ~ +13.8).
+        # *fitted* one initialized outside (_TRAINABLE_LOGIT_MIN, _TRAINABLE_LOGIT_MAX)
+        # starts where the sigmoid Jacobian ~ 0, so Adam cannot move it (e.g. value
+        # 1.0 -> raw logit ~ +13.8).
         if trainable and param_transform_kind(base) == "logit":
             if not (_TRAINABLE_LOGIT_MIN < value < _TRAINABLE_LOGIT_MAX):
                 raise ValueError(
