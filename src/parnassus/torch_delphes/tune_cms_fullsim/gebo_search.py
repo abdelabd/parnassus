@@ -1071,8 +1071,35 @@ def run_gebo(
                     f"[gebo] computed init trainee preds from best Sobol point "
                     f"(idx={best_sobol_idx}, loss={init_Y[best_sobol_idx, 0].item():.4e})"
                 )
+            # Persist the raw parameter vector (not the predictions) so
+            # resumed runs can re-evaluate against whatever val_loader is
+            # current — robust to changes in the validation split.
+            if state_path is not None:
+                _init_raw_path = state_path.parent / "init_trainee_raw.pt"
+                torch.save({
+                    "raw_params": init_X[best_sobol_idx].clone(),
+                    "param_names": param_names,
+                }, _init_raw_path)
 
     # --- common setup for both fresh and resumed paths -----------------------
+    # On resume (or when the raw-param file is missing from an old experiment),
+    # rebuild the initial trainee predictions from the saved raw vector and the
+    # *current* val_loader — robust to changes in the validation split.
+    if pred_init is None and state_path is not None:
+        _init_raw_path = state_path.parent / "init_trainee_raw.pt"
+        if _init_raw_path.exists() and val_loader is not None and param_names is not None:
+            from .gebo_plotting import build_card_from_raw_params, trainee_observables
+            _ckpt = torch.load(_init_raw_path, map_location="cpu", weights_only=False)
+            _best_sobol_raw = {
+                _ckpt["param_names"][j]: float(_ckpt["raw_params"][j])
+                for j in range(len(_ckpt["param_names"]))
+            }
+            torch.manual_seed(seed)
+            _init_card = build_card_from_raw_params(_best_sobol_raw, torch.device("cpu"))
+            pred_init, _ = trainee_observables(_init_card, val_loader)
+            if verbose:
+                print(f"[gebo] rebuilt init trainee preds from {_init_raw_path}")
+        # Old experiments without the file: pred_init stays None (no overlay).
     best_idx = int(train_Y[:, 0].argmin().item())
 
     device = train_X.device
