@@ -988,6 +988,9 @@ def run_gebo(
     start_iteration = 1
     train_X: torch.Tensor | None = None
     train_Y: torch.Tensor | None = None
+    # Boolean mask (one entry per row of train_X) protecting every point that
+    # has ever been the best-so-far from the random-drop buffer cap below.
+    is_protected: torch.Tensor | None = None
     history: list[dict] = []
     pred_init: dict | None = None  # initial trainee preds (best Sobol point)
 
@@ -1001,6 +1004,11 @@ def run_gebo(
             n_iterations += n_done
             train_X = ckpt["train_X"].to(dtype=torch.float64)
             train_Y = ckpt["train_Y"].to(dtype=torch.float64)
+            # Restore the protected mask if the checkpoint carries one (older
+            # checkpoints predate it -> rebuilt from the current best below).
+            _saved_prot = ckpt.get("is_protected")
+            if _saved_prot is not None and _saved_prot.numel() == train_X.shape[0]:
+                is_protected = _saved_prot.to(dtype=torch.bool)
             history = ckpt.get("history", [])
             start_iteration = n_done + 1
             resumed = True
@@ -1101,6 +1109,12 @@ def run_gebo(
                 print(f"[gebo] rebuilt init trainee preds from {_init_raw_path}")
         # Old experiments without the file: pred_init stays None (no overlay).
     best_idx = int(train_Y[:, 0].argmin().item())
+
+    # Initialize the protected mask (fresh run, or a resumed checkpoint that
+    # predates it): protect at least the current best point.
+    if is_protected is None or is_protected.numel() != train_X.shape[0]:
+        is_protected = torch.zeros(train_X.shape[0], dtype=torch.bool)
+    is_protected[best_idx] = True
 
     device = train_X.device
     dtype = torch.float64
@@ -1309,28 +1323,41 @@ def run_gebo(
 
         train_X = torch.cat([train_X, candidate])
         train_Y = torch.cat([train_Y, new_Y])
+        # The new point starts unprotected; the best-so-far mark below promotes
+        # it (and keeps every past record-holder) safe from the random drop.
+        is_protected = torch.cat([is_protected, torch.zeros(1, dtype=torch.bool)])
 
         best_idx = train_Y[:, 0].argmin().item()
         best_loss = float(train_Y[best_idx, 0])
+        is_protected[best_idx] = True  # protect every point that was ever best
 
-        # --- cap training set at the most recent MAX_TRAIN_POINTS -----------
+        # --- cap training set by randomly dropping NON-protected points -----
         # In no-grad mode the GP Cholesky is O(n³) instead of O((67n)³), so
         # it can comfortably handle many more points.  Use a generous cap.
+        # Points that have ever been the best-so-far are never dropped; the
+        # rest are pruned uniformly at random down to the buffer size.
         _max_pts = 500 if no_grad else 80
         if train_X.shape[0] > _max_pts:
+            protected_idx = torch.nonzero(is_protected, as_tuple=False).flatten()
+            free_idx = torch.nonzero(~is_protected, as_tuple=False).flatten()
+            # How many free (droppable) points we can still afford to keep.
+            n_free_keep = max(_max_pts - protected_idx.numel(), 0)
+            perm = torch.randperm(free_idx.numel())
+            free_keep = free_idx[perm[:n_free_keep]]
             keep = torch.zeros(train_X.shape[0], dtype=torch.bool)
-            # keep the most recent (_max_pts - 1) points ...
-            keep[- (_max_pts - 1):] = True
-            # ... and always keep the best point
-            keep[best_idx] = True
+            keep[protected_idx] = True
+            keep[free_keep] = True
+            n_dropped = int((~keep).sum().item())
             train_X = train_X[keep]
             train_Y = train_Y[keep]
+            is_protected = is_protected[keep]
             best_idx = train_Y[:, 0].argmin().item()
             best_loss = float(train_Y[best_idx, 0])
             if verbose:
                 print(
-                    f"[gebo]         capped train set at {_max_pts} points "
-                    f"(dropped {keep.numel() - keep.sum().item()} old, best at idx {best_idx})"
+                    f"[gebo]         capped train set at {train_X.shape[0]} points "
+                    f"(randomly dropped {n_dropped}, protected "
+                    f"{int(is_protected.sum().item())}, best at idx {best_idx})"
                 )
 
         # --- trust region update -------------------------------------------
@@ -1505,6 +1532,7 @@ def run_gebo(
             ckpt_data = {
                 "train_X": train_X.cpu(),
                 "train_Y": train_Y.cpu(),
+                "is_protected": is_protected.cpu(),
                 "history": history,
                 "iteration": iteration,
                 "n_initial": n_initial,
