@@ -55,3 +55,17 @@ plotting:
   n_plot_events: 20000
   plot_batch_size: 2000
   truth_config: src/parnassus/torch_delphes/param_configs/cms_target_default.yaml
+
+# --- Gaussian-process surrogate ---
+gp:
+  max_train_points: 80          # buffer cap for the gradient-enhanced GP (O((67n)^3) Cholesky)
+  max_train_points_no_grad: 500 # buffer cap for the loss-only GP (O(n^3) Cholesky)
+  lengthscale_prior: [3.0, 0.3] # RBF lengthscale GammaPrior(concentration, rate)
+  outputscale_prior: [2.0, 0.5] # kernel outputscale GammaPrior(concentration, rate)
+  noise_floor: 0.05             # min GP observation noise (GreaterThan constraint)
+  init_lengthscale_frac: 1.0    # initial lengthscale = frac * sqrt(dim)
+
+# --- Acquisition optimizer (optimize_acqf) ---
+acquisition:
+  num_restarts: 20              # multi-start restarts for the acquisition optimization
+  raw_samples: 4096             # random samples seeding the multi-start

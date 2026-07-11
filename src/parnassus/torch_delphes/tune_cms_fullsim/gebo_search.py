@@ -481,7 +481,15 @@ class GradientGPModel(gpytorch.models.ExactGP, GPyTorchModel):
 
     _num_outputs = 1  # conceptually one output (the loss)
 
-    def __init__(self, train_x, train_y, likelihood):
+    def __init__(
+        self,
+        train_x,
+        train_y,
+        likelihood,
+        lengthscale_prior=(3.0, 0.3),
+        outputscale_prior=(2.0, 0.5),
+        init_lengthscale_frac=1.0,
+    ):
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMeanGrad()
         # Single shared lengthscale (no ARD).  In 66-D standardized space the
@@ -492,16 +500,15 @@ class GradientGPModel(gpytorch.models.ExactGP, GPyTorchModel):
         # which gives exp(-66) ≈ 0 kernel values for ALL point pairs.
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.RBFKernelGrad(
-                lengthscale_prior=gpytorch.priors.GammaPrior(3.0, 0.3),
+                lengthscale_prior=gpytorch.priors.GammaPrior(*lengthscale_prior),
             ),
-            outputscale_prior=gpytorch.priors.GammaPrior(2.0, 0.5),
+            outputscale_prior=gpytorch.priors.GammaPrior(*outputscale_prior),
         )
-        # Initialise the lengthscale to sqrt(dim) ≈ 8.1 so the kernel sees
-        # correlation from the start instead of starting at 1.0 (near-zero
-        # correlation in high-d).
+        # Initialise the lengthscale to init_lengthscale_frac * sqrt(dim) so the
+        # kernel sees correlation from the start instead of starting at 1.0
+        # (near-zero correlation in high-d).
         d = train_x.size(-1)
-        init_lengthscale = d ** 0.5
-        self.covar_module.base_kernel.lengthscale = init_lengthscale
+        self.covar_module.base_kernel.lengthscale = init_lengthscale_frac * (d ** 0.5)
 
     def forward(self, x):
         mean_x = self.mean_module(x)
@@ -935,6 +942,14 @@ def run_gebo(
     tr_scheduler: "TrustRegion | None" = None,
     tr_scales: torch.Tensor | None = None,
     no_grad: bool = False,
+    max_train_points: int = 80,
+    max_train_points_no_grad: int = 500,
+    gp_lengthscale_prior: tuple = (3.0, 0.3),
+    gp_outputscale_prior: tuple = (2.0, 0.5),
+    gp_noise_floor: float = 0.05,
+    gp_init_lengthscale_frac: float = 1.0,
+    acqf_num_restarts: int = 20,
+    acqf_raw_samples: int = 4096,
     val_loader: "DelphesDataLoader | None" = None,
     plot_output_dir: Path | None = None,
     param_names: list[str] | None = None,
@@ -1174,12 +1189,12 @@ def run_gebo(
                 train_X_stdz, train_Y_no_grad,
                 covar_module=gpytorch.kernels.ScaleKernel(
                     gpytorch.kernels.RBFKernel(
-                        lengthscale_prior=gpytorch.priors.GammaPrior(3.0, 0.3),
+                        lengthscale_prior=gpytorch.priors.GammaPrior(*gp_lengthscale_prior),
                     ),
-                    outputscale_prior=gpytorch.priors.GammaPrior(2.0, 0.5),
+                    outputscale_prior=gpytorch.priors.GammaPrior(*gp_outputscale_prior),
                 ),
             ).to(device=device, dtype=torch.float64)
-            model.covar_module.base_kernel.lengthscale = dim ** 0.5
+            model.covar_module.base_kernel.lengthscale = gp_init_lengthscale_frac * (dim ** 0.5)
             likelihood = model.likelihood
             mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
             fit_gpytorch_mll(mll)
@@ -1202,9 +1217,16 @@ def run_gebo(
                 rank=0,
                 has_task_noise=False,  # single shared noise — prevents GP from
                                        # decoupling loss from gradients
-                noise_constraint=gpytorch.constraints.GreaterThan(5e-2),
+                noise_constraint=gpytorch.constraints.GreaterThan(gp_noise_floor),
             ).to(device=device, dtype=torch.float64)
-            model = GradientGPModel(train_X_stdz, train_Y_stdz, likelihood).to(
+            model = GradientGPModel(
+                train_X_stdz,
+                train_Y_stdz,
+                likelihood,
+                lengthscale_prior=gp_lengthscale_prior,
+                outputscale_prior=gp_outputscale_prior,
+                init_lengthscale_frac=gp_init_lengthscale_frac,
+            ).to(
                 device=device, dtype=torch.float64
             )
 
@@ -1268,8 +1290,8 @@ def run_gebo(
             acq_function=acq_func,
             bounds=tr_bounds.T.to(dtype=torch.float64),
             q=1,
-            num_restarts=20,
-            raw_samples=4096,
+            num_restarts=acqf_num_restarts,
+            raw_samples=acqf_raw_samples,
         )
 
         # --- diagnostics: predictive variance at candidate vs random ----------
@@ -1302,10 +1324,10 @@ def run_gebo(
 
         # --- cap training set by randomly dropping NON-protected points -----
         # In no-grad mode the GP Cholesky is O(n³) instead of O((67n)³), so
-        # it can comfortably handle many more points.  Use a generous cap.
+        # it can comfortably handle many more points (max_train_points_no_grad).
         # Points that have ever been the best-so-far are never dropped; the
         # rest are pruned uniformly at random down to the buffer size.
-        _max_pts = 500 if no_grad else 80
+        _max_pts = max_train_points_no_grad if no_grad else max_train_points
         if train_X.shape[0] > _max_pts:
             protected_idx = torch.nonzero(is_protected, as_tuple=False).flatten()
             free_idx = torch.nonzero(~is_protected, as_tuple=False).flatten()
@@ -1501,12 +1523,16 @@ _GEBO_CONFIG_CHOICES: dict = {
 }
 
 # Nested YAML sub-sections whose keys are FLATTENED onto the run loop's field
-# names. ``loss_weights`` / ``plotting`` keys pass through unchanged. The
-# ``trust_region`` section is NOT flattened -- it stays a ``{class_path,
-# init_args}`` spec instantiated by :func:`.trust_region.instantiate_trust_region`.
+# names, with the given prefix. ``loss_weights`` / ``plotting`` pass through
+# unchanged; ``gp`` keys get a ``gp_`` prefix and ``acquisition`` keys an
+# ``acqf_`` prefix. The ``trust_region`` section is NOT flattened -- it stays a
+# ``{class_path, init_args}`` spec instantiated by
+# :func:`.trust_region.instantiate_trust_region`.
 _GEBO_CONFIG_SECTIONS: dict[str, str] = {
     "loss_weights": "",
     "plotting": "",
+    "gp": "gp_",
+    "acquisition": "acqf_",
 }
 
 
@@ -1771,6 +1797,14 @@ def main() -> None:
         tr_scheduler=tr_scheduler,
         tr_scales=tr_scales,
         no_grad=args.no_grad,
+        max_train_points=args.gp_max_train_points,
+        max_train_points_no_grad=args.gp_max_train_points_no_grad,
+        gp_lengthscale_prior=args.gp_lengthscale_prior,
+        gp_outputscale_prior=args.gp_outputscale_prior,
+        gp_noise_floor=args.gp_noise_floor,
+        gp_init_lengthscale_frac=args.gp_init_lengthscale_frac,
+        acqf_num_restarts=args.acqf_num_restarts,
+        acqf_raw_samples=args.acqf_raw_samples,
         val_loader=val_loader,
         plot_output_dir=args.output_dir / "intermediate" if args.plot_every_best else None,
         param_names=vectorizer.param_names(),
