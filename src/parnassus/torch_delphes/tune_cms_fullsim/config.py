@@ -47,7 +47,7 @@ PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_
 # load_pflow_targets_from_tensor, so the intermediate-plot loop skips them (they are
 # absent from the pred dict).
 OBSERVABLES: list[str] = [
-    "pt", "eta", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid",
+    "pt", "eta", "phi", "log_E", "log_pt", "multiplicity", "ht", "log_ht", "pid",
     "chad_region_counts", "electron_region_counts", "muon_region_counts",
     # Calorimeter object-count targets (per-|eta|-region; ECal photons, HCal
     # neutral hadrons) for the differentiable resolution-param count term. Same

@@ -18,7 +18,7 @@ from .config import OBSERVABLES
 
 # The per-particle (variable-length) observables: padded per batch. Every other
 # key in OBSERVABLES is per-event (fixed shape) and is stacked instead.
-RAGGED_OBSERVABLES: tuple[str, ...] = ("pt", "eta", "log_E", "log_pt", "pid")
+RAGGED_OBSERVABLES: tuple[str, ...] = ("pt", "eta", "phi", "log_E", "log_pt", "pid")
 
 
 def _to_device(value, device):

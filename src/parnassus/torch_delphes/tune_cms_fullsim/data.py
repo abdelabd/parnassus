@@ -284,7 +284,7 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
 
     all_pt: list[np.ndarray] = []
     all_eta: list[np.ndarray] = []
-    # all_phi: list[np.ndarray] = [] # phi doesn't contribute to gradient
+    all_phi: list[np.ndarray] = []
     all_e: list[np.ndarray] = []
     all_pids: list[np.ndarray] = []
     per_event_mult = np.zeros(n_events, dtype=np.float64)
@@ -308,7 +308,7 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
     for i in range(n_events):
         pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
-        # phi = np.asarray(arrays["pflow_phi"][i], dtype=np.float64)
+        phi = np.asarray(arrays["pflow_phi"][i], dtype=np.float64)
         cls = np.asarray(arrays["pflow_class"][i], dtype=np.int64)
         # Reconstruct per-particle energy: E = sqrt(p^2 + m^2) with
         # |p| = pt * cosh(eta) and m from the class -> PDG -> mass map.
@@ -323,7 +323,7 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
         e = np.sqrt(p_mag * p_mag + mass * mass)
         all_pt.append(pt)
         all_eta.append(eta)
-        # all_phi.append(phi)
+        all_phi.append(phi)
         all_e.append(e)
         all_pids.append(pids)
         per_event_mult[i] = float(pt.shape[0])
@@ -347,6 +347,7 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
         n_events,
         all_pt,
         all_eta,
+        all_phi,
         all_e,
         all_pids,
         per_event_mult,
@@ -365,6 +366,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
         n_events,
         all_pt,
         all_eta,
+        all_phi,
         all_e,
         all_pids,
         per_event_mult,
@@ -387,7 +389,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
 
     pt_pad = _pad_stack(all_pt)
     eta_pad = _pad_stack(all_eta)
-    # phi_pad = _pad_stack(all_phi)  # phi doesn't contribute to gradient
+    phi_pad = _pad_stack(all_phi)
     e_pad = _pad_stack(all_e)
     pids_pad = _pad_stack(all_pids)
 
@@ -410,7 +412,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
     return {
         "pt": torch.from_numpy(pt_pad),
         "eta": torch.from_numpy(eta_pad),
-        # "phi": torch.from_numpy(phi_pad),
+        "phi": torch.from_numpy(phi_pad),
         # "E": torch.from_numpy(e_pad),
         "log_pt": torch.from_numpy(log_pt_pad),
         "log_E": torch.from_numpy(log_E_pad),
@@ -438,6 +440,7 @@ def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float
         n_events,
         all_pt,
         all_eta,
+        all_phi,
         all_e,
         all_pids,
         per_event_mult,
@@ -462,6 +465,7 @@ def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float
     return {
         "pt": _to_list(all_pt),
         "eta": _to_list(all_eta),
+        "phi": _to_list(all_phi),
         "log_pt": _to_list(log_pt_list),
         "log_E": _to_list(log_E_list),
         "pid": _to_list(all_pids),
@@ -501,6 +505,7 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
     """
     pt = arrays[..., ColumnMap.PT]  # (n_events, max_n_objects)
     eta = arrays[..., ColumnMap.ETA]
+    phi = arrays[..., ColumnMap.PHI]
 
     # Normalize the trainee card's mixed Delphes PID column (neutral-hadron
     # marker 0, photon 22, real PDG on tracks) to the SAME canonical PDG codes
@@ -551,6 +556,7 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
 
     pt_out = torch.where(valid, pt, torch.zeros_like(pt))
     eta_out = torch.where(valid, eta, torch.zeros_like(eta))
+    phi_out = torch.where(valid, phi, torch.zeros_like(phi))
     pid_out = torch.where(valid, pid, torch.zeros_like(pid))
 
     valid_f = valid.to(pt.dtype)
@@ -564,6 +570,7 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
     return {
         "pt": pt_out,
         "eta": eta_out,
+        "phi": phi_out,
         "log_E": log_E,
         # "E": e,
         "log_pt": log_pt,

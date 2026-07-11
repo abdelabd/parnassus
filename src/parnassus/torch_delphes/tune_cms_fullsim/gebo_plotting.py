@@ -233,7 +233,7 @@ _FINAL_PID_GROUPS: tuple[tuple[str, int, str], ...] = (
     ("111", 111, "neutral hadron"),
     ("22", 22, "photon"),
 )
-_FINAL_PID_VARS: tuple[str, ...] = ("Eta", "PT", "P", "E")
+_FINAL_PID_VARS: tuple[str, ...] = ("Eta", "Phi", "PT", "P", "E")
 
 
 def _final_pid_values(obs: dict[str, torch.Tensor], pid_abs: int, var: str) -> np.ndarray:
@@ -247,6 +247,10 @@ def _final_pid_values(obs: dict[str, torch.Tensor], pid_abs: int, var: str) -> n
         return np.empty(0, dtype=np.float64)
     if var == "Eta":
         vals = eta[mask]
+    elif var == "Phi":
+        if "phi" not in obs:
+            return np.empty(0, dtype=np.float64)
+        vals = obs["phi"][mask]
     elif var == "PT":
         vals = pt[mask]
     elif var == "P":

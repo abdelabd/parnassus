@@ -448,7 +448,7 @@ def _assemble_target_dict(
     """
     from torch.nn.utils.rnn import pad_sequence
 
-    RAGGED = {"pt", "eta", "log_E", "log_pt", "pid"}
+    RAGGED = {"pt", "eta", "phi", "log_E", "log_pt", "pid"}
     out: dict[str, torch.Tensor] = {}
     for key in target_list[0]:
         vals = [d[key].to(device) for d in target_list]
