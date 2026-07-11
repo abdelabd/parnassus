@@ -37,6 +37,7 @@ argument. See ``tune_cms_fullsim/configs/`` for examples.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import time
@@ -90,6 +91,7 @@ from .loss import (
     PID_WEIGHTING_CHOICES,
     get_loss_fn,
 )
+from .trust_region import NoTrustRegion, TrustRegion, instantiate_trust_region
 
 # =============================================================================
 # Parameter vectorizer – maps between a flat raw-parameter tensor and a card
@@ -930,10 +932,7 @@ def run_gebo(
     comet_exp: "comet_ml.Experiment | None" = None,
     machine_debug_path: Path | None = None,
     state_path: Path | None = None,
-    tr_schedule: str = "cosine",
-    tr_radius_min_frac: float = 0.01,
-    tr_t0: int | None = None,
-    tr_patience: int = 15,
+    tr_scheduler: "TrustRegion | None" = None,
     tr_scales: torch.Tensor | None = None,
     no_grad: bool = False,
     val_loader: "DelphesDataLoader | None" = None,
@@ -1123,39 +1122,15 @@ def run_gebo(
 
     # --- trust region -------------------------------------------------------
     # The trust region constrains how far the acquisition optimizer can stray
-    # from the current best point, acting as a "learning rate" for BO.
-    #
-    # Three schedules:
-    #   "cosine"   — cosine annealing WITH warm restarts (PyTorch-style).
-    #                Each cycle: radius decays init→min over T_cur iterations,
-    #                then resets to init.  T_cur doubles after each restart.
-    #                Periodically forces re-exploration to escape local minima.
-    #   "adaptive" — TuRBO-style (Eriksson et al. 2019): global success/failure
-    #                based on whether the new point improves the best loss.
-    #                After tr_patience consecutive successes, ALL dimensions'
-    #                radii double; after tr_patience consecutive failures, ALL halve.
-    #   "none"     — no trust region; global bounds only (vanilla BO).
-    #
-    # The initial radius spans the full search space.
-    tr_radius_init = 0.5 * (bounds[:, 1] - bounds[:, 0]).norm().item()
-    tr_radius_min = tr_radius_min_frac * tr_radius_init
-    # Per-dimension scaling (default 1.0 = no per-dim scaling).
-    _tr_scales = (
-        tr_scales.to(dtype=torch.float64)
-        if tr_scales is not None
-        else torch.ones(dim, dtype=torch.float64)
-    )
-    # Per-dimension radii, scaled independently.
-    tr_radius = torch.full((dim,), tr_radius_init, dtype=torch.float64) * _tr_scales
-    tr_radius_max = tr_radius_init * _tr_scales  # per-dim maximum
-    tr_radius_min_vec = tr_radius_min * _tr_scales  # per-dim minimum
-    # Success/failure counters (adaptive schedule only; global, not per-dim).
-    tr_success_count = 0
-    tr_failure_count = 0
-    tr_center = train_X[best_idx].clone()  # best point in raw space
-    # Warm-restart state (cosine schedule).
-    tr_cycle_len = tr_t0 if tr_t0 is not None else max(n_iterations // 4, 5)
-    tr_step_in_cycle = 0
+    # from the current best point each iteration (a per-dimension "learning
+    # rate" for BO). The concrete schedule -- cosine / adaptive / none -- is a
+    # TrustRegion object built from the config; here we just wire in the
+    # search-space geometry and the optional per-dim lr_scales, then follow the
+    # best point as the TR center.
+    if tr_scheduler is None:
+        tr_scheduler = NoTrustRegion()
+    tr_scheduler.setup(dim, bounds, tr_scales, n_iterations)
+    tr_center = train_X[best_idx].clone()  # best point in raw space (TR center)
 
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
@@ -1282,17 +1257,11 @@ def run_gebo(
             comet_exp=comet_exp,
         )
 
-        # --- trust region: intersect global bounds with hyperrectangle around
-        #     the current best point (in standardized space) ------------------
-        if tr_schedule == "none":
-            tr_bounds = bounds_stdz  # (d, 2) — full global bounds
-        else:
-            tr_center_stdz = ((tr_center.to(device=device, dtype=dtype) - X_mean.squeeze(0))
-                              / X_std.squeeze(0))
-            tr_radius_dev = tr_radius.to(device=device, dtype=dtype)
-            tr_lower = torch.clamp(tr_center_stdz - tr_radius_dev, min=bounds_stdz[:, 0])
-            tr_upper = torch.clamp(tr_center_stdz + tr_radius_dev, max=bounds_stdz[:, 1])
-            tr_bounds = torch.stack([tr_lower, tr_upper], dim=-1)  # (d, 2)
+        # --- trust region: acquisition box around the current best point ----
+        tr_center_stdz = (
+            (tr_center.to(device=device, dtype=dtype) - X_mean.squeeze(0)) / X_std.squeeze(0)
+        )
+        tr_bounds = tr_scheduler.get_bounds(tr_center_stdz, bounds_stdz)  # (d, 2)
 
         # --- optimize acquisition in standardized space (trust-region bounded)
         candidate_stdz, acq_value = optimize_acqf(
@@ -1362,64 +1331,9 @@ def run_gebo(
 
         # --- trust region update -------------------------------------------
         tr_center = train_X[best_idx].clone()  # always follow the best point
-        if tr_schedule == "none":
-            pass  # no trust region — nothing to update
-        elif tr_schedule == "cosine":
-            # Cosine annealing with warm restarts: per-dimension radii decay
-            # independently (each dim has its own min/max from tr_scales).
-            tr_step_in_cycle += 1
-            if tr_step_in_cycle >= tr_cycle_len:
-                tr_step_in_cycle = 0
-                tr_cycle_len *= 2
-                if verbose:
-                    print(
-                        f"[gebo]         cosine restart → "
-                        f"radius reset to per-dim max, "
-                        f"next cycle={tr_cycle_len} iters"
-                    )
-            progress = tr_step_in_cycle / max(tr_cycle_len, 1)
-            r = 0.5 * (1.0 + np.cos(np.pi * progress))  # in [0, 1]
-            tr_radius = tr_radius_min_vec + (tr_radius_max - tr_radius_min_vec) * r
-        elif tr_schedule == "adaptive":
-            # TuRBO (Eriksson et al. 2019): global success/failure measured by
-            # whether the new candidate beats the current best loss.  On
-            # tr_patience consecutive successes, ALL dimensions' radii double;
-            # on tr_patience consecutive failures, ALL halve.  Per-dimension
-            # scaling (tr_scales) is preserved through independent clamping.
-            old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
-            improved = best_loss < old_best_loss - 1e-8
-            if improved:
-                tr_success_count += 1
-                tr_failure_count = 0
-                if tr_success_count >= tr_patience:
-                    tr_radius = torch.clamp(tr_radius * 2.0, max=tr_radius_max)
-                    tr_success_count = 0
-                    if verbose:
-                        print(
-                            f"[gebo]         TR expanded → "
-                            f"med={tr_radius.median().item():.1f}"
-                        )
-            else:
-                tr_success_count = 0
-                tr_failure_count += 1
-                if tr_failure_count >= tr_patience:
-                    tr_radius = torch.clamp(tr_radius / 2.0, min=tr_radius_min_vec)
-                    tr_failure_count = 0
-                    if verbose:
-                        print(
-                            f"[gebo]         TR shrunk  → "
-                            f"med={tr_radius.median().item():.1f}"
-                        )
-
-            # Log summary stats for the per-dim radii.
-            if verbose and iteration % 5 == 0:
-                r = tr_radius
-                print(
-                    f"[gebo]         tr radii: "
-                    f"min={r.min().item():.1f}  med={r.median().item():.1f}  "
-                    f"max={r.max().item():.1f}  "
-                    f"({(r < tr_radius_max * 0.1).sum().item()}/{dim} below 10% of max)"
-                )
+        old_best_loss = float(train_Y[:-1, 0].min()) if train_Y.shape[0] > 1 else best_loss
+        improved = best_loss < old_best_loss - 1e-8
+        tr_scheduler.update(improved, verbose=verbose)
 
         # --- intermediate plots on every new best loss -----------------------
         if plot_output_dir is not None and val_loader is not None and param_names is not None:
@@ -1469,8 +1383,8 @@ def run_gebo(
             comet_exp.log_metric("n_unique_losses", n_unique, step=iteration)
             if cand_dist is not None:
                 comet_exp.log_metric("candidate_distance", cand_dist, step=iteration)
-            comet_exp.log_metric("tr_radius_median", tr_radius.median().item(), step=iteration)
-            comet_exp.log_metric("tr_radius_min", tr_radius.min().item(), step=iteration)
+            comet_exp.log_metric("tr_radius_median", tr_scheduler.radius.median().item(), step=iteration)
+            comet_exp.log_metric("tr_radius_min", tr_scheduler.radius.min().item(), step=iteration)
 
         # --- machine-debug: append per-iteration YAML -------------------------
         if machine_debug_path is not None:
@@ -1483,10 +1397,10 @@ def run_gebo(
                 "n_unique_losses": n_unique,
                 "n_total_points": int(train_X.shape[0]),
                 "elapsed_s": elapsed,
-                "tr_radius_median": tr_radius.median().item(),
-                "tr_radius_min": tr_radius.min().item(),
-                "tr_radius_max": tr_radius.max().item(),
-                "tr_radii_below_10pct": int((tr_radius < tr_radius_max * 0.1).sum().item()),
+                "tr_radius_median": tr_scheduler.radius.median().item(),
+                "tr_radius_min": tr_scheduler.radius.min().item(),
+                "tr_radius_max": tr_scheduler.radius.max().item(),
+                "tr_radii_below_10pct": int((tr_scheduler.radius < tr_scheduler.radius_max * 0.1).sum().item()),
             }
             if cand_dist is not None:
                 debug_entry["candidate_distance"] = cand_dist
@@ -1584,14 +1498,13 @@ _GEBO_CONFIG_CHOICES: dict = {
     "loss": list(LOSS_CHOICES),
     "acq": ["EI", "LogEI", "qLNEI"],
     "pid_weighting": list(PID_WEIGHTING_CHOICES),
-    "tr_schedule": ["cosine", "adaptive", "none"],
 }
 
-# Nested YAML sub-sections and how their keys map onto the flat field names the
-# run loop uses. ``trust_region`` keys get a ``tr_`` prefix (schedule ->
-# tr_schedule); ``loss_weights`` / ``plotting`` keys pass through unchanged.
+# Nested YAML sub-sections whose keys are FLATTENED onto the run loop's field
+# names. ``loss_weights`` / ``plotting`` keys pass through unchanged. The
+# ``trust_region`` section is NOT flattened -- it stays a ``{class_path,
+# init_args}`` spec instantiated by :func:`.trust_region.instantiate_trust_region`.
 _GEBO_CONFIG_SECTIONS: dict[str, str] = {
-    "trust_region": "tr_",
     "loss_weights": "",
     "plotting": "",
 }
@@ -1602,10 +1515,11 @@ def load_gebo_config(path: Path) -> argparse.Namespace:
 
     The config file is the single source of truth for every setting -- there are
     NO defaults in code, so each documented key must be present. Related settings
-    are grouped into sub-sections (``trust_region``, ``loss_weights``,
-    ``plotting``) which this flattens into the flat field names the run loop uses
-    (e.g. ``trust_region.schedule`` -> ``tr_schedule``). Keys may use hyphens or
-    underscores (``n-events`` == ``n_events``); invalid categorical values raise.
+    are grouped into sub-sections: ``loss_weights`` and ``plotting`` are
+    flattened onto the run loop's field names, while ``trust_region`` stays a
+    ``{class_path, init_args}`` spec (instantiated later). Keys may use hyphens
+    or underscores (``n-events`` == ``n_events``); invalid categorical values
+    raise.
     """
     if not path.exists():
         raise SystemExit(f"config file not found: {path}")
@@ -1625,6 +1539,10 @@ def load_gebo_config(path: Path) -> argparse.Namespace:
             raise SystemExit(f"{path}: missing or malformed '{section}:' section.")
         flat.update({f"{prefix}{k}": v for k, v in _norm(sect).items()})
     flat.update(_norm(raw))
+
+    # ``trust_region`` is a {class_path, init_args} spec, kept as-is (not flattened).
+    if not isinstance(flat.get("trust_region"), dict):
+        raise SystemExit(f"{path}: missing or malformed 'trust_region:' section.")
 
     # Wrap path-valued fields in Path (leave None as None).
     for key in _GEBO_CONFIG_PATH_FIELDS:
@@ -1834,6 +1752,10 @@ def main() -> None:
             f"max={tr_scales.max().item():.3f}"
         )
 
+    # --- trust-region schedule (from the config's class_path/init_args) ------
+    tr_scheduler = instantiate_trust_region(args.trust_region)
+    print(f"[gebo] trust region: {type(tr_scheduler).__name__}")
+
     result = run_gebo(
         objective=objective,
         dim=vectorizer.dim,
@@ -1846,10 +1768,7 @@ def main() -> None:
         comet_exp=comet_exp,
         machine_debug_path=machine_debug_path,
         state_path=state_path,
-        tr_schedule=args.tr_schedule,
-        tr_radius_min_frac=args.tr_radius_min_frac,
-        tr_t0=args.tr_t0,
-        tr_patience=args.tr_patience,
+        tr_scheduler=tr_scheduler,
         tr_scales=tr_scales,
         no_grad=args.no_grad,
         val_loader=val_loader,
