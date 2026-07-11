@@ -1574,40 +1574,6 @@ def _serializable_args(args: argparse.Namespace) -> dict:
 # Config
 # =============================================================================
 
-# Default value for every gebo_search run setting. A YAML config overrides any
-# subset of these; ``root_file`` is the only required key. This dict is the
-# single source of truth for the config schema (its keys) and their defaults.
-_GEBO_CONFIG_DEFAULTS: dict = {
-    "root_file": None,            # REQUIRED: CMS full-sim ROOT file (cms-flow schema)
-    "n_events": 2000,             # events for the static eval dataset (-1 = all)
-    "n_iterations": 50,           # BO iterations after the initial points
-    "n_initial": 30,              # random Sobol initial points
-    "batch_size": 256,            # forward-pass mini-batch for the objective
-    "loss": "wasserstein_1d",     # see LOSS_CHOICES
-    "acq": "EI",                  # EI | LogEI | qLNEI
-    "output_dir": "doc/gebo_results",
-    "optuna_config": None,        # None -> packaged param_configs/optuna_config.yaml
-    "seed": 0,
-    "count_weight": COUNT_WEIGHT,
-    "calo_count_weight": CALO_COUNT_WEIGHT,
-    "count_rate_floor": COUNT_RATE_FLOOR,
-    "event_weight": EVENT_WEIGHT,
-    "pid_weighting": "sqrt_fraction",   # see PID_WEIGHTING_CHOICES
-    "pid_weight_floor": 0.0,
-    "comet_disabled": False,
-    "machine_debug": False,       # write per-iteration gebo_debug.yaml
-    "tr_schedule": "cosine",      # cosine | adaptive | none
-    "tr_radius_min_frac": 0.01,
-    "tr_t0": None,                # None -> n_iterations // 4
-    "tr_patience": 15,            # adaptive schedule only
-    "param_config": None,         # optional per-dim TR lr_scale source
-    "no_grad": False,             # loss-only GP ablation (no gradients)
-    "plot_every_best": False,     # intermediate observable plots on each new best
-    "n_plot_events": 20_000,
-    "plot_batch_size": 2000,
-    "truth_config": "src/parnassus/torch_delphes/param_configs/cms_target_default.yaml",
-}
-
 # Fields interpreted as filesystem paths (wrapped in ``Path`` unless ``None``).
 _GEBO_CONFIG_PATH_FIELDS: frozenset[str] = frozenset({
     "root_file", "output_dir", "optuna_config", "param_config", "truth_config",
@@ -1621,15 +1587,25 @@ _GEBO_CONFIG_CHOICES: dict = {
     "tr_schedule": ["cosine", "adaptive", "none"],
 }
 
+# Nested YAML sub-sections and how their keys map onto the flat field names the
+# run loop uses. ``trust_region`` keys get a ``tr_`` prefix (schedule ->
+# tr_schedule); ``loss_weights`` / ``plotting`` keys pass through unchanged.
+_GEBO_CONFIG_SECTIONS: dict[str, str] = {
+    "trust_region": "tr_",
+    "loss_weights": "",
+    "plotting": "",
+}
+
 
 def load_gebo_config(path: Path) -> argparse.Namespace:
-    """Load and validate a gebo_search YAML run config.
+    """Load a gebo_search YAML run config into the flat namespace ``main`` expects.
 
-    Returns an ``argparse.Namespace`` carrying exactly the fields the old
-    per-flag CLI produced, so the body of :func:`main` is unchanged. Missing
-    keys fall back to :data:`_GEBO_CONFIG_DEFAULTS`; unknown keys and invalid
-    categorical values raise; ``root_file`` is required. Keys may use either
-    hyphens or underscores (``n-events`` == ``n_events``).
+    The config file is the single source of truth for every setting -- there are
+    NO defaults in code, so each documented key must be present. Related settings
+    are grouped into sub-sections (``trust_region``, ``loss_weights``,
+    ``plotting``) which this flattens into the flat field names the run loop uses
+    (e.g. ``trust_region.schedule`` -> ``tr_schedule``). Keys may use hyphens or
+    underscores (``n-events`` == ``n_events``); invalid categorical values raise.
     """
     if not path.exists():
         raise SystemExit(f"config file not found: {path}")
@@ -1638,40 +1614,32 @@ def load_gebo_config(path: Path) -> argparse.Namespace:
     if not isinstance(raw, dict):
         raise SystemExit(f"{path}: top-level YAML must be a mapping of settings.")
 
-    # Accept either hyphenated or underscored keys.
-    cfg = {str(k).replace("-", "_"): v for k, v in raw.items()}
+    def _norm(d: dict) -> dict:
+        return {str(k).replace("-", "_"): v for k, v in d.items()}
 
-    unknown = set(cfg) - set(_GEBO_CONFIG_DEFAULTS)
-    if unknown:
-        raise SystemExit(
-            f"{path}: unknown config key(s) {sorted(unknown)}; "
-            f"valid keys are {sorted(_GEBO_CONFIG_DEFAULTS)}."
-        )
-
-    merged = {**_GEBO_CONFIG_DEFAULTS, **cfg}
-
-    if merged["root_file"] is None:
-        raise SystemExit(f"{path}: 'root_file' is required.")
-
-    # None optuna_config -> the packaged default bounds config.
-    if merged["optuna_config"] is None:
-        merged["optuna_config"] = (
-            Path(pc.__file__).resolve().parent / "param_configs" / "optuna_config.yaml"
-        )
+    # Pop and flatten the nested sub-sections onto the top-level scalar keys.
+    flat: dict = {}
+    for section, prefix in _GEBO_CONFIG_SECTIONS.items():
+        sect = raw.pop(section, None)
+        if not isinstance(sect, dict):
+            raise SystemExit(f"{path}: missing or malformed '{section}:' section.")
+        flat.update({f"{prefix}{k}": v for k, v in _norm(sect).items()})
+    flat.update(_norm(raw))
 
     # Wrap path-valued fields in Path (leave None as None).
     for key in _GEBO_CONFIG_PATH_FIELDS:
-        if merged[key] is not None:
-            merged[key] = Path(merged[key])
+        v = flat.get(key)
+        if v is not None:
+            flat[key] = Path(v)
 
     # Validate categorical choices.
     for key, choices in _GEBO_CONFIG_CHOICES.items():
-        if merged[key] not in choices:
+        if flat.get(key) not in choices:
             raise SystemExit(
-                f"{path}: {key}={merged[key]!r} is invalid; choose from {choices}."
+                f"{path}: {key}={flat.get(key)!r} is invalid; choose from {choices}."
             )
 
-    return argparse.Namespace(**merged)
+    return argparse.Namespace(**flat)
 
 
 # =============================================================================
@@ -1683,8 +1651,8 @@ def main() -> None:
     """Entry point: ``python -m ...tune_cms_fullsim.gebo_search <config.yaml>``.
 
     Every run setting lives in a single YAML config; the only CLI argument is
-    the path to it. See ``tune_cms_fullsim/configs/`` for examples and
-    :data:`_GEBO_CONFIG_DEFAULTS` for the full list of keys and their defaults.
+    the path to it. The config file is self-documenting and the sole source of
+    truth for every value -- see ``tune_cms_fullsim/configs/`` for examples.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

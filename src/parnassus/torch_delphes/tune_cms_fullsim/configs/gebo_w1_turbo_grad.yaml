@@ -28,7 +28,7 @@ acq: LogEI                  # EI | LogEI | qLNEI
 no_grad: false              # false -> gradient-enhanced GP (RBFKernelGrad)
 
 # --- Output / logging ---
-output_dir: doc/figures/gebo_w1_cosine_randomdrop
+output_dir: doc/figures/gebo_w1_turbo
 machine_debug: true         # write per-iteration gebo_debug.yaml
 comet_disabled: false
 
@@ -38,7 +38,7 @@ param_config: null          # optional per-dim TR lr_scale source (null = none)
 
 # --- Trust region (flattened to tr_* fields) ---
 trust_region:
-  schedule: cosine          # cosine | adaptive | none
+  schedule: adaptive          # cosine | adaptive | none
   radius_min_frac: 0.01     # min radius as a fraction of the initial radius
   t0: null                  # cosine cycle length (null -> n_iterations // 4)
   patience: 15              # adaptive schedule only
