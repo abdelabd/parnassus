@@ -1,58 +1,57 @@
-# GEBO run config: Wasserstein-1D loss, cosine trust-region schedule,
+# GEBO run config: Wasserstein-1D loss, NO trust region (vanilla global BO),
 # gradient-enhanced GP (RBFKernelGrad).
 #
-# Reproduces the command:
-#   python -m parnassus.torch_delphes.tune_cms_fullsim.gebo_search \
-#     --root-file /global/cfs/cdirs/m3246/diff_delphes/cms_pseudodata_100k.root \
-#     --n-events 2000 --n-iterations 1000 --n-initial 10 --batch-size 256 \
-#     --loss wasserstein_1d --output-dir doc/figures/gebo_w1_cosine --acq LogEI \
-#     --machine-debug --tr-schedule cosine --plot-every-best
+# This file is the SINGLE SOURCE OF TRUTH for the run -- every setting is
+# defined here explicitly (there are no defaults baked into gebo_search.py).
+# Related settings are grouped into sub-sections (trust_region, loss_weights,
+# plotting).
 #
 # Run with:
 #   python -m parnassus.torch_delphes.tune_cms_fullsim.gebo_search \
-#     src/parnassus/torch_delphes/tune_cms_fullsim/configs/gebo_w1_cosine_grad.yaml
+#     src/parnassus/torch_delphes/tune_cms_fullsim/configs/gebo_w1_none_grad.yaml
 #
-# Any key omitted below falls back to its default (see _GEBO_CONFIG_DEFAULTS in
-# gebo_search.py). Keys accept hyphens or underscores (n-events == n_events).
+# Keys accept hyphens or underscores (n-events == n_events).
 
 # --- Data / run size ---
 root_file: /global/cfs/cdirs/m3246/diff_delphes/cms_pseudodata_100k.root
-n_events: 2000
-n_iterations: 1000
-n_initial: 10
-batch_size: 256
+n_events: 2000              # events for the static eval dataset (-1 = all)
+n_iterations: 1000          # BO iterations after the initial points
+n_initial: 10               # random Sobol initial points
+batch_size: 256             # forward-pass mini-batch for the objective
 seed: 0
 
 # --- Objective ---
-loss: wasserstein_1d          # deterministic, bin-free; see LOSS_CHOICES
-acq: LogEI                    # EI | LogEI | qLNEI
-
-# --- Trust region ---
-tr_schedule: none           # cosine | adaptive | none
-
+loss: wasserstein_1d        # deterministic, bin-free; see LOSS_CHOICES
+acq: LogEI                  # EI | LogEI | qLNEI
 
 # --- GP mode ---
-no_grad: false                # false -> gradient-enhanced GP (RBFKernelGrad)
+no_grad: false              # false -> gradient-enhanced GP (RBFKernelGrad)
 
 # --- Output / logging ---
-output_dir: doc/figures/gebo_w1_cosine
-machine_debug: true           # write per-iteration gebo_debug.yaml
+output_dir: doc/figures/gebo_w1_none
+machine_debug: true         # write per-iteration gebo_debug.yaml
 comet_disabled: false
 
+# --- Parameter search space ---
+optuna_config: src/parnassus/torch_delphes/param_configs/optuna_config.yaml
+param_config: null          # optional per-dim TR lr_scale source (null = none)
+
+# --- Trust region: none (search the full global bounds) ---
+trust_region:
+  class_path: parnassus.torch_delphes.tune_cms_fullsim.trust_region.NoTrustRegion
+
+# --- Loss weights ---
+loss_weights:
+  count_weight: 0.1
+  calo_count_weight: 1.0
+  count_rate_floor: 0.05
+  event_weight: 0.1
+  pid_weighting: sqrt_fraction   # see PID_WEIGHTING_CHOICES
+  pid_weight_floor: 0.0
+
 # --- Intermediate validation plots ---
-plot_every_best: true
-n_plot_events: 20000
-plot_batch_size: 2000
-truth_config: src/parnassus/torch_delphes/param_configs/cms_target_default.yaml
-
-# --- Parameter bounds / search space ---
-# optuna_config: null         # null -> packaged param_configs/optuna_config.yaml
-# param_config: null          # optional per-dim TR lr_scale source
-
-# --- Loss-weight knobs (defaults shown; uncomment to override) ---
-# count_weight: 0.1
-# calo_count_weight: 1.0
-# count_rate_floor: 0.05
-# event_weight: 0.1
-# pid_weighting: sqrt_fraction
-# pid_weight_floor: 0.0
+plotting:
+  plot_every_best: true
+  n_plot_events: 20000
+  plot_batch_size: 2000
+  truth_config: src/parnassus/torch_delphes/param_configs/cms_target_default.yaml

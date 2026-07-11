@@ -36,12 +36,12 @@ comet_disabled: false
 optuna_config: src/parnassus/torch_delphes/param_configs/optuna_config.yaml
 param_config: null          # optional per-dim TR lr_scale source (null = none)
 
-# --- Trust region (flattened to tr_* fields) ---
+# --- Trust region: cosine annealing with warm restarts ---
 trust_region:
-  schedule: cosine          # cosine | adaptive | none
-  radius_min_frac: 0.01     # min radius as a fraction of the initial radius
-  t0: null                  # cosine cycle length (null -> n_iterations // 4)
-  patience: 15              # adaptive schedule only
+  class_path: parnassus.torch_delphes.tune_cms_fullsim.trust_region.CosineTrustRegion
+  init_args:
+    radius_min_frac: 0.01     # min radius as a fraction of the initial radius
+    t0: null                  # cosine cycle length (null -> n_iterations // 4)
 
 # --- Loss weights ---
 loss_weights:
