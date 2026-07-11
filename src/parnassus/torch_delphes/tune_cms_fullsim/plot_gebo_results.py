@@ -61,12 +61,11 @@ from .data import (
 )
 from .dataloader import DelphesDataLoader, DelphesDataSet
 from .gebo_plotting import (
-    TARGET_COLOR,
-    INIT_COLOR,
-    FINAL_COLOR,
     build_card_from_raw_params,
     build_val_dataloader,
     obs_values,
+    plot_observable_best_only,
+    plot_pid_observables,
     trainee_observables,
 )
 from parnassus.torch_delphes.plotting import (
@@ -330,201 +329,34 @@ def plot_param_drift(
 # =============================================================================
 
 
-# =============================================================================
-# Plot: observable overlay (target / init / fitted)
-# =============================================================================
+def _load_saved_init_pred(
+    summary_dir: Path,
+    val_loader: DelphesDataLoader,
+    seed: int,
+) -> dict | None:
+    """Rebuild the initial-trainee observables from the raw params saved by
+    :mod:`gebo_search` (``init_trainee_raw.pt``).
 
-
-def plot_observable(
-    var: str,
-    target_vals: torch.Tensor,
-    init_vals: torch.Tensor,
-    fitted_vals: torch.Tensor,
-    edges: np.ndarray,
-    xlabel: str,
-    output_path: Path,
-    log_y: bool = False,
-) -> None:
-    """Overlay target / trainee-init / trainee-best with a ratio panel."""
-    # Order: target (step-filled gold), init (red), fitted (blue).
-    # plot_comparison_with_ratio treats the first distribution as the
-    # reference for the ratio panel and step-fills it.
-    target_np = target_vals.detach().cpu().numpy()
-    init_np = init_vals.detach().cpu().numpy()
-    fitted_np = fitted_vals.detach().cpu().numpy()
-
-    fig, (ax_top, ax_ratio) = plt.subplots(
-        2, 1, figsize=(5.5, 4.8), sharex=True,
-        gridspec_kw={"height_ratios": [3, 1], "hspace": 0.08},
-    )
-
-    # Top panel: step-filled target, line histograms for init/fitted.
-    h_target, _ = np.histogram(target_np, bins=edges)
-    h_init, _ = np.histogram(init_np, bins=edges)
-    h_fitted, _ = np.histogram(fitted_np, bins=edges)
-    bin_centers = 0.5 * (edges[:-1] + edges[1:])
-    width = edges[1] - edges[0]
-
-    ax_top.stairs(h_target, edges, fill=True, color=_TARGET_COLOR, alpha=0.5,
-                  label="target (full-sim)", linewidth=1.2)
-    ax_top.stairs(h_init, edges, fill=False, color=_INIT_COLOR, linewidth=1.6,
-                  label="trainee, initial")
-    ax_top.stairs(h_fitted, edges, fill=False, color=_FINAL_COLOR, linewidth=1.6,
-                  label="trainee, GEBO best")
-    if log_y:
-        ax_top.set_yscale("log")
-    ax_top.set_ylabel("Counts")
-    ax_top.legend(loc="best", fontsize=9)
-    ax_top.grid(True, alpha=0.3)
-    ax_top.set_title(var)
-
-    # Ratio panel: init/target and fitted/target.
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio_init = np.where(h_target > 0, h_init / h_target, np.nan)
-        ratio_fitted = np.where(h_target > 0, h_fitted / h_target, np.nan)
-
-    ax_ratio.axhline(1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-    ax_ratio.step(bin_centers, ratio_init, where="mid", color=_INIT_COLOR,
-                  linewidth=1.4, label="init / target")
-    ax_ratio.step(bin_centers, ratio_fitted, where="mid", color=_FINAL_COLOR,
-                  linewidth=1.4, label="GEBO best / target")
-    ax_ratio.set_xlabel(xlabel)
-    ax_ratio.set_ylabel("ratio / target")
-    ax_ratio.set_ylim(0.5, 1.5)
-    ax_ratio.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
-# =============================================================================
-# Plot: per-PID final observables
-# =============================================================================
-
-_FINAL_PID_GROUPS: tuple[tuple[str, int, str], ...] = (
-    ("211", 211, "charged hadron"),
-    ("11", 11, "electron"),
-    ("13", 13, "muon"),
-    ("111", 111, "neutral hadron"),
-    ("22", 22, "photon"),
-)
-_FINAL_PID_VARS: tuple[str, ...] = ("Eta", "PT", "P", "E")
-
-
-def _final_pid_values(obs: dict[str, torch.Tensor], pid_abs: int, var: str) -> np.ndarray:
-    if "pid" not in obs or "pt" not in obs:
-        return np.empty(0, dtype=np.float64)
-    pid = obs["pid"]
-    pt = obs["pt"]
-    eta = obs["eta"]
-    mask = (pt != 0) & (pid.abs() == pid_abs)
-    if not torch.any(mask):
-        return np.empty(0, dtype=np.float64)
-    if var == "Eta":
-        vals = eta[mask]
-    elif var == "PT":
-        vals = pt[mask]
-    elif var == "P":
-        vals = pt[mask] * torch.cosh(eta[mask])
-    elif var == "E":
-        vals = torch.exp(obs["log_E"][mask])
-    else:
-        return np.empty(0, dtype=np.float64)
-    return vals.detach().cpu().numpy().astype(np.float64)
-
-
-def plot_final_pid_observables(
-    target: dict[str, torch.Tensor],
-    pred_init: dict[str, torch.Tensor],
-    pred_final: dict[str, torch.Tensor],
-    output_dir: Path,
-    n_events: int,
-) -> None:
-    """Render per-PID observable overlays."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  Writing per-PID plots to {output_dir}")
-
-    from parnassus.torch_delphes.plotting import combined_vars_for, stitch_pngs
-
-    for pid_name, pid_abs, pid_label in _FINAL_PID_GROUPS:
-        pid_dir = output_dir / pid_name
-        pid_dir.mkdir(parents=True, exist_ok=True)
-
-        for var in _FINAL_PID_VARS:
-            target_np = _final_pid_values(target, pid_abs=pid_abs, var=var)
-            init_np = _final_pid_values(pred_init, pid_abs=pid_abs, var=var)
-            final_np = _final_pid_values(pred_final, pid_abs=pid_abs, var=var)
-
-            if target_np.size == 0 and init_np.size == 0 and final_np.size == 0:
-                continue
-
-            fig, (ax_top, ax_ratio) = plt.subplots(
-                2, 1, figsize=(5.5, 4.8), sharex=True,
-                gridspec_kw={"height_ratios": [3, 1], "hspace": 0.08},
-            )
-
-            edges = np.linspace(
-                min(
-                    target_np.min() if target_np.size else 0,
-                    init_np.min() if init_np.size else 0,
-                    final_np.min() if final_np.size else 0,
-                ),
-                max(
-                    target_np.max() if target_np.size else 1,
-                    init_np.max() if init_np.size else 1,
-                    final_np.max() if final_np.size else 1,
-                ),
-                51,
-            )
-
-            h_target, _ = np.histogram(target_np, bins=edges)
-            h_init, _ = np.histogram(init_np, bins=edges)
-            h_final, _ = np.histogram(final_np, bins=edges)
-            bin_centers = 0.5 * (edges[:-1] + edges[1:])
-
-            ax_top.stairs(h_target, edges, fill=True, color=_TARGET_COLOR,
-                          alpha=0.5, label="target (full-sim)", linewidth=1.2)
-            ax_top.stairs(h_init, edges, fill=False, color=_INIT_COLOR,
-                          linewidth=1.6, label="trainee, initial")
-            ax_top.stairs(h_final, edges, fill=False, color=_FINAL_COLOR,
-                          linewidth=1.6, label="trainee, GEBO best")
-            ax_top.set_ylabel("Counts")
-            ax_top.legend(loc=("upper left" if var != "Eta" else "best"), fontsize=8)
-            ax_top.grid(True, alpha=0.3)
-            ax_top.set_title(f"{pid_label}  {var}")
-            if var in ("PT", "P", "E"):
-                ax_top.set_yscale("log")
-
-            with np.errstate(divide="ignore", invalid="ignore"):
-                ratio_init = np.where(h_target > 0, h_init / h_target, np.nan)
-                ratio_final = np.where(h_target > 0, h_final / h_target, np.nan)
-            ax_ratio.axhline(1.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-            ax_ratio.step(bin_centers, ratio_init, where="mid", color=_INIT_COLOR,
-                          linewidth=1.4)
-            ax_ratio.step(bin_centers, ratio_final, where="mid", color=_FINAL_COLOR,
-                          linewidth=1.4)
-            ax_ratio.set_xlabel(var)
-            ax_ratio.set_ylabel("ratio / target")
-            ax_ratio.set_ylim(0.5, 1.5)
-            ax_ratio.grid(True, alpha=0.3)
-
-            fig.tight_layout()
-            fig.savefig(pid_dir / f"{var}.png")
-            plt.close(fig)
-
-        combo = combined_vars_for(_FINAL_PID_VARS)
-        per_var_pngs = [pid_dir / f"{v}.png" for v in combo]
-        all_png = pid_dir / "all.png"
-        wrote = stitch_pngs(
-            image_paths=per_var_pngs,
-            output_path=all_png,
-            title=f"Final EFlowObject: {pid_label}\n{n_events} events",
-            title_align="left",
-        )
-        n_var = len(list(pid_dir.glob("*.png"))) - (1 if wrote else 0)
-        extra = f" + all.png ({', '.join(combo)})" if wrote else ""
-        print(f"    {pid_name} ({pid_label}): wrote {n_var} per-var PNGs{extra}")
+    That file stores the best Sobol point captured at the start of the run.
+    Evaluating it against the *current* ``val_loader`` reproduces exactly the
+    initial-trainee overlay that ``gebo_search`` draws in its intermediate
+    plots -- and is robust to the validation split changing since the run.
+    Returns ``None`` for older runs that predate the saved file (their plots
+    simply omit the initial-trainee curves).
+    """
+    init_raw_path = summary_dir / "init_trainee_raw.pt"
+    if not init_raw_path.exists():
+        return None
+    ckpt = torch.load(init_raw_path, map_location="cpu", weights_only=False)
+    raw_params = ckpt["raw_params"]
+    param_names = ckpt["param_names"]
+    best_sobol_raw = {
+        param_names[j]: float(raw_params[j]) for j in range(len(param_names))
+    }
+    torch.manual_seed(seed)
+    init_card = build_card_from_raw_params(best_sobol_raw, torch.device("cpu"))
+    pred_init, _ = trainee_observables(init_card, val_loader)
+    return pred_init
 
 
 # =============================================================================
@@ -634,9 +466,8 @@ def main() -> None:
     truth = {k: spec["value"] for k, spec in flat_truth.items()}
     print(f"  truth config: {args.truth_config}")
 
-    # ---- Load init snapshot ----
+    # ---- Load init snapshot (legacy fallback for the 'initial' trainee) ----
     init_snapshot, init_source = _load_init_snapshot(args.param_config)
-    print(f"  trainee 'initial' (before-fit) params: {init_source}")
 
     # ---- 1. Loss trajectory ----
     plot_loss_trajectory(summary, output_dir / "loss_trajectory.pdf")
@@ -680,85 +511,97 @@ def main() -> None:
         f"(entries {val_entry_start}:{val_entry_start + n_plot_events})"
     )
 
-    # --- Initial trainee (from --param-config or defaults) ---
-    torch.manual_seed(args.seed)
-    trainee_init = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
-    if init_snapshot is not None:
-        _set_trainee_from_snapshot(trainee_init, init_snapshot)
-    pred_init, target = trainee_observables(trainee_init, val_loader)
-
     # --- Fitted trainee (from GEBO best) ---
     best_raw = summary.get("best_raw_params", {})
     if not best_raw:
         raise SystemExit("gebo_summary.json has no 'best_raw_params'")
     trainee_final = build_card_from_raw_params(best_raw, device)
     torch.manual_seed(args.seed)
-    pred_final, _ = trainee_observables(trainee_final, val_loader)
+    pred_final, target = trainee_observables(trainee_final, val_loader)
+
+    # --- Initial trainee ---
+    # Prefer the raw params saved by gebo_search (init_trainee_raw.pt: the best
+    # Sobol point), re-evaluated against the CURRENT validation split so the
+    # overlay matches gebo_search's intermediate plots exactly. Fall back to
+    # --param-config (legacy) if the file is absent; otherwise omit init curves.
+    pred_init = _load_saved_init_pred(args.summary.parent, val_loader, args.seed)
+    if pred_init is not None:
+        print(f"  trainee 'initial': {args.summary.parent / 'init_trainee_raw.pt'} "
+              "(saved best-Sobol point)")
+    elif init_snapshot is not None:
+        torch.manual_seed(args.seed)
+        trainee_init = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+        _set_trainee_from_snapshot(trainee_init, init_snapshot)
+        pred_init, _ = trainee_observables(trainee_init, val_loader)
+        print(f"  trainee 'initial' (fallback --param-config): {init_source}")
+    else:
+        print("  trainee 'initial': none (no init_trainee_raw.pt, no --param-config); "
+              "initial-trainee curves omitted")
 
     # Observable plots.
-    plot_observable(
+    plot_observable_best_only(
         "PT",
         obs_values(target, "pt"),
-        obs_values(pred_init, "pt"),
         obs_values(pred_final, "pt"),
         edges=np.linspace(0.0, 100.0, 51),
         xlabel=r"PF object $p_\mathrm{T}$ [GeV]",
         output_path=output_dir / "observable_pt.pdf",
         log_y=True,
+        init_vals=obs_values(pred_init, "pt") if pred_init is not None else None,
     )
     print("  wrote observable_pt.pdf")
 
-    plot_observable(
+    plot_observable_best_only(
         "Eta",
         obs_values(target, "eta"),
-        obs_values(pred_init, "eta"),
         obs_values(pred_final, "eta"),
         edges=np.linspace(-5.0, 5.0, 51),
         xlabel=r"PF object $\eta$",
         output_path=output_dir / "observable_eta.pdf",
+        init_vals=obs_values(pred_init, "eta") if pred_init is not None else None,
     )
     print("  wrote observable_eta.pdf")
 
-    plot_observable(
+    plot_observable_best_only(
         "ht",
         obs_values(target, "ht"),
-        obs_values(pred_init, "ht"),
         obs_values(pred_final, "ht"),
         edges=np.linspace(0.0, 1000.0, 51),
         xlabel=r"PF scalar $H_\mathrm{T}$ [GeV]",
         output_path=output_dir / "observable_ht.pdf",
+        init_vals=obs_values(pred_init, "ht") if pred_init is not None else None,
     )
     print("  wrote observable_ht.pdf")
 
-    plot_observable(
+    plot_observable_best_only(
         "log_ht",
         obs_values(target, "log_ht"),
-        obs_values(pred_init, "log_ht"),
         obs_values(pred_final, "log_ht"),
         edges=np.linspace(4.5, 7.5, 51),
         xlabel=r"PF scalar $\log\,H_\mathrm{T}$",
         output_path=output_dir / "observable_log_ht.pdf",
+        init_vals=obs_values(pred_init, "log_ht") if pred_init is not None else None,
     )
     print("  wrote observable_log_ht.pdf")
 
-    plot_observable(
+    plot_observable_best_only(
         "multiplicity",
         obs_values(target, "multiplicity"),
-        obs_values(pred_init, "multiplicity"),
         obs_values(pred_final, "multiplicity"),
         edges=np.linspace(0.0, 300.0, 61),
         xlabel=r"PF objects per event",
         output_path=output_dir / "observable_multiplicity.pdf",
+        init_vals=obs_values(pred_init, "multiplicity") if pred_init is not None else None,
     )
     print("  wrote observable_multiplicity.pdf")
 
     # Per-PID observables.
-    plot_final_pid_observables(
+    plot_pid_observables(
         target=target,
-        pred_init=pred_init,
         pred_final=pred_final,
         output_dir=output_dir / "PID",
         n_events=n_plot_events,
+        pred_init=pred_init,
     )
 
     n_pdfs = len(list(output_dir.glob("*.pdf")))
