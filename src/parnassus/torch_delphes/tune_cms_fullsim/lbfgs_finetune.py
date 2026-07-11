@@ -234,6 +234,7 @@ def main() -> None:
 
     # --- L-BFGS-B loop -------------------------------------------------------
     history: list[dict] = []
+    traj: list[np.ndarray] = []  # accepted parameter vector after each iteration
     _state: dict = {"loss": None}
 
     def fun_and_jac(x: np.ndarray) -> tuple[float, np.ndarray]:
@@ -255,6 +256,7 @@ def main() -> None:
             "best_loss": _state["loss"],
             "candidate_loss": _state["loss"],
         })
+        traj.append(np.array(xk, dtype=np.float64))
         print(f"[lbfgs] iter {len(history):3d}  loss={_state['loss']:.6e}")
 
     options = {"maxiter": args.n_steps}
@@ -333,8 +335,19 @@ def main() -> None:
     with open(summary_path, "w") as f:
         json.dump(out_summary, f, indent=2, default=str)
 
+    # Parameter + loss trajectory (starting from the GEBO best = x0), so
+    # plot_gebo_results can render param_drift_all.pdf / loss_scatter.pdf. The
+    # ``train_X`` / ``train_Y`` keys mirror gebo_data.pt's schema (train_Y here
+    # is just the (n, 1) loss column the plots read).
+    traj_X = np.stack([x0, *traj]) if traj else x0[None, :]
+    traj_losses = [init_loss] + [h["loss"] for h in history]
     torch.save(
-        {"best_raw": best_raw, "param_names": param_names},
+        {
+            "train_X": torch.tensor(traj_X, dtype=torch.float64),
+            "train_Y": torch.tensor(traj_losses, dtype=torch.float64).unsqueeze(-1),
+            "best_raw": best_raw,
+            "param_names": param_names,
+        },
         output_dir / "lbfgs_data.pt",
     )
 

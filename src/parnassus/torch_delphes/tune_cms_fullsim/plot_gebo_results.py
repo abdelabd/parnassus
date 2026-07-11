@@ -447,7 +447,12 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = _load_gebo_summary(args.summary)
+    # GEBO runs save gebo_data.pt; L-BFGS fine-tuning (lbfgs_finetune.py) saves
+    # lbfgs_data.pt with the same train_X / train_Y / param_names schema. Fall
+    # back to the latter so param_drift_all.pdf / loss_scatter.pdf render for both.
     gebo_data = _load_gebo_data(args.summary.parent / "gebo_data.pt")
+    if gebo_data is None:
+        gebo_data = _load_gebo_data(args.summary.parent / "lbfgs_data.pt")
 
     best_loss = summary.get("best_loss", float("nan"))
     dimension = summary.get("dimension", "?")
