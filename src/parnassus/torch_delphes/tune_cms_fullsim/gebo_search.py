@@ -1586,6 +1586,51 @@ def load_gebo_config(path: Path) -> argparse.Namespace:
     return argparse.Namespace(**flat)
 
 
+def _archive_run_config(config_path: Path, output_dir: Path, n_done: int) -> None:
+    """Snapshot the run config into ``<output_dir>/configs/`` for provenance.
+
+    The first snapshot is always ``config_0.yaml``. On a resume whose config
+    differs from the MOST RECENT snapshot, the new config is saved as
+    ``config_<next_iteration>.yaml`` (``next_iteration = n_done + 1``, the
+    iteration the resumed segment starts at), so the exact settings each segment
+    of the run used are preserved -- and a re-resume with an unchanged config
+    adds nothing. Comment/whitespace-only changes are ignored (the comparison is
+    on parsed YAML content).
+    """
+    import re
+    import shutil
+
+    configs_dir = output_dir / "configs"
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    baseline = configs_dir / "config_0.yaml"
+
+    if not baseline.exists():
+        shutil.copyfile(config_path, baseline)
+        print(f"[gebo] archived run config -> {baseline}")
+        return
+
+    # Find the most recent snapshot (highest config_<N>.yaml index).
+    def _idx(p: Path) -> int:
+        m = re.fullmatch(r"config_(\d+)", p.stem)
+        return int(m.group(1)) if m else -1
+
+    latest = max(
+        (p for p in configs_dir.glob("config_*.yaml") if _idx(p) >= 0),
+        key=_idx,
+    )
+
+    with open(config_path) as f:
+        current = yaml.safe_load(f)
+    with open(latest) as f:
+        previous = yaml.safe_load(f)
+    if current == previous:
+        print(f"[gebo] run config matches {latest.name}; no new snapshot")
+        return
+    dest = configs_dir / f"config_{n_done + 1}.yaml"
+    shutil.copyfile(config_path, dest)
+    print(f"[gebo] run config changed since {latest.name}; archived -> {dest}")
+
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -1604,7 +1649,8 @@ def main() -> None:
         type=Path,
         help="Path to the YAML run config (see tune_cms_fullsim/configs/).",
     )
-    args = load_gebo_config(parser.parse_args().config)
+    config_path = parser.parse_args().config
+    args = load_gebo_config(config_path)
 
     # --- Comet setup ---------------------------------------------------------
     comet_exp = None
@@ -1627,10 +1673,12 @@ def main() -> None:
     state_path = args.output_dir / "gebo_state.pt"
     os.makedirs(args.output_dir, exist_ok=True)
 
+    n_done = 0  # iterations already completed (0 on a fresh run)
     if state_path.exists():
         # Resume: load original args, compare, and reuse the Comet experiment.
         old_state = torch.load(state_path, map_location="cpu", weights_only=True)
         old_args = old_state.get("args", {})
+        n_done = old_state.get("iteration", 0)
 
         # Build a set of keys that differ between old and new runs (exclude
         # output_dir since it's often the same, and n_iterations which gets
@@ -1675,6 +1723,11 @@ def main() -> None:
             "comet_key": comet_key,
             "iteration": 0,
         }, state_path)
+
+    # Archive the run config into <output_dir>/configs/ for provenance
+    # (config_0.yaml on a fresh run; config_<next_iteration>.yaml when a resume
+    # uses a config that differs from config_0.yaml).
+    _archive_run_config(config_path, args.output_dir, n_done)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[gebo] device = {device}")
