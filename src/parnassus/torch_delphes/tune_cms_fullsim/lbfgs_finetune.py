@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -133,6 +134,15 @@ def main() -> None:
     parser.add_argument("--optuna-config", type=Path, default=None,
                         help="Override the run's optuna_config (bounds/trainable set).")
     args = parser.parse_args()
+
+    # Line-buffer stdout: this process is normally launched with stdout
+    # redirected to a log file (see gebo_optuna_search.py's _run_subprocess),
+    # and Python fully-buffers a non-tty stdout by default -- so without this,
+    # none of the [lbfgs] progress prints below (or the per-iteration
+    # _callback prints) reach the log until the process exits, making a slow
+    # run indistinguishable from a hung one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
 
     if not args.gebo_summary.exists():
         raise SystemExit(f"--gebo-summary {args.gebo_summary} does not exist.")

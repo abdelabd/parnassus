@@ -22,20 +22,31 @@ produced unchanged, one full set per trial, under
 What is held CONSTANT across every trial (of every one of the 12 scans this
 is meant to be run as, see ``gebo_scans_interactive.sh`` /
 ``gebo_scans_submit.sh``): the acquisition function (``LogEI``) and its
-optimizer (``acquisition.num_restarts=20``, ``raw_samples=4096``), the GEBO
-iteration budget (``--gebo-n-iterations``, default 200) capped by a wall-clock
-budget (``--gebo-time-limit-hours``, default 2.0 -- ``gebo_search.py`` stops its
-BO loop early once this elapses, even short of ``--gebo-n-iterations``, and the
-trial still proceeds to L-BFGS with whatever GEBO found so far), the L-BFGS-B
-iteration budget (``--lbfgs-n-steps``, default 200) evaluated against
-``--lbfgs-n-events`` events (default 20000, overriding whatever ``n_events``
-GEBO's trial happened to sample), the 66-physical-parameter search space
-(``--optuna-config``), the root file, and the RNG seed (so trials differ only
-by the sampled run-setting hyperparameters, same convention as
-:mod:`.optuna_search`). What is scanned per trial is read from
-``--meta-search-config`` (default ``configs/gebo_meta_search.yaml``); see that
-file for the exact ranges. A trial is scored by its L-BFGS **final** loss
-(the true end of the GEBO -> L-BFGS pipeline).
+optimizer (``acquisition.num_restarts=20``, ``raw_samples=4096``), the
+wall-clock cap on the GEBO stage (``--gebo-time-limit-hours``, default 2.0 --
+``gebo_search.py`` stops its BO loop early once this elapses, even short of
+the trial's own iteration TARGET below, and the trial still proceeds to
+L-BFGS with whatever GEBO found so far), the L-BFGS-B iteration budget
+(``--lbfgs-n-steps``, default 200) evaluated against ``--lbfgs-n-events``
+events (default 20000, overriding whatever ``n_events`` GEBO's trial happened
+to sample) with a batch size of the trial's GEBO-sampled ``batch_size`` times
+``--lbfgs-batch-size-multiplier`` (default 12, clamped to
+``--lbfgs-batch-size-max``, default 4096) -- scaled UP rather than reused
+directly, since GEBO's sampled ``batch_size`` can be as small as 64 and would
+otherwise force hundreds of mini-batches per L-BFGS objective/gradient call at
+20k events, the 66-physical-parameter search space (``--optuna-config``), the
+root file, and the RNG seed (so trials differ only by the sampled
+run-setting hyperparameters, same convention as :mod:`.optuna_search`). What
+is SCANNED per trial is read from ``--meta-search-config`` (default
+``configs/gebo_meta_search.yaml``), including ``n_iterations_gebo`` -- this
+trial's GEBO BO-iteration TARGET (replacing what used to be a fixed
+``--gebo-n-iterations``); see that file for the exact ranges. A trial is
+scored by its L-BFGS **final** loss (the true end of the GEBO -> L-BFGS
+pipeline) -- UNLESS ``--gebo-time-limit-hours`` fires before GEBO completes
+even its first BO iteration (checkpointed progress stays at 0), in which case
+the trial is scored ``inf`` directly and L-BFGS is skipped (see the objective
+function): running L-BFGS on a point BO never actually refined would waste
+budget and hide how bad the sampled run settings are.
 
 Resuming
 --------
@@ -58,11 +69,14 @@ inside a walltime-limited SLURM job:
    new GEBO run from scratch -- it re-invokes ``gebo_search.py`` pointed at the
    same ``output_dir``, and ``gebo_search.py``'s OWN ``gebo_state.pt``
    checkpoint (written every BO iteration) resumes it. To make this land on
-   exactly ``--gebo-n-iterations`` total (not "n_done + n_iterations more",
-   which is ``gebo_search.py``'s own human-driven resume semantics), this
-   script always requests ``n_iterations = target - n_done`` REMAINING
-   iterations, which ``gebo_search.py``'s ``n_iterations += n_done`` resume
-   logic then lands back at exactly ``target``. A trial whose GEBO run is
+   exactly the trial's sampled ``n_iterations_gebo`` total (not "n_done +
+   n_iterations more", which is ``gebo_search.py``'s own human-driven resume
+   semantics), this script always requests ``n_iterations = target - n_done``
+   REMAINING iterations, which ``gebo_search.py``'s ``n_iterations += n_done``
+   resume logic then lands back at exactly ``target``. Optuna's retry
+   mechanism re-enqueues the retried trial with the SAME sampled parameter
+   values as the original (including ``n_iterations_gebo``), so ``target``
+   is identical across the retry. A trial whose GEBO run is
    already complete (``n_done >= target``) is not re-invoked at all; a trial
    whose L-BFGS step already produced ``lbfgs/gebo_summary.json`` is not
    re-invoked either (L-BFGS has no iteration checkpoint of its own -- a job
@@ -162,6 +176,7 @@ def sample_trial(trial: optuna.Trial, meta: dict, args: argparse.Namespace) -> d
     p: dict = {
         "n_events": _suggest(trial, "n_events", common["n_events"]),
         "n_initial": _suggest(trial, "n_initial", common["n_initial"]),
+        "n_iterations_gebo": _suggest(trial, "n_iterations_gebo", common["n_iterations_gebo"]),
         "batch_size": _suggest(trial, "batch_size", common["batch_size"]),
     }
 
@@ -304,8 +319,9 @@ def make_objective(args: argparse.Namespace, meta: dict):
         trial.set_user_attr("round_id", round_id)
 
         try:
+            n_iterations_target = params["n_iterations_gebo"]
             n_done = _gebo_n_done(round_dir)
-            remaining = max(args.gebo_n_iterations - n_done, 0)
+            remaining = max(n_iterations_target - n_done, 0)
             gebo_cfg = build_gebo_config(params, args, round_dir, n_iterations=remaining)
             gebo_cfg_path = round_dir / "gebo_config.yaml"
             with open(gebo_cfg_path, "w") as f:
@@ -315,7 +331,7 @@ def make_objective(args: argparse.Namespace, meta: dict):
             if remaining > 0 or not gebo_summary_path.exists():
                 print(
                     f"[scan] trial {trial.number} (round {round_id}): "
-                    f"running GEBO ({remaining} of {args.gebo_n_iterations} iterations remaining) ...",
+                    f"running GEBO ({remaining} of {n_iterations_target} iterations remaining) ...",
                     flush=True,
                 )
                 _run_subprocess(
@@ -330,14 +346,50 @@ def make_objective(args: argparse.Namespace, meta: dict):
                 gebo_summary = json.load(f)
             gebo_best_loss = float(gebo_summary["best_loss"])
 
+            # n_iterations_gebo is always sampled >= 20 (see gebo_meta_search.yaml),
+            # so the ONLY way this round's checkpoint shows zero completed BO
+            # iterations is --gebo-time-limit-hours firing before iteration 1 (the
+            # initial Sobol evaluation itself ate the whole budget). gebo_search.py
+            # still writes a "valid" gebo_summary.json in that case -- best_loss
+            # from the random Sobol init alone, with NO Bayesian refinement -- so
+            # running the comparatively expensive L-BFGS stage on it would waste
+            # budget polishing a point BO never actually got to touch. Treat it the
+            # same as the other bad-point cases below: a legitimately bad, COMPLETE
+            # trial (score inf), skipping L-BFGS entirely.
+            if _gebo_n_done(round_dir) == 0:
+                print(
+                    f"[scan] trial {trial.number} (round {round_id}): GEBO timed out before "
+                    f"completing a single BO iteration (Sobol-only best_loss = {gebo_best_loss:.4e}) "
+                    "-- scoring as a bad, complete trial and skipping L-BFGS.",
+                    flush=True,
+                )
+                trial.set_user_attr("gebo_best_loss", gebo_best_loss)
+                trial.set_user_attr(
+                    "failure_reason", "GEBO timed out before completing a single BO iteration"
+                )
+                return float("inf")
+
             lbfgs_summary_path = round_dir / "gebo" / "lbfgs" / "gebo_summary.json"
             if not lbfgs_summary_path.exists():
-                print(f"[scan] trial {trial.number} (round {round_id}): running L-BFGS ...", flush=True)
+                # Scale UP from the trial's GEBO batch_size rather than reusing it
+                # directly: --lbfgs-n-events is much larger than what GEBO evaluated,
+                # and GEBO's sampled batch_size can be as small as 64 (see
+                # gebo_meta_search.yaml), which at 20k events would mean hundreds of
+                # mini-batches per L-BFGS objective/gradient call (this is what made
+                # every L-BFGS stage across the last scan look hung -- it wasn't
+                # hung, just running ~300x more mini-batches per eval than GEBO did).
+                lbfgs_batch_size = min(
+                    round(params["batch_size"] * args.lbfgs_batch_size_multiplier),
+                    args.lbfgs_batch_size_max,
+                )
+                print(f"[scan] trial {trial.number} (round {round_id}): running L-BFGS "
+                      f"(batch_size={lbfgs_batch_size}, {args.lbfgs_n_events} events) ...", flush=True)
                 cmd = [
                     sys.executable, "-m", "parnassus.torch_delphes.tune_cms_fullsim.lbfgs_finetune",
                     "--gebo-summary", str(gebo_summary_path),
                     "--n-steps", str(args.lbfgs_n_steps),
                     "--n-events", str(args.lbfgs_n_events),
+                    "--batch-size", str(lbfgs_batch_size),
                 ]
                 if args.lbfgs_max_fun is not None:
                     cmd += ["--max-fun", str(args.lbfgs_max_fun)]
@@ -414,12 +466,11 @@ def main() -> None:
                          help="Stop starting new trials after this many wall-clock hours "
                               "(checked between trials, not mid-trial). <=0 disables.")
 
-    parser.add_argument("--gebo-n-iterations", type=int, default=200,
-                         help="Total GEBO BO iterations per trial (held constant across the whole scan).")
     parser.add_argument("--gebo-time-limit-hours", type=float, default=2.0,
                          help="Wall-clock cap on the GEBO stage of each trial: gebo_search.py stops its "
-                              "BO loop once this elapses, even short of --gebo-n-iterations, and the "
-                              "trial proceeds to L-BFGS with whatever GEBO found so far "
+                              "BO loop once this elapses, even short of the trial's sampled "
+                              "n_iterations_gebo target (see --meta-search-config), and the trial "
+                              "proceeds to L-BFGS with whatever GEBO found so far "
                               "(<=0 disables; held constant across the whole scan).")
     parser.add_argument("--lbfgs-n-steps", type=int, default=200,
                          help="L-BFGS-B maxiter per trial (held constant across the whole scan).")
@@ -427,6 +478,17 @@ def main() -> None:
     parser.add_argument("--lbfgs-n-events", type=int, default=20_000,
                          help="Events the L-BFGS stage evaluates against, overriding whatever n_events "
                               "GEBO's trial happened to sample (held constant across the whole scan).")
+    parser.add_argument("--lbfgs-batch-size-multiplier", type=float, default=12.0,
+                         help="L-BFGS's forward-pass batch size = the trial's GEBO-sampled batch_size "
+                              "times this factor (clamped to --lbfgs-batch-size-max). A bigger batch "
+                              "amortizes --lbfgs-n-events's extra data over far fewer mini-batches per "
+                              "objective/gradient evaluation than reusing GEBO's (often tiny) sampled "
+                              "batch_size directly would -- held constant across the whole scan.")
+    parser.add_argument("--lbfgs-batch-size-max", type=int, default=4096,
+                         help="Hard ceiling on the scaled L-BFGS batch size: the calorimeter forward "
+                              "runs in float64, and 4096 is the repo's own documented safe operating "
+                              "point (~11GB/GPU; 8192 OOMs a 40GB card) -- held constant across the "
+                              "whole scan.")
 
     parser.add_argument("--acqf-num-restarts", type=int, default=20)
     parser.add_argument("--acqf-raw-samples", type=int, default=4096)
