@@ -57,6 +57,7 @@ from botorch.acquisition import (
     qLogNoisyExpectedImprovement,
 )
 from botorch.acquisition.objective import ScalarizedPosteriorTransform
+from botorch.exceptions.errors import ModelFittingError
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
 from botorch.models.gpytorch import GPyTorchModel
@@ -1162,6 +1163,7 @@ def run_gebo(
     tr_center = train_X[best_idx].clone()  # best point in raw space (TR center)
 
     run_start_time = time.perf_counter()
+    model_fit_error = False
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
 
@@ -1222,7 +1224,16 @@ def run_gebo(
             model.covar_module.base_kernel.lengthscale = gp_init_lengthscale_frac * (dim ** 0.5)
             likelihood = model.likelihood
             mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
-            fit_gpytorch_mll(mll)
+            try:
+                fit_gpytorch_mll(mll)
+            except ModelFittingError as exc:
+                model_fit_error = True
+                if verbose:
+                    print(
+                        f"[gebo] iter {iteration:3d}/{n_iterations}: GP fit failed ({exc}); "
+                        "stopping (trial will be scored as complete-but-bad, no L-BFGS)."
+                    )
+                break
 
             best_f = train_Y_no_grad.min()
 
@@ -1256,7 +1267,16 @@ def run_gebo(
             )
 
             mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
-            fit_gpytorch_mll(mll)
+            try:
+                fit_gpytorch_mll(mll)
+            except ModelFittingError as exc:
+                model_fit_error = True
+                if verbose:
+                    print(
+                        f"[gebo] iter {iteration:3d}/{n_iterations}: GP fit failed ({exc}); "
+                        "stopping (trial will be scored as complete-but-bad, no L-BFGS)."
+                    )
+                break
 
             best_f = train_Y_stdz[:, 0].min()
 
@@ -1513,6 +1533,7 @@ def run_gebo(
         "best_loss": float(train_Y[best_idx, 0]),
         "best_params": train_X[best_idx],
         "history": history,
+        "model_fit_error": model_fit_error,
     }
 
 
@@ -1934,6 +1955,7 @@ def main() -> None:
             "high": [float(bounds[i, 1]) for i in range(vectorizer.dim)],
         },
         "history": result["history"],
+        "model_fit_error": result.get("model_fit_error", False),
         "args": vars(args),
     }
     summary_path = output_dir / "gebo_summary.json"
