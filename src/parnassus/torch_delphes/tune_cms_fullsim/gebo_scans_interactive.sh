@@ -20,11 +20,24 @@
 #
 # Override the per-scan trial budget / wall-clock cap via env vars:
 #   N_TRIALS=40 TIME_BUDGET_HOURS=3.5 ./gebo_scans_interactive.sh
+#
+# Per-trial GEBO / L-BFGS knobs (also overridable via env vars):
+#   GEBO_N_ITERATIONS     total GEBO BO iterations per trial (default 300)
+#   GEBO_TIME_LIMIT_HOURS wall-clock cap on the GEBO stage of each trial --
+#                         GEBO stops early (even short of GEBO_N_ITERATIONS)
+#                         once this elapses, and the trial still proceeds to
+#                         L-BFGS with whatever GEBO found so far (default 2.0)
+#   LBFGS_N_EVENTS        events the L-BFGS stage evaluates against, overriding
+#                         whatever n_events GEBO's trial happened to sample
+#                         (default 20000)
 
 set -euo pipefail
 
 N_TRIALS="${N_TRIALS:-40}"
 TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-3.5}"   # leave margin under a 4h salloc
+GEBO_N_ITERATIONS="${GEBO_N_ITERATIONS:-300}"
+GEBO_TIME_LIMIT_HOURS="${GEBO_TIME_LIMIT_HOURS:-2.0}"
+LBFGS_N_EVENTS="${LBFGS_N_EVENTS:-20000}"
 
 source /pscratch/sd/a/aelabd/parnassus/parnassus_env/bin/activate
 cd /pscratch/sd/a/aelabd/parnassus/src
@@ -32,7 +45,7 @@ cd /pscratch/sd/a/aelabd/parnassus/src
 # export COMET_API_KEY="..."       # uncomment + fill in (or make sure it's already exported)
 # export COMET_WORKSPACE="..."
 
-export N_TRIALS TIME_BUDGET_HOURS  # read by gebo_scans_run_on_node.sh
+export N_TRIALS TIME_BUDGET_HOURS GEBO_N_ITERATIONS GEBO_TIME_LIMIT_HOURS LBFGS_N_EVENTS  # read by gebo_scans_run_on_node.sh
 
 mkdir -p logs
 
@@ -40,7 +53,7 @@ LOSSES=(wasserstein_1d soft_hist)
 TRUST_REGIONS=(cosine adaptive none)
 GRAD_MODES=(grad no_grad)
 
-echo "[launch] N_TRIALS=${N_TRIALS} TIME_BUDGET_HOURS=${TIME_BUDGET_HOURS}"
+echo "[launch] N_TRIALS=${N_TRIALS} TIME_BUDGET_HOURS=${TIME_BUDGET_HOURS} GEBO_N_ITERATIONS=${GEBO_N_ITERATIONS} GEBO_TIME_LIMIT_HOURS=${GEBO_TIME_LIMIT_HOURS} LBFGS_N_EVENTS=${LBFGS_N_EVENTS}"
 echo "[launch] SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-<not in a Slurm allocation>}"
 
 # This QOS/partition allows only ONE srun job step per node at a time within
