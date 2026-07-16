@@ -40,33 +40,57 @@ cd src
 # export COMET_API_KEY="..."       # uncomment + fill in (or make sure it's already exported)
 # export COMET_WORKSPACE="..."
 
+export N_TRIALS TIME_BUDGET_HOURS  # read by gebo_scans_run_on_node.sh
+
 mkdir -p logs
 
 LOSSES="wasserstein_1d soft_hist"
 TRUST_REGIONS="cosine adaptive none"
 GRAD_MODES="grad no_grad"
+SCRIPT_DIR="/pscratch/sd/a/aelabd/parnassus/src/parnassus/torch_delphes/tune_cms_fullsim"
 
 echo "[launch] N_TRIALS=${N_TRIALS} TIME_BUDGET_HOURS=${TIME_BUDGET_HOURS}"
 echo "[launch] SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-<none>}"
 
+# This QOS/partition allows only ONE srun job step per node at a time within
+# an allocation (verified empirically: a second `srun --nodelist=<already-
+# stepped node> --exact ...` is rejected outright -- "Job request does not
+# match any supported policy" -- regardless of --gpus-per-task / -G /
+# --gpu-bind / --overlap). So there is exactly ONE srun step per node here
+# (using the whole node), and gebo_scans_run_on_node.sh fans that single step
+# out into 4 plain background processes pinned via CUDA_VISIBLE_DEVICES --
+# ordinary Unix process management, not more Slurm steps, so the per-node
+# step-count limit doesn't apply to it.
+# (POSIX sh has no arrays, so nodes/combos are picked out of newline lists
+# with sed rather than indexed directly.)
+NODES=$(scontrol show hostnames "${SLURM_JOB_NODELIST:?not inside a Slurm allocation}")
+n_nodes=$(printf '%s\n' "$NODES" | wc -l)
+echo "[launch] nodes: $(printf '%s ' $NODES)"
+if [ "$n_nodes" -lt 3 ]; then
+  echo "[launch] WARNING: expected 3 nodes, got ${n_nodes} -- allocation may be smaller than 3x4." >&2
+fi
+
+COMBOS=""
 for loss in $LOSSES; do
   for tr in $TRUST_REGIONS; do
     for grad in $GRAD_MODES; do
-      scan_name="${loss}__${tr}__${grad}"
-      logfile="logs/${scan_name}.log"
-      echo "[launch] ${scan_name} -> ${logfile}"
-      # -G 1 --exact: carve exactly 1 GPU out of the allocation per step;
-      # Slurm packs the 12 concurrent steps 4-per-node across the 3 nodes and
-      # sets CUDA_VISIBLE_DEVICES correctly inside each step automatically.
-      srun --nodes=1 --ntasks=1 --cpus-per-task=32 --gpus-per-task=1 --exact \
-        python -m parnassus.torch_delphes.tune_cms_fullsim.gebo_optuna_search \
-          --loss "${loss}" --trust-region "${tr}" --grad-mode "${grad}" \
-          --n-trials "${N_TRIALS}" --time-budget-hours "${TIME_BUDGET_HOURS}" \
-          > "${logfile}" 2>&1 &
+      COMBOS="${COMBOS}${loss} ${tr} ${grad}
+"
     done
   done
+done  # 12 newline-separated "loss tr grad" lines, 4 assigned to each node below
+
+node_idx=1
+for start in 1 5 9; do
+  end=$(( start + 3 ))
+  node=$(printf '%s\n' "$NODES" | sed -n "${node_idx}p")
+  node_combo_args=$(printf '%s' "$COMBOS" | sed -n "${start},${end}p" | tr '\n' ' ')
+  echo "[launch] node=${node}: ${node_combo_args}"
+  srun --nodes=1 --ntasks=1 --nodelist="${node}" --exact \
+    bash "${SCRIPT_DIR}/gebo_scans_run_on_node.sh" ${node_combo_args} &
+  node_idx=$(( node_idx + 1 ))
 done
 
-echo "[launch] all 12 scans launched; waiting ..."
+echo "[launch] all 3 node steps launched (4 scans each); waiting ..."
 wait
 echo "[launch] all 12 scans finished (or hit their time budget)."
