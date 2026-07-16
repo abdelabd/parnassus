@@ -294,53 +294,74 @@ def make_objective(args: argparse.Namespace, meta: dict):
         round_dir.mkdir(parents=True, exist_ok=True)
 
         params = sample_trial(trial, meta, args)
-
-        n_done = _gebo_n_done(round_dir)
-        remaining = max(args.gebo_n_iterations - n_done, 0)
-        gebo_cfg = build_gebo_config(params, args, round_dir, n_iterations=remaining)
-        gebo_cfg_path = round_dir / "gebo_config.yaml"
-        with open(gebo_cfg_path, "w") as f:
-            yaml.safe_dump(gebo_cfg, f, sort_keys=False, default_flow_style=False)
-
-        gebo_summary_path = round_dir / "gebo" / "gebo_summary.json"
-        if remaining > 0 or not gebo_summary_path.exists():
-            print(
-                f"[scan] trial {trial.number} (round {round_id}): "
-                f"running GEBO ({remaining} of {args.gebo_n_iterations} iterations remaining) ...",
-                flush=True,
-            )
-            _run_subprocess(
-                [sys.executable, "-m", "parnassus.torch_delphes.tune_cms_fullsim.gebo_search",
-                 str(gebo_cfg_path)],
-                log_path=round_dir / "gebo_run.log",
-            )
-        else:
-            print(f"[scan] trial {trial.number} (round {round_id}): GEBO already complete, skipping", flush=True)
-
-        with open(gebo_summary_path) as f:
-            gebo_summary = json.load(f)
-        gebo_best_loss = float(gebo_summary["best_loss"])
-
-        lbfgs_summary_path = round_dir / "gebo" / "lbfgs" / "gebo_summary.json"
-        if not lbfgs_summary_path.exists():
-            print(f"[scan] trial {trial.number} (round {round_id}): running L-BFGS ...", flush=True)
-            cmd = [
-                sys.executable, "-m", "parnassus.torch_delphes.tune_cms_fullsim.lbfgs_finetune",
-                "--gebo-summary", str(gebo_summary_path),
-                "--n-steps", str(args.lbfgs_n_steps),
-            ]
-            if args.lbfgs_max_fun is not None:
-                cmd += ["--max-fun", str(args.lbfgs_max_fun)]
-            _run_subprocess(cmd, log_path=round_dir / "gebo" / "lbfgs_run.log")
-        else:
-            print(f"[scan] trial {trial.number} (round {round_id}): L-BFGS already complete, skipping", flush=True)
-
-        with open(lbfgs_summary_path) as f:
-            lbfgs_summary = json.load(f)
-        lbfgs_best_loss = float(lbfgs_summary["best_loss"])
-
         trial.set_user_attr("round_dir", str(round_dir))
         trial.set_user_attr("round_id", round_id)
+
+        try:
+            n_done = _gebo_n_done(round_dir)
+            remaining = max(args.gebo_n_iterations - n_done, 0)
+            gebo_cfg = build_gebo_config(params, args, round_dir, n_iterations=remaining)
+            gebo_cfg_path = round_dir / "gebo_config.yaml"
+            with open(gebo_cfg_path, "w") as f:
+                yaml.safe_dump(gebo_cfg, f, sort_keys=False, default_flow_style=False)
+
+            gebo_summary_path = round_dir / "gebo" / "gebo_summary.json"
+            if remaining > 0 or not gebo_summary_path.exists():
+                print(
+                    f"[scan] trial {trial.number} (round {round_id}): "
+                    f"running GEBO ({remaining} of {args.gebo_n_iterations} iterations remaining) ...",
+                    flush=True,
+                )
+                _run_subprocess(
+                    [sys.executable, "-m", "parnassus.torch_delphes.tune_cms_fullsim.gebo_search",
+                     str(gebo_cfg_path)],
+                    log_path=round_dir / "gebo_run.log",
+                )
+            else:
+                print(f"[scan] trial {trial.number} (round {round_id}): GEBO already complete, skipping", flush=True)
+
+            with open(gebo_summary_path) as f:
+                gebo_summary = json.load(f)
+            gebo_best_loss = float(gebo_summary["best_loss"])
+
+            lbfgs_summary_path = round_dir / "gebo" / "lbfgs" / "gebo_summary.json"
+            if not lbfgs_summary_path.exists():
+                print(f"[scan] trial {trial.number} (round {round_id}): running L-BFGS ...", flush=True)
+                cmd = [
+                    sys.executable, "-m", "parnassus.torch_delphes.tune_cms_fullsim.lbfgs_finetune",
+                    "--gebo-summary", str(gebo_summary_path),
+                    "--n-steps", str(args.lbfgs_n_steps),
+                ]
+                if args.lbfgs_max_fun is not None:
+                    cmd += ["--max-fun", str(args.lbfgs_max_fun)]
+                _run_subprocess(cmd, log_path=round_dir / "gebo" / "lbfgs_run.log")
+            else:
+                print(f"[scan] trial {trial.number} (round {round_id}): L-BFGS already complete, skipping", flush=True)
+
+            with open(lbfgs_summary_path) as f:
+                lbfgs_summary = json.load(f)
+            lbfgs_best_loss = float(lbfgs_summary["best_loss"])
+        except (RuntimeError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            # A subprocess exit failure here means THIS sampled hyperparameter
+            # point is bad (e.g. botorch.exceptions.ModelFittingError from an
+            # extreme GP-prior sample, or a CUDA OOM from an extreme
+            # batch_size/n_events draw) -- deterministic given the same params,
+            # so letting it propagate would mark the trial FAILED and the
+            # heartbeat RetryFailedTrialCallback (see main()) would re-enqueue
+            # the SAME round_id/hyperparameters, which would fail identically
+            # forever and burn the whole trial budget on one bad point. Score
+            # it as a legitimately bad, COMPLETE trial instead: TPE learns to
+            # avoid the region and the scan moves on to a new sample.
+            #
+            # A trial killed by an external SLURM timeout/preemption never
+            # reaches this except block at all -- the whole process dies
+            # mid-call, with no exception raised in THIS process. That case is
+            # what the heartbeat + RetryFailedTrialCallback machinery in
+            # main() is for, and is unaffected by this except block.
+            print(f"[scan] trial {trial.number} (round {round_id}): FAILED -- {exc}", flush=True)
+            trial.set_user_attr("failure_reason", str(exc))
+            return float("inf")
+
         trial.set_user_attr("gebo_best_loss", gebo_best_loss)
         trial.set_user_attr("lbfgs_best_loss", lbfgs_best_loss)
         print(
@@ -433,10 +454,29 @@ def main() -> None:
     # few minutes of slack is generous.
     storage = optuna.storages.RDBStorage(
         url=args.storage,
+        engine_kwargs={"connect_args": {"timeout": 30}},
         heartbeat_interval=60,
         grace_period=600,
         failed_trial_callback=optuna.storages.RetryFailedTrialCallback(),
     )
+    if args.storage.startswith("sqlite:"):
+        # SQLite's default rollback-journal mode takes a whole-database
+        # exclusive lock for the duration of any write; the heartbeat
+        # thread's periodic writes then collide with the main thread's own
+        # trial/study writes and raise "database is locked" (observed
+        # crashing a live scan). WAL mode lets a writer and readers coexist;
+        # the 30s connect timeout above is the fallback if a write really
+        # does have to wait. Applied per-connection since pragmas are
+        # per-connection and the heartbeat thread uses its own connection.
+        from sqlalchemy import event
+
+        @event.listens_for(storage.engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, _rec) -> None:
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.close()
+
     study = optuna.create_study(
         direction="minimize",
         sampler=optuna.samplers.TPESampler(multivariate=True, group=True, n_startup_trials=10, seed=args.seed),
