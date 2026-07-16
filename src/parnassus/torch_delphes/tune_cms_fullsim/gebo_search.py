@@ -933,6 +933,7 @@ def run_gebo(
     bounds: torch.Tensor,
     n_initial: int = 10,
     n_iterations: int = 50,
+    time_limit_hours: float | None = None,
     acq_name: str = "EI",
     seed: int = 0,
     verbose: bool = True,
@@ -970,6 +971,18 @@ def run_gebo(
     n_iterations : int
         Number of BO iterations (TOTAL, including any already-done ones when
         resuming).
+    time_limit_hours : float | None
+        Wall-clock budget (hours) for this call's BO loop, checked once per
+        iteration -- BEFORE that iteration's GP fit / acquisition step, so a
+        near-miss iteration is never started only to be cut off partway
+        through it. Once exceeded, the loop stops early (the same clean exit
+        as running out of ``n_iterations``) and the already-checkpointed
+        ``train_X``/``train_Y`` are returned intact, so the caller (e.g. the
+        GEBO -> L-BFGS pipeline in :mod:`.gebo_optuna_search`) proceeds with
+        whatever GEBO found so far. ``None`` (or <= 0) disables the check.
+        The clock starts fresh at the top of THIS call, not cumulative
+        across resumes -- the common case is one subprocess invocation per
+        trial's GEBO stage.
     acq_name : str
         Acquisition function: ``"EI"`` or ``"LogEI"``.
     seed : int
@@ -1147,8 +1160,19 @@ def run_gebo(
     tr_scheduler.setup(dim, bounds, tr_scales, n_iterations)
     tr_center = train_X[best_idx].clone()  # best point in raw space (TR center)
 
+    run_start_time = time.perf_counter()
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
+
+        if time_limit_hours is not None and time_limit_hours > 0:
+            elapsed_hours = (t_iter - run_start_time) / 3600.0
+            if elapsed_hours >= time_limit_hours:
+                if verbose:
+                    print(
+                        f"[gebo] time limit reached ({elapsed_hours:.2f}h >= "
+                        f"{time_limit_hours:.2f}h) before iteration {iteration}; stopping."
+                    )
+                break
 
         # --- normalization -------------------------------------------------------
         # Standardize inputs to zero-mean unit-variance per dimension so the ARD
@@ -1785,7 +1809,9 @@ def main() -> None:
     )
 
     # --- run GEBO ------------------------------------------------------------
-    print(f"[gebo] starting BO: {args.n_initial} initial + {args.n_iterations} iterations")
+    _time_limit = getattr(args, "time_limit_hours", None)
+    _time_limit_str = f", time limit {_time_limit:.2f}h" if _time_limit and _time_limit > 0 else ""
+    print(f"[gebo] starting BO: {args.n_initial} initial + {args.n_iterations} iterations{_time_limit_str}")
     os.makedirs(args.output_dir, exist_ok=True)
 
     machine_debug_path = args.output_dir / "gebo_debug.yaml" if args.machine_debug else None
@@ -1841,6 +1867,7 @@ def main() -> None:
         bounds=bounds,
         n_initial=args.n_initial,
         n_iterations=args.n_iterations,
+        time_limit_hours=getattr(args, "time_limit_hours", None),
         acq_name=args.acq,
         seed=args.seed,
         verbose=True,

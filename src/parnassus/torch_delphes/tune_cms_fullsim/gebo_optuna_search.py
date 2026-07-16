@@ -23,11 +23,16 @@ What is held CONSTANT across every trial (of every one of the 12 scans this
 is meant to be run as, see ``gebo_scans_interactive.sh`` /
 ``gebo_scans_submit.sh``): the acquisition function (``LogEI``) and its
 optimizer (``acquisition.num_restarts=20``, ``raw_samples=4096``), the GEBO
-iteration budget (``--gebo-n-iterations``, default 200) and the L-BFGS-B
-iteration budget (``--lbfgs-n-steps``, default 200), the 66-physical-parameter
-search space (``--optuna-config``), the root file, and the RNG seed (so
-trials differ only by the sampled run-setting hyperparameters, same
-convention as :mod:`.optuna_search`). What is scanned per trial is read from
+iteration budget (``--gebo-n-iterations``, default 200) capped by a wall-clock
+budget (``--gebo-time-limit-hours``, default 2.0 -- ``gebo_search.py`` stops its
+BO loop early once this elapses, even short of ``--gebo-n-iterations``, and the
+trial still proceeds to L-BFGS with whatever GEBO found so far), the L-BFGS-B
+iteration budget (``--lbfgs-n-steps``, default 200) evaluated against
+``--lbfgs-n-events`` events (default 20000, overriding whatever ``n_events``
+GEBO's trial happened to sample), the 66-physical-parameter search space
+(``--optuna-config``), the root file, and the RNG seed (so trials differ only
+by the sampled run-setting hyperparameters, same convention as
+:mod:`.optuna_search`). What is scanned per trial is read from
 ``--meta-search-config`` (default ``configs/gebo_meta_search.yaml``); see that
 file for the exact ranges. A trial is scored by its L-BFGS **final** loss
 (the true end of the GEBO -> L-BFGS pipeline).
@@ -201,6 +206,7 @@ def build_gebo_config(params: dict, args: argparse.Namespace, round_dir: Path, n
         "root_file": str(args.root_file),
         "n_events": params["n_events"],
         "n_iterations": n_iterations,
+        "time_limit_hours": args.gebo_time_limit_hours,
         "n_initial": params["n_initial"],
         "batch_size": params["batch_size"],
         "seed": args.seed,
@@ -331,6 +337,7 @@ def make_objective(args: argparse.Namespace, meta: dict):
                     sys.executable, "-m", "parnassus.torch_delphes.tune_cms_fullsim.lbfgs_finetune",
                     "--gebo-summary", str(gebo_summary_path),
                     "--n-steps", str(args.lbfgs_n_steps),
+                    "--n-events", str(args.lbfgs_n_events),
                 ]
                 if args.lbfgs_max_fun is not None:
                     cmd += ["--max-fun", str(args.lbfgs_max_fun)]
@@ -409,9 +416,17 @@ def main() -> None:
 
     parser.add_argument("--gebo-n-iterations", type=int, default=200,
                          help="Total GEBO BO iterations per trial (held constant across the whole scan).")
+    parser.add_argument("--gebo-time-limit-hours", type=float, default=2.0,
+                         help="Wall-clock cap on the GEBO stage of each trial: gebo_search.py stops its "
+                              "BO loop once this elapses, even short of --gebo-n-iterations, and the "
+                              "trial proceeds to L-BFGS with whatever GEBO found so far "
+                              "(<=0 disables; held constant across the whole scan).")
     parser.add_argument("--lbfgs-n-steps", type=int, default=200,
                          help="L-BFGS-B maxiter per trial (held constant across the whole scan).")
     parser.add_argument("--lbfgs-max-fun", type=int, default=None)
+    parser.add_argument("--lbfgs-n-events", type=int, default=20_000,
+                         help="Events the L-BFGS stage evaluates against, overriding whatever n_events "
+                              "GEBO's trial happened to sample (held constant across the whole scan).")
 
     parser.add_argument("--acqf-num-restarts", type=int, default=20)
     parser.add_argument("--acqf-raw-samples", type=int, default=4096)
