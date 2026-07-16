@@ -369,6 +369,22 @@ def make_objective(args: argparse.Namespace, meta: dict):
                 )
                 return float("inf")
 
+            # A bad sampled GP-prior combination can make botorch's GP hyperparameter
+            # fit numerically fail mid-run (see gebo_search.py's ModelFittingError
+            # handling); gebo_search.py stops the BO loop right there rather than
+            # crashing, and flags it here. Whatever best_loss it found so far is not
+            # worth polishing with L-BFGS -- score it as a bad, complete trial instead.
+            if gebo_summary.get("model_fit_error", False):
+                print(
+                    f"[scan] trial {trial.number} (round {round_id}): GEBO hit a GP model-fit "
+                    f"error (best_loss so far = {gebo_best_loss:.4e}) -- scoring as a bad, "
+                    "complete trial and skipping L-BFGS.",
+                    flush=True,
+                )
+                trial.set_user_attr("gebo_best_loss", gebo_best_loss)
+                trial.set_user_attr("failure_reason", "GEBO hit a GP model-fit error")
+                return float("inf")
+
             lbfgs_summary_path = round_dir / "gebo" / "lbfgs" / "gebo_summary.json"
             if not lbfgs_summary_path.exists():
                 # Scale UP from the trial's GEBO batch_size rather than reusing it
@@ -501,6 +517,16 @@ def main() -> None:
     parser.add_argument("--comet-disabled", action="store_true")
 
     args = parser.parse_args()
+
+    # Line-buffer stdout: this process is normally launched with stdout
+    # redirected to logs/<scan_name>.log (see gebo_scans_run_on_node.sh), and
+    # Python fully-buffers a non-tty stdout by default -- so without this, the
+    # "[scan] ..." lines below (resuming a study, catching a stale trial,
+    # starting/finishing each trial's GEBO/L-BFGS stage) don't reach the log
+    # until the process exits, which is exactly what you'd want to watch to
+    # confirm a resumed run is making progress.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
 
     if not args.root_file.exists():
         raise SystemExit(f"--root-file {args.root_file} does not exist.")
