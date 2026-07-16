@@ -40,6 +40,7 @@ import argparse
 import importlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -1675,6 +1676,14 @@ def main() -> None:
     )
     config_path = parser.parse_args().config
     args = load_gebo_config(config_path)
+
+    # Line-buffer stdout: this process is normally launched with stdout
+    # redirected to a log file (see gebo_optuna_search.py's _run_subprocess),
+    # and Python fully-buffers a non-tty stdout by default -- so without this,
+    # the per-iteration progress prints below don't reach the log until the
+    # process exits, making a slow run indistinguishable from a hung one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
 
     # --- Comet setup ---------------------------------------------------------
     comet_exp = None

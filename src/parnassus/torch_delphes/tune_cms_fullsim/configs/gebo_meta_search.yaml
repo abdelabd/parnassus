@@ -18,13 +18,18 @@
 #                   gebo_optuna_search.py samples only the one that matters for
 #                   a given --grad-mode and pins the other at gebo_search.py's
 #                   own default (80 / 500) so it never wastes search budget.
+#                   n_iterations_gebo is this trial's GEBO BO-iteration TARGET
+#                   (replaces a fixed --gebo-n-iterations); the trial's GEBO
+#                   stage still stops early if --gebo-time-limit-hours elapses
+#                   first, whichever comes sooner.
 #   trust_region:  one sub-block per --trust-region choice. "none"
 #                   (NoTrustRegion) takes no constructor args, so it is empty.
 
 common:
-  n_events:    {low: 1000, high: 10000, log: true, type: int}
-  n_initial:   {low: 5, high: 40, log: true, type: int}
-  batch_size:  {low: 64, high: 1024, log: true, type: int}
+  n_events:         {low: 1_000, high: 5_000, log: true, type: int}
+  n_initial:        {low: 5, high: 40, log: true, type: int}
+  n_iterations_gebo: {low: 20, high: 200, type: int}   # GEBO BO-iteration target for this trial
+  batch_size:       {low: 64, high: 1024, log: true, type: int}
 
   loss_weights:
     count_weight:      {low: 0.1, high: 2.0, log: true}
