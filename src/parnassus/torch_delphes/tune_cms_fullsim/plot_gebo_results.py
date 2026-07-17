@@ -280,15 +280,16 @@ def plot_param_drift(
     )
 
     def _sliding_mean(values: list[float], window: int) -> np.ndarray:
-        arr = np.asarray(values, dtype=float)
-        if window <= 1 or arr.size == 0:
-            return arr
-        window = max(1, int(window))
-        pad_left = window // 2
-        pad_right = window - 1 - pad_left
-        padded = np.pad(arr, (pad_left, pad_right), mode="edge")
-        kernel = np.ones(window, dtype=float) / float(window)
-        return np.convolve(padded, kernel, mode="valid")
+        return values
+        # arr = np.asarray(values, dtype=float)
+        # if window <= 1 or arr.size == 0:
+        #     return arr
+        # window = max(1, int(window))
+        # pad_left = window // 2
+        # pad_right = window - 1 - pad_left
+        # padded = np.pad(arr, (pad_left, pad_right), mode="edge")
+        # kernel = np.ones(window, dtype=float) / float(window)
+        # return np.convolve(padded, kernel, mode="valid")
 
     queries = list(range(n_total))
     flat_axes = axes.flatten()
