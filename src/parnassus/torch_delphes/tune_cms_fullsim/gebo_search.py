@@ -1717,6 +1717,9 @@ def main() -> None:
         )
         comet_key = comet_exp.get_key()
         comet_exp.log_parameters(vars(args))
+        comet_name = getattr(args, "comet_name", None)
+        if comet_name:
+            comet_exp.set_name(comet_name)
         print(f"[gebo] Comet experiment: {comet_exp.url}")
     elif args.comet_disabled:
         print("[gebo] Comet logging disabled via --comet-disabled.")

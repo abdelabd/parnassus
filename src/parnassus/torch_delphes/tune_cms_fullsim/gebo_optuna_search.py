@@ -215,7 +215,7 @@ def sample_trial(trial: optuna.Trial, meta: dict, args: argparse.Namespace) -> d
     return p
 
 
-def build_gebo_config(params: dict, args: argparse.Namespace, round_dir: Path, n_iterations: int) -> dict:
+def build_gebo_config(params: dict, args: argparse.Namespace, round_dir: Path, n_iterations: int, round_id: int) -> dict:
     """Shape a sampled point into the nested YAML schema :func:`.gebo_search.load_gebo_config` reads."""
     return {
         "root_file": str(args.root_file),
@@ -231,6 +231,7 @@ def build_gebo_config(params: dict, args: argparse.Namespace, round_dir: Path, n
         "output_dir": str(round_dir / "gebo"),
         "machine_debug": True,
         "comet_disabled": args.comet_disabled,
+        "comet_name": f"{args.loss}__{args.trust_region}__{args.grad_mode}__{round_id}",
         "optuna_config": str(args.optuna_config),
         "param_config": None,
         "trust_region": {
@@ -322,7 +323,7 @@ def make_objective(args: argparse.Namespace, meta: dict):
             n_iterations_target = params["n_iterations_gebo"]
             n_done = _gebo_n_done(round_dir)
             remaining = max(n_iterations_target - n_done, 0)
-            gebo_cfg = build_gebo_config(params, args, round_dir, n_iterations=remaining)
+            gebo_cfg = build_gebo_config(params, args, round_dir, n_iterations=remaining, round_id=round_id)
             gebo_cfg_path = round_dir / "gebo_config.yaml"
             with open(gebo_cfg_path, "w") as f:
                 yaml.safe_dump(gebo_cfg, f, sort_keys=False, default_flow_style=False)
