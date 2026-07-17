@@ -327,8 +327,15 @@ def make_objective(args: argparse.Namespace, meta: dict):
             with open(gebo_cfg_path, "w") as f:
                 yaml.safe_dump(gebo_cfg, f, sort_keys=False, default_flow_style=False)
 
+            # Gate on gebo_summary.json existing, NOT on remaining > 0: gebo_search.py
+            # writes a valid summary and hands off to L-BFGS as soon as it gracefully
+            # stops for ANY reason (full iteration count, its own --time-limit-hours,
+            # or a model-fit error) -- even if that's far short of n_iterations_target.
+            # A resumed trial should treat that the same way a first-time-through run
+            # does (accept it, move to L-BFGS), not redo GEBO from the checkpoint all
+            # the way out to the full target before ever touching L-BFGS again.
             gebo_summary_path = round_dir / "gebo" / "gebo_summary.json"
-            if remaining > 0 or not gebo_summary_path.exists():
+            if not gebo_summary_path.exists():
                 print(
                     f"[scan] trial {trial.number} (round {round_id}): "
                     f"running GEBO ({remaining} of {n_iterations_target} iterations remaining) ...",
