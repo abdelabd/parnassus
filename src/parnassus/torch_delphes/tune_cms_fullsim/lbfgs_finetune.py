@@ -39,6 +39,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -192,6 +193,7 @@ def main() -> None:
 
     output_dir = args.output_dir or (args.gebo_summary.parent / "lbfgs")
     output_dir.mkdir(parents=True, exist_ok=True)
+    state_path = output_dir / "lbfgs_state.pt"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[lbfgs] device = {device}")
@@ -240,11 +242,30 @@ def main() -> None:
             f"best_raw_params is missing {len(missing)} trainable keys "
             f"(e.g. {missing[:3]}); does --optuna-config match the run?"
         )
-    x0 = np.array([float(best_raw_params[n]) for n in param_names], dtype=np.float64)
+    orig_x0 = np.array([float(best_raw_params[n]) for n in param_names], dtype=np.float64)
+    x0 = orig_x0
 
-    # --- L-BFGS-B loop -------------------------------------------------------
+    # --- resume from a checkpoint, if this round's L-BFGS died mid-run --------
+    # Unlike GEBO, a single scipy.optimize.minimize() call is one blocking
+    # operation with no native checkpoint/resume support, so we save our own
+    # state (current point + full history) after every callback iteration --
+    # mirroring gebo_search.py's per-iteration gebo_state.pt -- and resume from
+    # the last accepted point instead of restarting from GEBO's best every time
+    # this process gets relaunched.
+    resumed = False
     history: list[dict] = []
     traj: list[np.ndarray] = []  # accepted parameter vector after each iteration
+    true_init_loss: float | None = None
+    if state_path.exists():
+        ckpt = torch.load(state_path, map_location="cpu", weights_only=True)
+        n_done = int(ckpt.get("iteration", 0))
+        if n_done > 0:
+            resumed = True
+            x0 = ckpt["x"].numpy().astype(np.float64)
+            history = list(ckpt.get("history", []))
+            traj = [row.numpy().astype(np.float64) for row in ckpt.get("traj", [])]
+            true_init_loss = ckpt.get("true_init_loss")
+
     _state: dict = {"loss": None}
 
     def fun_and_jac(x: np.ndarray) -> tuple[float, np.ndarray]:
@@ -255,8 +276,16 @@ def main() -> None:
         _state["loss"] = loss
         return loss, grad
 
-    init_loss, _ = fun_and_jac(x0)
-    print(f"[lbfgs] initial loss (GEBO best) = {init_loss:.6e}")
+    current_loss, _ = fun_and_jac(x0)
+    if true_init_loss is None:
+        true_init_loss = current_loss
+    if resumed:
+        print(
+            f"[lbfgs] RESUMING from {state_path}: {len(history)} iterations already "
+            f"done (of {args.n_steps} max), current loss = {current_loss:.6e}"
+        )
+    else:
+        print(f"[lbfgs] initial loss (GEBO best) = {current_loss:.6e}")
 
     def _callback(xk: np.ndarray) -> None:
         history.append({
@@ -268,27 +297,51 @@ def main() -> None:
         })
         traj.append(np.array(xk, dtype=np.float64))
         print(f"[lbfgs] iter {len(history):3d}  loss={_state['loss']:.6e}")
+        torch.save(
+            {
+                "iteration": len(history),
+                "x": torch.tensor(xk, dtype=torch.float64),
+                "history": history,
+                "traj": torch.stack([torch.tensor(t, dtype=torch.float64) for t in traj]),
+                "true_init_loss": true_init_loss,
+            },
+            state_path,
+        )
 
-    options = {"maxiter": args.n_steps}
-    if args.max_fun is not None:
-        options["maxfun"] = args.max_fun
-
+    remaining_steps = max(args.n_steps - len(history), 0)
     t0 = time.perf_counter()
-    res = minimize(
-        fun_and_jac,
-        x0,
-        method="L-BFGS-B",
-        jac=True,
-        bounds=scipy_bounds,
-        callback=_callback,
-        options=options,
-    )
+    if remaining_steps == 0:
+        # The checkpoint already reached the iteration budget, but the process
+        # died before this script could write its final output -- nothing left
+        # to optimize, just finalize with what the checkpoint already has.
+        print(
+            f"[lbfgs] resume point already reached the {args.n_steps}-iteration "
+            "budget; finalizing without further optimization."
+        )
+        res = SimpleNamespace(
+            fun=current_loss, x=x0, success=True, status=0,
+            message="resume point already reached the iteration budget",
+            nit=len(history), nfev=len(history),
+        )
+    else:
+        options = {"maxiter": remaining_steps}
+        if args.max_fun is not None:
+            options["maxfun"] = args.max_fun
+        res = minimize(
+            fun_and_jac,
+            x0,
+            method="L-BFGS-B",
+            jac=True,
+            bounds=scipy_bounds,
+            callback=_callback,
+            options=options,
+        )
     elapsed = time.perf_counter() - t0
     final_loss = float(res.fun)
     print(
         f"[lbfgs] done in {elapsed:.1f}s  ({res.nit} iters, {res.nfev} evals)  "
-        f"final loss = {final_loss:.6e}  (init {init_loss:.6e}, "
-        f"Δ = {final_loss - init_loss:+.3e})"
+        f"final loss = {final_loss:.6e}  (init {true_init_loss:.6e}, "
+        f"Δ = {final_loss - true_init_loss:+.3e})"
     )
     print(f"[lbfgs] scipy: success={res.success} status={res.status} — {res.message}")
 
@@ -309,7 +362,7 @@ def main() -> None:
     out_summary = {
         "method": "L-BFGS-B",
         "source_summary": str(args.gebo_summary),
-        "initial_loss": init_loss,
+        "initial_loss": true_init_loss,
         "best_loss": final_loss,
         "best_idx": 0,
         "best_raw_params": best_raw_out,
@@ -345,12 +398,14 @@ def main() -> None:
     with open(summary_path, "w") as f:
         json.dump(out_summary, f, indent=2, default=str)
 
-    # Parameter + loss trajectory (starting from the GEBO best = x0), so
+    # Parameter + loss trajectory (starting from the GEBO best = orig_x0), so
     # plot_gebo_results can render param_drift_all.pdf / loss_scatter.pdf. The
     # ``train_X`` / ``train_Y`` keys mirror gebo_data.pt's schema (train_Y here
-    # is just the (n, 1) loss column the plots read).
-    traj_X = np.stack([x0, *traj]) if traj else x0[None, :]
-    traj_losses = [init_loss] + [h["loss"] for h in history]
+    # is just the (n, 1) loss column the plots read). ``traj``/``history`` span
+    # every iteration across all resumes, so this covers the full run, not just
+    # whatever's left after the most recent restart.
+    traj_X = np.stack([orig_x0, *traj]) if traj else orig_x0[None, :]
+    traj_losses = [true_init_loss] + [h["loss"] for h in history]
     torch.save(
         {
             "train_X": torch.tensor(traj_X, dtype=torch.float64),
