@@ -1022,6 +1022,7 @@ def run_gebo(
     is_protected: torch.Tensor | None = None
     history: list[dict] = []
     pred_init: dict | None = None  # initial trainee preds (best Sobol point)
+    best_initial_loss: float | None = None  # best of the n_initial Sobol points alone
 
     if state_path is not None and state_path.exists():
         ckpt = torch.load(state_path, map_location="cpu", weights_only=True)
@@ -1039,6 +1040,14 @@ def run_gebo(
             if _saved_prot is not None and _saved_prot.numel() == train_X.shape[0]:
                 is_protected = _saved_prot.to(dtype=torch.bool)
             history = ckpt.get("history", [])
+            # Older checkpoints predate this field; best-effort fallback assumes
+            # the first n_initial rows of train_X are still exactly the Sobol
+            # points, which only holds if the random-drop buffer cap (below)
+            # has never fired yet.
+            best_initial_loss = ckpt.get(
+                "best_initial_loss",
+                float(train_Y[:n_initial, 0].min()) if train_X.shape[0] >= n_initial else None,
+            )
             start_iteration = n_done + 1
             resumed = True
             if verbose:
@@ -1063,9 +1072,10 @@ def run_gebo(
             print(f"[gebo] evaluating {n_initial} initial points ...")
         t0 = time.perf_counter()
         init_Y = objective(init_X)  # (n_initial, d+1)
+        best_initial_loss = float(init_Y[:, 0].min())
         if verbose:
             print(f"[gebo] initial evaluation took {time.perf_counter() - t0:.1f}s")
-            print(f"[gebo] initial best loss: {init_Y[:, 0].min().item():.6e}")
+            print(f"[gebo] initial best loss: {best_initial_loss:.6e}")
 
         train_X = init_X.clone()
         train_Y = init_Y.clone()
@@ -1517,6 +1527,7 @@ def run_gebo(
                 "history": history,
                 "iteration": iteration,
                 "n_initial": n_initial,
+                "best_initial_loss": best_initial_loss,
             }
             # Preserve metadata (args, comet_key) from any existing state so
             # resume comparison and Comet reconnection keep working.
@@ -1534,6 +1545,7 @@ def run_gebo(
         "best_params": train_X[best_idx],
         "history": history,
         "model_fit_error": model_fit_error,
+        "best_initial_loss": best_initial_loss,
     }
 
 
@@ -1959,6 +1971,7 @@ def main() -> None:
         },
         "history": result["history"],
         "model_fit_error": result.get("model_fit_error", False),
+        "best_initial_loss": result.get("best_initial_loss"),
         "args": vars(args),
     }
     summary_path = output_dir / "gebo_summary.json"

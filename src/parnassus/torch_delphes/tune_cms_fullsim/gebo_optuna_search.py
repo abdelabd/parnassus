@@ -380,18 +380,37 @@ def make_objective(args: argparse.Namespace, meta: dict):
             # A bad sampled GP-prior combination can make botorch's GP hyperparameter
             # fit numerically fail mid-run (see gebo_search.py's ModelFittingError
             # handling); gebo_search.py stops the BO loop right there rather than
-            # crashing, and flags it here. Whatever best_loss it found so far is not
-            # worth polishing with L-BFGS -- score it as a bad, complete trial instead.
+            # crashing, and flags it here. This is only fatal to the trial if the
+            # BO stage never actually found anything -- i.e. its best loss never
+            # beat the best of the n_initial Sobol points (best_initial_loss,
+            # reached here since the earlier _gebo_n_done(round_dir) == 0 check
+            # already handles the "not even one BO iteration completed" case). If
+            # at least one BO iteration DID improve on the Sobol init, that
+            # progress is real and worth polishing with L-BFGS despite the later
+            # GP-fit error, so fall through to the normal L-BFGS stage instead of
+            # skipping it.
             if gebo_summary.get("model_fit_error", False):
+                best_initial_loss = gebo_summary.get("best_initial_loss")
+                bo_improved_on_sobol = (
+                    best_initial_loss is not None and gebo_best_loss < best_initial_loss - 1e-8
+                )
+                if not bo_improved_on_sobol:
+                    print(
+                        f"[scan] trial {trial.number} (round {round_id}): GEBO hit a GP model-fit "
+                        f"error (best_loss so far = {gebo_best_loss:.4e}) and never beat the best "
+                        f"Sobol init ({best_initial_loss}) -- scoring as a bad, complete trial and "
+                        "skipping L-BFGS.",
+                        flush=True,
+                    )
+                    trial.set_user_attr("gebo_best_loss", gebo_best_loss)
+                    trial.set_user_attr("failure_reason", "GEBO hit a GP model-fit error")
+                    return float("inf")
                 print(
                     f"[scan] trial {trial.number} (round {round_id}): GEBO hit a GP model-fit "
-                    f"error (best_loss so far = {gebo_best_loss:.4e}) -- scoring as a bad, "
-                    "complete trial and skipping L-BFGS.",
+                    f"error but still improved on the best Sobol init ({best_initial_loss:.4e} -> "
+                    f"{gebo_best_loss:.4e}) -- proceeding to L-BFGS anyway.",
                     flush=True,
                 )
-                trial.set_user_attr("gebo_best_loss", gebo_best_loss)
-                trial.set_user_attr("failure_reason", "GEBO hit a GP model-fit error")
-                return float("inf")
 
             lbfgs_summary_path = round_dir / "gebo" / "lbfgs" / "gebo_summary.json"
             if not lbfgs_summary_path.exists():
