@@ -974,17 +974,23 @@ def run_gebo(
         Number of BO iterations (TOTAL, including any already-done ones when
         resuming).
     time_limit_hours : float | None
-        Wall-clock budget (hours) for this call's BO loop, checked once per
-        iteration -- BEFORE that iteration's GP fit / acquisition step, so a
-        near-miss iteration is never started only to be cut off partway
-        through it. Once exceeded, the loop stops early (the same clean exit
-        as running out of ``n_iterations``) and the already-checkpointed
+        Wall-clock budget (hours) for the BO loop, checked once per iteration
+        -- BEFORE that iteration's GP fit / acquisition step, so a near-miss
+        iteration is never started only to be cut off partway through it.
+        Once exceeded, the loop stops early (the same clean exit as running
+        out of ``n_iterations``) and the already-checkpointed
         ``train_X``/``train_Y`` are returned intact, so the caller (e.g. the
         GEBO -> L-BFGS pipeline in :mod:`.gebo_optuna_search`) proceeds with
         whatever GEBO found so far. ``None`` (or <= 0) disables the check.
-        The clock starts fresh at the top of THIS call, not cumulative
-        across resumes -- the common case is one subprocess invocation per
-        trial's GEBO stage.
+        CUMULATIVE across resumes: the wall-clock time already spent in the
+        BO loop by prior invocations of this same run (``state_path``) is
+        persisted in the checkpoint as ``elapsed_time_s`` and added to this
+        call's own elapsed time, so a run that keeps getting resumed (e.g.
+        across walltime-limited SLURM jobs) cannot exceed the budget by
+        restarting the clock each time. On a graceful time-limit stop, the
+        accumulated total is written to the checkpoint immediately (not just
+        at the next completed iteration) so the next resume picks up from
+        exactly where this one left off.
     acq_name : str
         Acquisition function: ``"EI"`` or ``"LogEI"``.
     seed : int
@@ -1023,6 +1029,7 @@ def run_gebo(
     history: list[dict] = []
     pred_init: dict | None = None  # initial trainee preds (best Sobol point)
     best_initial_loss: float | None = None  # best of the n_initial Sobol points alone
+    prior_elapsed_s = 0.0  # cumulative BO-loop wall-clock time from prior invocations (resume)
 
     if state_path is not None and state_path.exists():
         ckpt = torch.load(state_path, map_location="cpu", weights_only=True)
@@ -1048,12 +1055,17 @@ def run_gebo(
                 "best_initial_loss",
                 float(train_Y[:n_initial, 0].min()) if train_X.shape[0] >= n_initial else None,
             )
+            # Older checkpoints predate this field -> 0.0 (the old, buggy
+            # behavior of restarting the clock); anything checkpointed by the
+            # current code always carries an accurate cumulative total.
+            prior_elapsed_s = float(ckpt.get("elapsed_time_s", 0.0))
             start_iteration = n_done + 1
             resumed = True
             if verbose:
                 print(
                     f"[gebo] RESUMING from {state_path}: "
-                    f"{train_X.shape[0]} points, {n_done}/{n_iterations} iterations done"
+                    f"{train_X.shape[0]} points, {n_done}/{n_iterations} iterations done "
+                    f"({prior_elapsed_s / 3600.0:.2f}h of BO-loop time already spent)"
                 )
             # Re-derive prev_candidate from the last BO point.
             if train_X.shape[0] > n_initial:
@@ -1172,19 +1184,53 @@ def run_gebo(
     tr_scheduler.setup(dim, bounds, tr_scales, n_iterations)
     tr_center = train_X[best_idx].clone()  # best point in raw space (TR center)
 
+    def _write_checkpoint(iteration_done: int, elapsed_s: float) -> None:
+        """Save ``train_X``/``train_Y``/``history``/etc. plus the cumulative
+        BO-loop wall-clock time (``elapsed_time_s``) so the NEXT resume knows
+        exactly how much of ``time_limit_hours`` is already spent -- called
+        both after every completed iteration and (with the current, not yet
+        incremented, in-memory state) right before a graceful time-limit stop."""
+        if state_path is None:
+            return
+        ckpt_data = {
+            "train_X": train_X.cpu(),
+            "train_Y": train_Y.cpu(),
+            "is_protected": is_protected.cpu(),
+            "history": history,
+            "iteration": iteration_done,
+            "n_initial": n_initial,
+            "best_initial_loss": best_initial_loss,
+            "elapsed_time_s": elapsed_s,
+        }
+        # Preserve metadata (args, comet_key) from any existing state so
+        # resume comparison and Comet reconnection keep working.
+        if state_path.exists():
+            old = torch.load(state_path, map_location="cpu", weights_only=True)
+            ckpt_data["args"] = old.get("args", {})
+            ckpt_data["comet_key"] = old.get("comet_key")
+        torch.save(ckpt_data, state_path)
+
     run_start_time = time.perf_counter()
     model_fit_error = False
     for iteration in range(start_iteration, n_iterations + 1):
         t_iter = time.perf_counter()
 
         if time_limit_hours is not None and time_limit_hours > 0:
-            elapsed_hours = (t_iter - run_start_time) / 3600.0
+            cumulative_elapsed_s = prior_elapsed_s + (t_iter - run_start_time)
+            elapsed_hours = cumulative_elapsed_s / 3600.0
             if elapsed_hours >= time_limit_hours:
                 if verbose:
                     print(
                         f"[gebo] time limit reached ({elapsed_hours:.2f}h >= "
-                        f"{time_limit_hours:.2f}h) before iteration {iteration}; stopping."
+                        f"{time_limit_hours:.2f}h cumulative across resumes) before "
+                        f"iteration {iteration}; stopping and checkpointing the "
+                        "elapsed time so the next resume picks up from here."
                     )
+                # No new iteration completed -> checkpoint at the last completed
+                # count (iteration - 1, == start_iteration - 1 if none completed
+                # in this invocation) with the up-to-the-second cumulative time,
+                # rather than waiting for the (never-reached) end-of-iteration save.
+                _write_checkpoint(iteration - 1, cumulative_elapsed_s)
                 break
 
         # --- normalization -------------------------------------------------------
@@ -1519,23 +1565,7 @@ def run_gebo(
             )
 
         # --- save checkpoint after every iteration ---------------------------
-        if state_path is not None:
-            ckpt_data = {
-                "train_X": train_X.cpu(),
-                "train_Y": train_Y.cpu(),
-                "is_protected": is_protected.cpu(),
-                "history": history,
-                "iteration": iteration,
-                "n_initial": n_initial,
-                "best_initial_loss": best_initial_loss,
-            }
-            # Preserve metadata (args, comet_key) from any existing state so
-            # resume comparison and Comet reconnection keep working.
-            if state_path.exists():
-                old = torch.load(state_path, map_location="cpu", weights_only=True)
-                ckpt_data["args"] = old.get("args", {})
-                ckpt_data["comet_key"] = old.get("comet_key")
-            torch.save(ckpt_data, state_path)
+        _write_checkpoint(iteration, prior_elapsed_s + (time.perf_counter() - run_start_time))
 
     return {
         "train_X": train_X,       # (n_total, dim)
@@ -1546,6 +1576,9 @@ def run_gebo(
         "history": history,
         "model_fit_error": model_fit_error,
         "best_initial_loss": best_initial_loss,
+        # Cumulative BO-loop wall-clock time (seconds) across every resume of
+        # this run, including this call's own share.
+        "elapsed_time_s": prior_elapsed_s + (time.perf_counter() - run_start_time),
     }
 
 
@@ -1972,6 +2005,7 @@ def main() -> None:
         "history": result["history"],
         "model_fit_error": result.get("model_fit_error", False),
         "best_initial_loss": result.get("best_initial_loss"),
+        "elapsed_time_s": result.get("elapsed_time_s"),
         "args": vars(args),
     }
     summary_path = output_dir / "gebo_summary.json"
