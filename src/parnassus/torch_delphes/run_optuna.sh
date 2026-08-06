@@ -21,7 +21,7 @@ PYTHON=/global/cfs/cdirs/m3246/Runze/MCGen/envs/parnassus/bin/python
 # ===== preset: full CMS sim (uncomment this, comment the block above) =====
 ROOT_FILE=/global/cfs/cdirs/m3246/diff_delphes/train_1000.root
 N_EVENTS=100000
-OUTPUT_BASE=doc/fullsim_results
+OUTPUT_BASE=doc/figure_fullsim_results
 STUDY_NAME=fullsim_100k
 
 # ===== shared knobs =====
@@ -30,6 +30,10 @@ N_TRIALS=50          # trials ADDED per run (re-run to add 50 more; resumes the 
 LOSS=wasserstein_1d  # can be "soft_hist"
 PID_WEIGHTING=sqrt_fraction
 OPTUNA_CONFIG=src/parnassus/torch_delphes/param_configs/optuna_config.yaml
+# Warm start: trial 0 of a FRESH study starts from these known-good defaults
+# (values outside the optuna_config search ranges are clamped; lr / batch_size /
+# lr_scale are still sampled). Ignored when the study below is resumed.
+INIT_CONFIG=src/parnassus/torch_delphes/param_configs/cms_target_default.yaml
 HISTORY_PATH="$OUTPUT_BASE/all_optuna.json"
 # Persistent study: re-running this script RESUMES it and adds N_TRIALS more trials
 # (TPE keeps the earlier results; round_<n>/ dirs continue). To start over, delete
@@ -46,6 +50,7 @@ export OMP_NUM_THREADS=8        # CPU threads per rank (lower if the N ranks con
     -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$ROOT_FILE" \
     --optuna-config "$OPTUNA_CONFIG" \
+    --init-config "$INIT_CONFIG" \
     --n-events "$N_EVENTS" \
     --n-steps "$N_STEPS" \
     --n-trials "$N_TRIALS" \

@@ -356,7 +356,7 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
     )
 
 
-def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
+def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = 1e-6):
     """
     This task will pick the pflow objects from the input array, then it will
     pad the objects in each event to the max number of particles across events, and finally
@@ -424,7 +424,7 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
     }
 
 
-def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float = -1):
+def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float = 1e-6):
     """Ragged counterpart of :func:`load_pflow_targets`.
 
     The per-particle observables (``pt``, ``eta``, ``log_pt``, ``log_E``, ``pid``)
@@ -449,8 +449,11 @@ def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float
     ) = _build_pflow_event_data(arrays)
 
     # Per-event log(pt) / log(E) on the real particles only -- no padded slots to
-    # mask out. The np.maximum floors mirror the dense loader exactly (a no-op for
-    # the always-positive pflow pt/E, kept for bit-parity).
+    # mask out. The np.maximum floors guard log(0): a genuine pt == 0 pflow object
+    # would otherwise become -inf and poison the bin-free Wasserstein loss (its
+    # torch.quantile interpolation turns -inf into NaN). log_pt_floor mirrors the
+    # 1e-6 argument-floor used for log_E just below, on both this target loader and
+    # the pred-side load_pflow_targets_from_tensor.
     log_pt_list = [np.log(np.maximum(pt, log_pt_floor)) for pt in all_pt]
     log_E_list = [np.log(np.maximum(e, 1e-6)) for e in all_e]
 
@@ -476,7 +479,7 @@ def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float
     }
 
 
-def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -1):
+def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = 1e-6):
     """Build the per-observable dict from a padded ``EFlowObject`` tensor.
 
     The differentiable counterpart of :func:`load_pflow_targets`: it operates
@@ -542,9 +545,13 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
     # before taking the log so the backward (1/arg) stays finite on the pt == 0
     # slots; a plain torch.where(valid, log(pt), 0) would still backprop
     # log(0)'s -inf derivative through the masked branch and poison the
-    # gradient. (log_pt_floor is a no-op for pt >= 0, mirroring the reference;
-    # it is kept in the signature for parity.)
-    pt_safe = torch.where(valid, pt, torch.ones_like(pt))  # 1.0 on invalid slots
+    # gradient. log_pt_floor (1e-6) also floors a genuine valid pt == 0 object so
+    # its log_pt is log(1e-6) instead of -inf, matching the target loaders bit for
+    # bit (the bin-free Wasserstein loss turns a -inf target into NaN otherwise).
+    pt_safe = torch.clamp(
+        torch.where(valid, pt, torch.ones_like(pt)),  # 1.0 on invalid slots
+        min=log_pt_floor,
+    )
     log_pt = torch.where(valid, torch.log(pt_safe), torch.zeros_like(pt))
 
     # Same gradient-safety as log_pt: e was zeroed on invalid slots above, so a

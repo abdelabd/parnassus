@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import ot
 import torch
@@ -58,7 +58,7 @@ from .distributed import _is_dist
 # receive the Wasserstein energy-shape gradient), so the balance genuinely matters
 # there -- not only for the Adam-insensitive eff_logits. Overridable per-call via
 # the CLI --count-weight.
-COUNT_WEIGHT = 0.1
+COUNT_WEIGHT = 1.0
 
 # Weight of the CALO-resolution count terms (CALO_COUNT_TERM_KEYS: ecal_photon,
 # hcal_neutral_hadron) -- kept SEPARATE from COUNT_WEIGHT because these terms have a
@@ -93,6 +93,34 @@ EVENT_WEIGHT = 0.1
 # 0.05/event) and leaves dense charged-hadron / photon bins (rate >> 1) untouched.
 # Overridable per-call via the CLI --count-rate-floor.
 COUNT_RATE_FLOOR = 0.05
+
+
+class LossComponent(NamedTuple):
+    """One labeled contribution to the summed training loss, for the per-epoch
+    debug breakdown built when a loss is called with ``return_breakdown=True``.
+
+    ``weighted`` is exactly the scalar that was summed into the loss's ``terms``
+    (``weighted == raw * weight`` for every term), so ``sum(c.weighted for c in
+    components)`` equals the returned scalar loss. ``raw`` is the value BEFORE the
+    weight; ``weight`` is the multiplicative factor applied. All three are plain
+    Python floats (off the autograd graph) -- the breakdown is logging only.
+    """
+
+    category: str  # "pid_shape" | "event" | "count"
+    label: str  # e.g. "211:eta", "log_ht", "ChargedHadron"
+    raw: float  # value BEFORE the weight
+    weight: float  # multiplicative weight applied
+    weighted: float  # value AFTER the weight (== the term summed into ``terms``)
+
+
+# Short human labels for the count terms, derived from the card output key (the
+# first element of each COUNT_TERM_KEYS / CALO_COUNT_TERM_KEYS row) by dropping the
+# shared ``ExpectedCounts`` suffix: ChargedHadron / Electron / Muon / EcalPhoton /
+# HcalNeutralHadron. Used only to label the ``return_breakdown`` count entries.
+_COUNT_LABELS: dict[str, str] = {
+    out_key: out_key.removesuffix("ExpectedCounts")
+    for out_key, _pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS)
+}
 
 # =============================================================================
 # Differentiable histogram primitives (diagnostic only; copied from tuning.py)
@@ -320,8 +348,15 @@ def quantile_wasserstein_distance(
     """
     x = pred_values.reshape(-1)
     y = target_values.detach().reshape(-1).to(device=x.device, dtype=x.dtype)
+    # Drop non-finite samples before the quantile: torch.quantile linearly interpolates
+    # the order statistics, so a single -inf (e.g. log(0) from a pt == 0 object) makes an
+    # interpolated quantile evaluate -inf + frac*(finite - (-inf)) = -inf + inf = NaN and
+    # poisons the whole loss. The boolean gather keeps the surviving samples' gradient
+    # (mirrors the isfinite filter used for the pooled scale in _pooled_target_obs_std).
+    x = x[torch.isfinite(x)]
+    y = y[torch.isfinite(y)]
     if x.numel() == 0 or y.numel() == 0:  # nothing to match: graph-connected zero
-        return x.sum() * 0.0
+        return pred_values.sum() * 0.0
     if scale is not None:
         s = scale.to(device=x.device, dtype=x.dtype)
         x = x / s
@@ -379,6 +414,7 @@ def _count_terms(
     count_weight: float,
     calo_count_weight: float,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    out_components: list | None = None,
 ) -> list[torch.Tensor]:
     """Differentiable per-species expected-count terms, shared by both training
     losses: the gradient source for the tracking-efficiency eff_logits and the calo
@@ -428,10 +464,17 @@ def _count_terms(
 
     Returns a list of scalar terms (one per present species); each keeps the gradient
     to ``pred[pred_key]`` and the target side (counts, N and the floor) is detached.
+
+    When ``out_components`` is a list, each emitted term also appends a
+    ``(label, raw_tensor, weight)`` tuple to it -- the human label
+    (:data:`_COUNT_LABELS`), the UNWEIGHTED scalar, and the weight (``count_weight``
+    for tracking, ``calo_count_weight`` for calo) -- aligned 1:1 with the returned
+    ``count_terms`` (same order, same skips), for the per-epoch ``return_breakdown``
+    debug print. ``None`` (default) makes this a byte-identical no-op.
     """
     calo_pred_keys = {pred_key for _o, pred_key, _t in CALO_COUNT_TERM_KEYS}
     count_terms: list[torch.Tensor] = []
-    for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+    for out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred_counts = pred.get(pred_key)
         if pred_counts is None or tgt_key not in target:
             continue
@@ -449,12 +492,15 @@ def _count_terms(
         if pred_key in calo_pred_keys:
             # per-region-fair squared relative error (equal weight per region)
             rel = (pred_rate - tgt_rate) ** 2 / (tgt_rate + count_rate_floor) ** 2
-            count_terms.append(calo_count_weight * rel.mean())
+            raw, weight = rel.mean(), calo_count_weight
         else:
             # population-weighted squared relative error
             chi2 = (pred_rate - tgt_rate) ** 2 / (tgt_rate + count_rate_floor)
             total = tgt_rate.sum().clamp_min(count_rate_floor)  # detached -> invariant
-            count_terms.append(count_weight * (chi2.sum() / total))
+            raw, weight = chi2.sum() / total, count_weight
+        count_terms.append(weight * raw)
+        if out_components is not None:
+            out_components.append((_COUNT_LABELS[out_key], raw, weight))
     return count_terms
 
 
@@ -545,7 +591,8 @@ def per_event_wasserstein_loss(
     event_weight: float = EVENT_WEIGHT,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
-) -> torch.Tensor:
+    return_breakdown: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """Sliced Wasserstein-2 loss between predicted and target observables.
 
     One SW_2 term per particle type (``pid``) over the standardized 3-D
@@ -570,6 +617,13 @@ def per_event_wasserstein_loss(
     per-pid OBJECT terms by population fraction (see :func:`_pid_population_weights`);
     ``"equal"`` (default) is a no-op. ``pid_weight_floor`` sets a lower clamp on the
     per-pid weight. Neither touches the ``log(HT)`` or count terms.
+
+    When ``return_breakdown`` is True the function returns ``(loss, components)``,
+    where ``components`` is a list of :class:`LossComponent` (one per per-pid object
+    term, the ``log_ht`` event term, and each per-class count term) carrying the raw
+    (pre-weight) value, the weight applied, and the weighted (post-weight) value, so
+    ``sum(c.weighted for c in components)`` equals ``loss``. ``False`` (default)
+    returns the bare scalar exactly as before, with zero extra work.
     """
 
     pred_particles = torch.stack(
@@ -636,12 +690,12 @@ def per_event_wasserstein_loss(
         target_groups, present_pids, mode=pid_weighting, floor=pid_weight_floor
     )
     object_wasserstein_distance: dict[int, torch.Tensor] = {}
+    object_raw: dict[int, torch.Tensor] = {}  # pre-weight SW_2, for return_breakdown
     for pid in present_pids:
         x = pred_groups[pid]  # (n_pred, 3), differentiable
         y = target_groups[pid]  # (n_tgt, 3), reference (detached inside sliced_sw2)
-        object_wasserstein_distance[pid] = pid_weights[pid] * sliced_sw2(
-            x, y, object_scale
-        )
+        object_raw[pid] = sliced_sw2(x, y, object_scale)
+        object_wasserstein_distance[pid] = pid_weights[pid] * object_raw[pid]
 
     # Event-level term: SW_2 on the per-event log(HT) distribution, (n_events,) ->
     # (n_events, 1). log_ht is differentiable (built from pt). multiplicity is
@@ -666,12 +720,14 @@ def per_event_wasserstein_loss(
     # Differentiable per-species expected-count terms (tracking-efficiency eff_logits
     # and calo-resolution coefficients). See :func:`_count_terms` for the
     # population-weighted (tracking) vs per-region-fair (calo) normalization.
+    count_components: list | None = [] if return_breakdown else None
     count_terms = _count_terms(
         pred,
         target,
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        out_components=count_components,
     )
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
@@ -683,7 +739,8 @@ def per_event_wasserstein_loss(
         + count_terms
     )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
-        return pred_particles.sum() * 0.0
+        zero = pred_particles.sum() * 0.0
+        return (zero, []) if return_breakdown else zero
 
     # Opt-in per-component breakdown (set MCGEN_LOSS_DEBUG=1) -- the durable
     # replacement for the old `embed()`: confirms the count terms now sit on the
@@ -697,7 +754,39 @@ def per_event_wasserstein_loss(
             f"total={float(torch.stack(terms).sum()):.4f}",
             flush=True,
         )
-    return torch.stack(terms).sum()
+    total = torch.stack(terms).sum()
+    if not return_breakdown:
+        return total
+
+    # Labeled raw/weight/weighted breakdown, assembled in the same order the terms
+    # were summed. Raw and weighted scalars are stacked and converted in a SINGLE
+    # device->host sync each (not per term) to keep the per-batch overhead negligible.
+    cat_label: list[tuple[str, str]] = []
+    weights: list[float] = []
+    raw_tensors: list[torch.Tensor] = []
+    wtd_tensors: list[torch.Tensor] = []
+    for pid in present_pids:
+        cat_label.append(("pid_shape", str(pid)))
+        weights.append(float(pid_weights[pid]))
+        raw_tensors.append(object_raw[pid])
+        wtd_tensors.append(object_wasserstein_distance[pid])
+    for key, raw in event_wasserstein_distance.items():
+        cat_label.append(("event", key))
+        weights.append(float(event_weight))
+        raw_tensors.append(raw)
+        wtd_tensors.append(event_weight * raw)
+    for (label, raw, weight), wtd in zip(count_components or [], count_terms):
+        cat_label.append(("count", label))
+        weights.append(float(weight))
+        raw_tensors.append(raw)
+        wtd_tensors.append(wtd)
+    raw_vals = torch.stack(raw_tensors).detach().cpu().tolist()
+    wtd_vals = torch.stack(wtd_tensors).detach().cpu().tolist()
+    components = [
+        LossComponent(cat, lbl, rv, w, wv)
+        for (cat, lbl), w, rv, wv in zip(cat_label, weights, raw_vals, wtd_vals)
+    ]
+    return total, components
 
 
 def per_event_wasserstein_loss_distributed(
@@ -710,7 +799,8 @@ def per_event_wasserstein_loss_distributed(
     event_weight: float = EVENT_WEIGHT,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
-) -> torch.Tensor:
+    return_breakdown: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """DDP-aware wrapper: gathers pred/target across ranks before computing loss.
 
     The sliced Wasserstein distance is a *set-to-set* loss —
@@ -721,6 +811,10 @@ def per_event_wasserstein_loss_distributed(
     observables (via :func:`_all_gather_varlen`) so the loss is always computed
     on the union of all shards, making the DDP and single-process loss
     **identical** for the same underlying data.
+
+    ``return_breakdown`` is forwarded to the inner loss. Because the inner loss runs
+    on the gathered UNION, the returned ``(loss, components)`` breakdown is identical
+    on every rank, so the caller can print it from the main rank alone.
     """
     if not _is_dist():
         return per_event_wasserstein_loss(
@@ -732,6 +826,7 @@ def per_event_wasserstein_loss_distributed(
             event_weight=event_weight,
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
+            return_breakdown=return_breakdown,
         )
 
     pred_gathered: dict[str, torch.Tensor] = {}
@@ -793,6 +888,7 @@ def per_event_wasserstein_loss_distributed(
         event_weight=event_weight,
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
+        return_breakdown=return_breakdown,
     )
 
 
@@ -841,7 +937,8 @@ def _per_pid_obs_loss(
     debug_label: str,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
-) -> torch.Tensor:
+    return_breakdown: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """Shared body of the per-pid, per-observable shape losses
     (:func:`per_pid_soft_hist_loss` and :func:`per_pid_wasserstein_1d_loss`).
 
@@ -861,6 +958,12 @@ def _per_pid_obs_loss(
     scale each pid's shape terms by its population fraction; ``"equal"`` (default) is a
     no-op. Only the per-pid shape terms are weighted -- the ``log(HT)`` and count terms
     are untouched.
+
+    When ``return_breakdown`` is True the function returns ``(loss, components)`` -- a
+    list of :class:`LossComponent` (one per ``pid:obs`` shape term, the ``log_ht`` event
+    term, and each per-class count term) carrying the raw (pre-weight) value, the weight
+    applied, and the weighted (post-weight) value, with ``sum(c.weighted) == loss``.
+    ``False`` (default) returns the bare scalar exactly as before, with zero extra work.
     """
     obj_weights = (
         obj_weights if obj_weights is not None else DEFAULT_PID_HIST_OBS_WEIGHTS
@@ -887,37 +990,47 @@ def _per_pid_obs_loss(
         target_groups, present_pids, mode=pid_weighting, floor=pid_weight_floor
     )
 
-    # Per-pid, per-observable SHAPE terms.
+    # Per-pid, per-observable SHAPE terms. Keep the pre-weight value and the weight
+    # alongside each term for the optional return_breakdown.
     pid_obs_terms: dict[str, torch.Tensor] = {}
+    pid_obs_raw: dict[str, torch.Tensor] = {}
+    pid_obs_weight: dict[str, float] = {}
     for pid in present_pids:
         x = pred_groups[pid]  # (n_pred, 3), differentiable
         y = target_groups[pid]  # (n_tgt, 3), reference (detached inside term_fn)
         for obs in ("log_E", "log_pt", "eta"):
             col = _OBS_COL[obs]
-            pid_obs_terms[f"{pid}:{obs}"] = (
-                pid_weights[pid]
-                * float(obj_weights.get(obs, 1.0))
-                * term_fn(x[:, col], y[:, col], obs)
-            )
+            key = f"{pid}:{obs}"
+            raw = term_fn(x[:, col], y[:, col], obs)
+            weight = pid_weights[pid] * float(obj_weights.get(obs, 1.0))
+            pid_obs_raw[key] = raw
+            pid_obs_weight[key] = weight
+            pid_obs_terms[key] = weight * raw
 
     # Event-level term: the same shape distance on the per-event log(HT) distribution,
     # down-weighted by event_weight (mirrors the Wasserstein event term; multiplicity is
-    # intentionally excluded -- a hard pt != 0 count with no gradient).
+    # intentionally excluded -- a hard pt != 0 count with no gradient). Capture the RAW
+    # term directly (not event_term / event_weight, which would divide by zero when
+    # event_weight == 0).
     event_term: torch.Tensor | None = None
+    event_raw: torch.Tensor | None = None
     pv = pred["log_ht"].reshape(-1)
     tv = target["log_ht"].reshape(-1)
     if pv.numel() and tv.numel():
-        event_term = event_weight * term_fn(pv, tv, "log_ht")
+        event_raw = term_fn(pv, tv, "log_ht")
+        event_term = event_weight * event_raw
 
     # Same per-species expected-count terms as the Wasserstein loss: the gradient source
     # for eff_logits and the calo resolution coefficients (the shape terms are
     # count-blind, so these carry the absolute multiplicity / membership signal).
+    count_components: list | None = [] if return_breakdown else None
     count_terms = _count_terms(
         pred,
         target,
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        out_components=count_components,
     )
     terms = (
         list(pid_obs_terms.values())
@@ -925,7 +1038,8 @@ def _per_pid_obs_loss(
         + count_terms
     )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
-        return pred_particles.sum() * 0.0
+        zero = pred_particles.sum() * 0.0
+        return (zero, []) if return_breakdown else zero
     # Opt-in per-component breakdown (set MCGEN_LOSS_DEBUG=1), mirroring the Wasserstein
     # loss: confirms the count terms sit on the same O(1) scale as the per-pid shape terms.
     if os.environ.get("MCGEN_LOSS_DEBUG"):
@@ -937,7 +1051,39 @@ def _per_pid_obs_loss(
             f"total={float(torch.stack(terms).sum()):.4f}",
             flush=True,
         )
-    return torch.stack(terms).sum()
+    total = torch.stack(terms).sum()
+    if not return_breakdown:
+        return total
+
+    # Labeled raw/weight/weighted breakdown, in the same order the terms were summed.
+    # Raw and weighted scalars are stacked and converted in a SINGLE device->host sync
+    # each (not per term) to keep the per-batch overhead negligible.
+    cat_label: list[tuple[str, str]] = []
+    weights: list[float] = []
+    raw_tensors: list[torch.Tensor] = []
+    wtd_tensors: list[torch.Tensor] = []
+    for key in pid_obs_terms:  # pid-major, obs-minor insertion order
+        cat_label.append(("pid_shape", key))
+        weights.append(pid_obs_weight[key])
+        raw_tensors.append(pid_obs_raw[key])
+        wtd_tensors.append(pid_obs_terms[key])
+    if event_term is not None:
+        cat_label.append(("event", "log_ht"))
+        weights.append(float(event_weight))
+        raw_tensors.append(event_raw)
+        wtd_tensors.append(event_term)
+    for (label, raw, weight), wtd in zip(count_components or [], count_terms):
+        cat_label.append(("count", label))
+        weights.append(float(weight))
+        raw_tensors.append(raw)
+        wtd_tensors.append(wtd)
+    raw_vals = torch.stack(raw_tensors).detach().cpu().tolist()
+    wtd_vals = torch.stack(wtd_tensors).detach().cpu().tolist()
+    components = [
+        LossComponent(cat, lbl, rv, w, wv)
+        for (cat, lbl), w, rv, wv in zip(cat_label, weights, raw_vals, wtd_vals)
+    ]
+    return total, components
 
 
 def per_pid_soft_hist_loss(
@@ -953,7 +1099,8 @@ def per_pid_soft_hist_loss(
     obj_weights: dict[str, float] | None = None,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
-) -> torch.Tensor:
+    return_breakdown: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """Per-PID, per-observable soft-histogram MSE loss (feature parity with
     :func:`per_event_wasserstein_loss`).
 
@@ -1007,6 +1154,7 @@ def per_pid_soft_hist_loss(
         debug_label="pid_hist",
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
+        return_breakdown=return_breakdown,
     )
 
 
@@ -1025,6 +1173,8 @@ def _pooled_target_obs_std(
     ).detach()
     flat = target_particles.reshape(-1, target_particles.shape[-1])
     valid = flat[flat[..., -1] != 0]  # drop pid == 0 padding/ghosts
+    # remove any invalid values
+    valid = valid[torch.isfinite(valid).all(dim=-1)]
     scales: dict[str, torch.Tensor] = {}
     for obs in ("log_E", "log_pt", "eta"):
         col = _OBS_COL[obs]
@@ -1054,7 +1204,8 @@ def per_pid_wasserstein_1d_loss(
     p: int = 2,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
-) -> torch.Tensor:
+    return_breakdown: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """Per-PID, per-observable BIN-FREE 1D Wasserstein loss.
 
     Same scaffolding as :func:`per_pid_soft_hist_loss` (shared via
@@ -1109,6 +1260,7 @@ def per_pid_wasserstein_1d_loss(
         debug_label="pid_w1d",
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
+        return_breakdown=return_breakdown,
     )
 
 
@@ -1125,7 +1277,8 @@ def per_pid_wasserstein_1d_loss_distributed(
     p: int = 2,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
-) -> torch.Tensor:
+    return_breakdown: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """DDP-aware wrapper: gathers pred/target across ranks before computing the
     bin-free 1D Wasserstein loss.
 
@@ -1134,6 +1287,10 @@ def per_pid_wasserstein_1d_loss_distributed(
     This wrapper gathers every rank's predicted and target observables so the
     loss is computed on the union of all shards, making DDP and single-process
     results identical.
+
+    ``return_breakdown`` is forwarded to the inner loss; because the inner loss runs
+    on the gathered UNION, the returned ``(loss, components)`` breakdown is identical
+    on every rank (printable from the main rank alone).
     """
     if not _is_dist():
         return per_pid_wasserstein_1d_loss(
@@ -1148,6 +1305,7 @@ def per_pid_wasserstein_1d_loss_distributed(
             p=p,
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
+            return_breakdown=return_breakdown,
         )
 
     pred_gathered: dict[str, torch.Tensor] = {}
@@ -1202,6 +1360,7 @@ def per_pid_wasserstein_1d_loss_distributed(
         p=p,
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
+        return_breakdown=return_breakdown,
     )
 
 

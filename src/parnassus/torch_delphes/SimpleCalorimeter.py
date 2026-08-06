@@ -286,9 +286,20 @@ class SimpleCalorimeter(nn.Module):
         particle_tower_idx = particle_event_idx * n_towers_per_event + particle_local_tower_idx
         track_tower_idx = track_event_idx * n_towers_per_event + track_local_tower_idx
 
-        # For tracks, only those with fraction > 1e-9 contribute to fTrackEnergy
+        # For tracks, only those with fraction > cutoff contribute to fTrackEnergy;
+        # the rest bypass the tower entirely and reach EFlowTrack UNCHANGED.
         # C++: if(fTrackFractions[number] > 1.0E-9) { fTrackEnergy += energy; ... }
-        track_has_fraction = track_energy_fractions > 1e-9
+        # The C++ cutoff is 1e-9 because the CMS card writes EXACT 0.0 fractions
+        # (e.g. charged hadrons in the ECal). In learnable mode the fraction is
+        # sigmoid(logit), whose "zero" is sigmoid(_safe_logit(0.0)) = 1e-6 > 1e-9:
+        # with the C++ cutoff every charged hadron would enter the ECal rescale
+        # path against an always-zeroed tower, and the rescale
+        # wT/(wT+wC) = 1/(1+(res*E/sigma_noise)^2) folds the spectrum onto
+        # pT ~ sigma_noise/(2*res) -- sharp spikes at ~2-3 GeV plus a 4-9 GeV
+        # depletion that C++ Delphes does not have. The cutoff must therefore sit
+        # above the sigmoid floor (1e-6) and below any physical fraction (>= 0.02)
+        # so that "fraction ~ 0" means BYPASS, exactly like the C++ card.
+        track_has_fraction = track_energy_fractions > 1e-4
 
         # Find unique towers from valid particles AND valid tracks
         # NOTE: In C++, particles are filtered by fraction BEFORE creating tower hits,
@@ -389,18 +400,30 @@ class SimpleCalorimeter(nn.Module):
 
         # Compute final tower time: time = time_weighted_sum / weight_sum
         # Set to 0 if weight is too small (matching C++ check: fTowerTimeWeight < 1.0E-09)
-        # Safe-denominator pattern: pre-mask the bad branch so the gradient
-        # of the division does not produce NaN in learnable mode.
+        # Safe-denominator pattern: pre-mask the bad branch so the forward value
+        # of the division stays finite.
         tower_time_weight_safe = torch.where(
             tower_time_weight > 1e-9,
             tower_time_weight,
             torch.ones_like(tower_time_weight),
         )
+        # ``tower_time`` is an E^2-weighted readout time written ONLY to the
+        # ``ColumnMap.T`` output column. The tuning loss fits energy / pt / eta /
+        # counts, never time, so the upstream gradient on the time column is
+        # exactly zero -- yet the division's DivBackward still evaluates
+        # ``-num / den**2 * grad_out``; with ``grad_out == 0`` and a tiny (or
+        # overflowing) ``num / den**2`` that is ``0 * inf == NaN``. Because
+        # ``den = sum E**2`` depends on the learnable energy scales / hadron
+        # fractions, that NaN flows straight back into params like
+        # ``HadronFractions.chad_logit`` and poisons the whole fit (train loss
+        # NaN, while the anchor-free validation loss stays finite). The time
+        # readout is non-differentiable by construction, so detach it: the
+        # forward value is unchanged, but no spurious gradient is ever built.
         tower_time = torch.where(
             tower_time_weight > 1e-9,
             tower_time_weighted / tower_time_weight_safe,
             torch.zeros_like(tower_time_weighted),
-        )
+        ).detach()
 
         # Extract event_idx, eta_bin, and phi_bin from global tower index
         # Global tower index = event_idx * n_towers_per_event + eta_bin * max_phi_bins + phi_bin

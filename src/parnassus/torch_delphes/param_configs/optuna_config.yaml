@@ -16,7 +16,7 @@
 # loss. The best trial's history is copied to --history-path for plot_fit_results.
 #
 # RANGE GUARDS (param_config.to_raw raises if violated; ranges below respect them):
-#   - trainable logit (efficiency / fraction) init must be in the OPEN (0.1, 0.9)
+#   - trainable logit (efficiency / fraction) init must be in the OPEN (0.005, 0.995)
 #   - scale init must be in the OPEN (0.7, 1.3)            [1 + 0.3*tanh param.]
 #   - softplus coefficients (a/b/c/rate) must be > 0
 # The ranges are deliberately BROAD and truth-AGNOSTIC (set by parameter type, not
@@ -49,23 +49,25 @@ search:
     efficiency: {low: 0.1, high: 10.0, log: true}
 
 parameters:
-  # ===== Tracking efficiency (logit; init in (0.1, 0.9)) =====
-  ChargedHadronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}
-  ChargedHadronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.85}
-  ChargedHadronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.85}
-  ChargedHadronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.85}
-  ElectronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}
-  ElectronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.85}
-  ElectronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.85}
-  ElectronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.85}
-  ElectronTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.85}
-  ElectronTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.85}
-  MuonTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}
-  MuonTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.85}
-  MuonTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.85}
-  MuonTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.85}
-  MuonTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.85}
-  MuonTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.85}
+  # ===== Tracking efficiency (logit; init in (0.005, 0.995)) =====
+  # high=0.99: the believed-truth (cms_target_default.yaml) efficiencies reach
+  # 0.99 and must be inside the search range so the fit can regress to them.
+  ChargedHadronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.99}
+  ChargedHadronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.99}
+  ChargedHadronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.99}
+  ChargedHadronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.99}
+  ElectronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.99}
+  ElectronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.99}
+  ElectronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.99}
+  ElectronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.99}
+  ElectronTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.99}
+  ElectronTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.99}
+  MuonTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.99}
+  MuonTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.99}
+  MuonTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.99}
+  MuonTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.99}
+  MuonTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.99}
+  MuonTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.99}
   # Muon high-pt roll-off rate (softplus; small positive)
   MuonTrackingEfficiency.rate_raw[0]: {low: 1.0e-4, high: 1.0e-2, log: true}
   MuonTrackingEfficiency.rate_raw[1]: {low: 1.0e-4, high: 1.0e-2, log: true}
@@ -96,15 +98,27 @@ parameters:
   MuonMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
   MuonMomentumSmearing.resolution_module.a_raw[1]: {low: 5.0e-3, high: 0.5, log: true}
   MuonMomentumSmearing.resolution_module.a_raw[2]: {low: 5.0e-3, high: 0.5, log: true}
-  MuonMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  MuonMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  MuonMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-4, high: 1.0e-2, log: true}
+  # low=5e-5: the believed-truth muon b coefficients are 1e-4 - 3.5e-4.
+  MuonMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-5, high: 1.0e-2, log: true}
+  MuonMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-5, high: 1.0e-2, log: true}
+  MuonMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-5, high: 1.0e-2, log: true}
   MuonMomentumSmearing.resolution_module.scale_raw[0]: {low: 0.75, high: 1.28}
   MuonMomentumSmearing.resolution_module.scale_raw[1]: {low: 0.75, high: 1.28}
   MuonMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
 
-  # ===== Hadron fractions (logit; init in (0.1, 0.9)) =====
-  HadronFractions.chad_logit: {low: 0.15, high: 0.85}
+  # ===== Hadron fractions (logit; init in (0.005, 0.995)) =====
+  # chad PINNED at 0.0 (all charged-hadron energy to HCal, the CMS-card truth).
+  # SimpleCalorimeter bypasses the tower/rescale path for fractions < 1e-4
+  # (C++ parity: the card's 0.0 routes chad tracks straight to EFlowTrack), and
+  # the trainable-logit init guard forbids a search range reaching that low.
+  # The old {low: 0.02, high: 0.85} clamped the 1e-6 warm start up to 0.02,
+  # which pushed every charged hadron through the ECal rescale against an
+  # always-zeroed tower and imprinted sharp pT spikes at ~2-3 GeV (fold of
+  # wT/(wT+wC)) plus a 4-9 GeV depletion that C++ Delphes does not produce.
+  # To make the ECal fraction searchable again, use a range inside
+  # (0.005, 0.995) -- every sampled value then legitimately activates the
+  # ECal path -- but round 0 / the believed truth needs the pin below.
+  HadronFractions.chad_logit: {value: 0.0}
   HadronFractions.k0s_logit: {low: 0.15, high: 0.85}
   HadronFractions.lambda_logit: {low: 0.15, high: 0.85}
 

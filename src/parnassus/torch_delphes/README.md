@@ -314,7 +314,7 @@ parameters:
 - Each `parameters:` entry is either `{low, high, log}` (**sampled init**, trainable) or `{value}`
   (**pinned**, frozen). The shipped config makes all 66 scalars tunable.
 - Ranges must respect the same guards as the Step-2 transforms (see
-  [Param-config reference](#param-config-reference)): trainable logit init in `(0.1, 0.9)`, scale in
+  [Param-config reference](#param-config-reference)): trainable logit init in `(0.005, 0.995)`, scale in
   `(0.7, 1.3)`, softplus `> 0`. The loader validates **both endpoints** of every range up front and
   fails fast with a clear message (a materialized config with an out-of-window init would otherwise
   break Step 3).
@@ -327,6 +327,7 @@ parameters:
 |---|---|---|---|
 | `--root-file` | path | **required** | Full-sim pseudodata ROOT file. Loaded **once** and reused across all trials. |
 | `--optuna-config` | path | `param_configs/optuna_config.yaml` | The search-space YAML above. |
+| `--init-config` | path | `None` (no warm start) | Param-config YAML (e.g. `param_configs/cms_target_default.yaml`) whose values **seed one warm-start trial** via `study.enqueue_trial`. Params missing from it — and `lr`/`batch_size`/`lr_scale` — are sampled as usual; out-of-range values are clamped into the search range. On resume the seed is not re-enqueued while a waiting/evaluated seed trial exists (a crashed seed is retried). |
 | `--n-trials` | int | `search.n_trials` (50) | Number of trials (overrides the YAML). |
 | `--output-base` | path | `doc/fit_results` | Base dir; each trial writes `<base>/round_<n>/…`. |
 | `--history-path` | path | `doc/fit_results/all_v2.json` | Where the **best** trial's history.json is copied (the file Step 3 reads). |
@@ -369,6 +370,7 @@ active **pseudodata** block and a commented-out **full CMS sim** block (comment/
 | `N_STEPS` | `100` | Adam steps per trial. |
 | `N_TRIALS` | `50` | Trials **added per run** (re-run to add more; sequential, each uses all N GPUs). |
 | `LOSS` / `PID_WEIGHTING` | `wasserstein_1d` / `sqrt_fraction` | Forwarded to each fit. |
+| `INIT_CONFIG` | `param_configs/cms_target_default.yaml` | Warm start: seeds one trial with these known-good defaults (`--init-config` above). |
 | `HISTORY_PATH` | `<OUTPUT_BASE>/all_optuna.json` | Best-trial history copy (feed to Step 3). |
 | `STORAGE` | `sqlite:///<OUTPUT_BASE>/study.db` | Persistent study DB — re-running resumes it (see below). |
 | `PYTHON` | the repo's uv-env python | Interpreter (runs `torch.distributed.run`). |

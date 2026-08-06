@@ -322,17 +322,17 @@ class MomentumSmearing(nn.Module):
 
         # Central barrel
         mask1 = (abs_eta_outer <= 0.5) & (pt > 0.1)
-        res1 = torch.sqrt(0.01**2 + pt**2 * (1.0e-3) ** 2)
+        res1 = torch.sqrt(0.01**2 + pt**2 * (1.0e-4) ** 2)
         res = torch.where(mask1, res1, res)
 
         # Intermediate
         mask2 = (abs_eta_outer > 0.5) & (abs_eta_outer <= 1.5) & (pt > 0.1)
-        res2 = torch.sqrt(0.02**2 + pt**2 * (1.3e-3) ** 2)
+        res2 = torch.sqrt(0.015**2 + pt**2 * (1.5e-4) ** 2)
         res = torch.where(mask2, res2, res)
 
         # Forward
         mask3 = (abs_eta_outer > 1.5) & (abs_eta_outer <= 2.5) & (pt > 0.1)
-        res3 = torch.sqrt(0.10**2 + pt**2 * (2.0e-3) ** 2)
+        res3 = torch.sqrt(0.025**2 + pt**2 * (3.5e-4) ** 2)
         res = torch.where(mask3, res3, res)
 
         return res
