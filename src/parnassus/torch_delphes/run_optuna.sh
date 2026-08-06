@@ -10,7 +10,10 @@
 set -euo pipefail
 
 N_GPUS="${1:-4}"
-PYTHON=/global/cfs/cdirs/m3246/Runze/MCGen/envs/parnassus/bin/python
+# Use the ACTIVATED environment by default (override with PYTHON=... ./run_optuna.sh).
+# A hardcoded path here silently ignores `source parnassus_env/bin/activate` and dies
+# with "No module named 'parnassus'" if that env lacks an editable install.
+PYTHON="${PYTHON:-$(command -v python)}"
 
 # # ===== preset: pseudodata (active) =====
 # ROOT_FILE=/global/cfs/cdirs/m3246/diff_delphes/cms_pseudodata_100k.root
