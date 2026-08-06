@@ -22,14 +22,14 @@ PYTHON="${PYTHON:-$(command -v python)}"
 # STUDY_NAME=pseudo_100k
 
 # ===== preset: full CMS sim (uncomment this, comment the block above) =====
-ROOT_FILE=/global/cfs/cdirs/m3246/diff_delphes/train_1000.root
-N_EVENTS=100000
-OUTPUT_BASE=doc/figure_fullsim_results
-STUDY_NAME=fullsim_100k
+ROOT_FILE=${ROOT_FILE:-/global/cfs/cdirs/m3246/diff_delphes/train_1000.root}
+N_EVENTS=${N_EVENTS:-100000}
+OUTPUT_BASE=${OUTPUT_BASE:-doc/figure_fullsim_results}
+STUDY_NAME=${STUDY_NAME:-fullsim_100k}
 
 # ===== shared knobs =====
-N_STEPS=100
-N_TRIALS=50          # trials ADDED per run (re-run to add 50 more; resumes the study below)
+N_STEPS=${N_STEPS:-100}
+N_TRIALS=${N_TRIALS:-50}          # trials ADDED per run (re-run to add 50 more; resumes the study below)
 LOSS=wasserstein_1d  # can be "soft_hist"
 PID_WEIGHTING=sqrt_fraction
 OPTUNA_CONFIG=src/parnassus/torch_delphes/param_configs/optuna_config.yaml
@@ -37,6 +37,10 @@ OPTUNA_CONFIG=src/parnassus/torch_delphes/param_configs/optuna_config.yaml
 # (values outside the optuna_config search ranges are clamped; lr / batch_size /
 # lr_scale are still sampled). Ignored when the study below is resumed.
 INIT_CONFIG=src/parnassus/torch_delphes/param_configs/cms_target_default.yaml
+# Comet: one experiment PER TRIAL, named "<COMET_NAME>_<trial number>"
+# (optuna_adam_0, optuna_adam_1, ...). Needs COMET_API_KEY exported (workspace
+# from COMET_WORKSPACE); without it the search still runs, just unlogged.
+COMET_NAME="${COMET_NAME:-optuna_adam}"
 HISTORY_PATH="$OUTPUT_BASE/all_optuna.json"
 # Persistent study: re-running this script RESUMES it and adds N_TRIALS more trials
 # (TPE keeps the earlier results; round_<n>/ dirs continue). To start over, delete
@@ -61,5 +65,6 @@ export OMP_NUM_THREADS=8        # CPU threads per rank (lower if the N ranks con
     --pid-weighting "$PID_WEIGHTING" \
     --output-base "$OUTPUT_BASE" \
     --history-path "$HISTORY_PATH" \
+    --comet-name "$COMET_NAME" \
     --storage "$STORAGE" \
     --study-name "$STUDY_NAME"

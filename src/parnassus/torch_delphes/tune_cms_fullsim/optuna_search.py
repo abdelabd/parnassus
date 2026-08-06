@@ -110,6 +110,7 @@ from torch.utils.data.distributed import DistributedSampler
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
+from .comet_utils import end_comet_experiment, init_comet_experiment
 from .dataloader import DelphesDataLoader
 from .distributed import _cleanup_distributed, _init_distributed
 from .loss import (
@@ -491,6 +492,23 @@ def main() -> None:
         ),
     )
     parser.add_argument("--study-name", type=str, default="tune_cms_fullsim")
+    parser.add_argument(
+        "--comet-name",
+        type=str,
+        default="optuna_adam",
+        help=(
+            "Base name for the per-trial Comet experiments; each trial logs as "
+            "'<comet-name>_<trial number>' (default 'optuna_adam' -> "
+            "'optuna_adam_0', 'optuna_adam_1', ...). One experiment per trial, so "
+            "trials stay separable in the Comet UI. Requires COMET_API_KEY "
+            "(workspace from COMET_WORKSPACE); without it the search runs unlogged."
+        ),
+    )
+    parser.add_argument(
+        "--comet-disabled",
+        action="store_true",
+        help="Disable Comet logging even when COMET_API_KEY is set.",
+    )
     # Fit knobs passed straight through (defaults match the tuning CLI).
     parser.add_argument("--loss", type=str, default="wasserstein_1d", choices=list(LOSS_CHOICES))
     parser.add_argument(
@@ -585,6 +603,7 @@ def main() -> None:
         batch_size: int,
         round_dir: Path,
         trial: optuna.Trial | None,
+        comet_exp: object | None = None,
     ) -> tuple[dict, bool]:
         """Fit one trial's config; run by EVERY rank in lockstep (DDP if world_size>1).
 
@@ -592,6 +611,10 @@ def main() -> None:
         discard it. Every cross-rank collective (gradient all-reduce, the
         intermediate-plot all-gather, and the per-epoch prune broadcast below) is
         matched across ranks because all ranks run the same epochs.
+
+        ``comet_exp`` is the trial's Comet experiment (rank 0 only; the mirror-loop
+        ranks pass ``None``), forwarded to the fit so each epoch of the trial is
+        logged under that trial's own experiment.
         """
         _reclaim_gpu(device)
         torch.manual_seed(args.seed)  # identical init + smearing on every rank
@@ -669,6 +692,7 @@ def main() -> None:
             pid_weighting=args.pid_weighting,
             pid_weight_floor=args.pid_weight_floor,
             epoch_callback=epoch_callback,
+            comet_exp=comet_exp,
         )
         return history, state["pruned"]
 
@@ -707,10 +731,45 @@ def main() -> None:
                   "batch_size": batch_size, "round_dir": str(round_dir)}],
                 src=0,
             )
-        history, pruned = _run_fit_collective(flat_cfg, lr, batch_size, round_dir, trial)
+        # One Comet experiment PER TRIAL, named "<--comet-name>_<trial number>"
+        # (default "optuna_adam_0", "optuna_adam_1", ...). Created here rather than
+        # once for the study so each trial's loss curves stay separable, matching
+        # how the GEBO scans name their per-round experiments.
+        comet_exp = init_comet_experiment(
+            name=f"{args.comet_name}_{trial.number}",
+            params={
+                **trial.params,  # the sampled point: lr, batch_size, lr_scale[*], inits
+                "trial_number": trial.number,
+                "study_name": args.study_name,
+                "n_steps": args.n_steps,
+                "n_events": args.n_events,
+                "loss": args.loss,
+                "pid_weighting": args.pid_weighting,
+                "world_size": world_size,
+                "round_dir": str(round_dir),
+            },
+            disabled=args.comet_disabled,
+            rank=rank,
+            log_prefix="[optuna]",
+            quiet=True,  # one URL line per trial would drown the search log
+        )
 
-        val_losses = [v for v in history.get("val_loss", []) if v is not None]
-        best_val = min(val_losses) if val_losses else float("inf")
+        try:
+            history, pruned = _run_fit_collective(
+                flat_cfg, lr, batch_size, round_dir, trial, comet_exp=comet_exp
+            )
+
+            val_losses = [v for v in history.get("val_loss", []) if v is not None]
+            best_val = min(val_losses) if val_losses else float("inf")
+            if comet_exp is not None:
+                comet_exp.log_metric("best_val_loss", best_val)
+                comet_exp.log_other("pruned", pruned)
+                comet_exp.log_other("epochs_run", len(history.get("step", [])))
+        finally:
+            # Close the trial's experiment on every exit path -- including the
+            # TrialPruned raised below and any mid-fit exception -- so a long study
+            # never accumulates dangling live experiments.
+            end_comet_experiment(comet_exp)
         metadata = {
             "n_events": args.n_events,
             "n_steps": args.n_steps,

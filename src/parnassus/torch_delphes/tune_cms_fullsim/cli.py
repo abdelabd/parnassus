@@ -65,6 +65,7 @@ from torch.utils.data.distributed import DistributedSampler
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
+from .comet_utils import end_comet_experiment, init_comet_experiment
 from .config import _DEFAULT_LR
 
 from .dataloader import DelphesDataLoader
@@ -294,6 +295,21 @@ def main() -> None:
             "collapses the lr before convergence. Default 4."
         ),
     )
+    parser.add_argument(
+        "--comet-name",
+        type=str,
+        default=None,
+        help=(
+            "Comet experiment name. Default: 'adam_<param-config stem>'. Logging "
+            "additionally requires COMET_API_KEY in the environment (workspace "
+            "from COMET_WORKSPACE); without it the run proceeds unlogged."
+        ),
+    )
+    parser.add_argument(
+        "--comet-disabled",
+        action="store_true",
+        help="Disable Comet logging even when COMET_API_KEY is set.",
+    )
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -412,6 +428,23 @@ def main() -> None:
         f"tensor(s) from {args.param_config} for {args.n_steps} Adam steps..."
     )
 
+    # Comet (rank 0 only; None when comet_ml is missing, unkeyed, or disabled).
+    # The name defaults to the param config being fitted, which is the single
+    # most useful discriminator between otherwise-identical Adam runs.
+    comet_exp = init_comet_experiment(
+        name=args.comet_name or f"adam_{Path(args.param_config).stem}",
+        params={
+            **vars(args),
+            "world_size": world_size,
+            "batch_size": batch_size,
+            "n_trainable_scalars": n_trainable_scalars,
+            "param_group_lrs": sorted({g["lr"] for g in param_groups}),
+        },
+        disabled=args.comet_disabled,
+        rank=rank,
+        log_prefix="[adam]",
+    )
+
     history = fit_card_to_fullsim(
         trainee,
         train_dataloader,
@@ -438,7 +471,17 @@ def main() -> None:
         loss_name=args.loss,
         pid_weighting=args.pid_weighting,
         pid_weight_floor=args.pid_weight_floor,
+        comet_exp=comet_exp,
     )
+
+    # Summary metrics on the experiment, then close it. Done before the history
+    # write so a Comet hiccup cannot cost us the fit results on disk.
+    if comet_exp is not None:
+        _val = [v for v in history.get("val_loss", []) if v is not None]
+        if _val:
+            comet_exp.log_metric("best_val_loss", min(_val))
+        comet_exp.log_other("epochs_run", len(history["step"]))
+    end_comet_experiment(comet_exp)
 
     if args.history_path is not None and _is_main(rank):
         # Metadata: the run-level scalars. --lr is the global magnitude; each

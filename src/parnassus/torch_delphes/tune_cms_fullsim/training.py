@@ -70,6 +70,7 @@ def fit_card_to_fullsim(
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
     epoch_callback: Callable[[int, float], bool] | None = None,
+    comet_exp: "object | None" = None,
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -161,6 +162,17 @@ def fit_card_to_fullsim(
         ``history`` accumulated so far is still returned intact. Used by the Optuna
         search (:mod:`.optuna_search`) to report the val-loss trajectory to a trial
         and stop pruned trials early; ``None`` (default) is a no-op.
+    comet_exp : comet_ml.Experiment | None
+        Optional live Comet experiment (build one with
+        :func:`.comet_utils.init_comet_experiment`). When set, each epoch logs the
+        train/val loss, the per-group effective learning rates, and the full
+        labeled loss breakdown (``loss/<category>/<label>/{raw,weighted}``) at
+        ``step=<epoch>``; ``snapshot_parameters=True`` additionally logs every
+        card parameter's physical value as ``param/<name>``. The caller owns the
+        experiment's lifetime (call :func:`.comet_utils.end_comet_experiment`
+        when the fit returns). Only the main rank logs, so passing the same
+        experiment on every rank is safe -- but callers only build it on rank 0.
+        ``None`` (default) disables logging entirely.
 
     Returns
     -------
@@ -334,6 +346,65 @@ def fit_card_to_fullsim(
             for i, vv in enumerate(vflat):
                 snap[f"{name}[{i}]" if val.ndim else name] = float(vv)
         return snap
+
+    def _comet_metric_name(*parts: str) -> str:
+        """Join ``parts`` into a Comet-safe ``/``-separated metric name.
+
+        Component labels carry characters that are awkward in a metric key
+        (``211:eta``, ``ECal.resolution_func.barrel_a``, ``eff_logits[0]``); map
+        anything outside ``[A-Za-z0-9_.-/]`` to ``_`` so the Comet UI groups them
+        cleanly instead of silently mangling or rejecting the name.
+        """
+        safe = [
+            "".join(ch if (ch.isalnum() or ch in "_.-") else "_" for ch in str(p))
+            for p in parts
+        ]
+        return "/".join(s for s in safe if s)
+
+    def _log_comet_epoch(
+        step: int,
+        train_loss: float,
+        val_loss: float,
+        n_batches: int,
+        snapshot: dict[str, float] | None,
+    ) -> None:
+        """Log one epoch's metrics to Comet (no-op when logging is off).
+
+        Wrapped in a broad try/except on purpose: Comet is telemetry, and a
+        transient network/API failure must never abort a fit that is otherwise
+        progressing (these runs are hours long and hold multi-node allocations).
+        """
+        if comet_exp is None or not _is_main(rank):
+            return
+        try:
+            metrics: dict[str, float] = {
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+            }
+            # Effective per-group lr actually used this epoch (logged before the
+            # ReduceLROnPlateau step below, which applies to the NEXT epoch).
+            for i, g in enumerate(opt.param_groups):
+                metrics[_comet_metric_name("lr", g.get("name", f"group{i}"))] = float(
+                    g["lr"]
+                )
+            # Labeled loss breakdown, means over the epoch's train batches -- the
+            # same numbers the periodic stdout table prints, but every epoch.
+            for key, wtd in bd_wtd.items():
+                cat, label = key
+                metrics[_comet_metric_name("loss", cat, label, "weighted")] = (
+                    wtd / n_batches
+                )
+                metrics[_comet_metric_name("loss", cat, label, "raw")] = (
+                    bd_raw[key] / n_batches
+                )
+            # Physical (post-transform) parameter values, so parameter drift is
+            # visible in Comet without post-processing the history JSON.
+            if snapshot:
+                for pname, pval in snapshot.items():
+                    metrics[_comet_metric_name("param", pname)] = pval
+            comet_exp.log_metrics(metrics, step=step)
+        except Exception as e:  # noqa: BLE001 - telemetry must not break the fit
+            tqdm.write(f"  [comet] warning: metric logging failed at step {step}: {e}")
 
     pbar = tqdm(
         range(n_steps),
@@ -530,6 +601,16 @@ def fit_card_to_fullsim(
         # (all appended before any early-stopping break, so index i refers to
         # the same epoch across every list).
         history["val_loss"].append(print_val_loss)
+
+        # Comet: one point per epoch (loss curves, per-group lr, labeled loss
+        # breakdown, and -- when snapshotting -- every parameter's physical value).
+        _log_comet_epoch(
+            step,
+            print_loss,
+            print_val_loss,
+            len(train_dataloader),
+            history["parameters"][-1] if snapshot_parameters else None,
+        )
 
         # lr scheduler step (only when LR decay is enabled)
         if lr_scheduler is not None:
