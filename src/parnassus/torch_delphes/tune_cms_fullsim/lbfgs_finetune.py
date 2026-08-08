@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -43,7 +42,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
-import yaml
 from scipy.optimize import minimize
 
 from parnassus.torch_delphes import param_config as pc
@@ -54,46 +52,17 @@ from .data import (
     load_pflow_targets_ragged,
     load_truth_events_ragged,
 )
+from .finetune_utils import (
+    load_archived_config,
+    make_setting_resolver,
+    trainable_bases,
+)
 from .gebo_plotting import build_card_from_raw_params
 from .gebo_search import (
     ParamVectorizer,
     load_bounds_from_optuna_config,
     make_objective,
 )
-
-
-def _trainable_bases(optuna_config: Path) -> set[str]:
-    """Base names GEBO optimizes (any param with a {low, high} spec)."""
-    with open(optuna_config) as f:
-        raw = yaml.safe_load(f)
-    specs = raw.get("parameters", {}) if isinstance(raw, dict) else {}
-    return {k.split("[", 1)[0] for k, spec in specs.items() if "value" not in spec}
-
-
-def _load_archived_config(run_dir: Path):
-    """Load the most recent archived run config (``configs/config_<N>.yaml``).
-
-    GEBO snapshots the run config into ``<output_dir>/configs/``; recovering it
-    lets this script rebuild the exact objective even from an INTERMEDIATE
-    ``gebo_summary.json`` (which carries no ``args``). Returns ``None`` if no
-    snapshot is found or it fails to parse.
-    """
-    configs_dir = run_dir / "configs"
-    if not configs_dir.is_dir():
-        return None
-
-    def _idx(p: Path) -> int:
-        m = re.fullmatch(r"config_(\d+)", p.stem)
-        return int(m.group(1)) if m else -1
-
-    snaps = [p for p in configs_dir.glob("config_*.yaml") if _idx(p) >= 0]
-    if not snaps:
-        return None
-    from .gebo_search import load_gebo_config
-    try:
-        return load_gebo_config(max(snaps, key=_idx))
-    except SystemExit:
-        return None
 
 
 def main() -> None:
@@ -161,20 +130,12 @@ def main() -> None:
     run_dir = args.gebo_summary.parent
     if run_dir.name == "intermediate":
         run_dir = run_dir.parent
-    cfg_ns = _load_archived_config(run_dir)
+    cfg_ns = load_archived_config(run_dir)
     if cfg_ns is not None:
         print(f"[lbfgs] recovered run settings from {run_dir}/configs/")
 
     # Resolve each setting: CLI override -> summary 'args' -> archived config.
-    def _cfg(key, default=None):
-        sv = run_args.get(key)
-        if sv is not None:
-            return sv
-        if cfg_ns is not None:
-            cv = getattr(cfg_ns, key, None)
-            if cv is not None:
-                return cv
-        return default
+    _cfg = make_setting_resolver(run_args, cfg_ns)
 
     root_file = args.root_file or _cfg("root_file")
     if root_file is None:
@@ -209,7 +170,7 @@ def main() -> None:
     print(f"[lbfgs] loaded {len(truth_ragged)} events in {time.perf_counter() - t0:.1f}s")
 
     # --- vectorizer + bounds (same trainable set the run used) ---------------
-    trainable = _trainable_bases(optuna_config)
+    trainable = trainable_bases(optuna_config)
     probe = CMSEnergyFlowDefault(debug=False, learnable=True)
     vectorizer = ParamVectorizer(probe, trainable_keys=trainable)
     param_names = vectorizer.param_names()

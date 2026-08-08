@@ -32,6 +32,8 @@ set -euo pipefail
 
 N_TRIALS="${N_TRIALS:-40}"
 TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-23}"   # leave ~1h margin under the 24h -t above
+FINETUNE=lbfgs   # set explicitly so a FINETUNE=adam in the submitting shell
+                 # cannot silently redirect this scan (see optuna_gebo_adam.sh)
 
 cd /pscratch/sd/a/aelabd/parnassus
 source parnassus_env/bin/activate
@@ -40,7 +42,7 @@ cd src
 # export COMET_API_KEY="..."       # uncomment + fill in (or make sure it's already exported)
 # export COMET_WORKSPACE="..."
 
-export N_TRIALS TIME_BUDGET_HOURS  # read by gebo_scans_run_on_node.sh
+export N_TRIALS TIME_BUDGET_HOURS FINETUNE  # read by gebo_scans_run_on_node.sh
 
 mkdir -p logs
 

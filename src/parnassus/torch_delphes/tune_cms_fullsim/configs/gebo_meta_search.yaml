@@ -24,6 +24,15 @@
 #                   first, whichever comes sooner.
 #   trust_region:  one sub-block per --trust-region choice. "none"
 #                   (NoTrustRegion) takes no constructor args, so it is empty.
+#   adam:          sampled ONLY when --finetune=adam (the Optuna+GEBO+Adam
+#                   pipeline, see optuna_gebo_adam.sh). These are the Adam
+#                   fine-tuning knobs -- the same ones optuna_config.yaml's
+#                   `search:` block scans for the Optuna+Adam pipeline, with the
+#                   same ranges: GEBO now supplies the 66 parameter INITS that
+#                   Optuna used to sample, and the outer Optuna keeps tuning the
+#                   optimizer settings around them. Ignored entirely under
+#                   --finetune=lbfgs (L-BFGS-B has no learning rate), so both
+#                   fine-tuners scan the identical GEBO space above.
 
 common:
   n_events:         {low: 1_000, high: 5_000, log: true, type: int}
@@ -59,3 +68,17 @@ trust_region:
     radius_min_frac: {low: 0.001, high: 1.0, log: true}
     patience:        {low: 5, high: 50, log: true, type: int}
   none: {}
+
+# Adam fine-tuning stage (--finetune=adam only). Mirrors the `search:` block of
+# param_configs/optuna_config.yaml, so an Optuna+GEBO+Adam trial tunes Adam over
+# exactly the ranges an Optuna+Adam trial does.
+adam:
+  lr:         {low: 1.0e-4, high: 1.0e-2, log: true}   # global Adam lr magnitude
+  batch_size: {choices: [512, 1024, 2048, 4096]}       # train/val batch size
+  # Per-GROUP lr_scale (a parameter's effective Adam lr = global lr * its group
+  # lr_scale). Groups: resolution (a/b/c softplus coeffs), scale (tanh
+  # momentum/calo scales), efficiency (sigmoid efficiencies/fractions + rate_raw).
+  lr_scale:
+    resolution: {low: 0.1, high: 10.0, log: true}
+    scale:      {low: 0.1, high: 10.0, log: true}
+    efficiency: {low: 0.1, high: 10.0, log: true}

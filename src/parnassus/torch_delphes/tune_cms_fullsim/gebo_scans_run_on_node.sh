@@ -8,12 +8,17 @@
 #     bash gebo_scans_run_on_node.sh <loss1> <tr1> <grad1> <loss2> <tr2> <grad2> ... (4 triplets, 12 args)
 #
 # N_TRIALS / TIME_BUDGET_HOURS are read from the environment (srun propagates
-# the caller's environment by default). GEBO_TIME_LIMIT_HOURS / LBFGS_N_EVENTS
-# are likewise read from the environment but default here (so this script
-# works whether or not its caller set them -- gebo_scans_submit.sh does not
-# currently export them). GEBO's own iteration budget is no longer a fixed
-# knob here -- it is sampled PER TRIAL as n_iterations_gebo in
+# the caller's environment by default). GEBO_TIME_LIMIT_HOURS / FINETUNE_N_EVENTS
+# / FINETUNE / SCAN_ROOT are likewise read from the environment but default here
+# (so this script works whether or not its caller set them -- gebo_scans_submit.sh
+# does not currently export them all). GEBO's own iteration budget is no longer a
+# fixed knob here -- it is sampled PER TRIAL as n_iterations_gebo in
 # configs/gebo_meta_search.yaml, capped by GEBO_TIME_LIMIT_HOURS.
+#
+# FINETUNE selects which optimizer polishes GEBO's best point: "lbfgs" (bounded
+# L-BFGS-B on GEBO's own objective) or "adam" (the real tune_cms_fullsim
+# training loop, warm-started from that point -- see optuna_gebo_adam.sh). The
+# two produce incomparable trial scores, so SCAN_ROOT keeps their studies apart.
 #
 # Why this exists: this cluster's interactive/urgent GPU QOS allows only ONE
 # srun job step per node at a time within an allocation -- verified
@@ -30,21 +35,35 @@
 set -euo pipefail
 
 GEBO_TIME_LIMIT_HOURS="${GEBO_TIME_LIMIT_HOURS:-2.0}"
-LBFGS_N_EVENTS="${LBFGS_N_EVENTS:-20000}"
+FINETUNE="${FINETUNE:-lbfgs}"
+# Accept the old LBFGS_N_EVENTS spelling so existing launchers keep working.
+FINETUNE_N_EVENTS="${FINETUNE_N_EVENTS:-${LBFGS_N_EVENTS:-20000}}"
+FINETUNE_N_STEPS="${FINETUNE_N_STEPS:-200}"
+SCAN_ROOT="${SCAN_ROOT:-}"   # empty -> gebo_optuna_search.py's per-finetune default
+# Per-pipeline log dir, so an Adam scan does not overwrite the L-BFGS scan's
+# logs/<scan_name>.log (the two share scan names by design).
+LOG_DIR="${LOG_DIR:-logs}"
 
-mkdir -p logs
+mkdir -p "${LOG_DIR}"
 
 gpu=0
 while [ "$#" -gt 0 ]; do
   loss="$1"; tr="$2"; grad="$3"; shift 3
   scan_name="${loss}__${tr}__${grad}"
-  logfile="logs/${scan_name}.log"
-  echo "[launch] $(hostname): ${scan_name} -> CUDA_VISIBLE_DEVICES=${gpu} -> ${logfile}"
+  logfile="${LOG_DIR}/${scan_name}.log"
+  echo "[launch] $(hostname): ${scan_name} (finetune=${FINETUNE}) -> CUDA_VISIBLE_DEVICES=${gpu} -> ${logfile}"
+  output_base_args=()
+  if [ -n "${SCAN_ROOT}" ]; then
+    output_base_args=(--output-base "${SCAN_ROOT}/${scan_name}")
+  fi
   CUDA_VISIBLE_DEVICES="${gpu}" python -m parnassus.torch_delphes.tune_cms_fullsim.gebo_optuna_search \
     --loss "${loss}" --trust-region "${tr}" --grad-mode "${grad}" \
     --n-trials "${N_TRIALS}" --time-budget-hours "${TIME_BUDGET_HOURS}" \
     --gebo-time-limit-hours "${GEBO_TIME_LIMIT_HOURS}" \
-    --lbfgs-n-events "${LBFGS_N_EVENTS}" \
+    --finetune "${FINETUNE}" \
+    --finetune-n-events "${FINETUNE_N_EVENTS}" \
+    --finetune-n-steps "${FINETUNE_N_STEPS}" \
+    "${output_base_args[@]}" \
     > "${logfile}" 2>&1 &
   gpu=$(( gpu + 1 ))
 done

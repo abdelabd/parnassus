@@ -1,23 +1,46 @@
-r"""Optuna hyperparameter search over GEBO + L-BFGS *run settings*, for ONE
+r"""Optuna hyperparameter search over GEBO + fine-tune *run settings*, for ONE
 (loss, trust-region, gradient-mode) combination.
 
 This is the ``optuna_search.py``-style outer loop, but for the
-:mod:`.gebo_search` / :mod:`.lbfgs_finetune` pipeline instead of the Adam fit
-in :mod:`.training`. It does NOT reimplement GEBO or L-BFGS: each Optuna trial
+:mod:`.gebo_search` + fine-tune pipeline instead of the Adam fit in
+:mod:`.training`. It does NOT reimplement any of them: each Optuna trial
 materializes a normal ``gebo_search`` YAML run config (the same schema
 :func:`.gebo_search.load_gebo_config` reads) and invokes
 
 .. code-block:: shell
 
     python -m parnassus.torch_delphes.tune_cms_fullsim.gebo_search   <round_dir>/gebo_config.yaml
-    python -m parnassus.torch_delphes.tune_cms_fullsim.lbfgs_finetune --gebo-summary <round_dir>/gebo/gebo_summary.json --n-steps ...
+    python -m parnassus.torch_delphes.tune_cms_fullsim.<finetune>_finetune --gebo-summary <round_dir>/gebo/gebo_summary.json --n-steps ...
 
 as **subprocesses** -- one GPU, one process at a time, exactly as if you had
 run them by hand. Every artifact those two scripts normally produce (Comet
 experiment, ``gebo_state.pt``/``gebo_debug.yaml``, per-new-best intermediate
-plots, ``gebo_summary.json``, ``best_config.yaml``, the ``lbfgs/`` outputs) is
-produced unchanged, one full set per trial, under
-``<round_dir>/gebo/`` and ``<round_dir>/gebo/lbfgs/``.
+plots, ``gebo_summary.json``, ``best_config.yaml``, the fine-tune stage's own
+outputs) is produced unchanged, one full set per trial, under
+``<round_dir>/gebo/`` and ``<round_dir>/gebo/<finetune>/``.
+
+Two fine-tuners (``--finetune``), and they optimize genuinely different things:
+
+``lbfgs`` (default, :mod:`.lbfgs_finetune`)
+    Bounded L-BFGS-B on GEBO's OWN objective -- the whole dataset in one
+    deterministic evaluation returning loss plus an analytic 66-D gradient. A
+    local polish of exactly what the BO loop minimized. Trial score = that
+    objective's final value. Launched by ``gebo_scans_interactive.sh``.
+
+``adam`` (:mod:`.adam_finetune`)
+    The real ``tune_cms_fullsim`` training loop, warm-started from GEBO's best
+    point: stochastic mini-batches, a 70/20 train/val split, per-group Adam
+    learning rates, ``ReduceLROnPlateau`` and early stopping. This makes the
+    pipeline ``run_optuna.sh``'s Optuna+Adam with **GEBO** rather than Optuna
+    choosing the 66 parameter initializations; the outer Optuna keeps sampling
+    Adam's ``lr`` / ``batch_size`` / per-group ``lr_scale`` from the ``adam:``
+    section of the meta-search config, over the same ranges
+    ``param_configs/optuna_config.yaml`` uses. Trial score = the fit's best
+    VALIDATION loss. Launched by ``optuna_gebo_adam.sh``.
+
+Those two scores are not comparable, so the two pipelines default to separate
+study roots (``doc/gebo_optuna_scans/`` vs ``doc/gebo_adam_scans/``) -- never
+point them at the same ``--output-base``.
 
 What is held CONSTANT across every trial (of every one of the 12 scans this
 is meant to be run as, see ``gebo_scans_interactive.sh`` /
@@ -122,6 +145,17 @@ TRUST_REGION_CLASS_PATHS: dict[str, str] = {
 
 GRAD_MODE_CHOICES: tuple[str, ...] = ("grad", "no_grad")
 
+# Which optimizer polishes GEBO's best point. "lbfgs" runs bounded L-BFGS-B on
+# GEBO's own full-dataset objective (a local polish of exactly what BO
+# minimized); "adam" runs the real tune_cms_fullsim training loop -- stochastic
+# mini-batches, train/val split, early stopping -- warm-started from that point,
+# and is scored by its best VALIDATION loss. See the two *_finetune modules.
+FINETUNE_CHOICES: tuple[str, ...] = ("lbfgs", "adam")
+FINETUNE_MODULES: dict[str, str] = {
+    "lbfgs": "parnassus.torch_delphes.tune_cms_fullsim.lbfgs_finetune",
+    "adam": "parnassus.torch_delphes.tune_cms_fullsim.adam_finetune",
+}
+
 # gebo_search.py's own defaults (see configs/gebo_w1_cosine_grad.yaml), used
 # to pin whichever of max_train_points / max_train_points_no_grad this scan's
 # --grad-mode does NOT exercise, so it is never sampled for nothing.
@@ -212,6 +246,23 @@ def sample_trial(trial: optuna.Trial, meta: dict, args: argparse.Namespace) -> d
     p["trust_region_init_args"] = {
         key: _suggest(trial, f"tr_{key}", spec) for key, spec in tr_spec.items()
     }
+
+    # Adam fine-tuning knobs, sampled ONLY for --finetune=adam so the lbfgs
+    # scans keep the exact search space they have always had (an extra sampled
+    # dimension would change TPE's behavior and make the two incomparable).
+    if args.finetune == "adam":
+        adam = meta.get("adam")
+        if adam is None:
+            raise SystemExit(
+                f"{args.meta_search_config}: --finetune=adam needs a top-level "
+                "'adam' section (lr / batch_size / lr_scale)."
+            )
+        p["adam_lr"] = _suggest(trial, "adam_lr", adam["lr"])
+        p["adam_batch_size"] = _suggest(trial, "adam_batch_size", adam["batch_size"])
+        p["adam_lr_scale"] = {
+            g: _suggest(trial, f"adam_lr_scale_{g}", spec)
+            for g, spec in adam["lr_scale"].items()
+        }
     return p
 
 
@@ -363,12 +414,12 @@ def make_objective(args: argparse.Namespace, meta: dict):
             # running the comparatively expensive L-BFGS stage on it would waste
             # budget polishing a point BO never actually got to touch. Treat it the
             # same as the other bad-point cases below: a legitimately bad, COMPLETE
-            # trial (score inf), skipping L-BFGS entirely.
+            # trial (score inf), skipping the fine-tune stage entirely.
             if _gebo_n_done(round_dir) == 0:
                 print(
                     f"[scan] trial {trial.number} (round {round_id}): GEBO timed out before "
                     f"completing a single BO iteration (Sobol-only best_loss = {gebo_best_loss:.4e}) "
-                    "-- scoring as a bad, complete trial and skipping L-BFGS.",
+                    "-- scoring as a bad, complete trial and skipping the fine-tune stage.",
                     flush=True,
                 )
                 trial.set_user_attr("gebo_best_loss", gebo_best_loss)
@@ -399,7 +450,7 @@ def make_objective(args: argparse.Namespace, meta: dict):
                         f"[scan] trial {trial.number} (round {round_id}): GEBO hit a GP model-fit "
                         f"error (best_loss so far = {gebo_best_loss:.4e}) and never beat the best "
                         f"Sobol init ({best_initial_loss}) -- scoring as a bad, complete trial and "
-                        "skipping L-BFGS.",
+                        "skipping the fine-tune stage.",
                         flush=True,
                     )
                     trial.set_user_attr("gebo_best_loss", gebo_best_loss)
@@ -408,41 +459,59 @@ def make_objective(args: argparse.Namespace, meta: dict):
                 print(
                     f"[scan] trial {trial.number} (round {round_id}): GEBO hit a GP model-fit "
                     f"error but still improved on the best Sobol init ({best_initial_loss:.4e} -> "
-                    f"{gebo_best_loss:.4e}) -- proceeding to L-BFGS anyway.",
+                    f"{gebo_best_loss:.4e}) -- proceeding to the fine-tune stage anyway.",
                     flush=True,
                 )
 
-            lbfgs_summary_path = round_dir / "gebo" / "lbfgs" / "gebo_summary.json"
-            if not lbfgs_summary_path.exists():
-                # Scale UP from the trial's GEBO batch_size rather than reusing it
-                # directly: --lbfgs-n-events is much larger than what GEBO evaluated,
-                # and GEBO's sampled batch_size can be as small as 64 (see
-                # gebo_meta_search.yaml), which at 20k events would mean hundreds of
-                # mini-batches per L-BFGS objective/gradient call (this is what made
-                # every L-BFGS stage across the last scan look hung -- it wasn't
-                # hung, just running ~300x more mini-batches per eval than GEBO did).
-                lbfgs_batch_size = min(
-                    round(params["batch_size"] * args.lbfgs_batch_size_multiplier),
-                    args.lbfgs_batch_size_max,
-                )
-                print(f"[scan] trial {trial.number} (round {round_id}): running L-BFGS "
-                      f"(batch_size={lbfgs_batch_size}, {args.lbfgs_n_events} events) ...", flush=True)
+            # The fine-tune stage writes into <round>/gebo/<finetune>/, so the
+            # two fine-tuners never share a directory (or a resume gate).
+            finetune_summary_path = (
+                round_dir / "gebo" / args.finetune / "gebo_summary.json"
+            )
+            if not finetune_summary_path.exists():
+                print(f"[scan] trial {trial.number} (round {round_id}): running "
+                      f"{args.finetune.upper()} fine-tuning "
+                      f"({args.finetune_n_events} events) ...", flush=True)
                 cmd = [
-                    sys.executable, "-m", "parnassus.torch_delphes.tune_cms_fullsim.lbfgs_finetune",
+                    sys.executable, "-m", FINETUNE_MODULES[args.finetune],
                     "--gebo-summary", str(gebo_summary_path),
-                    "--n-steps", str(args.lbfgs_n_steps),
-                    "--n-events", str(args.lbfgs_n_events),
-                    "--batch-size", str(lbfgs_batch_size),
+                    "--n-steps", str(args.finetune_n_steps),
+                    "--n-events", str(args.finetune_n_events),
                 ]
-                if args.lbfgs_max_fun is not None:
-                    cmd += ["--max-fun", str(args.lbfgs_max_fun)]
-                _run_subprocess(cmd, log_path=round_dir / "gebo" / "lbfgs_run.log")
+                if args.finetune == "lbfgs":
+                    # Scale UP from the trial's GEBO batch_size rather than reusing it
+                    # directly: --finetune-n-events is much larger than what GEBO
+                    # evaluated, and GEBO's sampled batch_size can be as small as 64
+                    # (see gebo_meta_search.yaml), which at 20k events would mean
+                    # hundreds of mini-batches per L-BFGS objective/gradient call
+                    # (this is what made every L-BFGS stage across an early scan look
+                    # hung -- it wasn't hung, just running ~300x more mini-batches per
+                    # eval than GEBO did).
+                    lbfgs_batch_size = min(
+                        round(params["batch_size"] * args.lbfgs_batch_size_multiplier),
+                        args.lbfgs_batch_size_max,
+                    )
+                    cmd += ["--batch-size", str(lbfgs_batch_size)]
+                    if args.lbfgs_max_fun is not None:
+                        cmd += ["--max-fun", str(args.lbfgs_max_fun)]
+                else:
+                    # Adam's batch size / lr / per-group lr_scale are SAMPLED by this
+                    # trial (meta['adam']), not derived from GEBO's -- the outer
+                    # Optuna tunes the training the same way optuna_search.py does.
+                    cmd += ["--batch-size", str(params["adam_batch_size"]),
+                            "--lr", repr(params["adam_lr"])]
+                    for group, scale in params["adam_lr_scale"].items():
+                        cmd += [f"--lr-scale-{group}", repr(scale)]
+                _run_subprocess(
+                    cmd, log_path=round_dir / "gebo" / f"{args.finetune}_run.log"
+                )
             else:
-                print(f"[scan] trial {trial.number} (round {round_id}): L-BFGS already complete, skipping", flush=True)
+                print(f"[scan] trial {trial.number} (round {round_id}): "
+                      f"{args.finetune.upper()} already complete, skipping", flush=True)
 
-            with open(lbfgs_summary_path) as f:
-                lbfgs_summary = json.load(f)
-            lbfgs_best_loss = float(lbfgs_summary["best_loss"])
+            with open(finetune_summary_path) as f:
+                finetune_summary = json.load(f)
+            finetune_best_loss = float(finetune_summary["best_loss"])
         except (RuntimeError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             # A subprocess exit failure here means THIS sampled hyperparameter
             # point is bad (e.g. botorch.exceptions.ModelFittingError from an
@@ -465,13 +534,18 @@ def make_objective(args: argparse.Namespace, meta: dict):
             return float("inf")
 
         trial.set_user_attr("gebo_best_loss", gebo_best_loss)
-        trial.set_user_attr("lbfgs_best_loss", lbfgs_best_loss)
+        trial.set_user_attr("finetune_best_loss", finetune_best_loss)
+        # Kept under its historical key too, so tooling and notebooks written
+        # against the L-BFGS-only scans keep reading the studies they already have.
+        if args.finetune == "lbfgs":
+            trial.set_user_attr("lbfgs_best_loss", finetune_best_loss)
         print(
             f"[scan] trial {trial.number} (round {round_id}): "
-            f"gebo_best={gebo_best_loss:.4e}  lbfgs_best={lbfgs_best_loss:.4e}",
+            f"gebo_best={gebo_best_loss:.4e}  "
+            f"{args.finetune}_best={finetune_best_loss:.4e}",
             flush=True,
         )
-        return lbfgs_best_loss
+        return finetune_best_loss
 
     return objective
 
@@ -513,14 +587,33 @@ def main() -> None:
                          help="Wall-clock cap on the GEBO stage of each trial: gebo_search.py stops its "
                               "BO loop once this elapses, even short of the trial's sampled "
                               "n_iterations_gebo target (see --meta-search-config), and the trial "
-                              "proceeds to L-BFGS with whatever GEBO found so far "
+                              "proceeds to the fine-tune stage with whatever GEBO found so far "
                               "(<=0 disables; held constant across the whole scan).")
-    parser.add_argument("--lbfgs-n-steps", type=int, default=200,
-                         help="L-BFGS-B maxiter per trial (held constant across the whole scan).")
+    parser.add_argument("--finetune", choices=FINETUNE_CHOICES, default="lbfgs",
+                         help="Optimizer that polishes GEBO's best point. 'lbfgs' (default) runs "
+                              "bounded L-BFGS-B on GEBO's own full-dataset objective. 'adam' runs the "
+                              "real tune_cms_fullsim training loop (stochastic mini-batches, train/val "
+                              "split, ReduceLROnPlateau, early stopping) warm-started from that point, "
+                              "with its lr / batch_size / per-group lr_scale SAMPLED per trial from the "
+                              "meta-search config's 'adam' section -- i.e. Optuna+GEBO+Adam, where GEBO "
+                              "supplies the parameter inits that optuna_search.py would otherwise "
+                              "sample. Trials are then scored by the fit's best VALIDATION loss, which "
+                              "is NOT comparable to an L-BFGS scan's score: keep the two in separate "
+                              "studies (see --output-base / optuna_gebo_adam.sh).")
+    # Shared fine-tune-stage budget. The --lbfgs-* spellings are kept as aliases
+    # so existing scripts and command lines keep working unchanged.
+    parser.add_argument("--finetune-n-steps", "--lbfgs-n-steps", dest="finetune_n_steps",
+                         type=int, default=200,
+                         help="Fine-tune iteration budget per trial: L-BFGS-B maxiter, or Adam epochs "
+                              "(held constant across the whole scan).")
+    parser.add_argument("--finetune-n-events", "--lbfgs-n-events", dest="finetune_n_events",
+                         type=int, default=20_000,
+                         help="Events the fine-tune stage runs on, overriding whatever n_events "
+                              "GEBO's trial happened to sample (held constant across the whole scan). "
+                              "For --finetune=adam this is split 70/20 into train/val by "
+                              "runner.load_split_datasets, as in every other Adam fit.")
+    # L-BFGS-only knobs (Adam's batch size is sampled per trial instead).
     parser.add_argument("--lbfgs-max-fun", type=int, default=None)
-    parser.add_argument("--lbfgs-n-events", type=int, default=20_000,
-                         help="Events the L-BFGS stage evaluates against, overriding whatever n_events "
-                              "GEBO's trial happened to sample (held constant across the whole scan).")
     parser.add_argument("--lbfgs-batch-size-multiplier", type=float, default=12.0,
                          help="L-BFGS's forward-pass batch size = the trial's GEBO-sampled batch_size "
                               "times this factor (clamped to --lbfgs-batch-size-max). A bigger batch "
@@ -564,7 +657,14 @@ def main() -> None:
 
     scan_name = f"{args.loss}__{args.trust_region}__{args.grad_mode}"
     if args.output_base is None:
-        args.output_base = Path("doc/gebo_optuna_scans") / scan_name
+        # Separate default roots per fine-tuner. An Adam trial's score is a
+        # VALIDATION loss and an L-BFGS trial's is a full-dataset training
+        # objective, so pointing both at doc/gebo_optuna_scans/<scan_name> would
+        # silently resume one study with the other's incomparable trial values.
+        default_root = (
+            "doc/gebo_optuna_scans" if args.finetune == "lbfgs" else "doc/gebo_adam_scans"
+        )
+        args.output_base = Path(default_root) / scan_name
     if args.study_name is None:
         args.study_name = scan_name
     args.output_base.mkdir(parents=True, exist_ok=True)
@@ -573,7 +673,7 @@ def main() -> None:
 
     meta = load_meta_search_config(args.meta_search_config)
 
-    print(f"[scan] {scan_name}")
+    print(f"[scan] {scan_name}  (finetune={args.finetune})")
     print(f"[scan] output_base = {args.output_base}")
     print(f"[scan] storage     = {args.storage}")
 

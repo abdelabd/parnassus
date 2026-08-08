@@ -22,9 +22,9 @@ PYTHON="${PYTHON:-$(command -v python)}"
 # STUDY_NAME=pseudo_100k
 
 # ===== preset: full CMS sim (uncomment this, comment the block above) =====
-ROOT_FILE=${ROOT_FILE:-/global/cfs/cdirs/m3246/diff_delphes/train_1000.root}
-N_EVENTS=${N_EVENTS:-100000}
-OUTPUT_BASE=${OUTPUT_BASE:-doc/figure_fullsim_results}
+ROOT_FILE=${ROOT_FILE:-/global/cfs/cdirs/m3246/diff_delphes/cms_pseudodata_100k.root}
+N_EVENTS=${N_EVENTS:-100_000}
+OUTPUT_BASE=${OUTPUT_BASE:-doc/figures/optuna_adam_w1d_pseudo_100k}
 STUDY_NAME=${STUDY_NAME:-fullsim_100k}
 
 # ===== shared knobs =====

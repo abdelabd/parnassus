@@ -71,6 +71,7 @@ def fit_card_to_fullsim(
     pid_weight_floor: float = 0.0,
     epoch_callback: Callable[[int, float], bool] | None = None,
     comet_exp: "object | None" = None,
+    comet_suffix: str = "",
 ) -> dict[str, list[float]]:
     """Run Adam on ``card`` to match the target observables.
 
@@ -173,6 +174,13 @@ def fit_card_to_fullsim(
         when the fit returns). Only the main rank logs, so passing the same
         experiment on every rank is safe -- but callers only build it on rank 0.
         ``None`` (default) disables logging entirely.
+    comet_suffix : str
+        Appended to every Comet metric name this fit logs (``""`` = no change).
+        Set it when the fit shares an experiment with another stage that already
+        logs metrics of its own -- :mod:`.adam_finetune` passes ``"_adam"`` so
+        its ``val_loss_adam`` / ``loss/..._adam`` curves sit alongside the GEBO
+        stage's own ``best_loss`` in the round's single Comet experiment instead
+        of overwriting it.
 
     Returns
     -------
@@ -359,7 +367,8 @@ def fit_card_to_fullsim(
             "".join(ch if (ch.isalnum() or ch in "_.-") else "_" for ch in str(p))
             for p in parts
         ]
-        return "/".join(s for s in safe if s)
+        joined = "/".join(s for s in safe if s)
+        return f"{joined}{comet_suffix}" if comet_suffix else joined
 
     def _log_comet_epoch(
         step: int,
@@ -378,8 +387,8 @@ def fit_card_to_fullsim(
             return
         try:
             metrics: dict[str, float] = {
-                "train_loss": train_loss,
-                "val_loss": val_loss,
+                _comet_metric_name("train_loss"): train_loss,
+                _comet_metric_name("val_loss"): val_loss,
             }
             # Effective per-group lr actually used this epoch (logged before the
             # ReduceLROnPlateau step below, which applies to the NEXT epoch).

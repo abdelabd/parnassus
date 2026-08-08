@@ -27,16 +27,22 @@
 #                         n_iterations_gebo target, see configs/gebo_meta_search.yaml)
 #                         once this elapses, and the trial still proceeds to
 #                         L-BFGS with whatever GEBO found so far (default 2.0)
-#   LBFGS_N_EVENTS        events the L-BFGS stage evaluates against, overriding
+#   FINETUNE_N_EVENTS     events the L-BFGS stage evaluates against, overriding
 #                         whatever n_events GEBO's trial happened to sample
-#                         (default 20000)
+#                         (default 20000; the old LBFGS_N_EVENTS spelling still works)
+#
+# For the Adam-fine-tuned variant of this same pipeline -- GEBO picks the
+# initialization and the real tune_cms_fullsim Adam loop trains from it -- see
+# optuna_gebo_adam.sh, which keeps its studies in a separate root.
 
 set -euo pipefail
 
 N_TRIALS="${N_TRIALS:-40}"
 TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-3.9}"   # leave margin under a 4h salloc
 GEBO_TIME_LIMIT_HOURS="${GEBO_TIME_LIMIT_HOURS:-2.0}"
-LBFGS_N_EVENTS="${LBFGS_N_EVENTS:-20000}"
+FINETUNE_N_EVENTS="${FINETUNE_N_EVENTS:-${LBFGS_N_EVENTS:-20000}}"
+FINETUNE=lbfgs   # set explicitly so a FINETUNE=adam left in the shell by
+                 # optuna_gebo_adam.sh cannot silently redirect this scan
 
 source /pscratch/sd/a/aelabd/parnassus/parnassus_env/bin/activate
 cd /pscratch/sd/a/aelabd/parnassus/src
@@ -44,7 +50,7 @@ cd /pscratch/sd/a/aelabd/parnassus/src
 # export COMET_API_KEY="..."       # uncomment + fill in (or make sure it's already exported)
 # export COMET_WORKSPACE="..."
 
-export N_TRIALS TIME_BUDGET_HOURS GEBO_TIME_LIMIT_HOURS LBFGS_N_EVENTS  # read by gebo_scans_run_on_node.sh
+export N_TRIALS TIME_BUDGET_HOURS GEBO_TIME_LIMIT_HOURS FINETUNE FINETUNE_N_EVENTS  # read by gebo_scans_run_on_node.sh
 
 mkdir -p logs
 
@@ -52,7 +58,7 @@ LOSSES=(wasserstein_1d soft_hist)
 TRUST_REGIONS=(cosine adaptive none)
 GRAD_MODES=(grad no_grad)
 
-echo "[launch] N_TRIALS=${N_TRIALS} TIME_BUDGET_HOURS=${TIME_BUDGET_HOURS} GEBO_TIME_LIMIT_HOURS=${GEBO_TIME_LIMIT_HOURS} LBFGS_N_EVENTS=${LBFGS_N_EVENTS}"
+echo "[launch] finetune=${FINETUNE} N_TRIALS=${N_TRIALS} TIME_BUDGET_HOURS=${TIME_BUDGET_HOURS} GEBO_TIME_LIMIT_HOURS=${GEBO_TIME_LIMIT_HOURS} FINETUNE_N_EVENTS=${FINETUNE_N_EVENTS}"
 echo "[launch] SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-<not in a Slurm allocation>}"
 
 # This QOS/partition allows only ONE srun job step per node at a time within
