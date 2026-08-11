@@ -12,6 +12,7 @@ Zenodo sample) and rerun.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -1014,6 +1015,46 @@ def test_apply_chad_truncation_synthetic():
     out["ht"].sum().backward()
     assert obs["pt"].grad is not None
     assert obs["pt"].grad[1].tolist() == [0.0, 0.0, 0.0, 0.0, 0.0]
+
+
+def test_count_terms_pid_weighting():
+    """--pid-weighting also redistributes ACROSS the count-term species:
+    'equal' is a bit-exact no-op; 'sqrt_fraction' down-weights the rare species
+    and up-weights the abundant one, mean-1 normalized."""
+    n_events = 10
+    # Two species: abundant chads (90/event across 4 regions) and rare muons
+    # (0.4/event across 6 regions), with a fixed 20% pred deficit on both.
+    chad_tgt = torch.full((n_events, 4), 22.5, dtype=torch.float64)  # 90/event
+    muon_tgt = torch.full((n_events, 6), 0.4 / 6, dtype=torch.float64)
+    target = {"chad_region_counts": chad_tgt, "muon_region_counts": muon_tgt}
+    pred = {
+        "chad_expected_counts": chad_tgt.sum(dim=0) * 0.8,
+        "muon_expected_counts": muon_tgt.sum(dim=0) * 0.8,
+    }
+
+    def _terms(mode):
+        return _count_terms(
+            pred, target, count_weight=1.0, calo_count_weight=1.0,
+            pid_weighting=mode,
+        )
+
+    equal = [float(t) for t in _terms("equal")]
+    sqrt = [float(t) for t in _terms("sqrt_fraction")]
+    # equal: identical to the unweighted computation (weights exactly 1.0).
+    raw = [float(t) for t in _terms("equal")]
+    assert equal == raw
+    # The relative chi^2 raws are scale-free, so with equal weighting the two
+    # species cost nearly the same despite a 225x population gap.
+    assert equal[0] > 0 and equal[1] > 0
+    # sqrt_fraction: chad (abundant) up-weighted, muon (rare) down-weighted,
+    # mean preserved (mean-1 normalization over the two species).
+    assert sqrt[0] > equal[0]
+    assert sqrt[1] < equal[1]
+    w_chad = sqrt[0] / equal[0]
+    w_muon = sqrt[1] / equal[1]
+    assert abs((w_chad + w_muon) / 2 - 1.0) < 1e-9  # mean-1
+    # Expected ratio: sqrt(f_chad)/sqrt(f_muon) = sqrt(90/0.4)
+    assert abs(w_chad / w_muon - math.sqrt(90 / 0.4)) < 1e-6
 
 
 def test_restore_event_format_event_ids_alignment():

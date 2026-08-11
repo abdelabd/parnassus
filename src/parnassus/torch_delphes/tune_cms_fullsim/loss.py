@@ -414,6 +414,8 @@ def _count_terms(
     count_weight: float,
     calo_count_weight: float,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    pid_weighting: str = "equal",
+    pid_weight_floor: float = 0.0,
     out_components: list | None = None,
 ) -> list[torch.Tensor]:
     """Differentiable per-species expected-count terms, shared by both training
@@ -465,15 +467,32 @@ def _count_terms(
     Returns a list of scalar terms (one per present species); each keeps the gradient
     to ``pred[pred_key]`` and the target side (counts, N and the floor) is detached.
 
+    ``pid_weighting`` / ``pid_weight_floor`` optionally apply the SAME per-species
+    population weighting the shape terms use (:func:`_pid_population_weights`, CLI
+    ``--pid-weighting``) ACROSS the count terms: each species' term is multiplied
+    by a mean-1-normalized weight derived from its detached target population
+    fraction in the batch (``"equal"`` = exact no-op). Rationale: each term is a
+    scale-free RELATIVE chi^2, so without this a rare species with a structural
+    (unfixable) count mismatch -- e.g. the decay-in-flight muon excess, 0.39
+    reco/event vs a 0.165 truth ceiling -- contributes as much loss as the
+    abundant species (the observed Muon ~0.18 vs everything else <0.01). The
+    species population is read from the term's own target region counts, so no
+    extra plumbing is needed. Note the per-species efficiency logits receive
+    gradient ONLY from their own term, so a global rescale of that term mostly
+    re-scales (not re-directs) their Adam step.
+
     When ``out_components`` is a list, each emitted term also appends a
     ``(label, raw_tensor, weight)`` tuple to it -- the human label
-    (:data:`_COUNT_LABELS`), the UNWEIGHTED scalar, and the weight (``count_weight``
-    for tracking, ``calo_count_weight`` for calo) -- aligned 1:1 with the returned
-    ``count_terms`` (same order, same skips), for the per-epoch ``return_breakdown``
-    debug print. ``None`` (default) makes this a byte-identical no-op.
+    (:data:`_COUNT_LABELS`), the UNWEIGHTED scalar, and the EFFECTIVE weight
+    (``count_weight`` or ``calo_count_weight``, times the species population
+    weight) -- aligned 1:1 with the returned ``count_terms`` (same order, same
+    skips), for the per-epoch ``return_breakdown`` debug print. ``None``
+    (default) makes this a byte-identical no-op.
     """
     calo_pred_keys = {pred_key for _o, pred_key, _t in CALO_COUNT_TERM_KEYS}
-    count_terms: list[torch.Tensor] = []
+    # First pass: build every present species' raw term + its detached target
+    # population (for the cross-species weighting below).
+    entries: list[tuple[str, torch.Tensor, float, float]] = []
     for out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred_counts = pred.get(pred_key)
         if pred_counts is None or tgt_key not in target:
@@ -498,9 +517,22 @@ def _count_terms(
             chi2 = (pred_rate - tgt_rate) ** 2 / (tgt_rate + count_rate_floor)
             total = tgt_rate.sum().clamp_min(count_rate_floor)  # detached -> invariant
             raw, weight = chi2.sum() / total, count_weight
-        count_terms.append(weight * raw)
+        entries.append((out_key, raw, weight, float(tgt_counts.sum())))
+
+    # Cross-species population weights (mean-1 over the present terms; "equal" is
+    # a bit-exact 1.0 no-op). Detached plain floats, like the shape weights.
+    species_w = _population_weights_from_counts(
+        {out_key: tot for out_key, _raw, _w, tot in entries},
+        mode=pid_weighting,
+        floor=pid_weight_floor,
+    )
+
+    count_terms: list[torch.Tensor] = []
+    for out_key, raw, weight, _tot in entries:
+        eff_weight = weight * species_w[out_key]
+        count_terms.append(eff_weight * raw)
         if out_components is not None:
-            out_components.append((_COUNT_LABELS[out_key], raw, weight))
+            out_components.append((_COUNT_LABELS[out_key], raw, eff_weight))
     return count_terms
 
 
@@ -543,15 +575,33 @@ def _pid_population_weights(
     float OFF the autograd graph: multiplying a graph tensor by it keeps the gradient to
     ``pred`` and puts nothing on the weight, and ``"equal"`` stays a bit-exact ``1.0``.
     """
-    if not present_pids:
+    return _population_weights_from_counts(
+        {int(p): float(target_groups[p].shape[0]) for p in present_pids},
+        mode=mode,
+        floor=floor,
+    )
+
+
+def _population_weights_from_counts(
+    counts: dict, mode: str = "equal", floor: float = 0.0
+) -> dict:
+    """Mean-1-normalized population weights from a ``{key: detached count}`` map.
+
+    The shared core of :func:`_pid_population_weights` (per-pid SHAPE weights)
+    and the per-species COUNT-term weighting in :func:`_count_terms`; see the
+    former's docstring for the mode semantics (``"equal"`` -> exact 1.0 no-op,
+    ``"fraction"`` / ``"sqrt_fraction"`` down-weight low-population keys, mean-1
+    normalized over the present keys, optional ``floor`` clamp + re-normalize).
+    Keys are arbitrary hashables; every weight is a plain Python float.
+    """
+    if not counts:
         return {}
     if mode == "equal":
-        return {int(p): 1.0 for p in present_pids}
+        return {p: 1.0 for p in counts}
 
-    counts = {int(p): float(target_groups[p].shape[0]) for p in present_pids}
     total = sum(counts.values())
     if total <= 0:  # degenerate (shouldn't happen: present groups are non-empty)
-        return {int(p): 1.0 for p in present_pids}
+        return {p: 1.0 for p in counts}
 
     if mode == "fraction":
         g = {p: counts[p] / total for p in counts}
@@ -564,7 +614,7 @@ def _pid_population_weights(
 
     p_count = len(g)
 
-    def _normalize(gv: dict[int, float]) -> dict[int, float]:
+    def _normalize(gv: dict) -> dict:
         denom = sum(gv.values())
         if denom <= 0:
             return {p: 1.0 for p in gv}
@@ -719,7 +769,8 @@ def per_event_wasserstein_loss(
 
     # Differentiable per-species expected-count terms (tracking-efficiency eff_logits
     # and calo-resolution coefficients). See :func:`_count_terms` for the
-    # population-weighted (tracking) vs per-region-fair (calo) normalization.
+    # population-weighted (tracking) vs per-region-fair (calo) normalization and the
+    # cross-species pid_weighting.
     count_components: list | None = [] if return_breakdown else None
     count_terms = _count_terms(
         pred,
@@ -727,6 +778,8 @@ def per_event_wasserstein_loss(
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        pid_weighting=pid_weighting,
+        pid_weight_floor=pid_weight_floor,
         out_components=count_components,
     )
 
@@ -1023,6 +1076,7 @@ def _per_pid_obs_loss(
     # Same per-species expected-count terms as the Wasserstein loss: the gradient source
     # for eff_logits and the calo resolution coefficients (the shape terms are
     # count-blind, so these carry the absolute multiplicity / membership signal).
+    # pid_weighting also redistributes ACROSS the count species (mean-1; "equal" no-op).
     count_components: list | None = [] if return_breakdown else None
     count_terms = _count_terms(
         pred,
@@ -1030,6 +1084,8 @@ def _per_pid_obs_loss(
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        pid_weighting=pid_weighting,
+        pid_weight_floor=pid_weight_floor,
         out_components=count_components,
     )
     terms = (
