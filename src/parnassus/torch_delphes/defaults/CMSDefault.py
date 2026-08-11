@@ -110,6 +110,8 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         debug: bool = False,
         learnable: bool = False,
         gumbel_temperature: float = 0.5,
+        count_pt_min: float | None = None,
+        count_abs_eta_max: float | None = None,
     ) -> None:
         """Initialize the CMS detector simulation.
 
@@ -135,10 +137,21 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             values (e.g. 0.1) give sharper Bernoulli-like behavior; higher
             values (e.g. 1.0) give smoother gradients but more sampling
             noise. The training loop may anneal this value over time.
+        count_pt_min, count_abs_eta_max:
+            Acceptance harmonization for the differentiable COUNT TERMS only
+            (tracking expected counts + calo soft counts); object creation is
+            untouched. With ``count_pt_min`` set, expected counts only include
+            objects with reco pt >= count_pt_min (matching data targets built
+            from pt-cut files); with ``count_abs_eta_max`` set, the calo count
+            regions are bounded at |eta| <= max. Defaults None = legacy
+            behavior. Set by the tune_cms_fullsim fit entrypoints from
+            --reco-pt-cut / --eta-cut.
         """
         super().__init__()
         self.debug = debug
         self.learnable = learnable
+        self.count_pt_min = count_pt_min
+        self.count_abs_eta_max = count_abs_eta_max
 
         # Attribute-type declarations so mypy accepts the learnable / legacy
         # union. At runtime ``nn.Module.__setattr__`` registers whichever
@@ -473,6 +486,15 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         abs_eta = eflow_objects[:, ColumnMap.ETA].abs()
         region = eflow_objects[:, ColumnMap.EFF_REGION]  # global label; 0 = untagged
         valid = pt > 0  # drop efficiency-killed ghosts (zeroed momentum)
+        # Acceptance harmonization: the data-side region-count targets are built
+        # from pt/eta-cut reco files, so exclude out-of-acceptance survivors here
+        # too. Hard mask by design -- this term's gradient is confined to the
+        # eff_logits via the eff/eff.detach() reweight below; the counts M[b, r]
+        # are gradient-free either way.
+        if self.count_pt_min is not None:
+            valid = valid & (pt >= self.count_pt_min)
+        if self.count_abs_eta_max is not None:
+            valid = valid & (abs_eta <= self.count_abs_eta_max)
         offset = spec.label_offset
 
         # For each reco bin, find which pre-reco region the survivors came from, then
@@ -605,6 +627,8 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             # Differentiable per-region count term: on exactly in learnable mode,
             # mirroring the efficiency count term (off => generation byte-identical).
             compute_soft_count=self.learnable,
+            count_pt_min=self.count_pt_min,
+            count_abs_eta_max=self.count_abs_eta_max,
         )
 
     def _setup_HCal(self):
@@ -758,4 +782,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             scale_fn=hcal_scale_fn,
             learnable_fractions=learnable_fractions,
             compute_soft_count=self.learnable,
+            count_pt_min=self.count_pt_min,
+            count_abs_eta_max=self.count_abs_eta_max,
         )

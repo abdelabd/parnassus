@@ -74,8 +74,14 @@ _DEFAULT_PARAM_CONFIG = (
     Path(pc.__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
 )
 
-from .config import OBSERVABLES
+from .config import (
+    DEFAULT_ABS_ETA_CUT,
+    DEFAULT_RECO_PT_CUT,
+    DEFAULT_TRUTH_PT_CUT,
+    OBSERVABLES,
+)
 from .data import (
+    apply_reco_acceptance_cut,
     load_cms_flow_root,
     load_pflow_targets_from_tensor,
     load_pflow_targets_ragged,
@@ -402,6 +408,9 @@ def _build_val_dataloader(
     arrays: dict,
     batch_size: int,
     device: torch.device,
+    truth_pt_cut: float | None = None,
+    reco_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
 ) -> DelphesDataLoader:
     """Build the ragged validation dataloader the plot forwards iterate over.
 
@@ -415,15 +424,27 @@ def _build_val_dataloader(
     ``shuffle=False`` so the batch order is fixed: re-seeding the RNG before each
     full pass then gives the init and fitted cards the *same* per-batch noise, so
     their difference reflects the parameters, not the stochastic smearing.
+
+    ``truth_pt_cut`` / ``reco_pt_cut`` / ``abs_eta_cut``: the same acceptance
+    cuts the fit applied (read from the history metadata by the caller), so the
+    plotted target matches what the loss saw. NO chad truncation here -- the
+    final plots deliberately show the full (untruncated) spectra.
     """
-    truth_ragged = load_truth_events_ragged(arrays)
-    target_ragged = load_pflow_targets_ragged(arrays)
+    truth_ragged = load_truth_events_ragged(
+        arrays, truth_pt_cut=truth_pt_cut, abs_eta_cut=abs_eta_cut
+    )
+    target_ragged = load_pflow_targets_ragged(
+        arrays, reco_pt_cut=reco_pt_cut, abs_eta_cut=abs_eta_cut
+    )
     dataset = DelphesDataSet(truth_ragged, target_ragged, device=device)
     return DelphesDataLoader(dataset, batch_size=batch_size, shuffle=False)
 
 
 def _trainee_observables(
-    card: CMSEnergyFlowDefault, dataloader: DelphesDataLoader
+    card: CMSEnergyFlowDefault,
+    dataloader: DelphesDataLoader,
+    reco_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
 ) -> tuple[dict, dict]:
     """Run the trainee batch-by-batch -> (pred, target) flattened observables.
 
@@ -457,6 +478,11 @@ def _trainee_observables(
             out = card(truth_particles[mask])
             eflow_restored = restore_event_format(out["EFlowObject"], mask)
             pred = load_pflow_targets_from_tensor(eflow_restored)
+            # Same acceptance cut the fit applied to the trainee output, so the
+            # plotted trainee matches the target's acceptance (which carries the
+            # cut from the loader). No-op when both are None.
+            if reco_pt_cut is not None or abs_eta_cut is not None:
+                pred = apply_reco_acceptance_cut(pred, reco_pt_cut, abs_eta_cut)
             target = {k: batch[k] for k in batch if k != "truth_particles"}
             for key in OBSERVABLES:
                 if key not in pred or key not in target:
@@ -928,6 +954,38 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--truth-pt-cut",
+        type=float,
+        default=None,
+        help=(
+            "Truth-input acceptance cut (pt >= this, |eta| <= --eta-cut). "
+            "Default: the value recorded in the history metadata (falling back "
+            f"to {DEFAULT_TRUTH_PT_CUT}), so plots match the fit. <= 0 disables."
+        ),
+    )
+    parser.add_argument(
+        "--reco-pt-cut",
+        type=float,
+        default=None,
+        help=(
+            "Reco acceptance cut applied to BOTH the target (at load) and the "
+            "trainee output (pt >= this, |eta| <= --eta-cut). Default: the "
+            "history metadata value (falling back to "
+            f"{DEFAULT_RECO_PT_CUT}). <= 0 disables. The chad truncation is "
+            "NEVER applied here -- final plots show untruncated spectra."
+        ),
+    )
+    parser.add_argument(
+        "--eta-cut",
+        type=float,
+        default=None,
+        help=(
+            "|eta| acceptance bound for both cuts. Default: the history "
+            f"metadata value (falling back to {DEFAULT_ABS_ETA_CUT}). "
+            "<= 0 disables."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help=(
@@ -1011,7 +1069,35 @@ def main() -> None:
     # dict is the largest remaining transient -- free it once the dataloader owns
     # the ragged tensors.
     device = torch.device("cpu")
-    val_loader = _build_val_dataloader(arrays, args.plot_batch_size, device)
+
+    # Acceptance cuts: CLI value if given, else the value the FIT ran with
+    # (history metadata), else the package default -- so plots match the fit
+    # without extra flags. <= 0 on the CLI disables the respective cut.
+    meta = history.get("metadata", {})
+
+    def _resolve_cut(cli_value: float | None, meta_key: str, default: float) -> float | None:
+        if cli_value is not None:
+            return cli_value if cli_value > 0 else None
+        if meta_key in meta:
+            return meta[meta_key]  # may legitimately be None (= disabled)
+        return default
+    truth_pt_cut = _resolve_cut(args.truth_pt_cut, "truth_pt_cut", DEFAULT_TRUTH_PT_CUT)
+    reco_pt_cut = _resolve_cut(args.reco_pt_cut, "reco_pt_cut", DEFAULT_RECO_PT_CUT)
+    abs_eta_cut = _resolve_cut(args.eta_cut, "eta_cut", DEFAULT_ABS_ETA_CUT)
+    print(
+        f"  [filter] truth cut: pt >= {truth_pt_cut}, |eta| <= {abs_eta_cut} | "
+        f"reco cut (target+trainee): pt >= {reco_pt_cut}, |eta| <= {abs_eta_cut} "
+        "| no chad truncation in plots"
+    )
+
+    val_loader = _build_val_dataloader(
+        arrays,
+        args.plot_batch_size,
+        device,
+        truth_pt_cut=truth_pt_cut,
+        reco_pt_cut=reco_pt_cut,
+        abs_eta_cut=abs_eta_cut,
+    )
     del arrays
     gc.collect()
 
@@ -1029,7 +1115,9 @@ def main() -> None:
     # The target observables come out of the same batched pass as pred_init (they
     # are read from each batch's target keys), so they are flattened/co-indexed
     # identically to the predictions.
-    pred_init, target = _trainee_observables(trainee, val_loader)
+    pred_init, target = _trainee_observables(
+        trainee, val_loader, reco_pt_cut=reco_pt_cut, abs_eta_cut=abs_eta_cut
+    )
 
     # Restore the *best* (min-validation-loss) parameter snapshot and re-run.
     # Early stopping keeps training past the best epoch, so the last snapshot
@@ -1046,7 +1134,9 @@ def main() -> None:
     torch.manual_seed(args.seed)
     # Re-run the fitted card over the same fixed-order batches; the target is
     # identical to the first pass, so discard it.
-    pred_final, _ = _trainee_observables(trainee, val_loader)
+    pred_final, _ = _trainee_observables(
+        trainee, val_loader, reco_pt_cut=reco_pt_cut, abs_eta_cut=abs_eta_cut
+    )
 
     plot_observable(
         "PT",

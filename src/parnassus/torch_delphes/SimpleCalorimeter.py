@@ -28,6 +28,55 @@ from parnassus.data.particle_io import ColumnMap
 
 N_FEATURES = len(ColumnMap)
 
+# Canonical |eta| upper edges of the soft-count regions (final region is "> last
+# edge"). Shared with tune_cms_fullsim.data, which builds the matching TARGET
+# region counts from the reco data -- deriving both sides from these constants
+# (via the two helpers below) keeps the pred/target region layouts in lockstep.
+ECAL_COUNT_ETA_EDGES: tuple[float, ...] = (1.5, 2.5)
+HCAL_COUNT_ETA_EDGES: tuple[float, ...] = (3.0,)
+
+
+def calo_count_eta_edges(is_ecal: bool, abs_eta_max: float | None = None) -> tuple[float, ...]:
+    """|eta| upper edges of the calo count regions, optionally bounded.
+
+    With ``abs_eta_max`` set, edges at or beyond the bound are dropped (their
+    regions would be empty or partial): e.g. HCal ``(3.0,)`` bounded at 2.7
+    becomes ``()`` -- a single ``<= 2.7`` region.
+    """
+    base = ECAL_COUNT_ETA_EDGES if is_ecal else HCAL_COUNT_ETA_EDGES
+    if abs_eta_max is None:
+        return base
+    return tuple(e for e in base if e < abs_eta_max)
+
+
+def calo_count_region_masks(abs_eta, upper_edges, abs_eta_max=None) -> list:
+    """|eta| region masks for the calo count terms (duck-typed: numpy or torch).
+
+    For ``upper_edges = (1.5, 2.5)`` returns 3 masks: ``<=1.5``, ``(1.5, 2.5]``
+    and a final region that is ``> 2.5`` when ``abs_eta_max`` is None (the
+    unbounded legacy layout) or ``(2.5, abs_eta_max]`` when a bound is given, so
+    objects beyond the acceptance fall in NO region on either side. With empty
+    ``upper_edges`` the single region is ``<= abs_eta_max`` (all |eta| if None).
+    """
+    masks: list = []
+    prev = None
+    for up in upper_edges:
+        if prev is None:
+            masks.append(abs_eta <= up)
+        else:
+            masks.append((abs_eta > prev) & (abs_eta <= up))
+        prev = up
+    if prev is None:
+        if abs_eta_max is None:
+            masks.append(abs_eta == abs_eta)  # all-True, duck-typed
+        else:
+            masks.append(abs_eta <= abs_eta_max)
+    elif abs_eta_max is None:
+        masks.append(abs_eta > prev)
+    else:
+        masks.append((abs_eta > prev) & (abs_eta <= abs_eta_max))
+    return masks
+
 
 class SimpleCalorimeter(nn.Module):
     """PyTorch implementation of Delphes SimpleCalorimeter module.
@@ -58,6 +107,8 @@ class SimpleCalorimeter(nn.Module):
         disable_significance_cut: bool = False,
         compute_soft_count: bool = False,
         count_tau_rel: float = 0.05,
+        count_pt_min: float | None = None,
+        count_abs_eta_max: float | None = None,
     ) -> None:
         super().__init__()
 
@@ -81,6 +132,14 @@ class SimpleCalorimeter(nn.Module):
         # CMSDefault sets this True exactly in learnable mode.
         self.compute_soft_count = compute_soft_count
         self.count_tau_rel = count_tau_rel
+        # Acceptance harmonization for the soft-count term ONLY (object creation
+        # is untouched): with count_pt_min set, the expected count carries a soft
+        # pt >= count_pt_min gate (matching the reco-side acceptance cut applied
+        # to the loss objects and to the pt >= 1 preprocessed data targets); with
+        # count_abs_eta_max set, the count regions are bounded at |eta| <= max so
+        # towers beyond the data acceptance fall in no region.
+        self.count_pt_min = count_pt_min
+        self.count_abs_eta_max = count_abs_eta_max
 
         # Optional per-region energy scale (for differentiable tuning).
         # Applied to the tower energy passed into the log-normal smear so
@@ -750,17 +809,33 @@ class SimpleCalorimeter(nn.Module):
             ) * torch.sigmoid(
                 (neutral_sigma_soft - self.energy_sig_min) / (tau * self.energy_sig_min)
             )
-            # Straight-through: hard forward value == today's exact count, soft backward.
-            gate_st = significant_neutral.to(gate.dtype).detach() + (gate - gate.detach())
-            abs_eta_center = tower_eta_center.abs()
-            if self.is_ecal:
-                region_masks = [
-                    abs_eta_center <= 1.5,
-                    (abs_eta_center > 1.5) & (abs_eta_center <= 2.5),
-                    abs_eta_center > 2.5,
-                ]
+            # Acceptance harmonization: soft pt >= count_pt_min gate so the expected
+            # count matches the reco-side acceptance cut (data targets carry pt >= 1
+            # from preprocessing; the loss cuts the trainee objects the same way).
+            # Same relative-width sharpness convention as the gates above. The hard
+            # side mirrors it exactly so the straight-through forward value equals
+            # the hard count of objects that would survive the acceptance cut.
+            # Uses tower_eta (the emitted object's eta) for pt, like the eflow
+            # output; region assignment below keeps the tower-center convention.
+            if self.count_pt_min is not None:
+                cosh_eta_d = torch.cosh(tower_eta.detach())
+                pt_soft = neutral_energy_soft / cosh_eta_d
+                gate = gate * torch.sigmoid(
+                    (pt_soft - self.count_pt_min) / (tau * self.count_pt_min)
+                )
+                count_hard = significant_neutral & (
+                    neutral_energy.detach() / cosh_eta_d >= self.count_pt_min
+                )
             else:
-                region_masks = [abs_eta_center <= 3.0, abs_eta_center > 3.0]
+                count_hard = significant_neutral
+            # Straight-through: hard forward value == exact hard count, soft backward.
+            gate_st = count_hard.to(gate.dtype).detach() + (gate - gate.detach())
+            abs_eta_center = tower_eta_center.abs()
+            region_masks = calo_count_region_masks(
+                abs_eta_center,
+                calo_count_eta_edges(self.is_ecal, self.count_abs_eta_max),
+                self.count_abs_eta_max,
+            )
             # +0*sigma_after_c.sum() anchors a graph path even when n_towers == 0.
             anchor = sigma_after_c.sum() * 0.0
             expected_calo_counts = torch.stack([

@@ -23,7 +23,13 @@ from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.param_config import to_physical
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS, OBSERVABLES
-from .data import restore_event_format, load_pflow_targets_from_tensor
+from .data import (
+    apply_chad_truncation,
+    apply_reco_acceptance_cut,
+    batch_event_ids,
+    load_pflow_targets_from_tensor,
+    restore_event_format,
+)
 from .distributed import _is_dist, _is_main
 from .loss import (
     CALO_COUNT_WEIGHT,
@@ -69,6 +75,9 @@ def fit_card_to_fullsim(
     loss_name: str = "wasserstein",
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
+    reco_pt_cut: float | None = None,
+    reco_abs_eta_cut: float | None = None,
+    truncate_chads: bool = False,
     epoch_callback: Callable[[int, float], bool] | None = None,
     comet_exp: "object | None" = None,
 ) -> dict[str, list[float]]:
@@ -154,6 +163,22 @@ def fit_card_to_fullsim(
         Lower clamp on the per-pid shape weight (default 0.0 = off), re-normalized to keep
         the mean-1 invariant -- protects a rare species' gradient in a low-stat batch.
         Surfaced on the CLI as ``--pid-weight-floor``.
+    reco_pt_cut, reco_abs_eta_cut : float | None
+        Reco acceptance cut applied to the PRED side only, right before the loss
+        (``apply_reco_acceptance_cut``): the TARGET already carries the same cut
+        statically from the loaders (``load_pflow_targets_ragged(reco_pt_cut=...,
+        abs_eta_cut=...)``), so both sides of every shape term live in the same
+        acceptance. Intermediate plots collect the filtered dicts, so they show
+        the post-cut view on both sides. ``None`` (default) disables. Surfaced on
+        the CLI as ``--reco-pt-cut`` / ``--eta-cut``. NOTE: losses are not
+        comparable across different cut settings.
+    truncate_chads : bool
+        Per event, keep only the top-``n_truth_chad`` charged hadrons by pt on
+        the PRED side (``apply_chad_truncation``; the target was truncated
+        statically in the loader with ``truncate_chads=True``). The cap comes
+        from the batch's ``n_truth_chad`` target key. Requires the acceptance
+        cut to run first (wired below) and the ``event_ids``-aligned
+        ``restore_event_format`` (also wired below). Default False.
     epoch_callback : Callable[[int, float], bool] | None
         Optional per-epoch hook called as ``epoch_callback(step, val_loss)`` right
         after the validation loss for that epoch is computed (and after any
@@ -456,19 +481,35 @@ def fit_card_to_fullsim(
             # out["EFlowObject"] has shape (all objects, 20 features)
             out = card(truth_particles_nonpadded)
 
-            # first restore the (events, objects, features) shape by grouping with event number
+            # first restore the (events, objects, features) shape by grouping with
+            # event number; event_ids aligns pred row i with target batch row i
+            # (required by the per-event chad truncation below, harmless otherwise).
             eflow_objects = out["EFlowObject"]
-            eflow_objects_restored = restore_event_format(eflow_objects, mask)
+            eflow_objects_restored = restore_event_format(
+                eflow_objects, mask, event_ids=batch_event_ids(truth_particles, mask)
+            )
             # Then extract the observables from predicted objects
             pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
             # Differentiable per-region expected counts -- the honest gradient signal
             # for the eff_logits (track species) and the resolution params (calo
-            # object counts, via the soft significance gate).
+            # object counts, via the soft significance gate). Injected BEFORE the
+            # filters below (they pass non-object keys through untouched).
             for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                 pred_observables[pred_key] = out[out_key]
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+            # Acceptance cut (pred side only -- the target was cut in the loader),
+            # then the truth-ceiling chad truncation (cut first: the ranking must
+            # only see in-acceptance chads).
+            if reco_pt_cut is not None or reco_abs_eta_cut is not None:
+                pred_observables = apply_reco_acceptance_cut(
+                    pred_observables, reco_pt_cut, reco_abs_eta_cut
+                )
+            if truncate_chads:
+                pred_observables = apply_chad_truncation(
+                    pred_observables, target_observables["n_truth_chad"]
+                )
             loss, breakdown = loss_fn(
                 pred_observables, target_observables, want_breakdown=True
             )
@@ -565,12 +606,26 @@ def fit_card_to_fullsim(
                 out = card(truth_particles_nonpadded)
 
                 eflow_objects = out["EFlowObject"]
-                eflow_objects_restored = restore_event_format(eflow_objects, mask)
+                eflow_objects_restored = restore_event_format(
+                    eflow_objects, mask, event_ids=batch_event_ids(truth_particles, mask)
+                )
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
                 for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                     pred_observables[pred_key] = out[out_key]
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+                # Same pred-side acceptance cut + chad truncation as the train
+                # loop (the target is cut/truncated statically in the loader);
+                # the intermediate-plot accumulators below therefore collect the
+                # filtered view on both sides.
+                if reco_pt_cut is not None or reco_abs_eta_cut is not None:
+                    pred_observables = apply_reco_acceptance_cut(
+                        pred_observables, reco_pt_cut, reco_abs_eta_cut
+                    )
+                if truncate_chads:
+                    pred_observables = apply_chad_truncation(
+                        pred_observables, target_observables["n_truth_chad"]
+                    )
                 val_loss = loss_fn(pred_observables, target_observables)
                 val_loss_acc += val_loss.detach()
 

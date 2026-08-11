@@ -28,7 +28,14 @@ from parnassus.torch_delphes.tune_cms_fullsim import (
     fit_card_to_fullsim,
     load_cms_flow_root,
 )
+from parnassus.torch_delphes.SimpleCalorimeter import (
+    calo_count_eta_edges,
+    calo_count_region_masks,
+)
 from parnassus.torch_delphes.tune_cms_fullsim.data import (
+    apply_chad_truncation,
+    apply_reco_acceptance_cut,
+    batch_event_ids,
     load_pflow_targets,
     load_pflow_targets_from_tensor,
     load_pflow_targets_ragged,
@@ -248,9 +255,9 @@ def test_delphes_collate_reproduces_dense_batch(fixture_root: Path):
     ragged_input = batch["truth_particles"][torch.any(batch["truth_particles"] != 0, dim=-1)]
     assert torch.equal(ragged_input, dense_input)
 
-    # Targets: only directly comparable when no truth event was skipped (empty
-    # truth events would desync the dataset's truth-count from the full target
-    # count -- a pre-existing behavior we deliberately preserve).
+    # Targets: the truth loader keeps empty events as zero-row entries, so the
+    # dataset's truth-count always matches the full target count and the dense
+    # and collated targets are directly comparable.
     if len(ragged) == dense_tgt["multiplicity"].shape[0]:
         for key in OBSERVABLES:
             assert torch.equal(batch[key], dense_tgt[key]), f"mismatch in target '{key}'"
@@ -345,12 +352,21 @@ def test_fit_card_to_fullsim_runs(fixture_root: Path, tmp_path: Path):
 
 
 def test_get_loss_fn_dispatch():
-    """The dispatcher maps each loss name to the right callable (no data needed)."""
+    """The dispatcher maps each loss name to the right callable (no data needed).
+
+    Both Wasserstein losses dispatch to their ``*_distributed`` wrappers (a
+    no-op passthrough outside DDP); ``soft_hist`` stays non-distributed.
+    """
+    from parnassus.torch_delphes.tune_cms_fullsim.loss import (
+        per_event_wasserstein_loss_distributed,
+        per_pid_wasserstein_1d_loss_distributed,
+    )
+
     assert "wasserstein" in LOSS_CHOICES and "soft_hist" in LOSS_CHOICES
     assert "wasserstein_1d" in LOSS_CHOICES
-    assert get_loss_fn("wasserstein") is per_event_wasserstein_loss
+    assert get_loss_fn("wasserstein") is per_event_wasserstein_loss_distributed
     assert get_loss_fn("soft_hist") is per_pid_soft_hist_loss
-    assert get_loss_fn("wasserstein_1d") is per_pid_wasserstein_1d_loss
+    assert get_loss_fn("wasserstein_1d") is per_pid_wasserstein_1d_loss_distributed
     with pytest.raises(ValueError):
         get_loss_fn("not_a_loss")
 
@@ -785,6 +801,365 @@ def test_fit_wasserstein_1d_runs(fixture_root: Path, tmp_path: Path):
         assert loss == loss  # not NaN
     for vloss in history["val_loss"]:
         assert vloss == vloss
+
+
+# ---------------------------------------------------------------------------
+# Acceptance cuts + truth-ceiling chad truncation
+# ---------------------------------------------------------------------------
+
+
+def _mk_padded_obs(pt_rows: list[list[float]], pid_rows: list[list[int]],
+                   eta_rows: list[list[float]] | None = None) -> dict:
+    """Padded synthetic observables dict for the loss-side filter tests."""
+    n = len(pt_rows)
+    width = max(len(r) for r in pt_rows)
+    pt = torch.zeros((n, width), dtype=torch.float64)
+    pid = torch.zeros((n, width), dtype=torch.float64)
+    eta = torch.zeros((n, width), dtype=torch.float64)
+    for i, (pr, ir) in enumerate(zip(pt_rows, pid_rows)):
+        pt[i, : len(pr)] = torch.tensor(pr, dtype=torch.float64)
+        pid[i, : len(ir)] = torch.tensor(ir, dtype=torch.float64)
+        if eta_rows is not None:
+            eta[i, : len(eta_rows[i])] = torch.tensor(eta_rows[i], dtype=torch.float64)
+    valid = pt != 0
+    obs = {
+        "pt": pt,
+        "eta": eta,
+        "phi": torch.zeros_like(pt),
+        "log_pt": torch.where(valid, torch.log(pt.clamp(min=1e-6)), torch.zeros_like(pt)),
+        "log_E": torch.where(valid, torch.log(pt.clamp(min=1e-6)), torch.zeros_like(pt)),
+        "pid": pid,
+        "multiplicity": valid.sum(dim=1).to(pt.dtype),
+        "ht": pt.sum(dim=1),
+        "log_ht": torch.log(pt.sum(dim=1).clamp(min=1e-6)),
+    }
+    return obs
+
+
+def test_truth_acceptance_cut_matches_hand_selection(fixture_root: Path):
+    """The truth loader's acceptance cut equals a hand selection on the raw arrays."""
+    arrays = load_cms_flow_root(fixture_root, n_events=10)
+    cut_rows = load_truth_events_ragged(arrays, truth_pt_cut=1.0, abs_eta_cut=2.0)
+    assert len(cut_rows) == len(arrays["truth_pt"])
+    for i, row in enumerate(cut_rows):
+        pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
+        eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
+        sel = (pt >= 1.0) & (np.abs(eta) <= 2.0)
+        assert row.shape[0] == int(sel.sum())
+        if row.shape[0]:
+            np.testing.assert_allclose(row[:, ColumnMap.PT].numpy(), pt[sel])
+            assert float(row[:, ColumnMap.PT].min()) >= 1.0
+            assert float(row[:, ColumnMap.ETA].abs().max()) <= 2.0
+
+
+def test_truth_loader_keeps_empty_events():
+    """An event emptied (or born empty) stays in the list as a (0, N_FEATURES) row,
+    keeping the truth list aligned with the (all-events) pflow target loader."""
+    obj = np.empty(3, dtype=object)
+    arrays = {
+        "truth_pt": obj.copy(), "truth_eta": obj.copy(),
+        "truth_phi": obj.copy(), "truth_pdgid": obj.copy(),
+    }
+    vals = {
+        "truth_pt": [np.array([5.0, 0.4]), np.array([]), np.array([0.3])],
+        "truth_eta": [np.array([0.1, 0.2]), np.array([]), np.array([1.0])],
+        "truth_phi": [np.array([0.0, 1.0]), np.array([]), np.array([2.0])],
+        "truth_pdgid": [np.array([211, 22]), np.array([]), np.array([211])],
+    }
+    for k in arrays:
+        for i in range(3):
+            arrays[k][i] = vals[k][i]
+    rows = load_truth_events_ragged(arrays, truth_pt_cut=1.0, abs_eta_cut=2.7)
+    assert len(rows) == 3  # one entry per event, empties kept
+    assert rows[0].shape == (1, N_FEATURES)  # 0.4 GeV particle cut away
+    assert rows[1].shape == (0, N_FEATURES)  # born empty
+    assert rows[2].shape == (0, N_FEATURES)  # emptied by the cut
+
+
+def test_reco_acceptance_cut_target_loader(fixture_root: Path):
+    """The target loader's reco cut applies to every class, and mult/ht/region
+    counts are built from the cut set (sub-cut region bins go to zero)."""
+    arrays = load_cms_flow_root(fixture_root, n_events=16)
+    plain = load_pflow_targets_ragged(arrays)
+    cut = load_pflow_targets_ragged(arrays, reco_pt_cut=1.0, abs_eta_cut=2.0)
+    for i, pt in enumerate(cut["pt"]):
+        if pt.numel():
+            assert float(pt.min()) >= 1.0
+            assert float(cut["eta"][i].abs().max()) <= 2.0
+        # mult/ht recomputed from the kept objects
+        assert float(cut["multiplicity"][i]) == pt.numel()
+        assert torch.isclose(cut["ht"][i], pt.sum().double(), atol=1e-9)
+    # Cut never adds objects
+    assert float(cut["multiplicity"].sum()) <= float(plain["multiplicity"].sum())
+    # Chad (pt, |eta|) region-count targets: rebuilt from the cut set -- every
+    # sub-1-GeV pt region must be empty. Region 0/1 of the chad spec are the
+    # pt <= 1 bins (CMS_EFF_REGION_SPECS: pt edges (0.1, 1.0)).
+    from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
+    spec = CMS_EFF_REGION_SPECS["charged_hadron"]
+    # Identify sub-cut regions by probing the masks with a 0.5 GeV chad at eta 0.
+    probe_pt = np.array([0.5])
+    probe_eta = np.array([0.0])
+    for b, m in enumerate(spec.region_masks(probe_pt, probe_eta)):
+        if m[0]:
+            assert float(cut["chad_region_counts"][:, b].sum()) == 0.0
+    # Calo count-target widths follow the bounded region layout.
+    assert cut["ecal_photon_region_counts"].shape[1] == len(calo_count_eta_edges(True, 2.0)) + 1
+    assert cut["hcal_nh_region_counts"].shape[1] == len(calo_count_eta_edges(False, 2.0)) + 1
+
+
+def test_n_truth_chad_matches_hand_count(fixture_root: Path):
+    """``n_truth_chad`` equals a hand count of truth charged hadrons inside the
+    reco acceptance, and survives split + dataset + collate as a (batch,) tensor."""
+    from parnassus.utils import pid_to_class_vectorized
+
+    arrays = load_cms_flow_root(fixture_root, n_events=12)
+    target = load_pflow_targets_ragged(arrays, reco_pt_cut=1.0, abs_eta_cut=2.7)
+    for i in range(len(arrays["truth_pt"])):
+        t_pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
+        if t_pt.size:
+            t_eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
+            t_pid = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
+            hand = int(np.sum(
+                (pid_to_class_vectorized(t_pid) == 0) & (t_pt >= 1.0) & (np.abs(t_eta) <= 2.7)
+            ))
+        else:
+            hand = 0
+        assert int(target["n_truth_chad"][i]) == hand
+    # Rides the standard split/dataset/collate machinery like the region counts.
+    truth = load_truth_events_ragged(arrays)
+    ds = DelphesDataSet(truth, target, device=torch.device("cpu"))
+    batch = delphes_collate_fn([ds[i] for i in range(min(4, len(ds)))])
+    assert batch["n_truth_chad"].shape == (min(4, len(ds)),)
+    assert torch.equal(batch["n_truth_chad"], target["n_truth_chad"][: min(4, len(ds))])
+
+
+def test_target_chad_truncation(fixture_root: Path):
+    """Loader-side truncation keeps exactly min(n_chad, n_truth_chad) chads per
+    event, keeps the TOP-pt subset, and leaves other classes untouched."""
+    arrays = load_cms_flow_root(fixture_root, n_events=16)
+    plain = load_pflow_targets_ragged(arrays, reco_pt_cut=1.0, abs_eta_cut=2.7)
+    trunc = load_pflow_targets_ragged(
+        arrays, reco_pt_cut=1.0, abs_eta_cut=2.7, truncate_chads=True
+    )
+    for i in range(len(plain["pt"])):
+        p_pid = plain["pid"][i]
+        t_pid = trunc["pid"][i]
+        n_chad_plain = int((p_pid.abs() == 211).sum())
+        n_chad_trunc = int((t_pid.abs() == 211).sum())
+        k = int(plain["n_truth_chad"][i])
+        assert n_chad_trunc == min(n_chad_plain, k)
+        # Top-pt subset: the kept chads are the k hardest of the plain set.
+        plain_chad_pt = plain["pt"][i][p_pid.abs() == 211]
+        trunc_chad_pt = trunc["pt"][i][t_pid.abs() == 211]
+        if n_chad_trunc:
+            expected = torch.sort(plain_chad_pt, descending=True).values[:n_chad_trunc]
+            assert torch.allclose(
+                torch.sort(trunc_chad_pt, descending=True).values, expected
+            )
+        # Other classes byte-identical.
+        for cls_pid in (11, 13, 22, 111):
+            assert int((t_pid.abs() == cls_pid).sum()) == int((p_pid.abs() == cls_pid).sum())
+
+
+def test_apply_reco_acceptance_cut_synthetic():
+    """Exact keep mask, zeroing, recompute, empty batch, gradient, no mutation."""
+    obs = _mk_padded_obs(
+        pt_rows=[[5.0, 0.5, 2.0], [3.0]],
+        pid_rows=[[211, 22, 22], [111]],
+        eta_rows=[[0.1, 0.2, 3.0], [1.0]],
+    )
+    obs["pt"] = obs["pt"].requires_grad_(True)
+    before = {k: v.detach().clone() for k, v in obs.items()}
+    out = apply_reco_acceptance_cut(obs, 1.0, 2.7)
+    # Event 0: 0.5 GeV photon fails pt, 2.0 GeV photon at eta 3.0 fails eta.
+    assert out["multiplicity"].tolist() == [1.0, 1.0]
+    assert out["pt"][0].detach().tolist() == [5.0, 0.0, 0.0]
+    assert out["pid"][0].tolist() == [211.0, 0.0, 0.0]
+    assert torch.isclose(out["ht"][0], torch.tensor(5.0, dtype=torch.float64))
+    # Gradient flows only through kept slots.
+    out["ht"].sum().backward()
+    assert obs["pt"].grad is not None
+    assert obs["pt"].grad[0].tolist() == [1.0, 0.0, 0.0]
+    # No mutation of the input dict's tensors.
+    for k, v in before.items():
+        assert torch.equal(obs[k].detach(), v), f"input {k} mutated"
+    # None thresholds and empty batches pass through.
+    same = apply_reco_acceptance_cut(obs, None, None)
+    assert torch.equal(same["pt"].detach(), obs["pt"].detach())
+    empty = {k: v[:, :0] if v.ndim == 2 else v for k, v in _mk_padded_obs([[1.0]], [[211]]).items()}
+    assert apply_reco_acceptance_cut(empty, 1.0, 2.7)["pt"].shape[1] == 0
+
+
+def test_apply_chad_truncation_synthetic():
+    """Per-event k (incl. k=0 and k>n), pt ties, non-chads untouched, gradient."""
+    obs = _mk_padded_obs(
+        pt_rows=[[5.0, 3.0, 3.0, 2.0, 10.0], [4.0, 1.5, 0.0, 0.0, 0.0]],
+        pid_rows=[[211, 211, 211, 22, 111], [211, 211, 0, 0, 0]],
+    )
+    obs["pt"] = obs["pt"].requires_grad_(True)
+    n_t = torch.tensor([2.0, 0.0], dtype=torch.float64)
+    out = apply_chad_truncation(obs, n_t)
+    # Event 0: keep top-2 chads (5.0 and one of the tied 3.0s), photon + NH untouched.
+    assert int((out["pid"][0].abs() == 211).sum()) == 2
+    kept0 = out["pt"][0].detach()
+    assert 5.0 in kept0.tolist() and 10.0 in kept0.tolist() and 2.0 in kept0.tolist()
+    assert out["multiplicity"][0] == 4.0  # 2 chads + photon + NH
+    # Event 1: k=0 drops ALL chads.
+    assert int((out["pid"][1].abs() == 211).sum()) == 0
+    assert out["multiplicity"][1] == 0.0
+    # k > n keeps everything.
+    out_all = apply_chad_truncation(obs, torch.tensor([99.0, 99.0], dtype=torch.float64))
+    assert torch.equal(out_all["pt"].detach(), obs["pt"].detach())
+    # Gradient flows through kept slots only (event 1 fully dropped chads).
+    out["ht"].sum().backward()
+    assert obs["pt"].grad is not None
+    assert obs["pt"].grad[1].tolist() == [0.0, 0.0, 0.0, 0.0, 0.0]
+
+
+def test_restore_event_format_event_ids_alignment():
+    """With ``event_ids`` pred rows land at their batch positions (shuffled,
+    with an objectless event); ``None`` keeps the legacy sorted layout."""
+    n_features = N_FEATURES
+    # Batch of 3 events with global ids [7, 2, 5]; event 2 (id 5) has no objects.
+    ids = torch.tensor([7, 2, 5])
+    objs = []
+    for ev_id, pt in [(2, 1.0), (7, 3.0), (2, 2.0)]:
+        row = torch.zeros(n_features, dtype=torch.float64)
+        row[ColumnMap.PT] = pt
+        row[ColumnMap.EVENT_NUMBER] = ev_id
+        objs.append(row)
+    eflow = torch.stack(objs)
+    mask = torch.ones((3, 4), dtype=torch.bool)
+    out = restore_event_format(eflow, mask, event_ids=ids)
+    assert out.shape[0] == 3
+    assert sorted(out[0, :, ColumnMap.PT].tolist())[-1] == 3.0  # id 7 -> row 0
+    assert sorted(out[1, :, ColumnMap.PT].tolist())[-2:] == [1.0, 2.0]  # id 2 -> row 1
+    assert out[2].abs().sum() == 0.0  # id 5 produced nothing
+    # Legacy layout: ascending event number (2 -> row 0, 7 -> row 1).
+    legacy = restore_event_format(eflow, mask)
+    assert sorted(legacy[0, :, ColumnMap.PT].tolist())[-2:] == [1.0, 2.0]
+    assert sorted(legacy[1, :, ColumnMap.PT].tolist())[-1] == 3.0
+    # batch_event_ids reads ids from the truth tensor (objectless events get
+    # sentinels that never match).
+    truth = torch.zeros((3, 2, n_features), dtype=torch.float64)
+    for i, ev_id in enumerate([7, 2, 5]):
+        truth[i, 0, ColumnMap.PT] = 1.0
+        truth[i, 0, ColumnMap.EVENT_NUMBER] = ev_id
+    t_mask = torch.any(truth != 0, dim=-1)
+    assert batch_event_ids(truth, t_mask).tolist() == [7, 2, 5]
+
+
+def test_calo_count_region_masks_bounded():
+    """Bounded region layout: edges beyond the bound drop; the final region is
+    capped; unbounded reproduces the legacy masks."""
+    eta = np.array([0.5, 1.6, 2.6, 2.9, 3.5])
+    # Legacy (unbounded) ECal: <=1.5 / (1.5, 2.5] / > 2.5.
+    m = calo_count_region_masks(eta, calo_count_eta_edges(True, None), None)
+    assert len(m) == 3
+    assert m[2].tolist() == [False, False, True, True, True]
+    # Bounded at 2.7: final region (2.5, 2.7]; 2.9 and 3.5 fall nowhere.
+    m = calo_count_region_masks(eta, calo_count_eta_edges(True, 2.7), 2.7)
+    assert len(m) == 3
+    assert m[2].tolist() == [False, False, True, False, False]
+    # HCal bounded at 2.7: the 3.0 edge drops -> single <= 2.7 region.
+    assert calo_count_eta_edges(False, 2.7) == ()
+    m = calo_count_region_masks(eta, (), 2.7)
+    assert len(m) == 1
+    assert m[0].tolist() == [True, True, True, False, False]
+    # Torch tensors work identically (duck-typed).
+    m_t = calo_count_region_masks(torch.from_numpy(eta), (), 2.7)
+    assert m_t[0].tolist() == [True, True, True, False, False]
+
+
+def test_soft_count_pt_gate_monotone_and_shapes(fixture_root: Path):
+    """The card's expected-count outputs follow the bounded region layout, are
+    monotonically non-increasing in the pt gate, and keep resolution-param
+    gradients; the tracking counts are gated too."""
+    arrays = load_cms_flow_root(fixture_root, n_events=8)
+    truth = load_truth_events(arrays)
+    flat = truth[torch.any(truth != 0, dim=-1)]
+
+    def _forward(count_pt_min, count_abs_eta_max):
+        torch.manual_seed(11)
+        card = CMSEnergyFlowDefault(
+            debug=False, learnable=True,
+            count_pt_min=count_pt_min, count_abs_eta_max=count_abs_eta_max,
+        )
+        out = card(flat)
+        return card, out
+
+    _, legacy = _forward(None, None)
+    assert legacy["EcalPhotonExpectedCounts"].shape == (3,)
+    assert legacy["HcalNeutralHadronExpectedCounts"].shape == (2,)
+
+    card, bounded = _forward(1.0, 2.7)
+    assert bounded["EcalPhotonExpectedCounts"].shape == (3,)
+    assert bounded["HcalNeutralHadronExpectedCounts"].shape == (1,)
+    # Gate + bound can only remove counted objects (same seed => same smears).
+    assert float(bounded["EcalPhotonExpectedCounts"].sum()) <= float(
+        legacy["EcalPhotonExpectedCounts"].sum()
+    ) + 1e-9
+    assert float(bounded["ChargedHadronExpectedCounts"].sum()) <= float(
+        legacy["ChargedHadronExpectedCounts"].sum()
+    ) + 1e-9
+
+    _, tighter = _forward(3.0, 2.7)
+    assert float(tighter["EcalPhotonExpectedCounts"].sum()) <= float(
+        bounded["EcalPhotonExpectedCounts"].sum()
+    ) + 1e-9
+
+    # Resolution params still receive gradient through the soft gate.
+    (bounded["EcalPhotonExpectedCounts"].sum()
+     + bounded["HcalNeutralHadronExpectedCounts"].sum()).backward()
+    grads = [
+        p.grad for n, p in card.named_parameters()
+        if "resolution" in n and p.grad is not None and float(p.grad.abs().sum()) > 0
+    ]
+    assert grads, "no resolution parameter received gradient from the gated counts"
+
+
+def test_fit_runs_with_acceptance_cuts(fixture_root: Path, tmp_path: Path):
+    """End-to-end: loaders with cuts + truncation, gated card, fit hooks on --
+    a short wasserstein_1d fit stays finite."""
+    arrays = load_cms_flow_root(fixture_root, n_events=24)
+    device = torch.device("cpu")
+    truth = load_truth_events_ragged(arrays, truth_pt_cut=0.25, abs_eta_cut=2.7)
+    target = load_pflow_targets_ragged(
+        arrays, reco_pt_cut=1.0, abs_eta_cut=2.7, truncate_chads=True
+    )
+    tr_truth, va_truth, _ = split_truth_objects_jagged(truth, 0.7, 0.2)
+    tr_tgt, va_tgt, _ = split_pflow_targets_jagged(target, 0.7, 0.2)
+    train_dl = DelphesDataLoader(
+        DelphesDataSet(tr_truth, tr_tgt, device=device), batch_size=8, shuffle=True
+    )
+    val_dl = DelphesDataLoader(
+        DelphesDataSet(va_truth, va_tgt, device=device), batch_size=8, shuffle=False
+    )
+
+    torch.manual_seed(3)
+    card = CMSEnergyFlowDefault(
+        debug=False, learnable=True, count_pt_min=1.0, count_abs_eta_max=2.7
+    ).to(device)
+    cfg = _trainable_config(
+        card, tmp_path, ["ChargedHadronMomentumSmearing.resolution_module.scale_raw"]
+    )
+    _, param_groups = pc.select_trainable(card, cfg, global_lr=1e-1)
+
+    history = fit_card_to_fullsim(
+        card,
+        train_dl,
+        val_dl,
+        param_groups=param_groups,
+        n_steps=2,
+        log_every=0,
+        loss_name="wasserstein_1d",
+        reco_pt_cut=1.0,
+        reco_abs_eta_cut=2.7,
+        truncate_chads=True,
+    )
+    assert len(history["step"]) == 2
+    for loss in history["loss"] + history["val_loss"]:
+        assert loss == loss and loss not in (float("inf"), float("-inf"))
 
 
 def test_intermediate_plots_include_per_pid_pages(tmp_path: Path):

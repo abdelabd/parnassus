@@ -38,6 +38,10 @@ def load_split_datasets(
     device: torch.device,
     train_fraction: float = 0.7,
     val_fraction: float = 0.2,
+    truth_pt_cut: float | None = None,
+    reco_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
+    truncate_chads: bool = False,
 ) -> tuple[DelphesDataSet, DelphesDataSet]:
     """Load a CMS full-sim ROOT file and build the train/val dataset pair.
 
@@ -58,6 +62,15 @@ def load_split_datasets(
     train_fraction, val_fraction : float
         Fractions of the sample used for the train and validation splits (the
         remainder is held out). Defaults match the CLI (0.7 / 0.2).
+    truth_pt_cut, reco_pt_cut, abs_eta_cut : float | None
+        Acceptance cuts: truth input (``pt >= truth_pt_cut``, ``|eta| <=
+        abs_eta_cut``, all species) and reco target (``pt >= reco_pt_cut``,
+        ``|eta| <= abs_eta_cut``, all classes). ``None`` disables (legacy
+        behavior). See :func:`.data._build_truth_rows` /
+        :func:`.data._build_pflow_event_data`.
+    truncate_chads : bool
+        Truncate the target's reco charged hadrons at the per-event
+        ``n_truth_chad`` ceiling (see :func:`.data._build_pflow_event_data`).
 
     Returns
     -------
@@ -66,8 +79,15 @@ def load_split_datasets(
         :class:`~.dataloader.DelphesDataLoader`.
     """
     arrays = load_cms_flow_root(root_file, n_events=n_events)
-    truth_ragged = load_truth_events_ragged(arrays)
-    target = load_pflow_targets_ragged(arrays)
+    truth_ragged = load_truth_events_ragged(
+        arrays, truth_pt_cut=truth_pt_cut, abs_eta_cut=abs_eta_cut
+    )
+    target = load_pflow_targets_ragged(
+        arrays,
+        reco_pt_cut=reco_pt_cut,
+        abs_eta_cut=abs_eta_cut,
+        truncate_chads=truncate_chads,
+    )
 
     # The uproot arrays dict is the largest remaining transient; free it before
     # the split so peak RSS stays low.

@@ -53,7 +53,27 @@ OBSERVABLES: list[str] = [
     # neutral hadrons) for the differentiable resolution-param count term. Same
     # non-plottable, prediction-less status as the *_region_counts above.
     "ecal_photon_region_counts", "hcal_nh_region_counts",
+    # Per-event count of truth charged hadrons inside the reco acceptance
+    # (pt >= reco_pt_cut, |eta| <= eta_cut) -- the per-event cap used by
+    # apply_chad_truncation. A (n_events,) target-side scalar with no
+    # prediction-side counterpart, so plots skip it like the region counts.
+    "n_truth_chad",
 ]
+
+
+# =============================================================================
+# Acceptance-cut defaults
+# =============================================================================
+#
+# Defaults for the --truth-pt-cut / --reco-pt-cut / --eta-cut CLI args. The truth
+# cut harmonizes the trainee INPUT with the externally preprocessed files (which
+# already apply truth pt >= 0.25, |eta| <= 2.7); the reco cut is applied to BOTH
+# the pflow target and the trainee output (the target files already carry
+# pflow pt >= 1, |eta| <= 2.7, so it is a no-op there at the defaults, but it is
+# a real cut on the trainee: sub-GeV photons and |eta| > 2.7 forward objects).
+DEFAULT_TRUTH_PT_CUT: float = 0.25
+DEFAULT_RECO_PT_CUT: float = 1.0
+DEFAULT_ABS_ETA_CUT: float = 2.7
 
 
 # =============================================================================

@@ -66,7 +66,12 @@ from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
 from .comet_utils import end_comet_experiment, init_comet_experiment
-from .config import _DEFAULT_LR
+from .config import (
+    _DEFAULT_LR,
+    DEFAULT_ABS_ETA_CUT,
+    DEFAULT_RECO_PT_CUT,
+    DEFAULT_TRUTH_PT_CUT,
+)
 
 from .dataloader import DelphesDataLoader
 
@@ -225,6 +230,55 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--truth-pt-cut",
+        type=float,
+        default=DEFAULT_TRUTH_PT_CUT,
+        help=(
+            "Truth-input acceptance: keep truth particles (all species) with "
+            "pt >= this and |eta| <= --eta-cut before feeding the trainee. "
+            f"Default {DEFAULT_TRUTH_PT_CUT} (a no-op on the externally "
+            "preprocessed _selected files, made explicit here). <= 0 disables "
+            "the pt part."
+        ),
+    )
+    parser.add_argument(
+        "--reco-pt-cut",
+        type=float,
+        default=DEFAULT_RECO_PT_CUT,
+        help=(
+            "Reco acceptance: keep reco objects (ALL classes) with pt >= this "
+            "and |eta| <= --eta-cut, applied to BOTH the pflow target (at load "
+            "time; no-op on pre-cut files) and the trainee output (at loss "
+            "time; a real cut: sub-GeV photons, forward NH). Also gates the "
+            "differentiable count terms and sets the floor for the "
+            f"n_truth_chad truncation ceiling. Default {DEFAULT_RECO_PT_CUT}. "
+            "<= 0 disables the pt part. NOTE: losses are not comparable "
+            "across different cut settings."
+        ),
+    )
+    parser.add_argument(
+        "--eta-cut",
+        type=float,
+        default=DEFAULT_ABS_ETA_CUT,
+        help=(
+            "|eta| acceptance bound shared by the truth and reco cuts (and the "
+            f"calo count regions). Default {DEFAULT_ABS_ETA_CUT}, matching the "
+            "preprocessing of the _selected files. <= 0 disables."
+        ),
+    )
+    parser.add_argument(
+        "--no-chad-truncation",
+        action="store_true",
+        help=(
+            "Disable the per-event truth-ceiling charged-hadron truncation "
+            "(top-n_truth_chad by pt on both target and trainee; on by "
+            "default). The truncation removes the reco chads the full-sim data "
+            "contains but a truth-fed sim can never produce (~22/event on the "
+            "pt-hat 2500-3000 sample: K_S/Lambda decay daughters, baryons "
+            "missing from the truth record, GEANT4 material secondaries)."
+        ),
+    )
+    parser.add_argument(
         "--param-config",
         type=Path,
         required=True,
@@ -340,6 +394,18 @@ def main() -> None:
         )
     log(f"Loading full-simulation events from {root_file}")
 
+    # Resolve the acceptance-cut args (<= 0 disables the respective part).
+    truth_pt_cut = args.truth_pt_cut if args.truth_pt_cut > 0 else None
+    reco_pt_cut = args.reco_pt_cut if args.reco_pt_cut > 0 else None
+    abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
+    truncate_chads = not args.no_chad_truncation
+    log(
+        f"[filter] truth cut: pt >= {truth_pt_cut}, |eta| <= {abs_eta_cut} | "
+        f"reco cut (target+trainee, all classes): pt >= {reco_pt_cut}, "
+        f"|eta| <= {abs_eta_cut} | chad truncation at n_truth_chad: "
+        f"{'ON' if truncate_chads else 'OFF'}"
+    )
+
     # Ragged (no global padding): truth particles are kept as a per-event list and
     # each batch is padded to its own max in delphes_collate_fn. Padding every event
     # to the GLOBAL max multiplicity here would allocate ~50 GB at 100k events. The
@@ -347,8 +413,20 @@ def main() -> None:
     # _region_counts) the differentiable count terms match against. Shared with the
     # Optuna search via tune_cms_fullsim.runner.
     train_dataset, val_dataset = load_split_datasets(
-        root_file, n_events=args.n_events, device=device
+        root_file,
+        n_events=args.n_events,
+        device=device,
+        truth_pt_cut=truth_pt_cut,
+        reco_pt_cut=reco_pt_cut,
+        abs_eta_cut=abs_eta_cut,
+        truncate_chads=truncate_chads,
     )
+    if truncate_chads:
+        n_t = train_dataset.n_truth_chad
+        log(
+            f"[filter] mean n_truth_chad (train split) = {float(n_t.mean()):.2f} "
+            f"-- the per-event ceiling the reco chads are truncated to"
+        )
 
     # If DDP then each rank sees disjoint shard -- keep the jagged split
     # output as-is and only shard at the DataLoader level.
@@ -390,7 +468,14 @@ def main() -> None:
 
     # Same initial parameters for DDP
     torch.manual_seed(args.seed)
-    trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+    trainee = CMSEnergyFlowDefault(
+        debug=False,
+        learnable=True,
+        # Harmonize the differentiable count terms with the reco acceptance cut
+        # (tracking expected counts + calo soft counts; object creation untouched).
+        count_pt_min=reco_pt_cut,
+        count_abs_eta_max=abs_eta_cut,
+    ).to(device)
 
     # The param config drives everything: ``value`` initializes every learnable
     # parameter, ``trainable`` selects the optimized subset (per element, with a
@@ -471,6 +556,9 @@ def main() -> None:
         loss_name=args.loss,
         pid_weighting=args.pid_weighting,
         pid_weight_floor=args.pid_weight_floor,
+        reco_pt_cut=reco_pt_cut,
+        reco_abs_eta_cut=abs_eta_cut,
+        truncate_chads=truncate_chads,
         comet_exp=comet_exp,
     )
 
@@ -499,6 +587,12 @@ def main() -> None:
             # notebook cache key can detect changes). 0 = disabled.
             "early_stopping_patience": max(0, args.early_stopping_patience),
             "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
+            # Acceptance cuts + truncation (resolved values; None = disabled).
+            # Losses are NOT comparable across different settings of these.
+            "truth_pt_cut": truth_pt_cut,
+            "reco_pt_cut": reco_pt_cut,
+            "eta_cut": abs_eta_cut,
+            "chad_truncation": truncate_chads,
         }
         # The {metadata, history, best_result} schema (best = min val loss) is the
         # single source of truth shared with the Optuna search and consumed by

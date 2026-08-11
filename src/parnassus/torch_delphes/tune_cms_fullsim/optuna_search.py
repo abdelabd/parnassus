@@ -111,6 +111,7 @@ from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 
 from .comet_utils import end_comet_experiment, init_comet_experiment
+from .config import DEFAULT_ABS_ETA_CUT, DEFAULT_RECO_PT_CUT, DEFAULT_TRUTH_PT_CUT
 from .dataloader import DelphesDataLoader
 from .distributed import _cleanup_distributed, _init_distributed
 from .loss import (
@@ -523,6 +524,45 @@ def main() -> None:
     parser.add_argument("--count-rate-floor", type=float, default=COUNT_RATE_FLOOR)
     parser.add_argument("--event-weight", type=float, default=EVENT_WEIGHT)
     parser.add_argument(
+        "--truth-pt-cut",
+        type=float,
+        default=DEFAULT_TRUTH_PT_CUT,
+        help=(
+            "Truth-input acceptance: pt >= this and |eta| <= --eta-cut, all "
+            f"species. Default {DEFAULT_TRUTH_PT_CUT} (no-op on the _selected "
+            "files). <= 0 disables the pt part."
+        ),
+    )
+    parser.add_argument(
+        "--reco-pt-cut",
+        type=float,
+        default=DEFAULT_RECO_PT_CUT,
+        help=(
+            "Reco acceptance on BOTH target and trainee (all classes): pt >= "
+            "this and |eta| <= --eta-cut; also gates the count terms and sets "
+            "the n_truth_chad truncation-ceiling floor. Default "
+            f"{DEFAULT_RECO_PT_CUT}. <= 0 disables the pt part. Losses are not "
+            "comparable across different settings."
+        ),
+    )
+    parser.add_argument(
+        "--eta-cut",
+        type=float,
+        default=DEFAULT_ABS_ETA_CUT,
+        help=(
+            "|eta| acceptance bound shared by the truth and reco cuts (and the "
+            f"calo count regions). Default {DEFAULT_ABS_ETA_CUT}. <= 0 disables."
+        ),
+    )
+    parser.add_argument(
+        "--no-chad-truncation",
+        action="store_true",
+        help=(
+            "Disable the per-event truth-ceiling charged-hadron truncation "
+            "(on by default; see the tune_cms_fullsim CLI help)."
+        ),
+    )
+    parser.add_argument(
         "--early-stopping-patience",
         type=int,
         default=10,
@@ -580,9 +620,17 @@ def main() -> None:
             raise SystemExit(f"--init-config {args.init_config} does not exist.")
         init_cfg = pc.load_param_config(args.init_config)
 
+    # Resolve the acceptance-cut args (<= 0 disables the respective part).
+    truth_pt_cut = args.truth_pt_cut if args.truth_pt_cut > 0 else None
+    reco_pt_cut = args.reco_pt_cut if args.reco_pt_cut > 0 else None
+    abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
+    truncate_chads = not args.no_chad_truncation
+
     log(
         f"[optuna] world_size={world_size} device={device} n_trials={n_trials} "
-        f"loss={args.loss!r} pid_weighting={args.pid_weighting!r}"
+        f"loss={args.loss!r} pid_weighting={args.pid_weighting!r} "
+        f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
+        f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'}"
     )
 
     # Load the data ONCE per rank (reused across all trials; under DDP a
@@ -590,12 +638,24 @@ def main() -> None:
     log(f"[optuna] loading events from {args.root_file} ...")
     t0 = time.perf_counter()
     train_dataset, val_dataset = load_split_datasets(
-        args.root_file, n_events=args.n_events, device=device
+        args.root_file,
+        n_events=args.n_events,
+        device=device,
+        truth_pt_cut=truth_pt_cut,
+        reco_pt_cut=reco_pt_cut,
+        abs_eta_cut=abs_eta_cut,
+        truncate_chads=truncate_chads,
     )
     log(
         f"[optuna] loaded {len(train_dataset)} train / {len(val_dataset)} val events "
         f"in {time.perf_counter() - t0:.1f}s"
     )
+    if truncate_chads:
+        log(
+            f"[filter] mean n_truth_chad (train split) = "
+            f"{float(train_dataset.n_truth_chad.mean()):.2f} -- the per-event "
+            "ceiling the reco chads are truncated to"
+        )
 
     def _run_fit_collective(
         cfg: dict,
@@ -618,7 +678,14 @@ def main() -> None:
         """
         _reclaim_gpu(device)
         torch.manual_seed(args.seed)  # identical init + smearing on every rank
-        trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+        trainee = CMSEnergyFlowDefault(
+            debug=False,
+            learnable=True,
+            # Harmonize the differentiable count terms with the reco acceptance
+            # cut (tracking expected counts + calo soft counts).
+            count_pt_min=reco_pt_cut,
+            count_abs_eta_max=abs_eta_cut,
+        ).to(device)
         pc.apply_param_config(trainee, cfg)
         params_to_train, param_groups = pc.select_trainable(trainee, cfg, global_lr=lr)
         if not params_to_train:
@@ -691,6 +758,9 @@ def main() -> None:
             loss_name=args.loss,
             pid_weighting=args.pid_weighting,
             pid_weight_floor=args.pid_weight_floor,
+            reco_pt_cut=reco_pt_cut,
+            reco_abs_eta_cut=abs_eta_cut,
+            truncate_chads=truncate_chads,
             epoch_callback=epoch_callback,
             comet_exp=comet_exp,
         )
@@ -785,6 +855,12 @@ def main() -> None:
             "world_size": world_size,
             "early_stopping_patience": max(0, args.early_stopping_patience),
             "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
+            # Acceptance cuts + truncation (resolved values; None = disabled).
+            # Losses are NOT comparable across different settings of these.
+            "truth_pt_cut": truth_pt_cut,
+            "reco_pt_cut": reco_pt_cut,
+            "eta_cut": abs_eta_cut,
+            "chad_truncation": truncate_chads,
         }
         write_history_json(round_dir / "history.json", history, metadata)
 

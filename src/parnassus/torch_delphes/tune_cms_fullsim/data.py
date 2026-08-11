@@ -28,6 +28,10 @@ from parnassus.data.particle_io import (
     get_mass_from_pdg_id,
 )
 from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
+from parnassus.torch_delphes.SimpleCalorimeter import (
+    calo_count_eta_edges,
+    calo_count_region_masks,
+)
 from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
 from .config import PFLOW_BRANCHES, TRUTH_BRANCHES
@@ -44,32 +48,18 @@ _COUNT_TERM_SPECIES: tuple[tuple[str, int, str], ...] = (
 )
 
 # Per-species calorimeter object-count targets for the differentiable resolution-param
-# count term. Unlike the efficiency regions above these bin by |eta| ONLY (different
-# edges), matching the soft significance gate in ``SimpleCalorimeter.forward``: ECal
-# photons (|pid|==22) -> barrel<=1.5 / endcap(1.5,2.5] / forward>2.5; HCal neutral
-# hadrons (|pid|==111) -> central<=3.0 / forward>3.0. Tuple = (|pid| selecting the
-# species, |eta| upper edges (the final region is > the last edge), target dict key).
-# The edges MUST stay identical to the gate's region_masks.
-_CALO_COUNT_SPECIES: tuple[tuple[int, tuple[float, ...], str], ...] = (
-    (22, (1.5, 2.5), "ecal_photon_region_counts"),
-    (111, (3.0,), "hcal_nh_region_counts"),
+# count term. Unlike the efficiency regions above these bin by |eta| ONLY, matching
+# the soft significance gate in ``SimpleCalorimeter.forward``: ECal photons
+# (|pid|==22) and HCal neutral hadrons (|pid|==111). Tuple = (|pid| selecting the
+# species, is_ecal, target dict key). The region edges are derived from the SAME
+# shared helpers (calo_count_eta_edges / calo_count_region_masks in
+# parnassus.torch_delphes.SimpleCalorimeter) that the soft gate uses, optionally
+# bounded by the reco |eta| acceptance cut, so pred and target region layouts
+# cannot drift.
+_CALO_COUNT_SPECIES: tuple[tuple[int, bool, str], ...] = (
+    (22, True, "ecal_photon_region_counts"),
+    (111, False, "hcal_nh_region_counts"),
 )
-
-
-def _calo_eta_region_masks(abs_eta: np.ndarray, upper_edges: tuple[float, ...]) -> list[np.ndarray]:
-    """|eta| region masks matching the SimpleCalorimeter soft-gate regions.
-
-    For ``upper_edges = (1.5, 2.5)`` returns 3 masks: ``<=1.5``, ``(1.5, 2.5]``,
-    ``>2.5`` (the ``<=`` lower edges and ``>`` final edge match the gate exactly).
-    """
-    masks: list[np.ndarray] = []
-    for j, up in enumerate(upper_edges):
-        if j == 0:
-            masks.append(abs_eta <= up)
-        else:
-            masks.append((abs_eta > upper_edges[j - 1]) & (abs_eta <= up))
-    masks.append(abs_eta > upper_edges[-1])
-    return masks
 
 # =============================================================================
 # ROOT I/O
@@ -117,13 +107,24 @@ def load_cms_flow_root(
 # Constructing inputs
 # =============================================================================
 
-def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
+def _build_truth_rows(
+    arrays: dict[str, np.ndarray],
+    truth_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
+) -> list[np.ndarray]:
     """Build the per-event ``(n_particles, N_FEATURES)`` truth rows (float64).
 
     Shared by :func:`load_truth_events` (pads + stacks them into a dense tensor)
-    and :func:`load_truth_events_ragged` (keeps them ragged). Empty events (zero
-    truth particles) are skipped, so the returned list has one entry per
-    *non-empty* event, in file order.
+    and :func:`load_truth_events_ragged` (keeps them ragged). The returned list
+    has exactly one entry per event, in file order; an event with zero truth
+    particles contributes a ``(0, N_FEATURES)`` row so the list stays aligned
+    with the pflow target loader (which also keeps every event).
+
+    ``truth_pt_cut`` / ``abs_eta_cut`` apply an explicit acceptance selection
+    (``pt >= truth_pt_cut`` and ``|eta| <= abs_eta_cut``) to ALL truth species
+    before the rows are built. At the CLI defaults (0.25 / 2.7) this is a no-op
+    on the externally preprocessed files, but it makes the harmonization
+    explicit in code. ``None`` disables the respective part.
     """
     rows_list: list[np.ndarray] = []
     key_0 = arrays.keys().__iter__().__next__()
@@ -139,13 +140,24 @@ def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
         pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
         phi = np.asarray(arrays["truth_phi"][i], dtype=np.float64)
-        n_p = pt.shape[0]
-        if n_p == 0:
-            continue
         # Real PDG IDs (K_L0=130, n=2112, K+/-=321, p=2212, ...), carried
         # through unchanged so the ECal/HCal energy-fraction LUT routes each
         # species correctly instead of collapsing to the lossy class buckets.
         pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
+        if truth_pt_cut is not None or abs_eta_cut is not None:
+            sel = np.ones(pt.shape[0], dtype=bool)
+            if truth_pt_cut is not None:
+                sel &= pt >= truth_pt_cut
+            if abs_eta_cut is not None:
+                sel &= np.abs(eta) <= abs_eta_cut
+            pt, eta, phi, pids = pt[sel], eta[sel], phi[sel], pids[sel]
+        n_p = pt.shape[0]
+        if n_p == 0:
+            # Keep the empty event as a zero-row entry (NOT dropped): the pflow
+            # target loader keeps every event, so dropping here would silently
+            # desync truth[i] from target[i] for all subsequent events.
+            rows_list.append(np.zeros((0, N_FEATURES), dtype=np.float64))
+            continue
         # PDG-aware mass and charge so the energy reconstruction and the
         # B-field track curvature use the correct values per species.
         mass = get_mass_from_pdg_id(pids)
@@ -174,13 +186,19 @@ def _build_truth_rows(arrays: dict[str, np.ndarray]) -> list[np.ndarray]:
     return rows_list
 
 
-def load_truth_events(arrays: dict[str, np.ndarray],):
+def load_truth_events(
+    arrays: dict[str, np.ndarray],
+    truth_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
+):
     """
     This task will pick truth particles from the input array, then it will
     pad the objects in each event to the max number of particles across events, and finally
     the output has shape (n_events, max_n_particles, n_features) in tensor form.
+
+    ``truth_pt_cut`` / ``abs_eta_cut``: see :func:`_build_truth_rows`.
     """
-    rows_list = _build_truth_rows(arrays)
+    rows_list = _build_truth_rows(arrays, truth_pt_cut=truth_pt_cut, abs_eta_cut=abs_eta_cut)
     if not rows_list:
         return torch.zeros((0, N_FEATURES), dtype=torch.float64)
 
@@ -202,24 +220,35 @@ def load_truth_events(arrays: dict[str, np.ndarray],):
     return torch.from_numpy(stacked_rows)
 
 
-def load_truth_events_ragged(arrays: dict[str, np.ndarray]) -> list[torch.Tensor]:
+def load_truth_events_ragged(
+    arrays: dict[str, np.ndarray],
+    truth_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
+) -> list[torch.Tensor]:
     """Ragged counterpart of :func:`load_truth_events`.
 
     Returns the per-event truth particles as a ``list`` of ``(n_particles_i,
-    N_FEATURES)`` float64 tensors (one per non-empty event, file order) instead
-    of padding every event up to the GLOBAL max multiplicity and stacking into a
-    dense ``(n_events, max_n_particles, N_FEATURES)`` tensor. The dense form wastes
-    ~max/mean memory (it pads to the busiest event in the whole file, ~50 GB at
-    100k events) and the fit loop immediately un-pads it anyway, so the ragged
-    list + per-batch padding (see ``DelphesDataSet`` / ``delphes_collate_fn``) is
-    numerically identical and an order of magnitude smaller.
+    N_FEATURES)`` float64 tensors (one per event, file order; empty events give
+    ``(0, N_FEATURES)`` entries) instead of padding every event up to the GLOBAL
+    max multiplicity and stacking into a dense ``(n_events, max_n_particles,
+    N_FEATURES)`` tensor. The dense form wastes ~max/mean memory (it pads to the
+    busiest event in the whole file, ~50 GB at 100k events) and the fit loop
+    immediately un-pads it anyway, so the ragged list + per-batch padding (see
+    ``DelphesDataSet`` / ``delphes_collate_fn``) is numerically identical and an
+    order of magnitude smaller.
+
+    ``truth_pt_cut`` / ``abs_eta_cut``: see :func:`_build_truth_rows`.
     """
-    return [torch.from_numpy(row) for row in _build_truth_rows(arrays)]
+    return [
+        torch.from_numpy(row)
+        for row in _build_truth_rows(arrays, truth_pt_cut=truth_pt_cut, abs_eta_cut=abs_eta_cut)
+    ]
 
 
 def restore_event_format(
     eflow_objects: torch.Tensor,
     mask: torch.Tensor,
+    event_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Regroup the flat ``EFlowObject`` tensor back into per-event format.
 
@@ -233,6 +262,15 @@ def restore_event_format(
     dense ids; events that produced zero objects are absent from the input and end
     up as all-zero rows. The op is fully vectorized (no loop) and
     differentiable w.r.t. the ``eflow_objects`` values.
+
+    ``event_ids`` (optional): the ``(n_events,)`` global event numbers of the
+    batch IN BATCH ORDER (see :func:`batch_event_ids`). When given, output row
+    ``i`` holds the objects of event ``event_ids[i]``, so the prediction rows
+    line up with the target batch rows -- REQUIRED by any per-event pairing such
+    as :func:`apply_chad_truncation` (without it rows are ordered by ascending
+    global event number, which under a shuffled sampler is NOT the batch order;
+    purely distributional losses are unaffected either way). When ``None``,
+    the legacy ascending-event-number layout is used.
     """
     device = eflow_objects.device
     n_events = mask.shape[0]  # batch size, including events with zero objects
@@ -244,9 +282,17 @@ def restore_event_format(
         )
 
     event_numbers = eflow_objects[:, ColumnMap.EVENT_NUMBER].long()
-    # Map the shuffled/global event numbers to dense ids in [0, n_unique). Events
-    # with no objects are absent here and stay all-zero in the padded output.
-    _, local_event = torch.unique(event_numbers, sorted=True, return_inverse=True)
+    if event_ids is not None:
+        # Map each object's global event number to its BATCH position, so pred
+        # row i == target row i. searchsorted over the sorted ids, then undo the
+        # sort permutation.
+        sorted_ids, perm = torch.sort(event_ids.long())
+        pos = torch.searchsorted(sorted_ids, event_numbers)
+        local_event = perm[pos]
+    else:
+        # Map the shuffled/global event numbers to dense ids in [0, n_unique). Events
+        # with no objects are absent here and stay all-zero in the padded output.
+        _, local_event = torch.unique(event_numbers, sorted=True, return_inverse=True)
 
     counts = torch.bincount(local_event, minlength=n_events)  # objects per event
     max_n_objects = int(counts.max().item())
@@ -269,18 +315,49 @@ def restore_event_format(
 # Constructing targets
 # =============================================================================
 
-def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
+def _build_pflow_event_data(
+    arrays: dict[str, np.ndarray],
+    reco_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
+    truncate_chads: bool = False,
+):
     """Build the per-event pflow target arrays shared by the dense and ragged loaders.
 
     Returns ``(n_events, all_pt, all_eta, all_e, all_pids, per_event_mult,
-    per_event_ht, per_event_region_counts)`` where the ``all_*`` are per-event
-    lists of variable-length 1-D float64 arrays (``all_pids`` int64) and the
-    ``per_event_*`` are dense ``(n_events, ...)`` arrays. Every event is kept
-    (including empty ones), so the first axis is the full event count.
+    per_event_ht, per_event_n_truth_chad, per_event_region_counts)`` where the
+    ``all_*`` are per-event lists of variable-length 1-D float64 arrays
+    (``all_pids`` int64) and the ``per_event_*`` are dense ``(n_events, ...)``
+    arrays. Every event is kept (including empty ones), so the first axis is the
+    full event count.
+
+    Acceptance / truncation (all default off = legacy behavior):
+
+    - ``reco_pt_cut`` / ``abs_eta_cut``: keep reco objects (ALL classes) with
+      ``pt >= reco_pt_cut`` and ``|eta| <= abs_eta_cut``. At the CLI defaults
+      (1.0 / 2.7) this is a no-op on the externally preprocessed target files but
+      mirrors the cut applied to the trainee output in the fit loop.
+    - ``per_event_n_truth_chad``: count of truth charged hadrons inside the SAME
+      acceptance (``pt >= reco_pt_cut``, ``|eta| <= abs_eta_cut``) -- the
+      per-event ceiling on how many reco chads a truth-fed sim could produce.
+      Zero when the truth branches are absent from ``arrays``.
+    - ``truncate_chads``: per event, keep only the top-``n_truth_chad``
+      charged hadrons by pt (other classes untouched). Removes the reco chads
+      the data contains but a truth-fed sim can never make (decay-in-flight
+      daughters, baryons missing from the truth record, GEANT4 material
+      secondaries). Everything downstream (mult, ht, region counts -- including
+      the chad count-term targets) is built from the cut + truncated set.
     """
     # get num of events
     key_0 = arrays.keys().__iter__().__next__()
     n_events = len(arrays[key_0])
+
+    has_truth = "truth_pt" in arrays and "truth_pdgid" in arrays
+    if truncate_chads and not has_truth:
+        raise KeyError(
+            "truncate_chads=True requires the truth_pt/truth_eta/truth_pdgid "
+            "branches in the loaded arrays to count the per-event truth "
+            "charged-hadron ceiling, but they are absent."
+        )
 
     all_pt: list[np.ndarray] = []
     all_eta: list[np.ndarray] = []
@@ -289,6 +366,7 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
     all_pids: list[np.ndarray] = []
     per_event_mult = np.zeros(n_events, dtype=np.float64)
     per_event_ht = np.zeros(n_events, dtype=np.float64)
+    per_event_n_truth_chad = np.zeros(n_events, dtype=np.float64)
     # Per-event reconstructed per-species count in each RECO (pt, |eta|) region.
     # These are the (realistic, data-only) TARGETS for the differentiable count terms:
     # the trainee builds a differentiable expected count in these SAME reco bins from
@@ -301,19 +379,63 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
     }
     # Calorimeter object-count targets share the same dict, so they spread into the
     # loader output (and the loss) automatically alongside the efficiency counts.
+    # Region layout (possibly |eta|-bounded) comes from the shared helpers so it
+    # matches the card's soft-count regions when both get the same abs_eta_cut.
     per_event_region_counts.update({
-        key: np.zeros((n_events, len(upper_edges) + 1), dtype=np.float64)
-        for _pid, upper_edges, key in _CALO_COUNT_SPECIES
+        key: np.zeros(
+            (n_events, len(calo_count_eta_edges(is_ecal, abs_eta_cut)) + 1),
+            dtype=np.float64,
+        )
+        for _pid, is_ecal, key in _CALO_COUNT_SPECIES
     })
     for i in range(n_events):
         pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
         phi = np.asarray(arrays["pflow_phi"][i], dtype=np.float64)
         cls = np.asarray(arrays["pflow_class"][i], dtype=np.int64)
-        # Reconstruct per-particle energy: E = sqrt(p^2 + m^2) with
-        # |p| = pt * cosh(eta) and m from the class -> PDG -> mass map.
+        # Reco acceptance cut (all classes) BEFORE anything downstream, so the
+        # observables, ht and every region-count target see the cut set only.
+        if reco_pt_cut is not None or abs_eta_cut is not None:
+            sel = np.ones(pt.shape[0], dtype=bool)
+            if reco_pt_cut is not None:
+                sel &= pt >= reco_pt_cut
+            if abs_eta_cut is not None:
+                sel &= np.abs(eta) <= abs_eta_cut
+            pt, eta, phi, cls = pt[sel], eta[sel], phi[sel], cls[sel]
         pids = class_to_pid_vectorized(cls) if pt.size else np.empty(0, dtype=np.int64)
         abs_pid = np.abs(pids)
+
+        # Per-event truth charged-hadron ceiling, counted in the SAME acceptance
+        # as the reco cut (a sub-cut truth chad cannot make an in-acceptance reco
+        # chad; momentum smearing is percent-level). Loop index i is file order in
+        # BOTH collections, so this stays aligned with the reco arrays.
+        if has_truth:
+            t_pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
+            if t_pt.size:
+                t_eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
+                t_pids = np.asarray(arrays["truth_pdgid"][i], dtype=np.int64)
+                t_sel = pid_to_class_vectorized(t_pids) == 0  # any charged hadron
+                if reco_pt_cut is not None:
+                    t_sel &= t_pt >= reco_pt_cut
+                if abs_eta_cut is not None:
+                    t_sel &= np.abs(t_eta) <= abs_eta_cut
+                per_event_n_truth_chad[i] = float(np.sum(t_sel))
+
+        # Truncate reco charged hadrons at the truth ceiling: keep the top-k by
+        # pt (stable sort => deterministic on ties), all other classes untouched.
+        if truncate_chads:
+            k = int(per_event_n_truth_chad[i])
+            chad_idx = np.flatnonzero(abs_pid == 211)
+            if chad_idx.size > k:
+                order = np.argsort(-pt[chad_idx], kind="stable")
+                keep = np.ones(pt.shape[0], dtype=bool)
+                keep[chad_idx[order[k:]]] = False
+                pt, eta, phi, pids, abs_pid = (
+                    pt[keep], eta[keep], phi[keep], pids[keep], abs_pid[keep]
+                )
+
+        # Reconstruct per-particle energy: E = sqrt(p^2 + m^2) with
+        # |p| = pt * cosh(eta) and m from the class -> PDG -> mass map.
         mass = np.where(
             abs_pid == 11,
             0.000511,
@@ -338,9 +460,12 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
             for b, region_mask in enumerate(spec.region_masks(pt, abs_eta)):
                 per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
         # Calorimeter object counts: |eta|-only regions matching the soft gate.
-        for pid_sel, upper_edges, key in _CALO_COUNT_SPECIES:
+        for pid_sel, is_ecal, key in _CALO_COUNT_SPECIES:
             is_species = abs_pid == pid_sel
-            for b, region_mask in enumerate(_calo_eta_region_masks(abs_eta, upper_edges)):
+            edges = calo_count_eta_edges(is_ecal, abs_eta_cut)
+            for b, region_mask in enumerate(
+                calo_count_region_masks(abs_eta, edges, abs_eta_cut)
+            ):
                 per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
 
     return (
@@ -352,15 +477,25 @@ def _build_pflow_event_data(arrays: dict[str, np.ndarray]):
         all_pids,
         per_event_mult,
         per_event_ht,
+        per_event_n_truth_chad,
         per_event_region_counts,
     )
 
 
-def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = 1e-6):
+def load_pflow_targets(
+    arrays: dict[str, np.ndarray],
+    log_pt_floor: float = 1e-6,
+    reco_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
+    truncate_chads: bool = False,
+):
     """
     This task will pick the pflow objects from the input array, then it will
     pad the objects in each event to the max number of particles across events, and finally
     the output is a dict of tensors, each with shape (n_events, max_n_particles) except for multiplicity and ht which have shape (n_events,).
+
+    ``reco_pt_cut`` / ``abs_eta_cut`` / ``truncate_chads``: see
+    :func:`_build_pflow_event_data`.
     """
     (
         n_events,
@@ -371,8 +506,14 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = 1e-6
         all_pids,
         per_event_mult,
         per_event_ht,
+        per_event_n_truth_chad,
         per_event_region_counts,
-    ) = _build_pflow_event_data(arrays)
+    ) = _build_pflow_event_data(
+        arrays,
+        reco_pt_cut=reco_pt_cut,
+        abs_eta_cut=abs_eta_cut,
+        truncate_chads=truncate_chads,
+    )
 
     # shape of all_pt, all_eta, all_e is (num_events, num_particles_in_event); num_particles_in_event can vary across events
     # pad to the max num_particles across events and stack into a single tensor of shape (num_events, max_num_particles)
@@ -420,21 +561,32 @@ def load_pflow_targets(arrays: dict[str, np.ndarray], log_pt_floor: float = 1e-6
         "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
+        "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
         **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 
 
-def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float = 1e-6):
+def load_pflow_targets_ragged(
+    arrays: dict[str, np.ndarray],
+    log_pt_floor: float = 1e-6,
+    reco_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
+    truncate_chads: bool = False,
+):
     """Ragged counterpart of :func:`load_pflow_targets`.
 
     The per-particle observables (``pt``, ``eta``, ``log_pt``, ``log_E``, ``pid``)
     are returned as a ``list`` of per-event 1-D float64 tensors instead of dense
     ``(n_events, max_n_particles)`` arrays padded to the GLOBAL max multiplicity.
-    The per-event scalars (``multiplicity``, ``ht``, ``log_ht``) and the per-region
-    count targets (``*_region_counts``) stay dense ``(n_events, ...)`` exactly as in
-    the dense loader. Per-batch padding in ``delphes_collate_fn`` reconstructs the
-    same batch the fit loop expects (padded slots carry ``pid == 0`` and are dropped
-    by the loss), so this is numerically identical at a fraction of the memory.
+    The per-event scalars (``multiplicity``, ``ht``, ``log_ht``, ``n_truth_chad``)
+    and the per-region count targets (``*_region_counts``) stay dense
+    ``(n_events, ...)`` exactly as in the dense loader. Per-batch padding in
+    ``delphes_collate_fn`` reconstructs the same batch the fit loop expects
+    (padded slots carry ``pid == 0`` and are dropped by the loss), so this is
+    numerically identical at a fraction of the memory.
+
+    ``reco_pt_cut`` / ``abs_eta_cut`` / ``truncate_chads``: see
+    :func:`_build_pflow_event_data`.
     """
     (
         n_events,
@@ -445,8 +597,14 @@ def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float
         all_pids,
         per_event_mult,
         per_event_ht,
+        per_event_n_truth_chad,
         per_event_region_counts,
-    ) = _build_pflow_event_data(arrays)
+    ) = _build_pflow_event_data(
+        arrays,
+        reco_pt_cut=reco_pt_cut,
+        abs_eta_cut=abs_eta_cut,
+        truncate_chads=truncate_chads,
+    )
 
     # Per-event log(pt) / log(E) on the real particles only -- no padded slots to
     # mask out. The np.maximum floors guard log(0): a genuine pt == 0 pflow object
@@ -475,6 +633,7 @@ def load_pflow_targets_ragged(arrays: dict[str, np.ndarray], log_pt_floor: float
         "multiplicity": torch.from_numpy(per_event_mult),
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
+        "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
         **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 
@@ -586,6 +745,127 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = 1
         "ht": ht,
         "log_ht": log_ht,
     }
+
+
+# =============================================================================
+# Acceptance cut + truth-ceiling chad truncation (loss-side filters)
+# =============================================================================
+
+# Per-object observable keys zeroed by the filters below. Dropped slots get
+# pt == 0 AND pid == 0 -- identical to the padding/ghost convention -- so
+# _group_objects_by_pid (loss) and the ``pt != 0`` plot cuts exclude them with
+# no downstream changes.
+_OBJECT_OBS_KEYS: tuple[str, ...] = ("pt", "eta", "phi", "log_E", "log_pt", "pid")
+
+
+def _zero_dropped_and_recompute(
+    obs: dict[str, torch.Tensor], keep: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """Shared tail of the loss-side filters: zero dropped slots on the six
+    per-object keys and recompute ``multiplicity`` / ``ht`` / ``log_ht`` from the
+    kept objects (1e-6 floor matches the loaders). Shallow copy -- every other
+    key (``*_region_counts``, ``*_expected_counts``, ``n_truth_chad``, ...)
+    passes through untouched; the input dict is never mutated.
+    """
+    out = dict(obs)
+    for key in _OBJECT_OBS_KEYS:
+        if key in out:
+            out[key] = torch.where(keep, obs[key], torch.zeros_like(obs[key]))
+    out["multiplicity"] = keep.sum(dim=1).to(obs["multiplicity"].dtype)
+    ht = out["pt"].sum(dim=1)  # differentiable through the kept pred pt
+    out["ht"] = ht
+    out["log_ht"] = torch.log(torch.clamp(ht, min=1e-6))
+    return out
+
+
+def apply_reco_acceptance_cut(
+    obs: dict[str, torch.Tensor],
+    reco_pt_cut: float | None,
+    abs_eta_cut: float | None,
+) -> dict[str, torch.Tensor]:
+    """Apply the reco acceptance cut (``pt >= reco_pt_cut``, ``|eta| <=
+    abs_eta_cut``) to a per-observable dict, all classes.
+
+    The pred-side runtime counterpart of the loader-side cut in
+    :func:`_build_pflow_event_data`: the target files already carry the cut (or
+    get it at load time), while the trainee output must be cut here so both
+    sides of the loss live in the same acceptance. Gradients flow through the
+    kept slots only (the keep mask is built off-graph); the differentiable
+    membership gradient at the thresholds is supplied by the count terms'
+    soft/hard gates instead (``count_pt_min`` in the card).
+    """
+    if (reco_pt_cut is None and abs_eta_cut is None) or obs["pt"].shape[1] == 0:
+        return dict(obs)
+    with torch.no_grad():
+        pt = obs["pt"]
+        keep = pt != 0  # real objects only; never resurrect padding/ghosts
+        if reco_pt_cut is not None:
+            keep &= pt >= reco_pt_cut
+        if abs_eta_cut is not None:
+            keep &= obs["eta"].abs() <= abs_eta_cut
+    return _zero_dropped_and_recompute(obs, keep)
+
+
+def apply_chad_truncation(
+    obs: dict[str, torch.Tensor],
+    n_truth_chad: torch.Tensor,
+    chad_pid: int = 211,
+) -> dict[str, torch.Tensor]:
+    """Per event, keep only the top-``n_truth_chad[i]`` charged hadrons by pt.
+
+    Removes the reco charged hadrons the full-sim data contains but a truth-fed
+    sim can never produce (K_S/Lambda decay-in-flight daughters, baryons absent
+    from the truth record, GEANT4 material secondaries): the cap is the number
+    of truth chads inside the reco acceptance (see ``n_truth_chad`` in
+    :func:`_build_pflow_event_data`). Applied to BOTH pred and target for
+    symmetry (the trainee is structurally at/below the ceiling, so it mostly
+    bites the target). Other classes are untouched. Events with fewer chads
+    than the cap keep all of them; a cap of 0 drops all chads.
+
+    PRECONDITION: ``obs`` rows must be in the same event order as
+    ``n_truth_chad`` -- in the fit loop that is guaranteed by passing
+    ``event_ids=batch_event_ids(...)`` to :func:`restore_event_format`.
+    Apply :func:`apply_reco_acceptance_cut` FIRST so the ranking only sees
+    in-acceptance chads.
+    """
+    pt = obs["pt"]
+    n_events, n_obj = pt.shape
+    if n_obj == 0:
+        return dict(obs)
+    with torch.no_grad():
+        pid = obs["pid"]
+        is_chad = (pid.abs() == chad_pid) & (pt != 0)
+        # Rank chads by pt within each event: non-chads score -inf so every real
+        # chad outranks them; stable sort keeps pt-ties deterministic.
+        scores = torch.where(is_chad, pt, torch.full_like(pt, float("-inf")))
+        order = torch.argsort(scores, dim=1, descending=True, stable=True)
+        rank = torch.empty_like(order)
+        rank.scatter_(
+            1, order, torch.arange(n_obj, device=pt.device).expand(n_events, n_obj)
+        )
+        k = n_truth_chad.long().clamp(min=0).unsqueeze(1)  # (n_events, 1)
+        keep = torch.where(rank < k, pt != 0, ~is_chad & (pt != 0))
+    return _zero_dropped_and_recompute(obs, keep)
+
+
+def batch_event_ids(truth_particles: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Global event numbers of a padded truth batch, in batch order.
+
+    Reads the ``EVENT_NUMBER`` column of each event's first valid particle.
+    Events with zero truth particles get a unique negative sentinel (they can
+    never match a reconstructed object's event number, so their pred row stays
+    all-zero). Pass the result as ``event_ids`` to :func:`restore_event_format`
+    to align pred rows with the target batch rows.
+    """
+    n_events = mask.shape[0]
+    sentinels = -(torch.arange(n_events, device=mask.device, dtype=torch.long) + 1)
+    if mask.shape[1] == 0:
+        return sentinels
+    first = mask.long().argmax(dim=1)  # index of the first valid particle
+    ids = truth_particles[
+        torch.arange(n_events, device=mask.device), first, ColumnMap.EVENT_NUMBER
+    ].long()
+    return torch.where(mask.any(dim=1), ids, sentinels)
 
 
 # =============================================================================
