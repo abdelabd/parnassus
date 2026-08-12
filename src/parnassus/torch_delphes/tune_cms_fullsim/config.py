@@ -75,6 +75,11 @@ DEFAULT_TRUTH_PT_CUT: float = 0.25
 DEFAULT_RECO_PT_CUT: float = 1.0
 DEFAULT_ABS_ETA_CUT: float = 2.7
 
+# Default PhotonClusterMerger seed-cone radius for the tune entrypoints (M2:
+# frozen constant; <= 0 disables). Calibrated against CMS PF photon counts on
+# the dijet sample (docs/photon_merger_fraction_design.md sec 3.1 + M0/M1).
+DEFAULT_PHOTON_MERGE_RADIUS: float = 0.045
+
 
 # =============================================================================
 # Count-term wiring

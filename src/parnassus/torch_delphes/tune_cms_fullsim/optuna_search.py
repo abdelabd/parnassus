@@ -109,9 +109,15 @@ from torch.utils.data.distributed import DistributedSampler
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
 
 from .comet_utils import end_comet_experiment, init_comet_experiment
-from .config import DEFAULT_ABS_ETA_CUT, DEFAULT_RECO_PT_CUT, DEFAULT_TRUTH_PT_CUT
+from .config import (
+    DEFAULT_ABS_ETA_CUT,
+    DEFAULT_PHOTON_MERGE_RADIUS,
+    DEFAULT_RECO_PT_CUT,
+    DEFAULT_TRUTH_PT_CUT,
+)
 from .dataloader import DelphesDataLoader
 from .distributed import _cleanup_distributed, _init_distributed
 from .loss import (
@@ -563,6 +569,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--photon-merge-radius",
+        type=float,
+        default=DEFAULT_PHOTON_MERGE_RADIUS,
+        help=(
+            "PhotonClusterMerger seed-cone radius: greedy dR merging of the "
+            "eflow photon stream (CMS supercluster scale), with the ecal_photon "
+            "count term recomputed from the merged clusters. Frozen constant "
+            f"(not fitted). Default {DEFAULT_PHOTON_MERGE_RADIUS}. <= 0 "
+            "disables. Losses are not comparable across different settings."
+        ),
+    )
+    parser.add_argument(
         "--early-stopping-patience",
         type=int,
         default=10,
@@ -625,12 +643,16 @@ def main() -> None:
     reco_pt_cut = args.reco_pt_cut if args.reco_pt_cut > 0 else None
     abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
     truncate_chads = not args.no_chad_truncation
+    photon_merge_radius = (
+        args.photon_merge_radius if args.photon_merge_radius > 0 else None
+    )
 
     log(
         f"[optuna] world_size={world_size} device={device} n_trials={n_trials} "
         f"loss={args.loss!r} pid_weighting={args.pid_weighting!r} "
         f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
-        f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'}"
+        f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'} "
+        f"photon_merge_radius={photon_merge_radius}"
     )
 
     # Load the data ONCE per rank (reused across all trials; under DDP a
@@ -685,6 +707,13 @@ def main() -> None:
             # cut (tracking expected counts + calo soft counts).
             count_pt_min=reco_pt_cut,
             count_abs_eta_max=abs_eta_cut,
+            # Supercluster-scale photon merging (frozen radius; the ecal_photon
+            # count term is recomputed from the merged clusters inside the card).
+            photon_merger=(
+                PhotonClusterMerger(photon_merge_radius)
+                if photon_merge_radius is not None
+                else None
+            ),
         ).to(device)
         pc.apply_param_config(trainee, cfg)
         params_to_train, param_groups = pc.select_trainable(trainee, cfg, global_lr=lr)
@@ -861,6 +890,7 @@ def main() -> None:
             "reco_pt_cut": reco_pt_cut,
             "eta_cut": abs_eta_cut,
             "chad_truncation": truncate_chads,
+            "photon_merge_radius": photon_merge_radius,
         }
         write_history_json(round_dir / "history.json", history, metadata)
 

@@ -44,6 +44,7 @@ from parnassus.torch_delphes.learnable import (
 from parnassus.torch_delphes.Merger import Merger
 from parnassus.torch_delphes.MomentumSmearing import MomentumSmearing
 from parnassus.torch_delphes.ParticlePropagator import ParticlePropagator
+from parnassus.torch_delphes.PhotonClusterMerger import compose_merged_photon_count
 from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
 
 from .base import DelphesBaseCard
@@ -112,6 +113,7 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         gumbel_temperature: float = 0.5,
         count_pt_min: float | None = None,
         count_abs_eta_max: float | None = None,
+        photon_merger: nn.Module | None = None,
     ) -> None:
         """Initialize the CMS detector simulation.
 
@@ -146,12 +148,20 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             regions are bounded at |eta| <= max. Defaults None = legacy
             behavior. Set by the tune_cms_fullsim fit entrypoints from
             --reco-pt-cut / --eta-cut.
+        photon_merger:
+            Optional module applied to the flat eflow photon stream between
+            the ECal and the EFlowMerger (see
+            :class:`~parnassus.torch_delphes.PhotonClusterMerger.PhotonClusterMerger`),
+            emulating the CMS supercluster-scale clustering the per-tower
+            emission lacks. Default None = stream passes through untouched
+            (byte-identical legacy behavior).
         """
         super().__init__()
         self.debug = debug
         self.learnable = learnable
         self.count_pt_min = count_pt_min
         self.count_abs_eta_max = count_abs_eta_max
+        self.photon_merger = photon_merger
 
         # Attribute-type declarations so mypy accepts the learnable / legacy
         # union. At runtime ``nn.Module.__setattr__`` registers whichever
@@ -344,14 +354,34 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             muons_smeared,
         ])
 
-        # ECal (4th return: differentiable per-region expected photon count; None
-        # unless learnable)
-        ecal_tracks, ecal_towers, eflow_photons, ecal_calo_counts = self.ECal(
+        # ECal (4th return: differentiable per-region expected photon count; 5th:
+        # per-tower count export for the merged-count composition; None unless
+        # learnable)
+        ecal_tracks, ecal_towers, eflow_photons, ecal_calo_counts, ecal_count_export = self.ECal(
             particles_propagated, merged_tracks
         )
 
-        # HCal (4th return: per-region expected neutral-hadron count; None unless learnable)
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons, hcal_calo_counts = self.HCal(
+        # PhotonClusterMerger (optional): supercluster-scale merging of the
+        # photon stream. Runs here so training, plotting, and generation all
+        # see the same merged photons. None => untouched. When the soft count
+        # is active, the per-tower expected photon count would still describe
+        # UNMERGED towers, so it is replaced by the cluster-survival
+        # composition (fixes the count-term desync; see
+        # compose_merged_photon_count).
+        if self.photon_merger is not None:
+            if ecal_count_export is not None:
+                eflow_photons, photon_owner = self.photon_merger.forward_with_assignment(
+                    eflow_photons
+                )
+                ecal_calo_counts = compose_merged_photon_count(
+                    ecal_count_export, photon_owner, eflow_photons, self.photon_merger, self.ECal
+                )
+            else:
+                eflow_photons = self.photon_merger(eflow_photons)
+
+        # HCal (4th return: per-region expected neutral-hadron count; None unless
+        # learnable; per-tower export unused -- the NH stream is not merged)
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons, hcal_calo_counts, _ = self.HCal(
             particles_propagated, ecal_tracks
         )
 

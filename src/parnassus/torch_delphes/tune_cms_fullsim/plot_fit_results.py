@@ -67,6 +67,7 @@ import torch
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
 
 # The truth reference lines on the parameter-drift plots come from the same
 # param config used to generate the sample (its physical ``value`` fields).
@@ -76,6 +77,7 @@ _DEFAULT_PARAM_CONFIG = (
 
 from .config import (
     DEFAULT_ABS_ETA_CUT,
+    DEFAULT_PHOTON_MERGE_RADIUS,
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
     OBSERVABLES,
@@ -986,6 +988,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--photon-merge-radius",
+        type=float,
+        default=None,
+        help=(
+            "PhotonClusterMerger seed-cone radius for the trainee cards, so "
+            "plots show the same merged photon stream the fit saw. Default: "
+            "the history metadata value (falling back to "
+            f"{DEFAULT_PHOTON_MERGE_RADIUS}). <= 0 disables."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help=(
@@ -1084,11 +1097,22 @@ def main() -> None:
     truth_pt_cut = _resolve_cut(args.truth_pt_cut, "truth_pt_cut", DEFAULT_TRUTH_PT_CUT)
     reco_pt_cut = _resolve_cut(args.reco_pt_cut, "reco_pt_cut", DEFAULT_RECO_PT_CUT)
     abs_eta_cut = _resolve_cut(args.eta_cut, "eta_cut", DEFAULT_ABS_ETA_CUT)
+    photon_merge_radius = _resolve_cut(
+        args.photon_merge_radius, "photon_merge_radius", DEFAULT_PHOTON_MERGE_RADIUS
+    )
     print(
         f"  [filter] truth cut: pt >= {truth_pt_cut}, |eta| <= {abs_eta_cut} | "
         f"reco cut (target+trainee): pt >= {reco_pt_cut}, |eta| <= {abs_eta_cut} "
+        f"| photon merge radius: {photon_merge_radius} "
         "| no chad truncation in plots"
     )
+
+    def _make_merger() -> PhotonClusterMerger | None:
+        return (
+            PhotonClusterMerger(photon_merge_radius)
+            if photon_merge_radius is not None
+            else None
+        )
 
     val_loader = _build_val_dataloader(
         arrays,
@@ -1107,7 +1131,9 @@ def main() -> None:
     )
 
     torch.manual_seed(args.seed)
-    trainee = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
+    trainee = CMSEnergyFlowDefault(
+        debug=False, learnable=True, photon_merger=_make_merger()
+    ).to(device)
     # Set the init trainee to the perturbed STARTING config (the honest before-fit
     # baseline). Without this it would keep the card's constructor defaults.
     if init_snapshot is not None:
@@ -1218,7 +1244,9 @@ def main() -> None:
     if args.debug:
         print("\n  --debug: rendering per-module intermediate-output overlays...")
         torch.manual_seed(args.seed)
-        trainee_dbg = CMSEnergyFlowDefault(debug=True, learnable=True).to(device)
+        trainee_dbg = CMSEnergyFlowDefault(
+            debug=True, learnable=True, photon_merger=_make_merger()
+        ).to(device)
         if init_snapshot is not None:
             _set_trainee_from_snapshot(trainee_dbg, init_snapshot)
         init_outputs = _trainee_intermediate_outputs(trainee_dbg, val_loader)

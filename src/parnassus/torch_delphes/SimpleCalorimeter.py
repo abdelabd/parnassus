@@ -22,6 +22,7 @@ See EFlowMerger.md for details.
 from collections.abc import Callable
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from parnassus.data.particle_io import ColumnMap
@@ -232,7 +233,7 @@ class SimpleCalorimeter(nn.Module):
         self,
         particles: torch.Tensor,  # (N_particles, N_FEATURES) - can span multiple events
         tracks: torch.Tensor,  # (N_tracks, N_FEATURES) - can span multiple events
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, dict | None]:
         """Process particles and tracks from one or more events.
 
         Supports batched processing: particles and tracks can come from multiple events,
@@ -804,11 +805,20 @@ class SimpleCalorimeter(nn.Module):
             denom_c = torch.sqrt(track_sigma_d * track_sigma_d + sigma_after_c * sigma_after_c)
             neutral_sigma_soft = neutral_energy_soft / denom_c
             # Soft neutral-object cut (neutral_sigma is already dimensionless E/sigma).
-            gate = torch.sigmoid(
-                (neutral_energy_soft - self.energy_min) / (tau * self.energy_min)
-            ) * torch.sigmoid(
-                (neutral_sigma_soft - self.energy_sig_min) / (tau * self.energy_sig_min)
+            # The sigmoid arguments are named so the per-tower export below can also
+            # provide a saturation-safe log of the same product (softplus form) for
+            # the merged-count cluster composition; `gate` itself is arithmetically
+            # unchanged.
+            arg_neutral_e = (neutral_energy_soft - self.energy_min) / (tau * self.energy_min)
+            arg_neutral_sig = (neutral_sigma_soft - self.energy_sig_min) / (
+                tau * self.energy_sig_min
             )
+            gate_nopt = torch.sigmoid(arg_neutral_e) * torch.sigmoid(arg_neutral_sig)
+            gate = gate_nopt
+            # Soft pt (used by the count_pt_min gate and by the merged-count cluster
+            # pt gate). Live only through gate_tower inside neutral_energy_soft.
+            cosh_eta_d = torch.cosh(tower_eta.detach())
+            pt_soft = neutral_energy_soft / cosh_eta_d
             # Acceptance harmonization: soft pt >= count_pt_min gate so the expected
             # count matches the reco-side acceptance cut (data targets carry pt >= 1
             # from preprocessing; the loss cuts the trainee objects the same way).
@@ -818,8 +828,6 @@ class SimpleCalorimeter(nn.Module):
             # Uses tower_eta (the emitted object's eta) for pt, like the eflow
             # output; region assignment below keeps the tower-center convention.
             if self.count_pt_min is not None:
-                cosh_eta_d = torch.cosh(tower_eta.detach())
-                pt_soft = neutral_energy_soft / cosh_eta_d
                 gate = gate * torch.sigmoid(
                     (pt_soft - self.count_pt_min) / (tau * self.count_pt_min)
                 )
@@ -841,8 +849,30 @@ class SimpleCalorimeter(nn.Module):
             expected_calo_counts = torch.stack([
                 anchor + (gate_st * m.to(gate_st.dtype)).sum() for m in region_masks
             ])
+            # Per-tower export for the merged-photon cluster count composition
+            # (PhotonClusterMerger.compose_merged_photon_count). All tensors are
+            # per compact tower; emitted eflow rows are the [significant_neutral]
+            # slice, in order. gate_nopt is the survival gate WITHOUT the pt
+            # factor (the pt acceptance moves to cluster level after merging);
+            # log_gate_nopt is the saturation-safe log of the same product
+            # (sigmoid(x) saturates to exactly 1.0 in float64 at x ~ 37, which
+            # would zero every cluster mate's gradient through prod(1 - g)).
+            count_export = {
+                "gate_nopt": gate_nopt,
+                "log_gate_nopt": -(
+                    F.softplus(-arg_neutral_e) + F.softplus(-arg_neutral_sig)
+                ),
+                "pt_soft": pt_soft,
+                "emitted": significant_neutral,
+                "abs_eta_center": abs_eta_center,
+                "eta": tower_eta.detach(),
+                "phi": tower_phi.detach(),
+                "event": tower_event_num.detach(),
+                "anchor": anchor,
+            }
         else:
             expected_calo_counts = None
+            count_export = None
 
         # ===== Create Tower output =====
         # Towers with energy > 0 after thresholds
@@ -1059,7 +1089,7 @@ class SimpleCalorimeter(nn.Module):
             eflow_excess_neutrals[:, ColumnMap.EVENT_NUMBER] = eflow_tower_event_num
 
         # Return results
-        return eflow_tracks, towers, eflow_excess_neutrals, expected_calo_counts
+        return eflow_tracks, towers, eflow_excess_neutrals, expected_calo_counts, count_export
 
     def _compute_phi_bins(
         self,

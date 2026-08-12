@@ -64,11 +64,13 @@ from torch.utils.data.distributed import DistributedSampler
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
 
 from .comet_utils import end_comet_experiment, init_comet_experiment
 from .config import (
     _DEFAULT_LR,
     DEFAULT_ABS_ETA_CUT,
+    DEFAULT_PHOTON_MERGE_RADIUS,
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
 )
@@ -279,6 +281,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--photon-merge-radius",
+        type=float,
+        default=DEFAULT_PHOTON_MERGE_RADIUS,
+        help=(
+            "PhotonClusterMerger seed-cone radius: greedy dR merging of the "
+            "eflow photon stream (CMS supercluster scale), with the ecal_photon "
+            "count term recomputed from the merged clusters. Frozen constant "
+            f"(not fitted). Default {DEFAULT_PHOTON_MERGE_RADIUS}. <= 0 "
+            "disables. Losses are not comparable across different settings."
+        ),
+    )
+    parser.add_argument(
         "--param-config",
         type=Path,
         required=True,
@@ -399,11 +413,15 @@ def main() -> None:
     reco_pt_cut = args.reco_pt_cut if args.reco_pt_cut > 0 else None
     abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
     truncate_chads = not args.no_chad_truncation
+    photon_merge_radius = (
+        args.photon_merge_radius if args.photon_merge_radius > 0 else None
+    )
     log(
         f"[filter] truth cut: pt >= {truth_pt_cut}, |eta| <= {abs_eta_cut} | "
         f"reco cut (target+trainee, all classes): pt >= {reco_pt_cut}, "
         f"|eta| <= {abs_eta_cut} | chad truncation at n_truth_chad: "
-        f"{'ON' if truncate_chads else 'OFF'}"
+        f"{'ON' if truncate_chads else 'OFF'} | photon merge radius: "
+        f"{photon_merge_radius}"
     )
 
     # Ragged (no global padding): truth particles are kept as a per-event list and
@@ -475,6 +493,13 @@ def main() -> None:
         # (tracking expected counts + calo soft counts; object creation untouched).
         count_pt_min=reco_pt_cut,
         count_abs_eta_max=abs_eta_cut,
+        # Supercluster-scale photon merging (frozen radius; the ecal_photon
+        # count term is recomputed from the merged clusters inside the card).
+        photon_merger=(
+            PhotonClusterMerger(photon_merge_radius)
+            if photon_merge_radius is not None
+            else None
+        ),
     ).to(device)
 
     # The param config drives everything: ``value`` initializes every learnable
@@ -593,6 +618,7 @@ def main() -> None:
             "reco_pt_cut": reco_pt_cut,
             "eta_cut": abs_eta_cut,
             "chad_truncation": truncate_chads,
+            "photon_merge_radius": photon_merge_radius,
         }
         # The {metadata, history, best_result} schema (best = min val loss) is the
         # single source of truth shared with the Optuna search and consumed by

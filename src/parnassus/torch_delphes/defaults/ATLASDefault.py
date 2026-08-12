@@ -221,10 +221,10 @@ class ATLASEnergyFlowDefault(DelphesBaseCard):
         ])
 
         # ECal (4th return is the optional soft-count term, unused for ATLAS)
-        ecal_tracks, ecal_towers, eflow_photons, _ = self.ECal(particles_propagated, merged_tracks)
+        ecal_tracks, ecal_towers, eflow_photons, _, _ = self.ECal(particles_propagated, merged_tracks)
 
         # HCal
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons, _ = self.HCal(
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons, _, _ = self.HCal(
             particles_propagated, ecal_tracks
         )
 
