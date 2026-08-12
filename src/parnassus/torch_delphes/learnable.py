@@ -254,8 +254,8 @@ CMS_TRACK_RES_DEFAULTS: dict[str, dict[str, list[float]]] = {
         "b_init": [1.3e-3, 1.7e-3, 3.1e-3],
     },
     "muon": {
-        "a_init": [0.01, 0.015, 0.025],
-        "b_init": [1.0e-4, 1.5e-4, 3.5e-4],
+        "a_init": [0.01, 0.02, 0.10],
+        "b_init": [1.0e-3, 1.3e-3, 2.0e-3],
     },
 }
 

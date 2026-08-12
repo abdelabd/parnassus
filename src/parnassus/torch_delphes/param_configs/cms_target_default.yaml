@@ -95,15 +95,15 @@ ChargedHadronMomentumSmearing.resolution_module.b_raw[2]:
   trainable: false
   lr_scale: 0.1
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]:
-  value: 1.0
+  value: 1.25
   trainable: false
   lr_scale: 1.0
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]:
-  value: 1.0
+  value: 1.25
   trainable: false
   lr_scale: 1.0
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]:
-  value: 1.0
+  value: 1.25
   trainable: false
   lr_scale: 1.0
 ElectronMomentumSmearing.resolution_module.a_raw[0]:
@@ -147,23 +147,23 @@ MuonMomentumSmearing.resolution_module.a_raw[0]:
   trainable: false
   lr_scale: 0.1
 MuonMomentumSmearing.resolution_module.a_raw[1]:
-  value: 0.015
+  value: 0.02
   trainable: false
   lr_scale: 0.1
 MuonMomentumSmearing.resolution_module.a_raw[2]:
-  value: 0.025
+  value: 0.1
   trainable: false
   lr_scale: 0.1
 MuonMomentumSmearing.resolution_module.b_raw[0]:
-  value: 0.0001
+  value: 0.001
   trainable: false
   lr_scale: 0.1
 MuonMomentumSmearing.resolution_module.b_raw[1]:
-  value: 0.00015
+  value: 0.0013
   trainable: false
   lr_scale: 0.1
 MuonMomentumSmearing.resolution_module.b_raw[2]:
-  value: 0.00035
+  value: 0.002
   trainable: false
   lr_scale: 0.1
 MuonMomentumSmearing.resolution_module.scale_raw[0]:
@@ -191,15 +191,15 @@ HadronFractions.lambda_logit:
   trainable: false
   lr_scale: 1.0
 ECal.scale_module.scale_raw[0]:
-  value: 1.0
+  value: 1.2
   trainable: false
   lr_scale: 1.0
 ECal.scale_module.scale_raw[1]:
-  value: 1.0
+  value: 1.2
   trainable: false
   lr_scale: 1.0
 ECal.scale_module.scale_raw[2]:
-  value: 1.0
+  value: 1.2
   trainable: false
   lr_scale: 1.0
 ECal.resolution_func.common_c_E:
@@ -239,11 +239,11 @@ ECal.resolution_func.forward_c_S:
   trainable: false
   lr_scale: 0.1
 HCal.scale_module.scale_raw[0]:
-  value: 1.0
+  value: 0.9
   trainable: false
   lr_scale: 1.0
 HCal.scale_module.scale_raw[1]:
-  value: 1.0
+  value: 0.9
   trainable: false
   lr_scale: 1.0
 HCal.resolution_func.central_c_E:
