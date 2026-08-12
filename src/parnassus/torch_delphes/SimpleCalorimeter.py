@@ -286,20 +286,9 @@ class SimpleCalorimeter(nn.Module):
         particle_tower_idx = particle_event_idx * n_towers_per_event + particle_local_tower_idx
         track_tower_idx = track_event_idx * n_towers_per_event + track_local_tower_idx
 
-        # For tracks, only those with fraction > cutoff contribute to fTrackEnergy;
-        # the rest bypass the tower entirely and reach EFlowTrack UNCHANGED.
+        # For tracks, only those with fraction > 1e-9 contribute to fTrackEnergy
         # C++: if(fTrackFractions[number] > 1.0E-9) { fTrackEnergy += energy; ... }
-        # The C++ cutoff is 1e-9 because the CMS card writes EXACT 0.0 fractions
-        # (e.g. charged hadrons in the ECal). In learnable mode the fraction is
-        # sigmoid(logit), whose "zero" is sigmoid(_safe_logit(0.0)) = 1e-6 > 1e-9:
-        # with the C++ cutoff every charged hadron would enter the ECal rescale
-        # path against an always-zeroed tower, and the rescale
-        # wT/(wT+wC) = 1/(1+(res*E/sigma_noise)^2) folds the spectrum onto
-        # pT ~ sigma_noise/(2*res) -- sharp spikes at ~2-3 GeV plus a 4-9 GeV
-        # depletion that C++ Delphes does not have. The cutoff must therefore sit
-        # above the sigmoid floor (1e-6) and below any physical fraction (>= 0.02)
-        # so that "fraction ~ 0" means BYPASS, exactly like the C++ card.
-        track_has_fraction = track_energy_fractions > 1e-4
+        track_has_fraction = track_energy_fractions > 1e-9
 
         # Find unique towers from valid particles AND valid tracks
         # NOTE: In C++, particles are filtered by fraction BEFORE creating tower hits,

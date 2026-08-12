@@ -124,11 +124,7 @@ def test_sample_trial_produces_valid_config(tmp_path: Path):
     def objective(trial: optuna.Trial) -> float:
         flat_cfg, lr, batch_size, group_lr_scale = osearch.sample_trial(trial, search, parameters)
         assert set(flat_cfg) == set(parameters)
-        # Every searched scalar is tunable; {value: ...} entries (chad_logit,
-        # pinned at the believed-truth 0.0 so round 0 stays below the
-        # SimpleCalorimeter fraction-bypass cutoff) are not.
-        pinned = {k for k, s in parameters.items() if "value" in s}
-        assert all(spec["trainable"] == (key not in pinned) for key, spec in flat_cfg.items())
+        assert all(spec["trainable"] for spec in flat_cfg.values())  # all 66 tunable
         assert batch_size in search["batch_size"]["choices"]
         assert set(group_lr_scale) == set(osearch.LR_SCALE_GROUPS)
 
