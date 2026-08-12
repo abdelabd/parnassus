@@ -86,14 +86,13 @@ def test_load_rejects_trainable_logit_at_dead_gradient_tails(tmp_path: Path) -> 
             yaml.safe_dump({key: {"value": value, "trainable": trainable}}, f)
         return p
 
-    # Trainable logit outside the open (0.005, 0.995) interval -> reject.
-    for bad in (0.0, 1e-6, 0.005, 0.995, 0.999, 1.0):
+    # Trainable logit outside the open (0.1, 0.9) interval -> reject.
+    for bad in (0.0, 0.05, 0.1, 0.9, 0.95, 1.0):
         with pytest.raises(ValueError, match="trainable logit"):
             pc.load_param_config(_write(bad, trainable=True))
 
-    # Interior trainable logit -> ok (incl. believed-truth efficiencies at 0.99).
+    # Interior trainable logit -> ok.
     assert pc.load_param_config(_write(0.85, trainable=True))[key]["value"] == 0.85
-    assert pc.load_param_config(_write(0.99, trainable=True))[key]["value"] == 0.99
 
     # Fixed logit anywhere in [0, 1] -> ok (it never moves; e.g. a 0.99 truth).
     assert pc.load_param_config(_write(0.99, trainable=False))[key]["value"] == 0.99

@@ -36,18 +36,6 @@ The copied history keeps ``metadata.param_config`` pointing at the best round's
 ``materialized_config.yaml``, so ``plot_fit_results`` draws the honest
 "before-fit" baseline from the values that trial actually started from.
 
-Warm start
-----------
-Pass ``--init-config <param config .yaml>`` (e.g.
-``param_configs/cms_target_default.yaml``) to seed **one warm-start trial** with
-those values via ``study.enqueue_trial``: every searched scalar found in the
-file is fixed for that trial (clamped into its search range if needed); anything
-missing from it -- and lr / batch_size / lr_scale, which have no counterpart in a
-param config -- is sampled as usual. On resume the seed is not re-enqueued while
-a waiting or evaluated seed trial exists; a seed that crashed mid-fit (FAIL /
-zombie RUNNING) is enqueued again, and a pre-warm-start study picks up a seed on
-its first resume with the flag.
-
 Resume / add more trials
 ------------------------
 Pass ``--storage sqlite:///<path>/study.db --study-name <name>`` to make the study
@@ -103,7 +91,6 @@ import torch.distributed as dist
 import yaml
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
-from optuna.trial import TrialState
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
@@ -236,9 +223,8 @@ def load_search_config(path: str | Path) -> tuple[dict, dict]:
 
     # Per-parameter init-range guards. A sampled init can land on either endpoint,
     # so BOTH must satisfy the same range guards param_config enforces -- crucially
-    # the trainable-logit (LOGIT_INIT_MIN, LOGIT_INIT_MAX) window, which lives in
-    # load_param_config (not to_raw), so the midpoint apply above does NOT catch
-    # it. A range that strays
+    # the trainable-logit (0.1, 0.9) window, which lives in load_param_config (not
+    # to_raw), so the midpoint apply above does NOT catch it. A range that strays
     # outside it would produce a saturated, gradient-less init AND break
     # plot_fit_results when it reloads the materialized config.
     for key, spec in parameters.items():
@@ -279,72 +265,6 @@ def _midpoint(key: str, spec: dict) -> float:
         return float(spec["value"])
     low, high, log = _parse_range(key, spec)
     return (low * high) ** 0.5 if log else 0.5 * (low + high)
-
-
-def build_warm_start_params(
-    parameters: dict, init_cfg: dict
-) -> tuple[dict[str, float], list[str], list[tuple[str, float, float]]]:
-    """Build the ``study.enqueue_trial`` dict for a warm-start (seed) trial.
-
-    For every range-type entry in ``parameters`` (pinned ``{value:}`` entries are
-    never suggested, so they get no fixed param), take the init value from
-    ``init_cfg`` (:func:`param_config.load_param_config` format). A value outside
-    ``[low, high]`` is CLAMPED to the nearer endpoint: optuna only warns on an
-    out-of-range fixed param and uses it anyway, which could seed e.g. a
-    trainable logit at 1e-6 -- a dead-gradient init whose materialized config
-    then fails ``load_param_config``'s guard in ``plot_fit_results``. The range
-    endpoints already passed every ``to_raw``/logit-window check in
-    :func:`load_search_config`, so a clamped value is always representable. Keys
-    absent from ``init_cfg`` are left out of the dict, so the sampler fills them
-    (as it also does for lr / batch_size / lr_scale, which have no counterpart
-    in a param config).
-
-    Returns
-    -------
-    (enqueue_params, fallback_keys, clamped)
-        ``enqueue_params``: ``{optuna param name: value}`` for ``enqueue_trial``;
-        ``fallback_keys``: range params missing from ``init_cfg`` (sampler-filled);
-        ``clamped``: ``(key, requested, used)`` per out-of-range init value.
-    """
-    enqueue_params: dict[str, float] = {}
-    fallback_keys: list[str] = []
-    clamped: list[tuple[str, float, float]] = []
-    for key, spec in parameters.items():
-        if "value" in spec:
-            continue
-        if key not in init_cfg:
-            fallback_keys.append(key)
-            continue
-        value = float(init_cfg[key]["value"])
-        low, high, _log = _parse_range(key, spec)
-        used = min(max(value, low), high)
-        if used != value:
-            clamped.append((key, value, used))
-        enqueue_params[key] = used
-    return enqueue_params, fallback_keys, clamped
-
-
-def warm_start_pending(trials) -> bool:
-    """True when the study still needs its warm-start seed trial enqueued.
-
-    A seed trial (marked with the ``warm_start_config`` user attr at enqueue
-    time) counts as delivered when it is WAITING (it will run this time) or
-    COMPLETE/PRUNED (it was evaluated). A FAIL seed -- or a zombie RUNNING one
-    left behind by a killed driver; only rank 0 runs trials, so at start-up no
-    trial can genuinely be running -- was never evaluated, and the seed must be
-    re-enqueued. This is also why ``enqueue_trial(skip_if_exists=True)`` cannot
-    replace this check: optuna matches the fixed params against trials in ANY
-    state, including FAIL, and would silently drop the retry.
-
-    Returns
-    -------
-    bool
-        ``True`` if no delivered seed trial exists in ``trials``.
-    """
-    delivered = (TrialState.WAITING, TrialState.COMPLETE, TrialState.PRUNED)
-    return not any(
-        "warm_start_config" in t.user_attrs and t.state in delivered for t in trials
-    )
 
 
 # =============================================================================
@@ -431,20 +351,6 @@ def main() -> None:
         type=Path,
         default=Path(pc.__file__).resolve().parent / "param_configs" / "optuna_config.yaml",
         help="YAML search space (search: + parameters: sections). See param_configs/optuna_config.yaml.",  # noqa: E501
-    )
-    parser.add_argument(
-        "--init-config",
-        type=Path,
-        default=None,
-        help=(
-            "Optional param-config YAML ({value, trainable, lr_scale} per scalar, e.g. "
-            "param_configs/cms_target_default.yaml). Seeds ONE warm-start trial with "
-            "its values via study.enqueue_trial; params missing from it (and lr / "
-            "batch_size / lr_scale) are sampled as usual, and out-of-range values are "
-            "clamped into the search range. On resume the seed is NOT re-enqueued if a "
-            "waiting or evaluated seed trial already exists (a crashed seed is "
-            "retried). Default: no warm start."
-        ),
     )
     parser.add_argument(
         "--n-trials",
@@ -571,14 +477,6 @@ def main() -> None:
     search, parameters = load_search_config(args.optuna_config)
     n_trials = args.n_trials if args.n_trials is not None else int(search.get("n_trials", 50))
     sampler_seed = int(search.get("seed", 0))
-
-    # Warm-start source (fail fast on every rank, before the expensive data load;
-    # only rank 0 uses it, at the enqueue below).
-    init_cfg: dict | None = None
-    if args.init_config is not None:
-        if not args.init_config.exists():
-            raise SystemExit(f"--init-config {args.init_config} does not exist.")
-        init_cfg = pc.load_param_config(args.init_config)
 
     log(
         f"[optuna] world_size={world_size} device={device} n_trials={n_trials} "
@@ -817,39 +715,6 @@ def main() -> None:
         study.sampler = TPESampler(
             multivariate=True, group=True, n_startup_trials=10, seed=sampler_seed + n_existing
         )
-    # Warm start (rank 0 only -- ranks != 0 returned into the mirror loop above):
-    # seed one trial with the --init-config values. The seed is (re-)enqueued
-    # whenever the study has no WAITING/COMPLETE/PRUNED seed trial yet -- i.e. on
-    # a fresh study, on a study whose previous seed crashed mid-fit (FAIL, or a
-    # zombie RUNNING trial after a hard kill; optuna never re-runs those), and on
-    # a pre-warm-start study resumed with --init-config for the first time.
-    if init_cfg is not None:
-        if not warm_start_pending(study.trials):
-            log(
-                f"[optuna] warm start: seed trial already waiting or evaluated; "
-                f"NOT re-enqueueing {args.init_config}"
-            )
-        else:
-            enqueue_params, fallback_keys, clamped = build_warm_start_params(parameters, init_cfg)
-            for key, requested, used in clamped:
-                log(
-                    f"[optuna] warm start: {key} init {requested:g} is outside its "
-                    f"search range; clamped to {used:g}"
-                )
-            if fallback_keys:
-                log(
-                    f"[optuna] warm start: {len(fallback_keys)} params missing from "
-                    f"{args.init_config}, sampled as usual: {fallback_keys}"
-                )
-            study.enqueue_trial(
-                enqueue_params,
-                user_attrs={"warm_start_config": str(args.init_config)},
-            )
-            log(
-                f"[optuna] warm start: trial {n_existing} seeded with "
-                f"{len(enqueue_params)} init values from {args.init_config} "
-                f"(lr / batch_size / lr_scale sampled)"
-            )
     study.optimize(objective, n_trials=n_trials)
 
     # Release the mirror-loop ranks.

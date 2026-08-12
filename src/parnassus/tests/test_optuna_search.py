@@ -103,17 +103,11 @@ def test_load_search_config_rejects_bad(tmp_path: Path):
     with pytest.raises((SystemExit, ValueError)):
         osearch.load_search_config(_write({"search": good_search, "parameters": bad_params}))
 
-    # Init range outside the trainable-logit guard (0.005, 0.995) -- high side.
+    # Init range outside the trainable-logit guard (0.1, 0.9).
     bad_params2 = dict(base)
-    bad_params2["ChargedHadronTrackingEfficiency.eff_logits[0]"] = {"low": 0.92, "high": 0.999}
+    bad_params2["ChargedHadronTrackingEfficiency.eff_logits[0]"] = {"low": 0.92, "high": 0.99}
     with pytest.raises(SystemExit):
         osearch.load_search_config(_write({"search": good_search, "parameters": bad_params2}))
-
-    # ... and low side (e.g. pushing chad_logit toward its believed truth of 0).
-    bad_params3 = dict(base)
-    bad_params3["HadronFractions.chad_logit"] = {"low": 0.001, "high": 0.5}
-    with pytest.raises(SystemExit):
-        osearch.load_search_config(_write({"search": good_search, "parameters": bad_params3}))
 
 
 # ---------------------------------------------------------------------------
@@ -161,145 +155,6 @@ def test_sample_trial_produces_valid_config(tmp_path: Path):
         assert spec["value"] == pytest.approx(captured["flat_cfg"][key]["value"])
         assert spec["trainable"] == captured["flat_cfg"][key]["trainable"]
         assert spec["lr_scale"] == pytest.approx(captured["flat_cfg"][key]["lr_scale"])
-
-
-# ---------------------------------------------------------------------------
-# Warm start (no data)
-# ---------------------------------------------------------------------------
-
-
-def test_build_warm_start_params_shipped_configs():
-    """cms_target_default seeds every searched scalar with no clamping needed."""
-    _, parameters = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)
-    init_cfg = pc.load_param_config(PARAM_CONFIGS / "cms_target_default.yaml")
-
-    enqueue_params, fallback_keys, clamped = osearch.build_warm_start_params(
-        parameters, init_cfg
-    )
-
-    assert set(enqueue_params) == {k for k, s in parameters.items() if "value" not in s}
-    assert fallback_keys == []
-    for key, value in enqueue_params.items():
-        low, high, _ = osearch._parse_range(key, parameters[key])
-        assert low <= value <= high, key
-
-    # The believed chad ECal fraction is 0.0, which no trainable sigmoid can
-    # represent; chad_logit is therefore PINNED in the shipped config (excluded
-    # from the search and from the warm start) instead of clamped up to an
-    # active fraction -- a clamped 0.02 warm start used to push every charged
-    # hadron through the ECal rescale and spike the round-0 pT spectrum.
-    # Everything else -- including the 0.9-0.99 efficiencies and the small muon
-    # b coefficients the ranges were widened for -- passes through exactly.
-    assert clamped == []
-    assert "HadronFractions.chad_logit" not in enqueue_params
-    assert enqueue_params["ChargedHadronTrackingEfficiency.eff_logits[0]"] == pytest.approx(0.7)
-    assert enqueue_params["MuonTrackingEfficiency.eff_logits[1]"] == pytest.approx(0.99)
-    assert enqueue_params["MuonMomentumSmearing.resolution_module.b_raw[0]"] == pytest.approx(
-        1.0e-4
-    )
-
-
-def test_build_warm_start_params_fallback_and_pinned():
-    """Pinned params are excluded; missing ones fall back; out-of-range ones clamp."""
-    parameters = {
-        "pinned": {"value": 0.5},
-        "in_range": {"low": 0.1, "high": 1.0},
-        "too_high": {"low": 0.1, "high": 1.0},
-        "missing": {"low": 0.1, "high": 1.0},
-    }
-    init_cfg = {
-        "pinned": {"value": 0.5, "trainable": False, "lr_scale": 1.0},
-        "in_range": {"value": 0.4, "trainable": False, "lr_scale": 1.0},
-        "too_high": {"value": 2.0, "trainable": False, "lr_scale": 1.0},
-    }
-    enqueue_params, fallback_keys, clamped = osearch.build_warm_start_params(
-        parameters, init_cfg
-    )
-    assert enqueue_params == {"in_range": 0.4, "too_high": 1.0}
-    assert fallback_keys == ["missing"]
-    assert clamped == [("too_high", 2.0, 1.0)]
-
-
-def test_warm_start_trial_uses_init_values(tmp_path: Path):
-    """An enqueued (partial) warm-start trial materializes exactly the init values,
-    the sampler fills lr/batch_size/lr_scale, the result round-trips the normal
-    loader (regression: an unclamped saturated logit would fail its guard), and
-    the next trial is sampler-driven again."""
-    search, parameters = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)
-    init_cfg = pc.load_param_config(PARAM_CONFIGS / "cms_target_default.yaml")
-    enqueue_params, _, _ = osearch.build_warm_start_params(parameters, init_cfg)
-
-    configs: list[dict] = []
-
-    def objective(trial: optuna.Trial) -> float:
-        flat_cfg, _, _, _ = osearch.sample_trial(trial, search, parameters)
-        configs.append(flat_cfg)
-        return 0.0
-
-    study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
-    study.enqueue_trial(enqueue_params, skip_if_exists=True)
-    study.optimize(objective, n_trials=2)
-
-    # Trial 0 carries the init values verbatim...
-    for key, value in enqueue_params.items():
-        assert configs[0][key]["value"] == pytest.approx(value), key
-        assert study.trials[0].params[key] == pytest.approx(value), key
-    # ...plus sampler-filled study hyperparameters (the partial-dict fallback).
-    assert "lr" in study.trials[0].params
-    assert "batch_size" in study.trials[0].params
-
-    # The warm-start config is a normal, loadable, applicable param config even
-    # with trainable 0.99 efficiency logits.
-    mat = tmp_path / "materialized_config.yaml"
-    osearch._dump_flat_config(configs[0], mat)
-    reloaded = pc.load_param_config(mat)
-    card = CMSEnergyFlowDefault(debug=False, learnable=True)
-    pc.apply_param_config(card, reloaded)
-
-    # Trial 1 is sampler-driven, not a copy of the seed.
-    diffs = [
-        key
-        for key in enqueue_params
-        if abs(configs[1][key]["value"] - configs[0][key]["value"]) > 1e-12
-    ]
-    assert diffs
-
-
-def test_warm_start_pending_tracks_seed_trial_state():
-    """The re-enqueue decision follows the seed trial's lifecycle: pending on a
-    fresh study, delivered while the seed is WAITING or once it COMPLETEs, and
-    pending again when the seed FAILed mid-fit (optuna never re-runs FAIL trials,
-    so without this the defaults would silently never be evaluated)."""
-    attrs = {"warm_start_config": "cms_target_default.yaml"}
-
-    # Fresh study -> pending.
-    study = optuna.create_study()
-    assert osearch.warm_start_pending(study.trials)
-
-    # Enqueued (WAITING) -> delivered; evaluated (COMPLETE) -> still delivered.
-    study.enqueue_trial({"x": 0.7}, user_attrs=attrs)
-    assert not osearch.warm_start_pending(study.trials)
-    study.optimize(lambda t: t.suggest_float("x", 0.0, 1.0), n_trials=1)
-    assert study.trials[0].state == optuna.trial.TrialState.COMPLETE
-    assert not osearch.warm_start_pending(study.trials)
-
-    # Seed crashed mid-fit (FAIL) -> pending again.
-    crashed = optuna.create_study()
-    crashed.enqueue_trial({"x": 0.7}, user_attrs=attrs)
-
-    def boom(trial: optuna.Trial) -> float:
-        trial.suggest_float("x", 0.0, 1.0)
-        raise RuntimeError("simulated mid-fit crash")
-
-    with pytest.raises(RuntimeError):
-        crashed.optimize(boom, n_trials=1)
-    assert crashed.trials[0].state == optuna.trial.TrialState.FAIL
-    assert osearch.warm_start_pending(crashed.trials)
-
-    # Sampler-driven trials without the marker never count as a seed.
-    unmarked = optuna.create_study()
-    unmarked.optimize(lambda t: t.suggest_float("x", 0.0, 1.0), n_trials=1)
-    assert osearch.warm_start_pending(unmarked.trials)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +217,6 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
         "optuna_search",
         "--root-file", str(fixture_root),
         "--optuna-config", str(SHIPPED_OPTUNA_CONFIG),
-        "--init-config", str(PARAM_CONFIGS / "cms_target_default.yaml"),
         "--n-trials", "2",
         "--n-steps", "2",
         "--n-events", "80",
@@ -384,14 +238,6 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
         assert plots, f"no intermediate plots in {rd}"
         # The materialized config is a normal, loadable param config.
         assert len(pc.load_param_config(rd / "materialized_config.yaml")) == 66
-
-    # Trial 0 was warm-started from --init-config (chad_logit pinned at 0.0,
-    # below the SimpleCalorimeter fraction-bypass cutoff -> ECal path off).
-    round0 = pc.load_param_config(out_base / "round_0" / "materialized_config.yaml")
-    assert round0["ChargedHadronTrackingEfficiency.eff_logits[0]"]["value"] == pytest.approx(0.7)
-    assert round0["MuonTrackingEfficiency.eff_logits[1]"]["value"] == pytest.approx(0.99)
-    assert round0["HadronFractions.chad_logit"]["value"] == pytest.approx(0.0)
-    assert round0["HadronFractions.chad_logit"]["trainable"] is False
 
     # Canonical best history exists and is accepted by the plot pipeline.
     assert history_path.exists()

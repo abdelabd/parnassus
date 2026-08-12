@@ -33,10 +33,6 @@ N_TRIALS=${N_TRIALS:-50}          # trials ADDED per run (re-run to add 50 more;
 LOSS=wasserstein_1d  # can be "soft_hist"
 PID_WEIGHTING=sqrt_fraction
 OPTUNA_CONFIG=src/parnassus/torch_delphes/param_configs/optuna_config.yaml
-# Warm start: trial 0 of a FRESH study starts from these known-good defaults
-# (values outside the optuna_config search ranges are clamped; lr / batch_size /
-# lr_scale are still sampled). Ignored when the study below is resumed.
-INIT_CONFIG=src/parnassus/torch_delphes/param_configs/cms_target_default.yaml
 # Comet: one experiment PER TRIAL, named "<COMET_NAME>_<trial number>"
 # (optuna_adam_0, optuna_adam_1, ...). Needs COMET_API_KEY exported (workspace
 # from COMET_WORKSPACE); without it the search still runs, just unlogged.
@@ -57,7 +53,6 @@ export OMP_NUM_THREADS=8        # CPU threads per rank (lower if the N ranks con
     -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$ROOT_FILE" \
     --optuna-config "$OPTUNA_CONFIG" \
-    --init-config "$INIT_CONFIG" \
     --n-events "$N_EVENTS" \
     --n-steps "$N_STEPS" \
     --n-trials "$N_TRIALS" \
