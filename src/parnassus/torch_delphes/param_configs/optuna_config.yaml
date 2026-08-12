@@ -47,6 +47,22 @@ search:
     resolution: {low: 0.1, high: 10.0, log: true}
     scale:      {low: 0.1, high: 10.0, log: true}
     efficiency: {low: 0.1, high: 10.0, log: true}
+  # PhotonClusterMerger seed-cone radius, a required categorical like batch_size:
+  # every trial samples one of these, so the study IS the R scan. The baseline
+  # (calibrated) 0.045 goes FIRST -- the warm-start trial always runs the first
+  # choice; 0.0 = merger OFF (exactly the legacy card); 0.1 = the deliberately
+  # too-big bracket. A single-element list fixes the radius for every trial.
+  # Unlike the acceptance cuts, best-val losses ARE comparable across radii (the
+  # target side is untouched). R is deliberately a per-trial constant, not a
+  # gradient-fitted param: each trial's physics params converge self-consistently
+  # at its R (design doc section 6, M3). Give TPE >= ~4-5 trials per choice and
+  # judge the scan on COMPLETE trials' best values: median pruning pools
+  # val-loss across radii, so a slow-adapting radius can be pruned early.
+  # NOTE: on a resumed (--storage) study these choices must match the stored
+  # trials EXACTLY (even reordering breaks optuna categoricals; the search
+  # fails fast with a clear message if they differ).
+  photon_merge_radius:
+    choices: [0.045, 0.0, 0.1]
 
 parameters:
   # ===== Tracking efficiency (logit; init in (0.005, 0.995)) =====

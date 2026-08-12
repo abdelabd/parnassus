@@ -8,8 +8,10 @@ samples
 - one INIT value per learnable scalar (within the range given in the
   ``optuna_config.yaml`` ``parameters:`` block),
 - one ``lr_scale`` per parameter GROUP (resolution / scale / efficiency),
-- the global learning rate, and
-- the batch size,
+- the global learning rate,
+- the batch size, and
+- the ``photon_merge_radius`` from its ``choices`` list (a single choice fixes
+  it for every trial; several make the study an R scan; 0.0 = merger off),
 
 materializes a normal ``{value, trainable, lr_scale}`` param config, runs the
 fit (:func:`.training.fit_card_to_fullsim`), and is scored by its best (minimum)
@@ -91,6 +93,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import math
 import os
 import shutil
 import sys
@@ -114,7 +117,6 @@ from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
 from .comet_utils import end_comet_experiment, init_comet_experiment
 from .config import (
     DEFAULT_ABS_ETA_CUT,
-    DEFAULT_PHOTON_MERGE_RADIUS,
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
 )
@@ -227,6 +229,43 @@ def load_search_config(path: str | Path) -> tuple[dict, dict]:
         if g not in lr_scale:
             raise SystemExit(f"{path}: search.lr_scale is missing the '{g}' group.")
         _parse_range(f"search.lr_scale.{g}", lr_scale[g])
+
+    # PhotonClusterMerger radius: a required categorical like batch_size. A
+    # single choice fixes the radius for every trial; several make the study an
+    # R scan; a 0.0 choice runs that trial with the merger OFF (legacy card).
+    pmr = search.get("photon_merge_radius")
+    choices = pmr.get("choices") if isinstance(pmr, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise SystemExit(
+            f"{path}: search.photon_merge_radius must give a non-empty 'choices' "
+            "list (like batch_size): {choices: [0.045]} for a fixed radius, "
+            "{choices: [0.045, 0.0, 0.1]} to scan (0 = merger off)."
+        )
+    vals: list[float] = []
+    for c in choices:
+        # bool is an int subclass, so float() would silently turn a YAML 1.1
+        # boolean (on/off/yes/no/true/false) into a radius of 1.0 or 0.0.
+        if isinstance(c, bool):
+            raise SystemExit(
+                f"{path}: search.photon_merge_radius choice {c!r} is a YAML "
+                "boolean, not a radius (write 0.0 for merger-off)."
+            )
+        try:
+            v = float(c)
+        except (TypeError, ValueError):
+            raise SystemExit(
+                f"{path}: search.photon_merge_radius choice {c!r} is not a number."
+            ) from None
+        if not math.isfinite(v) or v < 0:
+            raise SystemExit(
+                f"{path}: search.photon_merge_radius choice {c!r} must be a "
+                "finite value >= 0 (0 = merger off)."
+            )
+        vals.append(v)
+    if len(set(vals)) != len(vals):
+        raise SystemExit(
+            f"{path}: search.photon_merge_radius choices contain duplicates: {vals}."
+        )
 
     # Coverage check: the parameters block must cover the card's scalars exactly.
     # A midpoint config applied to a probe card fails fast on a missing/extra key
@@ -354,6 +393,36 @@ def warm_start_pending(trials) -> bool:
     )
 
 
+def check_resume_categorical(trials, name: str, choices: list) -> None:
+    """Fail fast when a resumed study's stored categorical differs from the config.
+
+    Optuna categorical distributions cannot change on resume (equality is an
+    order-sensitive tuple comparison, so even reordering counts). Without this
+    check the mismatch only surfaces at ask time -- a cryptic
+    'CategoricalDistribution does not support dynamic value space' ValueError
+    AFTER the expensive per-rank data load -- or, for a stale WAITING (enqueued)
+    trial pinned to a since-dropped value, as a "'0.045' not in (...)" error.
+    """
+    want = tuple(choices)
+    for t in trials:
+        dist = t.distributions.get(name)
+        if dist is not None and tuple(dist.choices) != want:
+            raise SystemExit(
+                f"[optuna] resume mismatch: the study already recorded {name} "
+                f"choices {list(dist.choices)} but the current config gives "
+                f"{list(want)}. Optuna categoricals cannot change on resume "
+                f"(even reordering) -- restore the previous list or start a "
+                f"new --study-name / --storage."
+            )
+        fixed = (t.system_attrs.get("fixed_params") or {}).get(name)
+        if t.state == TrialState.WAITING and fixed is not None and fixed not in want:
+            raise SystemExit(
+                f"[optuna] resume mismatch: a WAITING (enqueued) trial pins "
+                f"{name}={fixed}, which is not among the current choices "
+                f"{list(want)}. Delete the waiting trial or restore the choices."
+            )
+
+
 # =============================================================================
 # Per-trial sampling
 # =============================================================================
@@ -397,6 +466,27 @@ def sample_trial(
             "lr_scale": group_lr_scale[_group_of(base)],
         }
     return flat_cfg, lr, batch_size, group_lr_scale
+
+
+def sample_photon_merge_radius(trial: optuna.Trial, search: dict) -> float | None:
+    """Per-trial PhotonClusterMerger radius; ``None`` means merger OFF.
+
+    ``search.photon_merge_radius.choices`` is a required categorical (like
+    batch_size): a single choice fixes the radius for every trial, several make
+    the study an R scan, and a 0.0 draw disables the merger for that trial --
+    exactly the legacy card. R is deliberately a per-trial CONSTANT, not a
+    gradient-fitted parameter: within a trial all physics params converge
+    self-consistently at that R, and trials are compared on converged validation
+    loss -- which sidesteps the count-channel degeneracy a learnable R would
+    face at unconverged resolutions (design doc section 6, M3).
+    """
+    radius = float(
+        trial.suggest_categorical(
+            "photon_merge_radius",
+            [float(c) for c in search["photon_merge_radius"]["choices"]],
+        )
+    )
+    return radius if radius > 0 else None
 
 
 def _dump_flat_config(flat_cfg: dict[str, dict], path: Path) -> None:
@@ -569,18 +659,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--photon-merge-radius",
-        type=float,
-        default=DEFAULT_PHOTON_MERGE_RADIUS,
-        help=(
-            "PhotonClusterMerger seed-cone radius: greedy dR merging of the "
-            "eflow photon stream (CMS supercluster scale), with the ecal_photon "
-            "count term recomputed from the merged clusters. Frozen constant "
-            f"(not fitted). Default {DEFAULT_PHOTON_MERGE_RADIUS}. <= 0 "
-            "disables. Losses are not comparable across different settings."
-        ),
-    )
-    parser.add_argument(
         "--early-stopping-patience",
         type=int,
         default=10,
@@ -643,17 +721,22 @@ def main() -> None:
     reco_pt_cut = args.reco_pt_cut if args.reco_pt_cut > 0 else None
     abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
     truncate_chads = not args.no_chad_truncation
-    photon_merge_radius = (
-        args.photon_merge_radius if args.photon_merge_radius > 0 else None
-    )
 
+    radius_choices = [float(c) for c in search["photon_merge_radius"]["choices"]]
     log(
         f"[optuna] world_size={world_size} device={device} n_trials={n_trials} "
         f"loss={args.loss!r} pid_weighting={args.pid_weighting!r} "
         f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
         f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'} "
-        f"photon_merge_radius={photon_merge_radius}"
+        f"photon_merge_radius={radius_choices}"
     )
+    if len(radius_choices) > 1:
+        log(
+            "[optuna] NOTE: radius scan active -- median pruning pools val-loss "
+            "across radii, so a slow-adapting radius can be pruned before it "
+            "converges. Give each choice >= ~4-5 trials and judge the scan on "
+            "COMPLETE trials' best values."
+        )
 
     # Load the data ONCE per rank (reused across all trials; under DDP a
     # DistributedSampler shards it per epoch).
@@ -685,6 +768,7 @@ def main() -> None:
         batch_size: int,
         round_dir: Path,
         trial: optuna.Trial | None,
+        merge_radius: float | None,
         comet_exp: object | None = None,
     ) -> tuple[dict, bool]:
         """Fit one trial's config; run by EVERY rank in lockstep (DDP if world_size>1).
@@ -694,9 +778,12 @@ def main() -> None:
         intermediate-plot all-gather, and the per-epoch prune broadcast below) is
         matched across ranks because all ranks run the same epochs.
 
-        ``comet_exp`` is the trial's Comet experiment (rank 0 only; the mirror-loop
-        ranks pass ``None``), forwarded to the fit so each epoch of the trial is
-        logged under that trial's own experiment.
+        ``merge_radius`` is the trial's (possibly sampled) PhotonClusterMerger
+        radius -- an explicit argument, and part of the DDP payload, so every
+        rank builds the identical card. ``comet_exp`` is the trial's Comet
+        experiment (rank 0 only; the mirror-loop ranks pass ``None``), forwarded
+        to the fit so each epoch of the trial is logged under that trial's own
+        experiment.
         """
         _reclaim_gpu(device)
         torch.manual_seed(args.seed)  # identical init + smearing on every rank
@@ -707,12 +794,11 @@ def main() -> None:
             # cut (tracking expected counts + calo soft counts).
             count_pt_min=reco_pt_cut,
             count_abs_eta_max=abs_eta_cut,
-            # Supercluster-scale photon merging (frozen radius; the ecal_photon
-            # count term is recomputed from the merged clusters inside the card).
+            # Supercluster-scale photon merging (per-trial constant; the
+            # ecal_photon count term is recomputed from the merged clusters
+            # inside the card).
             photon_merger=(
-                PhotonClusterMerger(photon_merge_radius)
-                if photon_merge_radius is not None
-                else None
+                PhotonClusterMerger(merge_radius) if merge_radius is not None else None
             ),
         ).to(device)
         pc.apply_param_config(trainee, cfg)
@@ -807,6 +893,7 @@ def main() -> None:
             _run_fit_collective(
                 payload["cfg"], payload["lr"], payload["batch_size"],
                 Path(payload["round_dir"]), trial=None,
+                merge_radius=payload["photon_merge_radius"],
             )
         _cleanup_distributed()
         return
@@ -816,18 +903,21 @@ def main() -> None:
 
     def objective(trial: optuna.Trial) -> float:
         flat_cfg, lr, batch_size, group_lr_scale = sample_trial(trial, search, parameters)
+        trial_merge_radius = sample_photon_merge_radius(trial, search)
         round_dir = args.output_base / f"round_{trial.number}"
         round_dir.mkdir(parents=True, exist_ok=True)
         _dump_flat_config(flat_cfg, round_dir / "materialized_config.yaml")
         log(
             f"[optuna] trial {trial.number}: lr={lr:.3e} batch={batch_size} "
-            f"lr_scale={{{', '.join(f'{g}={v:.2g}' for g, v in group_lr_scale.items())}}}"
+            f"lr_scale={{{', '.join(f'{g}={v:.2g}' for g, v in group_lr_scale.items())}}} "
+            f"merge_radius={trial_merge_radius}"
         )
         # Hand this trial's config to the other ranks before fitting it together.
         if world_size > 1:
             dist.broadcast_object_list(
                 [{"stop": False, "cfg": flat_cfg, "lr": lr,
-                  "batch_size": batch_size, "round_dir": str(round_dir)}],
+                  "batch_size": batch_size, "round_dir": str(round_dir),
+                  "photon_merge_radius": trial_merge_radius}],
                 src=0,
             )
         # One Comet experiment PER TRIAL, named "<--comet-name>_<trial number>"
@@ -855,7 +945,8 @@ def main() -> None:
 
         try:
             history, pruned = _run_fit_collective(
-                flat_cfg, lr, batch_size, round_dir, trial, comet_exp=comet_exp
+                flat_cfg, lr, batch_size, round_dir, trial,
+                merge_radius=trial_merge_radius, comet_exp=comet_exp,
             )
 
             val_losses = [v for v in history.get("val_loss", []) if v is not None]
@@ -890,7 +981,9 @@ def main() -> None:
             "reco_pt_cut": reco_pt_cut,
             "eta_cut": abs_eta_cut,
             "chad_truncation": truncate_chads,
-            "photon_merge_radius": photon_merge_radius,
+            # THIS trial's radius (sampled when the scan block is active; None =
+            # merger off). plot_fit_results resolves the per-round merger from it.
+            "photon_merge_radius": trial_merge_radius,
         }
         write_history_json(round_dir / "history.json", history, metadata)
 
@@ -923,6 +1016,11 @@ def main() -> None:
         study.sampler = TPESampler(
             multivariate=True, group=True, n_startup_trials=10, seed=sampler_seed + n_existing
         )
+        # A resumed study's categoricals must match the stored distributions
+        # exactly -- fail with a clear message instead of optuna's ask-time
+        # ValueError (which would also strand the DDP mirror ranks).
+        check_resume_categorical(study.trials, "photon_merge_radius", radius_choices)
+        check_resume_categorical(study.trials, "batch_size", list(search["batch_size"]["choices"]))
     # Warm start (rank 0 only -- ranks != 0 returned into the mirror loop above):
     # seed one trial with the --init-config values. The seed is (re-)enqueued
     # whenever the study has no WAITING/COMPLETE/PRUNED seed trial yet -- i.e. on
@@ -937,6 +1035,9 @@ def main() -> None:
             )
         else:
             enqueue_params, fallback_keys, clamped = build_warm_start_params(parameters, init_cfg)
+            # The seed trial evaluates the believed-truth config at the FIRST
+            # radius choice -- put the baseline radius first when scanning.
+            enqueue_params["photon_merge_radius"] = radius_choices[0]
             for key, requested, used in clamped:
                 log(
                     f"[optuna] warm start: {key} init {requested:g} is outside its "
@@ -953,14 +1054,18 @@ def main() -> None:
             )
             log(
                 f"[optuna] warm start: trial {n_existing} seeded with "
-                f"{len(enqueue_params)} init values from {args.init_config} "
+                f"{len(enqueue_params) - 1} init values from {args.init_config} "
+                f"+ photon_merge_radius={enqueue_params['photon_merge_radius']} "
                 f"(lr / batch_size / lr_scale sampled)"
             )
-    study.optimize(objective, n_trials=n_trials)
-
-    # Release the mirror-loop ranks.
-    if world_size > 1:
-        dist.broadcast_object_list([{"stop": True}], src=0)
+    try:
+        study.optimize(objective, n_trials=n_trials)
+    finally:
+        # ALWAYS release the mirror-loop ranks -- an exception escaping the
+        # study would otherwise leave every non-zero rank blocked in
+        # broadcast_object_list until the collective timeout kills the job.
+        if world_size > 1:
+            dist.broadcast_object_list([{"stop": True}], src=0)
 
     # Pick the best round (prefer COMPLETE trials; fall back to the lowest recorded
     # best_val_loss so an all-pruned study still yields a usable result).

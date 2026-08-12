@@ -47,9 +47,12 @@ def fixture_root() -> Path:
 def test_shipped_config_parses_and_covers_card():
     """The shipped optuna_config.yaml parses and exactly covers the 66 card scalars."""
     search, parameters = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)
-    assert {"lr", "batch_size", "lr_scale"} <= set(search)
+    assert {"lr", "batch_size", "lr_scale", "photon_merge_radius"} <= set(search)
     for g in osearch.LR_SCALE_GROUPS:
         assert g in search["lr_scale"]
+    # Shipped default: the 3-value R scan, baseline 0.045 first (the warm-start
+    # trial always runs the first choice).
+    assert search["photon_merge_radius"]["choices"] == [0.045, 0.0, 0.1]
 
     card = CMSEnergyFlowDefault(debug=False, learnable=True)
     card_keys = set()
@@ -95,6 +98,7 @@ def test_load_search_config_rejects_bad(tmp_path: Path):
         "lr": {"low": 1e-4, "high": 1e-2, "log": True},
         "batch_size": {"choices": [256]},
         "lr_scale": {g: {"low": 0.1, "high": 10.0, "log": True} for g in osearch.LR_SCALE_GROUPS},
+        "photon_merge_radius": {"choices": [0.045]},
     }
 
     # Inverted range (low >= high) on a parameter.
@@ -303,6 +307,98 @@ def test_warm_start_pending_tracks_seed_trial_state():
 
 
 # ---------------------------------------------------------------------------
+# Photon-merge-radius scan (no data)
+# ---------------------------------------------------------------------------
+
+
+def test_photon_merge_radius_block_validation(tmp_path: Path):
+    """search.photon_merge_radius is required (like batch_size); bad blocks fail fast."""
+    import yaml
+
+    base = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)[1]
+
+    def _write(block) -> Path:
+        s = {
+            "lr": {"low": 1e-4, "high": 1e-2, "log": True},
+            "batch_size": {"choices": [256]},
+            "lr_scale": {
+                g: {"low": 0.1, "high": 10.0, "log": True} for g in osearch.LR_SCALE_GROUPS
+            },
+        }
+        if block is not None:
+            s["photon_merge_radius"] = block
+        p = tmp_path / "cfg.yaml"
+        with p.open("w") as f:
+            yaml.safe_dump({"search": s, "parameters": base}, f)
+        return p
+
+    # Good blocks round-trip: a scan and a single fixed choice.
+    search, _ = osearch.load_search_config(_write({"choices": [0.0, 0.045, 0.1]}))
+    assert search["photon_merge_radius"]["choices"] == [0.0, 0.045, 0.1]
+    search, _ = osearch.load_search_config(_write({"choices": [0.045]}))
+    assert search["photon_merge_radius"]["choices"] == [0.045]
+
+    # Malformed fail fast: MISSING block, no/empty choices, non-list, non-numeric,
+    # negative, duplicate, YAML boolean (on/off would silently float() to 1.0/0.0).
+    for bad in (
+        None,
+        {},
+        {"choices": []},
+        {"choices": "0.045"},
+        {"choices": [0.045, "big"]},
+        {"choices": [-0.01, 0.045]},
+        {"choices": [0.045, 0.045]},
+        {"choices": [True, 0.045]},
+    ):
+        with pytest.raises(SystemExit):
+            osearch.load_search_config(_write(bad))
+
+
+def test_sample_photon_merge_radius():
+    """Per-trial categorical draw; a 0.0 draw means merger OFF (None radius)."""
+    search = {"photon_merge_radius": {"choices": [0.0, 0.045, 0.1]}}
+    t = optuna.trial.FixedTrial({"photon_merge_radius": 0.045})
+    assert osearch.sample_photon_merge_radius(t, search) == 0.045
+    assert t.params["photon_merge_radius"] == 0.045  # registered as a trial param
+    t0 = optuna.trial.FixedTrial({"photon_merge_radius": 0.0})
+    assert osearch.sample_photon_merge_radius(t0, search) is None
+    # Single choice: every trial gets the fixed radius.
+    t1 = optuna.trial.FixedTrial({"photon_merge_radius": 0.045})
+    assert (
+        osearch.sample_photon_merge_radius(
+            t1, {"photon_merge_radius": {"choices": [0.045]}}
+        )
+        == 0.045
+    )
+
+
+def test_check_resume_categorical():
+    """Resuming with edited/reordered choices (or a stale pinned WAITING trial)
+    fails fast with a clear message instead of optuna's ask-time ValueError."""
+    study = optuna.create_study()
+    study.optimize(
+        lambda t: float(t.suggest_categorical("photon_merge_radius", [0.045, 0.0, 0.1]) or 0),
+        n_trials=1,
+    )
+
+    # Same choices: fine. Edited OR merely reordered: SystemExit.
+    osearch.check_resume_categorical(study.trials, "photon_merge_radius", [0.045, 0.0, 0.1])
+    with pytest.raises(SystemExit):
+        osearch.check_resume_categorical(study.trials, "photon_merge_radius", [0.045, 0.0, 0.08])
+    with pytest.raises(SystemExit):
+        osearch.check_resume_categorical(study.trials, "photon_merge_radius", [0.0, 0.045, 0.1])
+    # Unrelated categorical name: no opinion.
+    osearch.check_resume_categorical(study.trials, "batch_size", [256])
+
+    # A WAITING trial pinned (enqueued) to a value dropped from the choices.
+    pinned = optuna.create_study()
+    pinned.enqueue_trial({"photon_merge_radius": 0.045})
+    with pytest.raises(SystemExit):
+        osearch.check_resume_categorical(pinned.trials, "photon_merge_radius", [0.0, 0.1])
+    osearch.check_resume_categorical(pinned.trials, "photon_merge_radius", [0.045, 0.0])
+
+
+# ---------------------------------------------------------------------------
 # epoch_callback break (needs data)
 # ---------------------------------------------------------------------------
 
@@ -407,3 +503,61 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
     # Best score equals the min val_loss over the best round's epochs.
     best_val = history["best_result"]["val_loss"]
     assert best_val == pytest.approx(min(history["val_loss"]))
+
+
+def test_optuna_search_radius_scan_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatch):
+    """With several radius choices, each trial's sampled radius lands in its
+    round metadata (0.0 draw -> None = merger off), the warm-start trial runs
+    at the FIRST choice (the baseline), and the metadata value is exactly the
+    radius the trial's card was BUILT with (guards against the sampled value
+    reaching the metadata but not the physics, or vice versa)."""
+    import json
+
+    import yaml
+
+    with open(SHIPPED_OPTUNA_CONFIG) as f:
+        cfg = yaml.safe_load(f)
+    cfg["search"]["photon_merge_radius"] = {"choices": [0.045, 0.0]}
+
+    # Spy on merger construction: one entry per trial whose card got a merger.
+    built: list[float] = []
+    real_merger = osearch.PhotonClusterMerger
+
+    class SpyMerger(real_merger):
+        def __init__(self, merge_radius):
+            built.append(merge_radius)
+            super().__init__(merge_radius)
+
+    monkeypatch.setattr(osearch, "PhotonClusterMerger", SpyMerger)
+    cfg_path = tmp_path / "optuna_config_radius.yaml"
+    with cfg_path.open("w") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+
+    out_base = tmp_path / "fit_results"
+    argv = [
+        "optuna_search",
+        "--root-file", str(fixture_root),
+        "--optuna-config", str(cfg_path),
+        "--init-config", str(PARAM_CONFIGS / "cms_target_default.yaml"),
+        "--n-trials", "3",
+        "--n-steps", "2",
+        "--n-events", "80",
+        "--plot-every", "1",
+        "--output-base", str(out_base),
+        "--history-path", str(out_base / "all.json"),
+        "--loss", "wasserstein_1d",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    osearch.main()
+
+    radii = []
+    for i in range(3):
+        with (out_base / f"round_{i}" / "history.json").open() as f:
+            meta = json.load(f)["metadata"]
+        assert meta["photon_merge_radius"] in (None, 0.045), meta["photon_merge_radius"]
+        radii.append(meta["photon_merge_radius"])
+    # Warm-start seed trial runs at the first choice (the baseline radius).
+    assert radii[0] == pytest.approx(0.045)
+    # The card each trial actually fitted used exactly the radius its metadata
+    # records: one merger per non-None trial, in trial order, same values.
+    assert built == [r for r in radii if r is not None]
