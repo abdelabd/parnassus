@@ -90,7 +90,7 @@ Key files in this directory:
 | [tune_cms_fullsim/plot_fit_results.py](tune_cms_fullsim/plot_fit_results.py) | Step 3 — validation plots |
 | [param_config.py](param_config.py) | YAML loader, raw↔physical transforms, `select_trainable` |
 | [param_configs/](param_configs/) | shipped configs + [make_default_configs.py](param_configs/make_default_configs.py) |
-| [param_configs/optuna_config.yaml](param_configs/optuna_config.yaml) | Optuna search-space config (a **range** per parameter, not a single value) |
+| [param_configs/optuna_config.yaml](param_configs/optuna_config.yaml) | Optuna search-space config (per-group lrs + the `constants:` subset) |
 | [run_optuna.sh](run_optuna.sh) | multi-GPU launcher for Step 2b (`torchrun`; one study, DDP fit per trial) |
 | [defaults/](defaults/) | the `CMSEnergyFlowDefault` detector card definition |
 
@@ -205,9 +205,10 @@ the LR decay is recommended for single-parameter closure fits, where the stochas
 loss otherwise makes the scheduler collapse the LR before convergence. DDP-aware: under SLURM
 `srun` it shards across ranks, and only rank 0 logs, plots, and writes history.
 
-> The converged fit is sensitive to the parameter **initialization**, the global **learning rate**,
-> and the **batch size**. To search those automatically instead of hand-picking them, use the Optuna
-> wrapper in [Step 2b](#step-2b--optuna-hyperparameter-search-optional).
+> The converged fit is sensitive to the per-group **learning rate**, and a handful of parameters
+> (the hadron fractions, the photon merge radius) cannot be fitted by Adam at all. To search those
+> automatically instead of hand-picking them, use the Optuna wrapper in
+> [Step 2b](#step-2b--optuna-hyperparameter-search-optional).
 
 ### Flags
 
@@ -251,6 +252,9 @@ When `--history-path` is set, the written JSON has three top-level keys:
 - `metadata` — run-level scalars: `n_events`, `n_steps`, `lr`, `param_config`, the distinct
   `param_group_lrs`, the list of `trainable_params`, `world_size`, and the schedule knobs
   `early_stopping_patience` / `lr_scheduler_patience` (`0` = disabled).
+  *(Step 2b writes `lr_groups` — the three absolute per-group lrs — plus `global_lr: 1.0`,
+  `batch_size`, `constants`, `photon_merge_radius` and `trial_number` instead of `lr` /
+  `param_group_lrs`. It has no single global lr; see [Step 2b](#the-optuna_configyaml-search-space).)*
 - `history` — one entry per epoch (`epoch_<step>`) with `step`, `train_loss`, `val_loss`, and a
   `parameters` snapshot (physical, post-transform values keyed `name[i]`).
 - `best_result` — the epoch with the minimum validation loss, including its final parameter values.
@@ -262,13 +266,19 @@ When `--history-path` is set, the written JSON has three top-level keys:
 `uv run python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search`
 ([tune_cms_fullsim/optuna_search.py](tune_cms_fullsim/optuna_search.py))
 
-The manual Step 2 fit depends strongly on the parameter **initialization**, global **learning rate**,
-and **batch size**. This wraps the *same* Adam fit in an [Optuna](https://optuna.org/) study: each
-trial samples those hyperparameters, runs the fit, and is scored by the fit's **best (minimum)
-validation loss**. A **TPE** (Bayesian) sampler proposes the trials and a **median pruner** stops
+The manual Step 2 fit depends strongly on the per-group **learning rate** and on the handful of
+parameters Adam cannot fit at all. This wraps the *same* Adam fit in an [Optuna](https://optuna.org/)
+study: each trial samples those, runs the fit, and is scored by the fit's **best (minimum) validation
+loss**. A **TPE** (Bayesian) sampler proposes the trials and a **median pruner** stops
 clearly-unpromising ones early via the per-epoch val-loss trajectory (using the `epoch_callback` hook
 in [training.py](tune_cms_fullsim/training.py)). After the study, the best trial's history is copied
 to `--history-path`, so **Step 3 works on it unchanged**.
+
+**Why some parameters are searched rather than fitted.** The `HadronFractions` logits have no
+count-term gradient — the differentiable soft-count gate reads a *detached* energy — so Adam only ever
+sees their (weak, composition-drifting) shape effect and walks them into the window walls. The study,
+scored on the val-loss **value**, sees exactly the count terms Adam is blind to. They are therefore
+frozen per trial and chosen at the study level, like the merge radius.
 
 It runs as **one** Optuna process. With **N GPUs** (launched via `torchrun`, see
 [Running across N GPUs](#running-across-n-gpus--run_optunash)) the trials run **sequentially** and each
@@ -277,9 +287,10 @@ sampler, and a single study writer (rank 0). `run_optuna.sh` persists the study 
 re-run **resumes / adds more trials** (see [Resume / add more trials](#resume--add-more-trials)). A
 plain `python -m ...optuna_search` (no launcher) runs on one GPU.
 
-Each trial samples: one **init value per learnable scalar** (within its range), one **`lr_scale` per
-parameter group** (resolution / scale / efficiency), the **global lr**, and the **batch size**. It
-writes a self-contained per-trial directory and, after the study, copies the best trial's history out:
+Each trial samples: one **absolute learning rate per parameter group** (resolution / scale /
+efficiency), the **photon merge radius**, and one value per **sampled constant**. Everything else
+starts at its **card constructor default** and is fitted by Adam. Each trial writes a self-contained
+directory and, after the study, the best trial's history is copied out:
 
 ```
 <output-base>/round_<n>/materialized_config.yaml   # the concrete {value,trainable,lr_scale} this trial used
@@ -290,45 +301,72 @@ writes a self-contained per-trial directory and, after the study, copies the bes
 
 ### The `optuna_config.yaml` search space
 
-A **new format** ([param_configs/optuna_config.yaml](param_configs/optuna_config.yaml)), distinct from
-the Step-2 param-config: each parameter gives a **range** (sampled per trial) instead of a single
-`value`. Two top-level sections:
+A **separate format** ([param_configs/optuna_config.yaml](param_configs/optuna_config.yaml)), distinct
+from the Step-2 param-config. Two top-level sections:
 
 ```yaml
 search:
-  n_trials: 50
-  seed: 0                                              # TPE sampler seed (reproducible study)
-  lr: {low: 1.0e-4, high: 1.0e-2, log: true}          # global Adam lr magnitude
-  batch_size: {choices: [512, 1024, 2048, 4096]}      # train/val batch size
-  lr_scale:                                           # per-GROUP; effective lr = global lr * group lr_scale
-    resolution: {low: 0.1, high: 10.0, log: true}
-    scale:      {low: 0.1, high: 10.0, log: true}
-    efficiency: {low: 0.1, high: 10.0, log: true}
+  n_trials: 40
+  seed: 0                    # TPE sampler seed (reproducible study)
+  global_batch_size: 2048    # batch SUMMED over ranks; each rank takes global // world_size
+  lr:                        # ABSOLUTE Adam lr per group; `init` = what the seed trial runs
+    resolution: {low: 1.0e-4, high: 6.0e-3, log: true, init: 4.9e-3}
+    scale:      {low: 3.0e-4, high: 6.0e-3, log: true, init: 1.9e-3}
+    efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 1.5e-2}
+  photon_merge_radius: {low: 0.0, high: 0.1, init: 0.045}   # continuous; R -> 0 is merger off
 
-parameters:
-  ChargedHadronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.85}            # sampled init (trainable)
-  ChargedHadronMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
-  ECal.resolution_func.barrel_a: {value: 1.0}                                       # {value} => pinned (frozen)
+constants:                   # a SUBSET; everything unlisted is FITTED from its card default
+  HadronFractions.chad_logit:   {value: 0.0}                      # pinned every trial
+  HadronFractions.k0s_logit:    {low: 0.1, high: 0.5, init: 0.3}  # TPE picks one per trial
 ```
 
-- Each `parameters:` entry is either `{low, high, log}` (**sampled init**, trainable) or `{value}`
-  (**pinned**, frozen). The shipped config makes all 66 scalars tunable.
-- Ranges must respect the same guards as the Step-2 transforms (see
-  [Param-config reference](#param-config-reference)): trainable logit init in `(0.005, 0.995)`, scale in
-  `(0.7, 1.3)`, softplus `> 0`. The loader validates **both endpoints** of every range up front and
-  fails fast with a clear message (a materialized config with an out-of-window init would otherwise
-  break Step 3).
-- The three `lr_scale` groups mirror `default_lr_scale`: `scale` (tanh scales), `efficiency` (sigmoid
-  efficiencies/fractions and `rate_raw`), `resolution` (every other softplus coefficient).
+- **`constants:` is a subset, not a cover.** Every entry is a per-trial **constant**
+  (`trainable: false`): `{value}` is pinned identically in every trial, `{low, high, log, init}` lets
+  TPE choose one value that is then held fixed for the whole fit. Every scalar **not** listed starts
+  at its **card constructor default** (== the CMS card) and is fitted by Adam at its group's sampled
+  lr. The materialized config each trial writes is still **full-cover (68 scalars)**, so Step 3's
+  before-fit baseline is unchanged.
+- **`init:` is required on every sampled entry AND on every `lr` group**, and together they define
+  the **seed trial**: trial 0 runs the known-good lrs on the believed-truth constants at the `init`
+  radius, with every fitted scalar at its card default — the CMS-default baseline card, with no
+  external file. It is **fully pinned**, so it is an exactly reproducible baseline; when the lrs
+  were sampler-filled instead, trial 0 was the truth physics crossed with an arbitrary optimizer
+  draw and ranked 11th of 18. The seed trial **counts toward `--n-trials`**.
+- **`global_batch_size` is the batch summed over ranks**, not per rank; each rank takes
+  `global // world_size`. Adam steps once per global batch, so this fixes the number of updates
+  per epoch and makes a study **reproducible across GPU counts**. Read as per-rank it silently
+  scales with the launcher: `2048` on 4 GPUs is a global batch of 8192 and ~10x fewer Adam
+  updates than the same config on one GPU. The driver logs `updates/epoch` at start-up and
+  records it in the history metadata.
+- **The lr ranges are tied to `global_batch_size`.** They were calibrated at a global batch of
+  ~512 and scaled by **sqrt(batch ratio)** for the shipped 2048 (Adam gradient noise falls as
+  sqrt(batch), so the sqrt rule applies — *not* the linear SGD rule). Change `global_batch_size`
+  and the ranges must move with it, or the search fights the batch instead of the physics.
+- **There is no global `lr`.** Adam only ever sees `global_lr * lr_scale`, so the two were exactly
+  degenerate — a redundant search dimension. The groups' absolute lrs are searched instead, and a
+  materialized config carries them in its `lr_scale` field with `global_lr = 1`. The groups mirror
+  `default_lr_scale`: `scale` (tanh scales), `efficiency` (sigmoid efficiencies/fractions and
+  `rate_raw`), `resolution` (every other softplus coefficient).
+- **Lr decay is off by default here** (`--lr-scheduler-patience 0`): the study searches the lr, and a
+  mid-fit `ReduceLROnPlateau` would make the sampled value a mere starting point — and since decay
+  only goes down, it silently rescues too-high lrs and biases the search.
+- Values must respect the Step-2 transform guards (see
+  [Param-config reference](#param-config-reference)): fractions/efficiencies inside their physical
+  window (`k0s_logit` `(0.1, 0.5)`, `photon_logit` `(0.8, 1.0)`, `k0l_logit` `(0.0, 0.4)`, plain
+  logits `(0, 1)`), scale in `(0.7, 1.3)`, softplus `> 0`. Both endpoints of every range are validated
+  up front. Constants **may sit on a window boundary** (`photon_logit: {value: 1.0}`): the
+  `(0.005, 0.995)` trainable-logit guard exists to protect gradient flow and applies only to fitted
+  parameters. `chad_logit` additionally may not span `(1e-4, 5e-3)`, where the ECal rescale path is on
+  but the tower is always sub-threshold (spurious ~2-3 GeV pT spikes).
 
 ### Flags
 
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--root-file` | path | **required** | Full-sim pseudodata ROOT file. Loaded **once** and reused across all trials. |
-| `--optuna-config` | path | `param_configs/optuna_config.yaml` | The search-space YAML above. |
-| `--init-config` | path | `None` (no warm start) | Param-config YAML (e.g. `param_configs/cms_target_default.yaml`) whose values **seed one warm-start trial** via `study.enqueue_trial`. Params missing from it — and `lr`/`batch_size`/`lr_scale` — are sampled as usual; out-of-range values are clamped into the search range. On resume the seed is not re-enqueued while a waiting/evaluated seed trial exists (a crashed seed is retried). |
-| `--n-trials` | int | `search.n_trials` (50) | Number of trials (overrides the YAML). |
+| `--optuna-config` | path | `param_configs/optuna_config.yaml` | The `search:` + `constants:` YAML above. |
+| `--init-config` | path | `None` (card defaults) | Param-config YAML (e.g. a previous round's `materialized_config.yaml`) that **overrides the start value of the FITTED scalars** it names, so a study can refine from a converged card. Keys in the `constants:` block are ignored. Not needed for the normal flow: trial 0 already runs the config's `init:` values from the card defaults. |
+| `--n-trials` | int | `search.n_trials` (40) | Number of trials (overrides the YAML). The **seed trial counts** toward it. |
 | `--output-base` | path | `doc/fit_results` | Base dir; each trial writes `<base>/round_<n>/…`. |
 | `--history-path` | path | `doc/fit_results/all_v2.json` | Where the **best** trial's history.json is copied (the file Step 3 reads). |
 | `--n-events` | int | `-1` | Events to load (`-1` = all). |
@@ -336,9 +374,10 @@ parameters:
 | `--seed` | int | `0` | Torch RNG seed, fixed across trials so they differ only by the sampled hyperparameters. |
 | `--plot-every` | int | `10` | Per-round intermediate-plot cadence (the final/early-stopped/pruned epoch is always plotted). |
 | `--storage` | str | `None` (in-memory) | Optuna storage URL, e.g. `sqlite:///<dir>/study.db`. Set it to make the study **persistent / resumable** — a re-run with the same storage + `--study-name` adds `--n-trials` more (`run_optuna.sh` sets this). |
-| `--study-name` | str | `tune_cms_fullsim` | Study name; identifies the study within `--storage` on resume. |
+| `--study-name` | str | `tune_cms_fullsim_v2` | Study name; identifies the study within `--storage` on resume. The `_v2` suffix marks the constants restructure: it renamed every Optuna parameter (`lr`/`lr_scale[g]` → `lr[g]`, categorical → continuous radius), so a pre-restructure study **cannot** be resumed meaningfully. |
 | `--loss`, `--pid-weighting`, `--pid-weight-floor`, `--count-weight`, `--calo-count-weight`, `--count-rate-floor`, `--event-weight` | | same as Step 2 | Forwarded unchanged to every trial's fit. |
-| `--early-stopping-patience`, `--lr-scheduler-patience` | int | `10` / `4` | Per-trial early stopping / LR decay (pass `<=0` to disable). |
+| `--early-stopping-patience` | int | `10` | Per-trial early stopping (pass `<=0` to disable). |
+| `--lr-scheduler-patience` | int | `0` (**off**) | Per-trial `ReduceLROnPlateau`. Off here by design: the study searches the lr, so decaying it mid-fit would make the sampled value a starting point only — and decay is one-way, silently rescuing too-high lrs. |
 
 ### Running across N GPUs — `run_optuna.sh`
 
@@ -368,9 +407,8 @@ active **pseudodata** block and a commented-out **full CMS sim** block (comment/
 | `STUDY_NAME` | `pseudo_100k` | Study name (full-sim preset: `fullsim_100k`). |
 | `N_EVENTS` | `-1` | Events to load (`-1` = all). |
 | `N_STEPS` | `100` | Adam steps per trial. |
-| `N_TRIALS` | `50` | Trials **added per run** (re-run to add more; sequential, each uses all N GPUs). |
+| `N_TRIALS` | `40` | Trials **added per run** (re-run to add more; sequential, each uses all N GPUs). |
 | `LOSS` / `PID_WEIGHTING` | `wasserstein_1d` / `sqrt_fraction` | Forwarded to each fit. |
-| `INIT_CONFIG` | `param_configs/cms_target_default.yaml` | Warm start: seeds one trial with these known-good defaults (`--init-config` above). |
 | `HISTORY_PATH` | `<OUTPUT_BASE>/all_optuna.json` | Best-trial history copy (feed to Step 3). |
 | `STORAGE` | `sqlite:///<OUTPUT_BASE>/study.db` | Persistent study DB — re-running resumes it (see below). |
 | `PYTHON` | the repo's uv-env python | Interpreter (runs `torch.distributed.run`). |
@@ -398,8 +436,9 @@ The best history is re-copied to `HISTORY_PATH` over the full study after every 
 ### GPU memory
 
 - The calorimeter forward is the memory peak and runs in **float64**, so it scales with the **per-rank**
-  `batch_size`: the proven working point is batch **4096** (~11 GB per GPU); batch **8192** needs ~34 GB
-  and OOMs a 40 GB card. That is why the shipped `batch_size` choices stop at 4096.
+  PER-RANK batch (`global_batch_size // world_size`): the proven working point is **4096** per rank
+  (~11 GB per GPU); **8192** needs ~34 GB and OOMs a 40 GB card. The shipped `global_batch_size` is
+  **512**, so even on one GPU it is far under that ceiling.
 - Each rank holds the full dataset on its GPU and processes its `DistributedSampler` shard each epoch.
   The intermediate plots are **all-gathered across ranks** before rendering, so they use the **full**
   validation set (not one rank's shard) — same statistics as a single-GPU run.
@@ -483,7 +522,7 @@ after the transform. Defined in [param_config.py](param_config.py):
 | Parameter kind | Suffix | Transform (raw → physical) | Range |
 |---|---|---|---|
 | Scale | `.scale_raw` | `1 + 0.3·tanh(raw)` | open `(0.7, 1.3)` |
-| Efficiency / fraction | `.eff_logits`, `_logit` | `sigmoid(raw)` | `(0, 1)` |
+| Efficiency / fraction | `.eff_logits`, `_logit` | `lo + (hi−lo)·sigmoid(raw)` | per-param window from `logit_bounds`; default `(0, 1)`, `k0s_logit` `(0.1, 0.5)`, `photon_logit` `(0.8, 1.0)`, `k0l_logit` `(0.0, 0.4)` |
 | Resolution / rate | `.a_raw`, `.b_raw`, `.rate_raw`, calo `resolution_func` | `softplus(raw)` | `> 0` |
 
 > ⚠️ **Scale NaN caveat.** A scale `value` must stay strictly inside `(0.7, 1.3)`. The exact
@@ -494,7 +533,8 @@ after the transform. Defined in [param_config.py](param_config.py):
 
 Parameters cover, by particle type and detector region: tracking efficiencies (`eff_logits`,
 `rate_raw`), momentum smearing per species (`a_raw`/`b_raw`/`scale_raw`), hadron fractions
-(`chad_logit`, `k0s_logit`, `lambda_logit`), and ECal/HCal energy scales and resolution functions.
+(`chad_logit`, `k0s_logit`, `lambda_logit`, `photon_logit`, `k0l_logit`), and ECal/HCal energy
+scales and resolution functions.
 
 ### Truth vs debug config
 

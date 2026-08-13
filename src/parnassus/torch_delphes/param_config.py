@@ -39,7 +39,13 @@ import yaml
 from torch import nn
 from torch.nn import functional as F
 
-from parnassus.torch_delphes.learnable import _safe_logit, _softplus_inv
+from parnassus.torch_delphes.learnable import (
+    K0L_FRAC_BOUNDS,
+    K0S_FRAC_BOUNDS,
+    PHOTON_FRAC_BOUNDS,
+    _safe_logit,
+    _softplus_inv,
+)
 
 # Scale parameterization: ``scale = _SCALE_CENTER + _SCALE_HALF_WIDTH*tanh(raw)``,
 # bounded to the OPEN interval ``(0.7, 1.3)``. The boundary is unreachable
@@ -61,6 +67,24 @@ _SCALE_MAX = _SCALE_CENTER + _SCALE_HALF_WIDTH  # 1.3
 # never move).
 _TRAINABLE_LOGIT_MIN = 0.005
 _TRAINABLE_LOGIT_MAX = 0.995
+
+# Physical bounds per logit parameter: the sigmoid output is affinely mapped
+# into (lo, hi), so the fit cannot leave the window. Default (0, 1) is the
+# plain sigmoid. Matched by suffix against the base parameter name.
+_LOGIT_BOUNDS: tuple[tuple[str, tuple[float, float]], ...] = (
+    ("k0s_logit", K0S_FRAC_BOUNDS),
+    ("photon_logit", PHOTON_FRAC_BOUNDS),
+    ("k0l_logit", K0L_FRAC_BOUNDS),
+)
+
+
+def logit_bounds(name: str) -> tuple[float, float]:
+    """Physical (lo, hi) window of a logit parameter; (0, 1) unless registered."""
+    base = name.split("[", 1)[0]
+    for suffix, bounds in _LOGIT_BOUNDS:
+        if base.endswith(suffix):
+            return bounds
+    return (0.0, 1.0)
 
 _DTYPE = torch.float64
 
@@ -99,14 +123,17 @@ def to_physical(name: str, raw: torch.Tensor) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        ``1 + 0.3*tanh(raw)`` for scales, ``sigmoid(raw)`` for logits,
-        ``softplus(raw)`` for positive coefficients, ``raw`` otherwise.
+        ``1 + 0.3*tanh(raw)`` for scales, ``lo + (hi-lo)*sigmoid(raw)`` for
+        logits (per-param window from :func:`logit_bounds`; ``(0, 1)`` for
+        plain logits), ``softplus(raw)`` for positive coefficients, ``raw``
+        otherwise.
     """
     kind = param_transform_kind(name)
     if kind == "scale":
         return _SCALE_CENTER + _SCALE_HALF_WIDTH * torch.tanh(raw)
     if kind == "logit":
-        return torch.sigmoid(raw)
+        lo, hi = logit_bounds(name)
+        return lo + (hi - lo) * torch.sigmoid(raw)
     if kind == "softplus":
         return F.softplus(raw)
     return raw
@@ -116,9 +143,12 @@ def to_raw(name: str, value: float | list[float] | torch.Tensor) -> torch.Tensor
     """Map a physical value (scalar or 1-D) to the raw parameter space.
 
     Range-guarded: scales must be in the open ``(0.7, 1.3)``,
-    efficiencies/fractions in ``[0, 1]`` (clipped away from the ends), and
-    softplus-wrapped coefficients ``> 0``. Out-of-range input raises
-    :class:`ValueError` rather than producing ``inf``/``NaN``.
+    efficiencies/fractions in their physical window (``[0, 1]`` unless the
+    parameter is registered in :func:`logit_bounds`, e.g. k0s ``[0.1, 0.5]``,
+    photon ``[0.8, 1.0]``, k0l ``[0, 0.4]``; clipped away from the ends), and
+    softplus-wrapped coefficients ``> 0``.
+    Out-of-range input raises :class:`ValueError` rather than producing
+    ``inf``/``NaN``.
 
     Returns
     -------
@@ -139,11 +169,12 @@ def to_raw(name: str, value: float | list[float] | torch.Tensor) -> torch.Tensor
         arg = ((v - _SCALE_CENTER) / _SCALE_HALF_WIDTH).clamp(-1 + 1e-12, 1 - 1e-12)
         return torch.atanh(arg)
     if kind == "logit":
-        if bool(torch.any(v < 0.0)) or bool(torch.any(v > 1.0)):
+        lo, hi = logit_bounds(name)
+        if bool(torch.any(v < lo)) or bool(torch.any(v > hi)):
             raise ValueError(
-                f"{name}: probability/fraction {v.flatten().tolist()} must be in [0, 1]."
+                f"{name}: probability/fraction {v.flatten().tolist()} must be in [{lo}, {hi}]."
             )
-        flat = [_safe_logit(float(x)) for x in v.flatten().tolist()]
+        flat = [_safe_logit((float(x) - lo) / (hi - lo)) for x in v.flatten().tolist()]
         return torch.tensor(flat, dtype=_DTYPE).reshape(v.shape)
     if kind == "softplus":
         if bool(torch.any(v <= 0.0)):
@@ -231,14 +262,16 @@ def load_param_config(path: str | Path) -> dict[str, dict]:
         # starts where the sigmoid Jacobian ~ 0, so Adam cannot move it (e.g. value
         # 1.0 -> raw logit ~ +13.8).
         if trainable and param_transform_kind(base) == "logit":
-            if not (_TRAINABLE_LOGIT_MIN < value < _TRAINABLE_LOGIT_MAX):
+            lo, hi = logit_bounds(base)
+            vmin = lo + _TRAINABLE_LOGIT_MIN * (hi - lo)
+            vmax = lo + _TRAINABLE_LOGIT_MAX * (hi - lo)
+            if not (vmin < value < vmax):
                 raise ValueError(
                     f"{path}: {key!r} is a trainable logit parameter with value {value}, "
-                    f"which must be strictly inside the open interval "
-                    f"({_TRAINABLE_LOGIT_MIN}, {_TRAINABLE_LOGIT_MAX}). Initializing a "
-                    f"fitted efficiency/fraction at the 0/1 tails maps to a saturated raw "
-                    f"logit with a vanishing gradient, so the fit cannot move it. Use an "
-                    f"interior value (e.g. 0.85); only pin the boundary with trainable: false."
+                    f"which must be strictly inside the open interval ({vmin}, {vmax}). "
+                    f"Initializing a fitted efficiency/fraction at the window tails maps "
+                    f"to a saturated raw logit with a vanishing gradient, so the fit "
+                    f"cannot move it. Only pin a boundary with trainable: false."
                 )
         out[str(key)] = {
             "value": value,
@@ -361,6 +394,44 @@ def select_trainable(
 # =============================================================================
 
 
+def card_default_config(card: nn.Module) -> dict[str, dict]:
+    """Build a flat param config from ``card``'s current physical values.
+
+    Every entry is ``{"value": float, "trainable": False, "lr_scale": ...}``
+    with ``lr_scale`` seeded from :func:`default_lr_scale`. This is the single
+    source of "what a parameter starts at by default" -- both for
+    :func:`dump_param_config` and for the Optuna search, which initializes
+    every scalar it does not treat as a constant from this dict.
+
+    Returns
+    -------
+    dict[str, dict]
+        The flat per-scalar configuration, in ``named_parameters()`` order.
+    """
+    out: dict[str, dict] = {}
+    for name, p in card.named_parameters():
+        phys = to_physical(name, p.detach()).flatten().tolist()
+        lr_scale = default_lr_scale(name)
+        # Windowed logits: a boundary pin is stored as the _safe_logit-clamped
+        # raw, whose physical value sits 1e-6 (in normalized units) inside the
+        # window (photon 1 - 2e-7, k0l 4e-7). Snap those to the exact bound so
+        # a regenerated YAML matches the hand-maintained pins (1.0 / 0.0).
+        # Plain (0, 1) logits are left as-is (1e-6 stays the canonical form).
+        lo, hi = logit_bounds(name)
+        snap = param_transform_kind(name) == "logit" and (lo, hi) != (0.0, 1.0)
+        for key, val in zip(_scalar_keys(name, p), phys):
+            if snap:
+                if (val - lo) <= 1.5e-6 * (hi - lo):
+                    val = lo
+                elif (hi - val) <= 1.5e-6 * (hi - lo):
+                    val = hi
+            # Round to 8 significant figures to keep the YAML human-readable
+            # (drops float-repr noise like 0.9499999999999998) while staying
+            # well within round-trip tolerance for these O(1)-O(1e-3) values.
+            out[key] = {"value": float(f"{val:.8g}"), "trainable": False, "lr_scale": lr_scale}
+    return out
+
+
 def dump_param_config(card: nn.Module, path: str | Path) -> None:
     """Write ``card``'s current physical values to a flat per-scalar YAML.
 
@@ -368,14 +439,5 @@ def dump_param_config(card: nn.Module, path: str | Path) -> None:
     from :func:`default_lr_scale`. Intended as a starting point: copy the file
     and flip the ``value`` / ``trainable`` fields you want.
     """
-    out: dict[str, dict] = {}
-    for name, p in card.named_parameters():
-        phys = to_physical(name, p.detach()).flatten().tolist()
-        lr_scale = default_lr_scale(name)
-        for key, val in zip(_scalar_keys(name, p), phys):
-            # Round to 8 significant figures to keep the YAML human-readable
-            # (drops float-repr noise like 0.9499999999999998) while staying
-            # well within round-trip tolerance for these O(1)-O(1e-3) values.
-            out[key] = {"value": float(f"{val:.8g}"), "trainable": False, "lr_scale": lr_scale}
     with open(path, "w") as f:
-        yaml.safe_dump(out, f, sort_keys=False, default_flow_style=False)
+        yaml.safe_dump(card_default_config(card), f, sort_keys=False, default_flow_style=False)

@@ -1,23 +1,29 @@
 r"""Optuna hyperparameter search for the CMS TorchDelphes card fit.
 
-The single-fit CLI (:mod:`.cli`) needs a hand-picked starting config, global
-learning rate, and batch size, and the converged result is sensitive to all
-three. This module wraps the *same* Adam fit in an Optuna study: each trial
-samples
+The single-fit CLI (:mod:`.cli`) needs a hand-picked starting config and per-group
+learning rates, and the converged result is sensitive to both. This module wraps
+the *same* Adam fit in an Optuna study: each trial samples
 
-- one INIT value per learnable scalar (within the range given in the
-  ``optuna_config.yaml`` ``parameters:`` block),
-- one ``lr_scale`` per parameter GROUP (resolution / scale / efficiency),
-- the global learning rate,
-- the batch size, and
-- the ``photon_merge_radius`` from its ``choices`` list (a single choice fixes
-  it for every trial; several make the study an R scan; 0.0 = merger off),
+- one ABSOLUTE learning rate per parameter GROUP (resolution / scale /
+  efficiency) -- ``lr`` and ``lr_scale`` are exactly degenerate (Adam only ever
+  sees their product), so the search parameterizes the product directly,
+- the ``photon_merge_radius`` (continuous; its 0 limit is the merger off), and
+- one value per entry of the ``optuna_config.yaml`` ``constants:`` block.
 
-materializes a normal ``{value, trainable, lr_scale}`` param config, runs the
-fit (:func:`.training.fit_card_to_fullsim`), and is scored by its best (minimum)
-validation loss. A TPE (Bayesian) sampler proposes the trials and a median
-pruner stops clearly-unpromising ones early via the per-epoch val-loss
-trajectory.
+Every scalar NOT listed in ``constants:`` starts at its card constructor default
+and is fitted by Adam. Every scalar that IS listed is a per-trial CONSTANT
+(``trainable: false``), either pinned (``{value}``) or TPE-sampled
+(``{low, high, init}``). The shipped block lists the five ``HadronFractions``
+logits: their count-level effects are invisible to Adam (the soft-count gate
+reads a DETACHED energy), but they are visible to the study, which is scored on
+the val-loss VALUE -- count terms included.
+
+Each trial materializes a normal full-cover ``{value, trainable, lr_scale}``
+param config (with ``lr_scale`` holding the group's absolute lr, i.e.
+``global_lr = 1``), runs the fit (:func:`.training.fit_card_to_fullsim`), and is
+scored by its best (minimum) validation loss. A TPE (Bayesian) sampler proposes
+the trials and a median pruner stops clearly-unpromising ones early via the
+per-epoch val-loss trajectory.
 
 Each trial writes a self-contained ``round_<n>/`` directory under
 ``--output-base`` (default ``doc/fit_results``)::
@@ -38,17 +44,24 @@ The copied history keeps ``metadata.param_config`` pointing at the best round's
 ``materialized_config.yaml``, so ``plot_fit_results`` draws the honest
 "before-fit" baseline from the values that trial actually started from.
 
-Warm start
+Seed trial
 ----------
-Pass ``--init-config <param config .yaml>`` (e.g.
-``param_configs/cms_target_default.yaml``) to seed **one warm-start trial** with
-those values via ``study.enqueue_trial``: every searched scalar found in the
-file is fixed for that trial (clamped into its search range if needed); anything
-missing from it -- and lr / batch_size / lr_scale, which have no counterpart in a
-param config -- is sampled as usual. On resume the seed is not re-enqueued while
-a waiting or evaluated seed trial exists; a seed that crashed mid-fit (FAIL /
-zombie RUNNING) is enqueued again, and a pre-warm-start study picks up a seed on
-its first resume with the flag.
+The per-entry ``init:`` fields (on every ``search.lr`` group, on
+``photon_merge_radius``, and on each sampled entry of ``constants:``) define
+**one seed trial**, enqueued via ``study.enqueue_trial``: trial 0 runs the
+known-good learning rates on the believed-truth constants at the calibrated
+radius. It is fully pinned, so it is an exactly reproducible baseline rather
+than the truth physics crossed with an arbitrary optimizer draw, and it needs no
+external file -- with the shipped ``init:`` values that trial is exactly the
+CMS-default baseline card. On resume the seed is not
+re-enqueued while a waiting or evaluated seed trial exists; a seed that crashed
+mid-fit (FAIL / zombie RUNNING) is enqueued again. Note the seed trial COUNTS
+toward ``--n-trials``.
+
+``--init-config <param config .yaml>`` is an optional OVERRIDE for the fitted
+(unlisted) scalars: values found in that file replace the card defaults those
+parameters start from, which is how you refine from a previously converged card.
+It never affects the constants block.
 
 Resume / add more trials
 ------------------------
@@ -82,8 +95,8 @@ collective deadlock). Example for 4 GPUs::
 
 A plain ``python -m ...optuna_search`` (no launcher) runs single-process on one
 GPU and works identically. The per-trial peak memory is the calorimeter forward
-(float64), which scales with the per-rank ``batch_size``; keep the ``batch_size``
-choices to what fits one GPU (≤ 4096 on a 40 GB card).
+(float64), which scales with the per-rank ``search.batch_size``; keep it to what
+fits one GPU (≤ 4096 on a 40 GB card).
 
 Run with
 ``python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search ...``.
@@ -133,32 +146,67 @@ from .loss import (
 from .runner import load_split_datasets, write_history_json
 from .training import fit_card_to_fullsim
 
-# The three lr_scale groups, mirroring param_config.default_lr_scale: resolution
-# coefficients (a/b/c softplus) step slower than the scale (tanh) and efficiency
-# (sigmoid + rate_raw) parameters.
-LR_SCALE_GROUPS: tuple[str, ...] = ("resolution", "scale", "efficiency")
+# The three lr groups, mirroring param_config.default_lr_scale: resolution
+# coefficients (a/b/c softplus), scale (tanh) and efficiency (sigmoid +
+# rate_raw) parameters each get their own absolute learning rate.
+LR_GROUPS: tuple[str, ...] = ("resolution", "scale", "efficiency")
 
-# The open interval a *trainable* logit (efficiency / fraction) init must start
-# inside (a saturated sigmoid init has a vanishing gradient). Aliased from
-# param_config so the search-space validator rejects out-of-window ranges with the
-# exact bound param_config.load_param_config enforces (single source of truth).
+# The open interval a *trainable* logit (efficiency / fraction) must start inside
+# (a saturated sigmoid init has a vanishing gradient). Aliased from param_config
+# so the --init-config override validator uses the exact bound
+# load_param_config enforces (single source of truth). Constants are exempt:
+# trainable: false parameters never move, so a boundary value is fine.
 LOGIT_INIT_MIN = pc._TRAINABLE_LOGIT_MIN  # noqa: SLF001
 LOGIT_INIT_MAX = pc._TRAINABLE_LOGIT_MAX  # noqa: SLF001
 
+# SimpleCalorimeter bypasses the ECal tower/rescale path for hadron fractions
+# below _CHAD_BYPASS_MAX (C++ parity: the CMS card's 0.0 routes charged-hadron
+# tracks straight to EFlowTrack). Between it and _CHAD_ACTIVE_MIN the ECal path
+# is ON but the tower is always sub-threshold, which imprints spurious pT spikes
+# at ~2-3 GeV plus a 4-9 GeV depletion that C++ Delphes does not produce.
+_CHAD_BYPASS_MAX = 1.0e-4
+_CHAD_ACTIVE_MIN = 5.0e-3
+
 
 def _group_of(base: str) -> str:
-    """Return the lr_scale group of a parameter (by its base name).
+    """Return the lr group of a parameter (by its base name).
 
     Mirrors :func:`param_config.default_lr_scale`: ``scale`` (tanh scales),
     ``efficiency`` (sigmoid efficiencies/fractions and the softplus ``rate_raw``),
     or ``resolution`` (every other softplus coefficient: a/b/c_*).
+
+    Raises
+    ------
+    ValueError
+        If ``base`` matches no known transform. A new card parameter whose name
+        misses every :func:`param_config.param_transform_kind` suffix would
+        otherwise be silently filed under ``resolution`` -- and, worse, treated
+        as ``identity`` by ``to_physical`` / ``to_raw``, so its configs would
+        store the RAW value while claiming to be physical.
     """
     kind = pc.param_transform_kind(base)
     if kind == "scale":
         return "scale"
     if kind == "logit" or base.endswith("rate_raw"):
         return "efficiency"
-    return "resolution"
+    if kind == "softplus":
+        return "resolution"
+    raise ValueError(
+        f"{base!r} matches no known parameter transform (kind={kind!r}), so it "
+        f"cannot be assigned an lr group. Register its name suffix in "
+        f"param_config.param_transform_kind first."
+    )
+
+
+def _short(key: str) -> str:
+    """Compact log label for a scalar key.
+
+    Returns
+    -------
+    str
+        The key's last dotted component.
+    """
+    return key.rsplit(".", 1)[-1]
 
 
 def _reclaim_gpu(device: torch.device) -> None:
@@ -195,183 +243,235 @@ def _parse_range(name: str, spec: dict) -> tuple[float, float, bool]:
     return low, high, log
 
 
+def _parse_sampled(name: str, spec: dict) -> tuple[float, float, bool, float]:
+    """Validate a ``{low, high, log, init}`` sampled-constant spec.
+
+    ``init`` is REQUIRED: it is the value the seed trial runs, so a spec without
+    one would silently leave trial 0 to the sampler.
+
+    Returns
+    -------
+    (low, high, log, init)
+    """
+    low, high, log = _parse_range(name, spec)
+    if "init" not in spec:
+        raise SystemExit(
+            f"{name}: a sampled entry needs an 'init' value (the seed trial runs "
+            f"it). Add e.g. 'init: {0.5 * (low + high):g}', or pin the parameter "
+            "with {value: ...}."
+        )
+    init = float(spec["init"])
+    if not low <= init <= high:
+        raise SystemExit(f"{name}: init {init} is outside its range [{low}, {high}].")
+    return low, high, log, init
+
+
 def load_search_config(path: str | Path) -> tuple[dict, dict]:
     """Load and validate an ``optuna_config.yaml``.
 
     Fails fast (raising before the expensive data load) if the file is malformed,
-    a range is invalid, an init range falls outside a ``param_config`` guard, or
-    the ``parameters`` set does not exactly cover the card's learnable scalars.
+    a range is invalid, or the ``constants`` block names a key the card does not
+    have. Validation applies the MERGED config (card defaults for every unlisted
+    scalar, a representative in-range value for every listed one) to a probe
+    card, so the full-cover invariant and the ``to_raw`` guards are exercised at
+    load time.
 
     Returns
     -------
-    (search, parameters)
-        ``search`` is the global study/hyperparameter block; ``parameters`` maps
-        each scalar key to its init spec (either ``{low, high, log}`` for a
-        sampled/trainable param or ``{value}`` for a pinned one).
+    (search, constants)
+        ``search`` is the study/hyperparameter block; ``constants`` maps each
+        listed scalar key to its spec (``{value}`` pinned or ``{low, high, log,
+        init}`` TPE-sampled). Both are per-trial CONSTANTS; every scalar absent
+        from ``constants`` is fitted, starting from its card default.
     """
     with open(path) as f:
         raw = yaml.safe_load(f)
-    if not isinstance(raw, dict) or "parameters" not in raw or "search" not in raw:
+    if not isinstance(raw, dict) or "constants" not in raw or "search" not in raw:
         raise SystemExit(
-            f"{path}: expected a mapping with top-level 'search' and 'parameters' "
-            "sections (see param_configs/optuna_config.yaml for the format)."
+            f"{path}: expected a mapping with top-level 'search' and 'constants' "
+            "sections (see param_configs/optuna_config.yaml). Pre-2026-08 configs "
+            "used a full-cover 'parameters:' block whose {low, high} entries meant "
+            "'sampled INIT of a trainable param'; that format is gone -- listed "
+            "entries are now per-trial constants and everything else is fitted "
+            "from the card defaults."
         )
     search = raw["search"] or {}
-    parameters = raw["parameters"] or {}
-
-    # Validate the global-hyperparameter search space.
-    _parse_range("search.lr", search.get("lr", {}))
-    bs = search.get("batch_size", {})
-    if "choices" not in bs or not bs["choices"]:
-        raise SystemExit(f"{path}: search.batch_size must give a non-empty 'choices' list.")
-    lr_scale = search.get("lr_scale", {})
-    for g in LR_SCALE_GROUPS:
-        if g not in lr_scale:
-            raise SystemExit(f"{path}: search.lr_scale is missing the '{g}' group.")
-        _parse_range(f"search.lr_scale.{g}", lr_scale[g])
-
-    # PhotonClusterMerger radius: a required categorical like batch_size. A
-    # single choice fixes the radius for every trial; several make the study an
-    # R scan; a 0.0 choice runs that trial with the merger OFF (legacy card).
-    pmr = search.get("photon_merge_radius")
-    choices = pmr.get("choices") if isinstance(pmr, dict) else None
-    if not isinstance(choices, list) or not choices:
-        raise SystemExit(
-            f"{path}: search.photon_merge_radius must give a non-empty 'choices' "
-            "list (like batch_size): {choices: [0.045]} for a fixed radius, "
-            "{choices: [0.045, 0.0, 0.1]} to scan (0 = merger off)."
-        )
-    vals: list[float] = []
-    for c in choices:
-        # bool is an int subclass, so float() would silently turn a YAML 1.1
-        # boolean (on/off/yes/no/true/false) into a radius of 1.0 or 0.0.
-        if isinstance(c, bool):
-            raise SystemExit(
-                f"{path}: search.photon_merge_radius choice {c!r} is a YAML "
-                "boolean, not a radius (write 0.0 for merger-off)."
-            )
-        try:
-            v = float(c)
-        except (TypeError, ValueError):
-            raise SystemExit(
-                f"{path}: search.photon_merge_radius choice {c!r} is not a number."
-            ) from None
-        if not math.isfinite(v) or v < 0:
-            raise SystemExit(
-                f"{path}: search.photon_merge_radius choice {c!r} must be a "
-                "finite value >= 0 (0 = merger off)."
-            )
-        vals.append(v)
-    if len(set(vals)) != len(vals):
-        raise SystemExit(
-            f"{path}: search.photon_merge_radius choices contain duplicates: {vals}."
-        )
-
-    # Coverage check: the parameters block must cover the card's scalars exactly.
-    # A midpoint config applied to a probe card fails fast on a missing/extra key
-    # before the expensive data load.
-    probe = CMSEnergyFlowDefault(debug=False, learnable=True)
-    midpoint_cfg = {
-        key: {"value": _midpoint(key, spec), "trainable": "value" not in spec, "lr_scale": 1.0}
-        for key, spec in parameters.items()
-    }
+    constants = raw["constants"] or {}
     try:
-        pc.apply_param_config(probe, midpoint_cfg)  # checks coverage (key set) + to_raw guards
+        _validate_search_config(path, search, constants)
     except ValueError as e:
-        raise SystemExit(f"{path}: invalid 'parameters' block -- {e}") from e
+        # _parse_range's message names the offending key but not the file.
+        raise SystemExit(f"{path}: {e}") from e
+    return search, constants
 
-    # Per-parameter init-range guards. A sampled init can land on either endpoint,
-    # so BOTH must satisfy the same range guards param_config enforces -- crucially
-    # the trainable-logit (LOGIT_INIT_MIN, LOGIT_INIT_MAX) window, which lives in
-    # load_param_config (not to_raw), so the midpoint apply above does NOT catch
-    # it. A range that strays
-    # outside it would produce a saturated, gradient-less init AND break
-    # plot_fit_results when it reloads the materialized config.
-    for key, spec in parameters.items():
+
+def _validate_search_config(path: str | Path, search: dict, constants: dict) -> None:
+    """Fail fast on a malformed ``search`` / ``constants`` pair (see caller)."""
+    # Absolute per-group Adam learning rates. `lr` and the old `lr_scale` were
+    # exactly degenerate (select_trainable only ever uses their product), so the
+    # search parameterizes the product and materialized configs carry it with
+    # global_lr = 1.
+    lr = search.get("lr", {})
+    for g in LR_GROUPS:
+        if g not in lr:
+            raise SystemExit(f"{path}: search.lr is missing the '{g}' group.")
+        # `init` is required here for the same reason as on a sampled constant:
+        # it is what the seed trial runs. Without it trial 0 drew random lrs, so
+        # the "baseline" was the believed-truth physics crossed with an arbitrary
+        # optimizer -- in the 18-trial mee round that landed 11th of 18.
+        _parse_sampled(f"search.lr.{g}", lr[g])
+
+    if "batch_size" in search:
+        raise SystemExit(
+            f"{path}: 'search.batch_size' was renamed to 'search.global_batch_size' and "
+            "its meaning CHANGED: it is now the batch summed over all ranks, and each "
+            "rank uses global_batch_size // world_size. The old per-rank reading made a "
+            "study silently depend on the GPU count -- 4 ranks x 2048 meant a global "
+            "batch of 8192 and ~10x fewer Adam updates than the same config on 1 GPU."
+        )
+    bs = search.get("global_batch_size")
+    if not isinstance(bs, int) or isinstance(bs, bool) or bs <= 0:
+        raise SystemExit(
+            f"{path}: search.global_batch_size must be a positive integer (got {bs!r})."
+        )
+
+    # PhotonClusterMerger radius: a continuous per-trial constant whose R -> 0
+    # limit IS the merger off (an isolated photon is a cluster of one and passes
+    # through bit-identical, so small R is the identity).
+    pmr = search.get("photon_merge_radius")
+    if not isinstance(pmr, dict):
+        raise SystemExit(
+            f"{path}: search.photon_merge_radius must be a "
+            "{low, high, init} range, e.g. {low: 0.0, high: 0.1, init: 0.045}."
+        )
+    r_lo, r_hi, _log, _init = _parse_sampled("search.photon_merge_radius", pmr)
+    if r_lo < 0 or not math.isfinite(r_hi):
+        raise SystemExit(
+            f"{path}: search.photon_merge_radius must be a finite range with "
+            f"low >= 0 (got [{r_lo}, {r_hi}])."
+        )
+
+    probe = CMSEnergyFlowDefault(debug=False, learnable=True)
+    card_keys = set(pc.card_default_config(probe))
+    unknown = sorted(set(constants) - card_keys)
+    if unknown:
+        raise SystemExit(f"{path}: 'constants' names keys the card does not have: {unknown}")
+    if set(constants) == card_keys:
+        raise SystemExit(
+            f"{path}: 'constants' covers every card scalar, so nothing would be "
+            "fitted. It is a SUBSET block -- list only the parameters you want "
+            "frozen at a per-trial value."
+        )
+
+    # Per-constant guards, then a merged probe apply (coverage + to_raw).
+    for key, spec in constants.items():
         base = key.split("[", 1)[0]
-        kind = pc.param_transform_kind(base)
-        if "value" in spec:
+        values = (
+            [float(spec["value"])]
+            if "value" in spec
+            else list(_parse_sampled(key, spec)[:2])  # both endpoints must be representable
+        )
+        for v in values:
             try:
-                pc.to_raw(base, float(spec["value"]))
+                pc.to_raw(base, v)
             except ValueError as e:
-                raise SystemExit(f"{path}: {key!r} pinned value invalid -- {e}") from e
-            continue
-        lo, hi, _log = _parse_range(key, spec)
-        for end in (lo, hi):
-            if kind == "logit":
-                if not (LOGIT_INIT_MIN < end < LOGIT_INIT_MAX):
-                    raise SystemExit(
-                        f"{path}: {key!r} is a trainable logit; its init range "
-                        f"[{lo}, {hi}] must lie strictly inside the open interval "
-                        f"({LOGIT_INIT_MIN}, {LOGIT_INIT_MAX}) -- a saturated sigmoid "
-                        "init has a vanishing gradient. Pin the boundary with "
-                        "{value: ...} instead."
-                    )
-            else:
-                # scale boundary (0.7, 1.3) and softplus > 0 are enforced by to_raw.
-                try:
-                    pc.to_raw(base, end)
-                except ValueError as e:
-                    raise SystemExit(
-                        f"{path}: {key!r} init-range endpoint {end} invalid -- {e}"
-                    ) from e
+                raise SystemExit(f"{path}: {key!r} value {v} invalid -- {e}") from e
+        # The whole INTERVAL must miss the artifact zone, not just its endpoints:
+        # a range straddling it (1e-5 .. 0.5) would sample straight into it.
+        if base.endswith("chad_logit") and (
+            min(values) < _CHAD_ACTIVE_MIN and max(values) > _CHAD_BYPASS_MAX
+        ):
+            raise SystemExit(
+                f"{path}: {key!r} spans ({_CHAD_BYPASS_MAX}, {_CHAD_ACTIVE_MIN}), "
+                "where the ECal rescale path is ON but the tower is always "
+                "sub-threshold -- that imprints spurious ~2-3 GeV pT spikes and a "
+                f"4-9 GeV depletion. Stay at/below {_CHAD_BYPASS_MAX} (the C++ "
+                f"bypass) or at/above {_CHAD_ACTIVE_MIN}."
+            )
 
-    return search, parameters
+    merged = pc.card_default_config(probe)
+    for key, spec in constants.items():
+        merged[key] = {**merged[key], "value": _representative(key, spec), "trainable": False}
+    try:
+        pc.apply_param_config(probe, merged)
+    except ValueError as e:
+        raise SystemExit(f"{path}: invalid 'constants' block -- {e}") from e
 
 
-def _midpoint(key: str, spec: dict) -> float:
-    """Representative in-range value of a param spec (for fail-fast validation)."""
-    if "value" in spec:
-        return float(spec["value"])
-    low, high, log = _parse_range(key, spec)
-    return (low * high) ** 0.5 if log else 0.5 * (low + high)
+def coupled_photon_constants(constants: dict) -> list[str]:
+    """Sampled constants that fight ``photon_merge_radius`` over photon yield.
 
-
-def build_warm_start_params(
-    parameters: dict, init_cfg: dict
-) -> tuple[dict[str, float], list[str], list[tuple[str, float, float]]]:
-    """Build the ``study.enqueue_trial`` dict for a warm-start (seed) trial.
-
-    For every range-type entry in ``parameters`` (pinned ``{value:}`` entries are
-    never suggested, so they get no fixed param), take the init value from
-    ``init_cfg`` (:func:`param_config.load_param_config` format). A value outside
-    ``[low, high]`` is CLAMPED to the nearer endpoint: optuna only warns on an
-    out-of-range fixed param and uses it anyway, which could seed e.g. a
-    trainable logit at 1e-6 -- a dead-gradient init whose materialized config
-    then fails ``load_param_config``'s guard in ``plot_fit_results``. The range
-    endpoints already passed every ``to_raw``/logit-window check in
-    :func:`load_search_config`, so a clamped value is always representable. Keys
-    absent from ``init_cfg`` are left out of the dict, so the sampler fills them
-    (as it also does for lr / batch_size / lr_scale, which have no counterpart
-    in a param config).
+    ``photon_logit`` and ``k0l_logit`` both move the photon<->NH balance, as the
+    radius does, so their optima are correlated. They are NOT degenerate -- only
+    the fractions move energy into the HCal stream, and merging HARDENS the
+    photon spectrum (merged = sum) where a leak SOFTENS it, so the per-pid shape
+    and ``hcal_nh`` count terms can separate them. Expect a ridge and judge the
+    study on the response surface, not on the single best trial.
 
     Returns
     -------
-    (enqueue_params, fallback_keys, clamped)
-        ``enqueue_params``: ``{optuna param name: value}`` for ``enqueue_trial``;
-        ``fallback_keys``: range params missing from ``init_cfg`` (sampler-filled);
-        ``clamped``: ``(key, requested, used)`` per out-of-range init value.
+    list[str]
+        The sampled (not pinned) coupled keys; empty when none are searched.
     """
-    enqueue_params: dict[str, float] = {}
-    fallback_keys: list[str] = []
-    clamped: list[tuple[str, float, float]] = []
-    for key, spec in parameters.items():
-        if "value" in spec:
-            continue
-        if key not in init_cfg:
-            fallback_keys.append(key)
-            continue
-        value = float(init_cfg[key]["value"])
-        low, high, _log = _parse_range(key, spec)
-        used = min(max(value, low), high)
-        if used != value:
-            clamped.append((key, value, used))
-        enqueue_params[key] = used
-    return enqueue_params, fallback_keys, clamped
+    return [
+        k
+        for k in ("HadronFractions.photon_logit", "HadronFractions.k0l_logit")
+        if k in constants and "value" not in constants[k]
+    ]
 
 
-def warm_start_pending(trials) -> bool:
-    """True when the study still needs its warm-start seed trial enqueued.
+def _representative(key: str, spec: dict) -> float:
+    """In-range value of a constant spec, for fail-fast validation.
+
+    Returns
+    -------
+    float
+        The pinned value, or the range's (geometric) midpoint.
+    """
+    if "value" in spec:
+        return float(spec["value"])
+    low, high, log, _init = _parse_sampled(key, spec)
+    return (low * high) ** 0.5 if log else 0.5 * (low + high)
+
+
+def apply_init_overrides(defaults: dict[str, dict], init_cfg: dict, source: str) -> list[str]:
+    """Override fitted-scalar start values from an ``--init-config`` param config.
+
+    ``defaults`` (from :func:`param_config.card_default_config`) is mutated in
+    place; only keys present in BOTH are touched, so a partial file is fine and
+    the constants block is untouched (the caller passes the fitted subset).
+    Overridden logits are re-checked against the trainable window, because unlike
+    a constant these parameters DO have to move.
+
+    Returns
+    -------
+    list[str]
+        The keys that were overridden.
+    """
+    changed = []
+    for key, spec in init_cfg.items():
+        if key not in defaults:
+            continue
+        base = key.split("[", 1)[0]
+        value = float(spec["value"])
+        if pc.param_transform_kind(base) == "logit":
+            blo, bhi = pc.logit_bounds(base)
+            vmin = blo + LOGIT_INIT_MIN * (bhi - blo)
+            vmax = blo + LOGIT_INIT_MAX * (bhi - blo)
+            if not vmin < value < vmax:
+                raise SystemExit(
+                    f"{source}: {key!r} = {value} is outside the trainable-logit "
+                    f"window ({vmin}, {vmax}); it is a FITTED parameter here, so a "
+                    "saturated init would have no gradient. Freeze it in the "
+                    "constants block instead."
+                )
+        defaults[key]["value"] = value
+        changed.append(key)
+    return changed
+
+
+def seed_trial_pending(trials) -> bool:
+    """True when the study still needs its ``init:``-valued seed trial enqueued.
 
     A seed trial (marked with the ``warm_start_config`` user attr at enqueue
     time) counts as delivered when it is WAITING (it will run this time) or
@@ -393,99 +493,69 @@ def warm_start_pending(trials) -> bool:
     )
 
 
-def check_resume_categorical(trials, name: str, choices: list) -> None:
-    """Fail fast when a resumed study's stored categorical differs from the config.
-
-    Optuna categorical distributions cannot change on resume (equality is an
-    order-sensitive tuple comparison, so even reordering counts). Without this
-    check the mismatch only surfaces at ask time -- a cryptic
-    'CategoricalDistribution does not support dynamic value space' ValueError
-    AFTER the expensive per-rank data load -- or, for a stale WAITING (enqueued)
-    trial pinned to a since-dropped value, as a "'0.045' not in (...)" error.
-    """
-    want = tuple(choices)
-    for t in trials:
-        dist = t.distributions.get(name)
-        if dist is not None and tuple(dist.choices) != want:
-            raise SystemExit(
-                f"[optuna] resume mismatch: the study already recorded {name} "
-                f"choices {list(dist.choices)} but the current config gives "
-                f"{list(want)}. Optuna categoricals cannot change on resume "
-                f"(even reordering) -- restore the previous list or start a "
-                f"new --study-name / --storage."
-            )
-        fixed = (t.system_attrs.get("fixed_params") or {}).get(name)
-        if t.state == TrialState.WAITING and fixed is not None and fixed not in want:
-            raise SystemExit(
-                f"[optuna] resume mismatch: a WAITING (enqueued) trial pins "
-                f"{name}={fixed}, which is not among the current choices "
-                f"{list(want)}. Delete the waiting trial or restore the choices."
-            )
-
-
 # =============================================================================
 # Per-trial sampling
 # =============================================================================
 
 
 def sample_trial(
-    trial: optuna.Trial, search: dict, parameters: dict
-) -> tuple[dict[str, dict], float, int, dict[str, float]]:
-    """Sample one full hyperparameter point for a trial.
+    trial: optuna.Trial, search: dict, constants: dict, defaults: dict[str, dict]
+) -> tuple[dict[str, dict], dict[str, float]]:
+    """Sample one trial's learning rates and constants into a full param config.
+
+    ``defaults`` is :func:`param_config.card_default_config` (optionally
+    ``--init-config``-overridden): every scalar it holds that the ``constants``
+    block does not claim is FITTED, starting from that value.
 
     Returns
     -------
-    (flat_cfg, lr, batch_size, group_lr_scale)
-        ``flat_cfg`` is the materialized ``{key: {value, trainable, lr_scale}}``
-        config (the exact format :func:`param_config.load_param_config` returns),
-        ready for :func:`param_config.apply_param_config` /
-        :func:`param_config.select_trainable`.
+    (flat_cfg, group_lr)
+        ``flat_cfg`` is the full-cover materialized ``{key: {value, trainable,
+        lr_scale}}`` config -- the exact format
+        :func:`param_config.load_param_config` returns, ready for
+        :func:`param_config.apply_param_config` /
+        :func:`param_config.select_trainable` (with ``global_lr=1``, since
+        ``lr_scale`` already holds the group's absolute lr).
     """
-    lr_lo, lr_hi, lr_log = _parse_range("search.lr", search["lr"])
-    lr = trial.suggest_float("lr", lr_lo, lr_hi, log=lr_log)
-    batch_size = int(trial.suggest_categorical("batch_size", list(search["batch_size"]["choices"])))
-
-    group_lr_scale: dict[str, float] = {}
-    for g in LR_SCALE_GROUPS:
-        lo, hi, log = _parse_range(f"search.lr_scale.{g}", search["lr_scale"][g])
-        group_lr_scale[g] = trial.suggest_float(f"lr_scale[{g}]", lo, hi, log=log)
+    group_lr = {}
+    for g in LR_GROUPS:
+        lo, hi, log, _init = _parse_sampled(f"search.lr.{g}", search["lr"][g])
+        group_lr[g] = trial.suggest_float(f"lr[{g}]", lo, hi, log=log)
 
     flat_cfg: dict[str, dict] = {}
-    for key, spec in parameters.items():
-        base = key.split("[", 1)[0]
-        if "value" in spec:
-            value = float(spec["value"])
-            trainable = False
+    for key, default in defaults.items():
+        spec = constants.get(key)
+        if spec is None:
+            value, trainable = default["value"], True
+        elif "value" in spec:
+            value, trainable = float(spec["value"]), False
         else:
-            lo, hi, log = _parse_range(key, spec)
-            value = trial.suggest_float(key, lo, hi, log=log)
-            trainable = True
+            lo, hi, log, _init = _parse_sampled(key, spec)
+            value, trainable = trial.suggest_float(key, lo, hi, log=log), False
         flat_cfg[key] = {
             "value": value,
             "trainable": trainable,
-            "lr_scale": group_lr_scale[_group_of(base)],
+            "lr_scale": group_lr[_group_of(key.split("[", 1)[0])],
         }
-    return flat_cfg, lr, batch_size, group_lr_scale
+    return flat_cfg, group_lr
 
 
 def sample_photon_merge_radius(trial: optuna.Trial, search: dict) -> float | None:
     """Per-trial PhotonClusterMerger radius; ``None`` means merger OFF.
 
-    ``search.photon_merge_radius.choices`` is a required categorical (like
-    batch_size): a single choice fixes the radius for every trial, several make
-    the study an R scan, and a 0.0 draw disables the merger for that trial --
-    exactly the legacy card. R is deliberately a per-trial CONSTANT, not a
-    gradient-fitted parameter: within a trial all physics params converge
-    self-consistently at that R, and trials are compared on converged validation
-    loss -- which sidesteps the count-channel degeneracy a learnable R would
-    face at unconverged resolutions (design doc section 6, M3).
+    Sampled continuously from ``search.photon_merge_radius``. The R -> 0 limit
+    IS the merger off (an isolated photon is a cluster of one and passes through
+    bit-identical), so the range needs no off-sentinel; ``None`` is returned only
+    for an exact 0, which ``PhotonClusterMerger`` would reject.
+
+    R is deliberately a per-trial CONSTANT, not a gradient-fitted parameter:
+    within a trial all physics params converge self-consistently at that R, and
+    trials are compared on converged validation loss -- which sidesteps the
+    count-channel degeneracy a learnable R would face at unconverged
+    resolutions (design doc section 6, M3).
     """
-    radius = float(
-        trial.suggest_categorical(
-            "photon_merge_radius",
-            [float(c) for c in search["photon_merge_radius"]["choices"]],
-        )
-    )
+    lo, hi, log = _parse_range("search.photon_merge_radius", search["photon_merge_radius"])
+    radius = trial.suggest_float("photon_merge_radius", lo, hi, log=log)
     return radius if radius > 0 else None
 
 
@@ -534,20 +604,21 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Optional param-config YAML ({value, trainable, lr_scale} per scalar, e.g. "
-            "param_configs/cms_target_default.yaml). Seeds ONE warm-start trial with "
-            "its values via study.enqueue_trial; params missing from it (and lr / "
-            "batch_size / lr_scale) are sampled as usual, and out-of-range values are "
-            "clamped into the search range. On resume the seed is NOT re-enqueued if a "
-            "waiting or evaluated seed trial already exists (a crashed seed is "
-            "retried). Default: no warm start."
+            "Optional param-config YAML ({value, trainable, lr_scale} per scalar, e.g. a "
+            "previous round's materialized_config.yaml). OVERRIDES the card-default "
+            "start value of every FITTED scalar it names, so a study can refine from a "
+            "converged card; keys in the constants block are ignored. Default: start "
+            "every fitted scalar at its card constructor default."
         ),
     )
     parser.add_argument(
         "--n-trials",
         type=int,
         default=None,
-        help="Number of Optuna trials (overrides search.n_trials in the config; default 50).",
+        help=(
+            "Number of Optuna trials (overrides search.n_trials in the config). The "
+            "enqueued seed trial COUNTS toward this number."
+        ),
     )
     parser.add_argument(
         "--output-base",
@@ -588,7 +659,11 @@ def main() -> None:
             "for a resumable/inspectable study. Default: in-memory."
         ),
     )
-    parser.add_argument("--study-name", type=str, default="tune_cms_fullsim")
+    # v2: the constants restructure renamed every optuna param (lr/lr_scale[g] ->
+    # lr[g], categorical radius -> continuous), so a pre-restructure study cannot
+    # be resumed meaningfully -- TPE would file its trials under a different
+    # parameter group and silently ignore them.
+    parser.add_argument("--study-name", type=str, default="tune_cms_fullsim_v2")
     parser.add_argument(
         "--comet-name",
         type=str,
@@ -662,13 +737,18 @@ def main() -> None:
         "--early-stopping-patience",
         type=int,
         default=10,
-        help="Per-trial early stopping (<=0 disables, the default -- pruning handles early termination).",  # noqa: E501
+        help="Per-trial early stopping; epochs of no val improvement before stopping (<=0 disables). Default 10.",  # noqa: E501
     )
     parser.add_argument(
         "--lr-scheduler-patience",
         type=int,
-        default=4,
-        help="Per-trial ReduceLROnPlateau patience (<=0 disables, the default -- search varies lr).",  # noqa: E501
+        default=0,
+        help=(
+            "Per-trial ReduceLROnPlateau patience; <=0 DISABLES lr decay, the default "
+            "here. The study searches the per-group lr, so decaying it mid-fit would "
+            "make the sampled value a mere starting point -- and the decay only goes "
+            "down, which silently rescues too-high lrs and biases the search."
+        ),
     )
     args = parser.parse_args()
 
@@ -704,17 +784,34 @@ def main() -> None:
             "ROOT file (cms-flow schema)."
         )
 
-    search, parameters = load_search_config(args.optuna_config)
-    n_trials = args.n_trials if args.n_trials is not None else int(search.get("n_trials", 50))
+    search, constants = load_search_config(args.optuna_config)
+    n_trials = args.n_trials if args.n_trials is not None else int(search.get("n_trials", 40))
     sampler_seed = int(search.get("seed", 0))
 
-    # Warm-start source (fail fast on every rank, before the expensive data load;
-    # only rank 0 uses it, at the enqueue below).
-    init_cfg: dict | None = None
+    # The config fixes the GLOBAL batch; each rank takes an equal slice. Adam
+    # steps once per global batch, so this is what keeps the number of updates
+    # per epoch -- and therefore the fit itself -- identical on 1 GPU and on N.
+    global_batch_size = int(search["global_batch_size"])
+    if global_batch_size % world_size:
+        raise SystemExit(
+            f"search.global_batch_size ({global_batch_size}) must be divisible by the "
+            f"number of ranks ({world_size}); otherwise the ranks would take unequal "
+            "batches. Pick a multiple, or launch a different --nproc-per-node."
+        )
+    batch_size = global_batch_size // world_size
+
+    # Start values of the FITTED scalars: card constructor defaults, optionally
+    # overridden from --init-config. Built once and reused by every trial.
+    defaults = pc.card_default_config(CMSEnergyFlowDefault(debug=False, learnable=True))
     if args.init_config is not None:
         if not args.init_config.exists():
             raise SystemExit(f"--init-config {args.init_config} does not exist.")
-        init_cfg = pc.load_param_config(args.init_config)
+        # This view SHARES its spec dicts with `defaults`, so the override lands
+        # there directly; filtering exists only to keep the constants out of reach.
+        fitted = {k: v for k, v in defaults.items() if k not in constants}
+        overridden = apply_init_overrides(
+            fitted, pc.load_param_config(args.init_config), str(args.init_config)
+        )
 
     # Resolve the acceptance-cut args (<= 0 disables the respective part).
     truth_pt_cut = args.truth_pt_cut if args.truth_pt_cut > 0 else None
@@ -722,20 +819,41 @@ def main() -> None:
     abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
     truncate_chads = not args.no_chad_truncation
 
-    radius_choices = [float(c) for c in search["photon_merge_radius"]["choices"]]
+    r_lo, r_hi, _r_log, r_init = _parse_sampled(
+        "search.photon_merge_radius", search["photon_merge_radius"]
+    )
+    n_sampled = sum(1 for s in constants.values() if "value" not in s)
     log(
         f"[optuna] world_size={world_size} device={device} n_trials={n_trials} "
-        f"loss={args.loss!r} pid_weighting={args.pid_weighting!r} "
+        f"batch={global_batch_size} global ({batch_size}/rank) loss={args.loss!r} "
+        f"pid_weighting={args.pid_weighting!r} "
         f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
         f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'} "
-        f"photon_merge_radius={radius_choices}"
+        f"photon_merge_radius=[{r_lo}, {r_hi}] "
+        f"lr_decay={'ON' if args.lr_scheduler_patience > 0 else 'OFF'}"
     )
-    if len(radius_choices) > 1:
+    log(
+        f"[optuna] search space: 3 group lrs + radius + {n_sampled} sampled "
+        f"constant(s); {len(defaults) - len(constants)} scalars fitted from "
+        f"{'--init-config-overridden ' if args.init_config else ''}card defaults, "
+        f"{len(constants)} frozen"
+    )
+    if args.init_config is not None:
+        log(f"[optuna] init override: {len(overridden)} fitted scalars from {args.init_config}")
+    if r_lo < r_hi:
         log(
-            "[optuna] NOTE: radius scan active -- median pruning pools val-loss "
-            "across radii, so a slow-adapting radius can be pruned before it "
-            "converges. Give each choice >= ~4-5 trials and judge the scan on "
-            "COMPLETE trials' best values."
+            "[optuna] NOTE: the radius is searched -- median pruning pools "
+            "val-loss across radii, so a slow-adapting radius can be pruned "
+            "before it converges. Judge on COMPLETE trials' best values."
+        )
+    coupled = coupled_photon_constants(constants)
+    if coupled:
+        log(
+            "[optuna] NOTE: sampling " + ", ".join(coupled) + " together with "
+            "photon_merge_radius -- all move the photon<->NH balance, so their "
+            "optima are correlated (separable via the photon shape + hcal_nh "
+            "count terms, but it costs trials). Judge on the response surface "
+            "(the importances printed at the end), not on the single best trial."
         )
 
     # Load the data ONCE per rank (reused across all trials; under DDP a
@@ -761,11 +879,18 @@ def main() -> None:
             f"{float(train_dataset.n_truth_chad.mean()):.2f} -- the per-event "
             "ceiling the reco chads are truncated to"
         )
+    # Adam steps once per global batch, so this -- not the epoch count -- is how
+    # much fitting a trial actually gets. Logged because a too-large global batch
+    # starves the fit in a way the loss curve alone makes hard to spot.
+    updates_per_epoch = math.ceil(len(train_dataset) / world_size / batch_size)
+    log(
+        f"[optuna] {updates_per_epoch} Adam updates/epoch "
+        f"(~{updates_per_epoch * args.n_steps} per trial at --n-steps {args.n_steps}); "
+        f"halve search.global_batch_size to double them"
+    )
 
     def _run_fit_collective(
         cfg: dict,
-        lr: float,
-        batch_size: int,
         round_dir: Path,
         trial: optuna.Trial | None,
         merge_radius: float | None,
@@ -802,7 +927,8 @@ def main() -> None:
             ),
         ).to(device)
         pc.apply_param_config(trainee, cfg)
-        params_to_train, param_groups = pc.select_trainable(trainee, cfg, global_lr=lr)
+        # cfg's lr_scale already holds each group's ABSOLUTE lr, so global_lr = 1.
+        params_to_train, param_groups = pc.select_trainable(trainee, cfg, global_lr=1.0)
         if not params_to_train:
             raise SystemExit("optuna_config marks no parameter trainable; nothing to optimize.")
 
@@ -891,8 +1017,7 @@ def main() -> None:
             if payload.get("stop"):
                 break
             _run_fit_collective(
-                payload["cfg"], payload["lr"], payload["batch_size"],
-                Path(payload["round_dir"]), trial=None,
+                payload["cfg"], Path(payload["round_dir"]), trial=None,
                 merge_radius=payload["photon_merge_radius"],
             )
         _cleanup_distributed()
@@ -902,34 +1027,38 @@ def main() -> None:
     args.output_base.mkdir(parents=True, exist_ok=True)
 
     def objective(trial: optuna.Trial) -> float:
-        flat_cfg, lr, batch_size, group_lr_scale = sample_trial(trial, search, parameters)
+        flat_cfg, group_lr = sample_trial(trial, search, constants, defaults)
         trial_merge_radius = sample_photon_merge_radius(trial, search)
         round_dir = args.output_base / f"round_{trial.number}"
         round_dir.mkdir(parents=True, exist_ok=True)
         _dump_flat_config(flat_cfg, round_dir / "materialized_config.yaml")
+        lrs = ", ".join(f"{g}={v:.2e}" for g, v in group_lr.items())
+        sampled = ", ".join(
+            f"{_short(k)}={flat_cfg[k]['value']:.3g}"
+            for k, s in constants.items()
+            if "value" not in s
+        )
         log(
-            f"[optuna] trial {trial.number}: lr={lr:.3e} batch={batch_size} "
-            f"lr_scale={{{', '.join(f'{g}={v:.2g}' for g, v in group_lr_scale.items())}}} "
-            f"merge_radius={trial_merge_radius}"
+            f"[optuna] trial {trial.number}: lr={{{lrs}}} "
+            f"merge_radius={trial_merge_radius} constants={{{sampled}}}"
         )
         # Hand this trial's config to the other ranks before fitting it together.
         if world_size > 1:
             dist.broadcast_object_list(
-                [{"stop": False, "cfg": flat_cfg, "lr": lr,
-                  "batch_size": batch_size, "round_dir": str(round_dir),
+                [{"stop": False, "cfg": flat_cfg, "round_dir": str(round_dir),
                   "photon_merge_radius": trial_merge_radius}],
                 src=0,
             )
         # One Comet experiment PER TRIAL, named "<--comet-name>_<trial number>"
-        # (default "optuna_adam_0", "optuna_adam_1", ...). Created here rather than
-        # once for the study so each trial's loss curves stay separable, matching
-        # how the GEBO scans name their per-round experiments.
+        # (default "optuna_adam_0", "optuna_adam_1", ...). Created here rather
+        # than once for the study so each trial's loss curves stay separable.
         comet_exp = init_comet_experiment(
             name=f"{args.comet_name}_{trial.number}",
             params={
-                **trial.params,  # the sampled point: lr, batch_size, lr_scale[*], inits
+                **trial.params,  # the sampled point: lr[*], radius, constants
                 "trial_number": trial.number,
                 "study_name": args.study_name,
+                "batch_size": batch_size,
                 "n_steps": args.n_steps,
                 "n_events": args.n_events,
                 "loss": args.loss,
@@ -945,7 +1074,7 @@ def main() -> None:
 
         try:
             history, pruned = _run_fit_collective(
-                flat_cfg, lr, batch_size, round_dir, trial,
+                flat_cfg, round_dir, trial,
                 merge_radius=trial_merge_radius, comet_exp=comet_exp,
             )
 
@@ -963,12 +1092,19 @@ def main() -> None:
         metadata = {
             "n_events": args.n_events,
             "n_steps": args.n_steps,
-            "lr": lr,
+            # global == the Adam batch; batch_size is the per-rank slice. Two runs
+            # are only comparable at equal global_batch_size (it sets the number of
+            # optimizer updates per epoch, and so the amount of fitting done).
+            "global_batch_size": global_batch_size,
             "batch_size": batch_size,
-            "lr_scale_groups": group_lr_scale,
+            "updates_per_epoch": updates_per_epoch,
+            # Absolute per-group Adam lrs; the materialized config carries them in
+            # its lr_scale field, so global_lr is 1 by construction.
+            "lr_groups": group_lr,
+            "global_lr": 1.0,
             # plot_fit_results reads this to draw the honest before-fit baseline.
             "param_config": str(round_dir / "materialized_config.yaml"),
-            "param_group_lrs": sorted({lr * v for v in group_lr_scale.values()}),
+            "constants": {k: flat_cfg[k]["value"] for k in constants},
             "trainable_params": sorted(k for k, spec in flat_cfg.items() if spec["trainable"]),
             "trial_number": trial.number,
             "optuna_config": str(args.optuna_config),
@@ -1016,48 +1152,29 @@ def main() -> None:
         study.sampler = TPESampler(
             multivariate=True, group=True, n_startup_trials=10, seed=sampler_seed + n_existing
         )
-        # A resumed study's categoricals must match the stored distributions
-        # exactly -- fail with a clear message instead of optuna's ask-time
-        # ValueError (which would also strand the DDP mirror ranks).
-        check_resume_categorical(study.trials, "photon_merge_radius", radius_choices)
-        check_resume_categorical(study.trials, "batch_size", list(search["batch_size"]["choices"]))
-    # Warm start (rank 0 only -- ranks != 0 returned into the mirror loop above):
-    # seed one trial with the --init-config values. The seed is (re-)enqueued
-    # whenever the study has no WAITING/COMPLETE/PRUNED seed trial yet -- i.e. on
-    # a fresh study, on a study whose previous seed crashed mid-fit (FAIL, or a
-    # zombie RUNNING trial after a hard kill; optuna never re-runs those), and on
-    # a pre-warm-start study resumed with --init-config for the first time.
-    if init_cfg is not None:
-        if not warm_start_pending(study.trials):
-            log(
-                f"[optuna] warm start: seed trial already waiting or evaluated; "
-                f"NOT re-enqueueing {args.init_config}"
-            )
-        else:
-            enqueue_params, fallback_keys, clamped = build_warm_start_params(parameters, init_cfg)
-            # The seed trial evaluates the believed-truth config at the FIRST
-            # radius choice -- put the baseline radius first when scanning.
-            enqueue_params["photon_merge_radius"] = radius_choices[0]
-            for key, requested, used in clamped:
-                log(
-                    f"[optuna] warm start: {key} init {requested:g} is outside its "
-                    f"search range; clamped to {used:g}"
-                )
-            if fallback_keys:
-                log(
-                    f"[optuna] warm start: {len(fallback_keys)} params missing from "
-                    f"{args.init_config}, sampled as usual: {fallback_keys}"
-                )
-            study.enqueue_trial(
-                enqueue_params,
-                user_attrs={"warm_start_config": str(args.init_config)},
-            )
-            log(
-                f"[optuna] warm start: trial {n_existing} seeded with "
-                f"{len(enqueue_params) - 1} init values from {args.init_config} "
-                f"+ photon_merge_radius={enqueue_params['photon_merge_radius']} "
-                f"(lr / batch_size / lr_scale sampled)"
-            )
+    # Seed trial (rank 0 only -- ranks != 0 returned into the mirror loop above):
+    # the config's `init:` values, i.e. the believed-truth constants at the
+    # calibrated radius. (Re-)enqueued whenever the study has no
+    # WAITING/COMPLETE/PRUNED seed yet -- on a fresh study, and on one whose
+    # previous seed crashed mid-fit (FAIL, or a zombie RUNNING trial after a hard
+    # kill; optuna never re-runs those).
+    if not seed_trial_pending(study.trials):
+        log("[optuna] seed trial already waiting or evaluated; NOT re-enqueueing")
+    else:
+        # Trial 0 is fully determined: known-good lrs, believed-truth constants,
+        # calibrated radius. That makes it an exactly reproducible baseline rather
+        # than the truth physics plus an arbitrary optimizer draw.
+        enqueue_params = {f"lr[{g}]": float(search["lr"][g]["init"]) for g in LR_GROUPS}
+        enqueue_params.update(
+            {key: float(spec["init"]) for key, spec in constants.items() if "value" not in spec}
+        )
+        enqueue_params["photon_merge_radius"] = r_init
+        study.enqueue_trial(
+            enqueue_params,
+            user_attrs={"warm_start_config": f"{args.optuna_config}#init"},
+        )
+        seeded = ", ".join(f"{_short(k)}={v:g}" for k, v in enqueue_params.items())
+        log(f"[optuna] seed: trial {n_existing} enqueued with {seeded} (fully pinned)")
     try:
         study.optimize(objective, n_trials=n_trials)
     finally:
@@ -1082,6 +1199,11 @@ def main() -> None:
     log(f"[optuna] best trial: {best.number}  best val_loss = {best_val:.4e}")
     log(f"[optuna] best round dir: {best_round}")
     log(f"[optuna] copied best history -> {args.history_path}")
+    # The constants are correlated by construction (photon fraction, k0l and the
+    # merge radius all move the photon<->NH balance), so the single best trial
+    # can sit anywhere along a ridge. The importances say which dimensions the
+    # study could actually resolve -- read them before trusting one trial.
+    _log_param_importances(study, log)
     log("[optuna] validate with:")
     log(
         f"  python -m parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results "
@@ -1089,6 +1211,40 @@ def main() -> None:
         f"--output-dir doc/figures --debug"
     )
     _cleanup_distributed()
+
+
+def _log_param_importances(study: optuna.Study, log) -> None:
+    """Print the parameter importances, or why they are unavailable.
+
+    Prefers optuna's default fANOVA evaluator and falls back to PedAnova, which
+    needs no scikit-learn (an optional dependency here). Needs >= 2 COMPLETE
+    trials with differing params; never fatal -- the study's results are already
+    written by the time this runs.
+    """
+    for label, kwargs in (
+        ("fANOVA", {}),
+        ("PedAnova", {"evaluator": optuna.importance.PedAnovaImportanceEvaluator()}),
+    ):
+        try:
+            importances = optuna.importance.get_param_importances(study, **kwargs)
+        except (ImportError, RuntimeError, ValueError) as e:
+            last = e
+            continue
+        if not importances or not any(importances.values()):
+            # Too few COMPLETE trials to separate the dimensions (PedAnova scores
+            # against a top-quantile baseline, so a handful of trials yields
+            # nothing) -- say so rather than print a bare header.
+            log(
+                f"[optuna] parameter importances ({label}): not resolvable from "
+                f"{len([t for t in study.trials if t.value is not None])} completed "
+                "trial(s); run more."
+            )
+            return
+        log(f"[optuna] parameter importances ({label}, fraction of val-loss variance):")
+        for name, value in importances.items():
+            log(f"    {name:44s} {value:.3f}")
+        return
+    log(f"[optuna] parameter importances unavailable: {last}")
 
 
 def _select_best_trial(study: optuna.Study) -> optuna.trial.FrozenTrial | None:

@@ -29,14 +29,16 @@ STUDY_NAME=${STUDY_NAME:-fullsim_100k}
 
 # ===== shared knobs =====
 N_STEPS=${N_STEPS:-100}
-N_TRIALS=${N_TRIALS:-50}          # trials ADDED per run (re-run to add 50 more; resumes the study below)
+N_TRIALS=${N_TRIALS:-40}          # trials ADDED per run (re-run to add more; resumes the study
+                                  # below). The seed trial counts toward this number.
 LOSS=wasserstein_1d  # can be "soft_hist"
 PID_WEIGHTING=sqrt_fraction
 OPTUNA_CONFIG=src/parnassus/torch_delphes/param_configs/optuna_config.yaml
-# Warm start: trial 0 of a FRESH study starts from these known-good defaults
-# (values outside the optuna_config search ranges are clamped; lr / batch_size /
-# lr_scale are still sampled). Ignored when the study below is resumed.
-INIT_CONFIG=src/parnassus/torch_delphes/param_configs/cms_target_default.yaml
+# Trial 0 runs the optuna_config `init:` values (believed-truth constants at the
+# calibrated radius) with every fitted scalar at its card default -- no external
+# file needed. To refine from a converged card instead, add
+#   --init-config <round_N>/materialized_config.yaml
+# to the launch below; it overrides the START value of the fitted scalars only.
 # Comet: one experiment PER TRIAL, named "<COMET_NAME>_<trial number>"
 # (optuna_adam_0, optuna_adam_1, ...). Needs COMET_API_KEY exported (workspace
 # from COMET_WORKSPACE); without it the search still runs, just unlogged.
@@ -57,7 +59,6 @@ export OMP_NUM_THREADS=8        # CPU threads per rank (lower if the N ranks con
     -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$ROOT_FILE" \
     --optuna-config "$OPTUNA_CONFIG" \
-    --init-config "$INIT_CONFIG" \
     --n-events "$N_EVENTS" \
     --n-steps "$N_STEPS" \
     --n-trials "$N_TRIALS" \

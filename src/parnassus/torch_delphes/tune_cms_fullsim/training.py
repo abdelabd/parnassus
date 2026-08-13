@@ -97,7 +97,7 @@ def fit_card_to_fullsim(
         If True, the history dict will additionally contain a
         ``"parameters"`` list whose i-th entry is a ``{name: float}``
         dict recording every learnable parameter value after step i.
-        Off by default because it is O(n_steps * 66) in memory and
+        Off by default because it is O(n_steps * 68) in memory and
         only needed for plotting parameter-drift trajectories.
     intermediate_plot_dir : str | Path | None
         If set (and not ``""``), write a multi-page PDF per epoch

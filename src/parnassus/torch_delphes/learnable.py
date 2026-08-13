@@ -13,7 +13,11 @@ Design notes
   same numerical values used by the existing static formulas in
   ``MomentumSmearing.py`` and ``SimpleCalorimeter.py``. With no parameter
   updates, the learnable card produces output statistically identical to the
-  default card (modulo Gumbel-ST noise on the efficiency mask).
+  default card (modulo Gumbel-ST noise on the efficiency mask). Exception by
+  design: windowed fraction pins at a window boundary (photon 1.0, K_L 0.0)
+  are realized through the ``_safe_logit`` clamp as 1 - 2e-7 / 4e-7 --
+  statistically identical to the static dicts, but not bitwise (RNG-stream
+  realignment; see ``photon_kl_windowed_logits_plan.md``).
 - **Positivity / boundedness via reparameterization.** Strictly positive
   quantities (resolution coefficients, decay rates) are stored as raw
   parameters and exposed via ``softplus`` so that optimizer steps cannot
@@ -831,19 +835,42 @@ def make_cms_hcal_scale() -> LearnableCaloScale:
 # =============================================================================
 
 
+# K_S ECal fraction is confined to this open window by construction:
+# frac = lo + (hi - lo) * sigmoid(k0s_logit). Keeps the fit from abusing the
+# fraction as an unbounded NH<->photon composition knob (it drifted to 0.95).
+K0S_FRAC_BOUNDS: tuple[float, float] = (0.1, 0.5)
+
+# Photon (+pi0 rider) ECal fraction window. Pinned at 1.0 today; the window
+# exists so a future fit can leak a bounded slice of photon energy into the
+# HCal (the A1 "leak knob"). A pinned boundary is realized through the
+# ``_safe_logit`` clamp as 1 - 2e-7, NOT exact 1.0 -- statistically identical,
+# not bitwise (see photon_kl_windowed_logits_plan.md).
+PHOTON_FRAC_BOUNDS: tuple[float, float] = (0.8, 1.0)
+
+# K_L ECal fraction window. Pinned at 0.0 today (realized as 4e-7); owning
+# PDG 130 here permanently decouples K_L from the charged-hadron default.
+K0L_FRAC_BOUNDS: tuple[float, float] = (0.0, 0.4)
+
+
 class LearnableHadronFractions(nn.Module):
     """Shared learnable PDG → ECal/HCal energy fraction module.
 
-    Three particle classes are tunable, each parameterized by a single ECal
+    Five particle classes are tunable, each parameterized by a single ECal
     fraction logit (HCal fraction = 1 - ECal fraction):
 
     - **Charged hadron default** (PDG=0 in the Delphes fraction map):
       covers charged pions, kaons, protons, etc. Default 0.0/1.0.
-    - **K-short** (PDG=310): default 0.3/0.7.
+    - **K-short** (PDG=310): default 0.3/0.7, ECal fraction windowed to
+      ``K0S_FRAC_BOUNDS`` by construction.
     - **Lambda** (PDG=3122): default 0.3/0.7.
+    - **Photon** (PDG=22, with pi0=111 as a rider): pinned to 1.0 (realized
+      1 - 2e-7), ECal fraction windowed to ``PHOTON_FRAC_BOUNDS``.
+    - **K-long** (PDG=130): pinned to 0.0 (realized 4e-7), ECal fraction
+      windowed to ``K0L_FRAC_BOUNDS``. Previously followed ``chad_logit``
+      via the PDG=0 default; now decoupled.
 
-    All other particle classes (electrons, photons, muons, neutrinos, etc.)
-    have physics-fixed fractions and are *not* parameterized here.
+    All other particle classes (electrons, muons, neutrinos, etc.) have
+    physics-fixed fractions and are *not* parameterized here.
 
     A single instance of this module is shared between the ECal and HCal
     submodules of the detector card so that the ECal and HCal fractions stay
@@ -853,26 +880,51 @@ class LearnableHadronFractions(nn.Module):
     # PDG IDs of the tunable particle classes.
     K0S_PDG: int = 310
     LAMBDA_PDG: int = 3122
+    PHOTON_PDG: int = 22
+    PI0_PDG: int = 111
+    K0L_PDG: int = 130
 
     def __init__(self) -> None:
         super().__init__()
-        # Defaults match the static dicts in CMSDefault._setup_ECal/_setup_HCal.
+        # Defaults match the static dicts in CMSDefault._setup_ECal/_setup_HCal
+        # (windowed pins land at the _safe_logit clamp, 1e-6 in normalized units
+        # from the boundary: photon 1 - 2e-7, k0l 4e-7).
+        lo, hi = K0S_FRAC_BOUNDS
         self.chad_logit = nn.Parameter(torch.tensor(_safe_logit(0.0), dtype=torch.float64))
-        self.k0s_logit = nn.Parameter(torch.tensor(_safe_logit(0.3), dtype=torch.float64))
+        self.k0s_logit = nn.Parameter(
+            torch.tensor(_safe_logit((0.3 - lo) / (hi - lo)), dtype=torch.float64)
+        )
         self.lambda_logit = nn.Parameter(torch.tensor(_safe_logit(0.3), dtype=torch.float64))
+        plo, phi = PHOTON_FRAC_BOUNDS
+        self.photon_logit = nn.Parameter(
+            torch.tensor(_safe_logit((1.0 - plo) / (phi - plo)), dtype=torch.float64)
+        )
+        klo, khi = K0L_FRAC_BOUNDS
+        self.k0l_logit = nn.Parameter(
+            torch.tensor(_safe_logit((0.0 - klo) / (khi - klo)), dtype=torch.float64)
+        )
 
     # ----- per-class fraction accessors (ECal side; HCal = 1 - ECal) -----
     def chad_ecal_frac(self) -> torch.Tensor:
         return torch.sigmoid(self.chad_logit)
 
     def k0s_ecal_frac(self) -> torch.Tensor:
-        return torch.sigmoid(self.k0s_logit)
+        lo, hi = K0S_FRAC_BOUNDS
+        return lo + (hi - lo) * torch.sigmoid(self.k0s_logit)
 
     def lambda_ecal_frac(self) -> torch.Tensor:
         return torch.sigmoid(self.lambda_logit)
 
+    def photon_ecal_frac(self) -> torch.Tensor:
+        lo, hi = PHOTON_FRAC_BOUNDS
+        return lo + (hi - lo) * torch.sigmoid(self.photon_logit)
+
+    def k0l_ecal_frac(self) -> torch.Tensor:
+        lo, hi = K0L_FRAC_BOUNDS
+        return lo + (hi - lo) * torch.sigmoid(self.k0l_logit)
+
     def fraction_for(self, particle_class: str, is_ecal: bool) -> torch.Tensor:
-        """Return the (scalar) fraction for one of the three tunable classes.
+        """Return the (scalar) fraction for one of the five tunable classes.
 
         Returns
         -------
@@ -884,6 +936,8 @@ class LearnableHadronFractions(nn.Module):
             "chad": self.chad_ecal_frac,
             "k0s": self.k0s_ecal_frac,
             "lambda": self.lambda_ecal_frac,
+            "photon": self.photon_ecal_frac,
+            "k0l": self.k0l_ecal_frac,
         }[particle_class]()
         return ecal if is_ecal else (1.0 - ecal)
 
@@ -902,8 +956,8 @@ class LearnableHadronFractions(nn.Module):
         base_fractions : torch.Tensor
             Per-particle fractions from the static LUT lookup, shape ``(N,)``.
         abs_pids : torch.Tensor
-            Absolute PDG IDs (long), shape ``(N,)``. Used to identify K0S and
-            Lambda particles.
+            Absolute PDG IDs (long), shape ``(N,)``. Used to identify the
+            K0S / Lambda / photon(+pi0) / K_L particles.
         uses_default : torch.Tensor
             Boolean mask of shape ``(N,)`` indicating which particles fall back
             to the "default" (PDG=0) fraction. These get overridden by
@@ -915,18 +969,27 @@ class LearnableHadronFractions(nn.Module):
         Returns
         -------
         torch.Tensor
-            ``base_fractions`` with the three tunable classes replaced by the
+            ``base_fractions`` with the five tunable classes replaced by the
             current learnable values. Differentiable wrt the parameters of
             this module.
         """
         chad_frac = self.fraction_for("chad", is_ecal).to(base_fractions.dtype)
         k0s_frac = self.fraction_for("k0s", is_ecal).to(base_fractions.dtype)
         lam_frac = self.fraction_for("lambda", is_ecal).to(base_fractions.dtype)
+        photon_frac = self.fraction_for("photon", is_ecal).to(base_fractions.dtype)
+        k0l_frac = self.fraction_for("k0l", is_ecal).to(base_fractions.dtype)
 
         is_k0s = abs_pids == self.K0S_PDG
         is_lambda = abs_pids == self.LAMBDA_PDG
+        is_photon = (abs_pids == self.PHOTON_PDG) | (abs_pids == self.PI0_PDG)
+        is_k0l = abs_pids == self.K0L_PDG
 
         out = torch.where(uses_default, chad_frac.expand_as(base_fractions), base_fractions)
+        # K_L has no static-dict entry (uses_default is True for 130), so its
+        # override MUST come after the chad-default where -- the later where
+        # wins. The dict-backed classes (310/3122/22/111) are order-insensitive.
+        out = torch.where(is_k0l, k0l_frac.expand_as(out), out)
         out = torch.where(is_k0s, k0s_frac.expand_as(out), out)
         out = torch.where(is_lambda, lam_frac.expand_as(out), out)
+        out = torch.where(is_photon, photon_frac.expand_as(out), out)
         return out

@@ -1226,9 +1226,12 @@ class SimpleCalorimeter(nn.Module):
         fractions = self._fraction_lut[clamped_pids]
 
         # Optional override from a shared LearnableHadronFractions module:
-        # rewrites the entries for PDG=0-default, K0S, and Lambda with the
-        # current learnable parameter values, leaving physics-fixed entries
-        # (electrons, photons, muons, ...) untouched.
+        # rewrites the entries for the five learnable classes -- PDG=0-default,
+        # K0S, Lambda, photon(+pi0), and K_L -- with the current learnable
+        # parameter values, leaving the remaining physics-fixed entries
+        # (electrons, muons, neutrinos, ...) untouched. Note the photon/K_L
+        # rewrites happen every forward even at their pins (1 - 2e-7 / 4e-7,
+        # not the static LUT's exact 1.0 / chad fallback).
         if self.learnable_fractions is not None:
             uses_default = self._fraction_uses_default_lut[clamped_pids]
             # Particles with PDG ID beyond _max_pdg_id were clamped above and

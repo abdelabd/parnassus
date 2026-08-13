@@ -190,6 +190,14 @@ HadronFractions.lambda_logit:
   value: 0.3
   trainable: false
   lr_scale: 1.0
+HadronFractions.photon_logit:
+  value: 1.0
+  trainable: false
+  lr_scale: 1.0
+HadronFractions.k0l_logit:
+  value: 0.0
+  trainable: false
+  lr_scale: 1.0
 ECal.scale_module.scale_raw[0]:
   value: 1.0
   trainable: false

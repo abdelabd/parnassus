@@ -1,31 +1,39 @@
-# Optuna hyperparameter-search config for tune_cms_fullsim.optuna_search.
+# Optuna search config for tune_cms_fullsim.optuna_search.
 #
-# NEW FORMAT (different from the value/trainable/lr_scale per-scalar configs read
-# by param_config.load_param_config). Two top-level sections:
+# FORMAT (different from the value/trainable/lr_scale per-scalar configs read by
+# param_config.load_param_config). Two top-level sections:
 #
-#   search:      the global study knobs + the search space for the optimizer
-#                hyperparameters (global lr, batch size, per-GROUP lr_scale).
-#   parameters:  the per-scalar INIT search space. Each entry is either
-#                  {low, high, log}   -> the init value is SAMPLED in [low, high]
-#                                        each trial (the parameter is trainable), or
-#                  {value: <float>}   -> the parameter is PINNED (trainable: false).
+#   search:     study knobs + the search space for the three per-group Adam
+#               learning rates and the photon merge radius.
+#   constants:  a SUBSET of the card's scalars, each frozen at a per-trial
+#               CONSTANT (trainable: false) -- either
+#                 {value: v}                 -> pinned, identical every trial, or
+#                 {low, high, log, init}     -> TPE picks one constant per trial
+#                                               ('init' is what the seed trial runs).
+#               Every scalar NOT listed here is FITTED by Adam, starting from its
+#               card constructor default (== the CMS card).
 #
-# Every trial samples one init value per parameter + one lr_scale per group + a
-# global lr + a batch size, materializes a normal {value, trainable, lr_scale}
-# config, runs the existing Adam fit, and is scored by its best (min) validation
-# loss. The best trial's history is copied to --history-path for plot_fit_results.
+# WHY THE FRACTIONS ARE CONSTANTS. R2 verdict (2026-08-12): with a gradient-fitted
+# photon leak the optimizer shut it off (f 0.98 -> 0.9994), and that was
+# structurally predetermined -- the soft-count gate reads a DETACHED energy
+# (SimpleCalorimeter.py), so fraction parameters get NO count-term gradient, while
+# sqrt_fraction mutes the NH shape terms that carry the (1-f) benefit. The study,
+# by contrast, is scored on the val-loss VALUE, count terms included, so it sees
+# exactly what Adam is blind to. The fractions are therefore treated like the merge
+# radius: per-trial constants, judged at the study level.
 #
-# RANGE GUARDS (param_config.to_raw raises if violated; ranges below respect them):
-#   - trainable logit (efficiency / fraction) init must be in the OPEN (0.005, 0.995)
-#   - scale init must be in the OPEN (0.7, 1.3)            [1 + 0.3*tanh param.]
-#   - softplus coefficients (a/b/c/rate) must be > 0
-# The ranges are deliberately BROAD and truth-AGNOSTIC (set by parameter type, not
-# centered on the pseudodata truth). WIDEN/retune them for a real-data fit.
+# WHY THERE IS NO GLOBAL lr. Adam only ever sees global_lr * lr_scale
+# (select_trainable), so the two were exactly degenerate -- a whole redundant
+# search dimension. The groups' ABSOLUTE learning rates are searched instead, and
+# a materialized config carries them in its lr_scale field with global_lr = 1.
 #
-# All 66 card scalars are tunable here (per the design decision), including
-# ECal.resolution_func.barrel_a (normally pinned to break the exact ECal
-# barrel/endcap sigma degeneracy) and the dead lepton-eff / muon-rate / k0s /
-# lambda params. Expect barrel_a and the dead params to wander or sit idle.
+# RANGE GUARDS (param_config.to_raw raises if violated):
+#   - fractions/efficiencies must be inside their physical window (k0s 0.1-0.5,
+#     photon 0.8-1.0, k0l 0-0.4, plain logits 0-1). Constants MAY sit on a
+#     boundary; the (0.005, 0.995) trainable-logit guard applies only to fitted
+#     params, which never appear here.
+#   - chad_logit may not span (1e-4, 5e-3): there the ECal rescale path is on but
+#     the tower is always sub-threshold, which imprints ~2-3 GeV pT spikes.
 #
 # Run:
 #   python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
@@ -36,130 +44,100 @@
 #     --output-base doc/fit_results --history-path doc/fit_results/all_v2.json
 
 search:
-  n_trials: 50              # overridable with --n-trials
+  n_trials: 40              # overridable with --n-trials; the seed trial counts
   seed: 0                   # TPE sampler seed (reproducible study)
-  lr: {low: 1.0e-4, high: 1.0e-2, log: true}        # global Adam lr magnitude
-  batch_size: {choices: [512, 1024, 2048, 4096]}   # train/val batch size
-  # Per-GROUP lr_scale (the effective Adam lr of a parameter = global lr * its
-  # group lr_scale). Groups: resolution (a/b/c softplus coeffs), scale (tanh
-  # momentum/calo scales), efficiency (sigmoid efficiencies/fractions + rate_raw).
-  lr_scale:
-    resolution: {low: 0.1, high: 10.0, log: true}
-    scale:      {low: 0.1, high: 10.0, log: true}
-    efficiency: {low: 0.1, high: 10.0, log: true}
-  # PhotonClusterMerger seed-cone radius, a required categorical like batch_size:
-  # every trial samples one of these, so the study IS the R scan. The baseline
-  # (calibrated) 0.045 goes FIRST -- the warm-start trial always runs the first
-  # choice; 0.0 = merger OFF (exactly the legacy card); 0.1 = the deliberately
-  # too-big bracket. A single-element list fixes the radius for every trial.
+  # GLOBAL batch (summed over ranks); each rank takes global // world_size. Adam
+  # steps once per global batch, so this fixes the number of updates per epoch and
+  # makes a study reproducible across GPU counts -- read as PER-RANK it silently
+  # became 8192 on 4 GPUs (9 updates/epoch vs 137), which cost the mee restructure
+  # round 0.27 -> 0.43 with TPE pinned against the lr ceilings compensating.
+  # 2048 trades updates for throughput: 35 updates/epoch at 100k events (vs 137 at
+  # 512), but 4x fewer all-reduces and 512/rank on 4 GPUs instead of a
+  # cache-inefficient 128. The lr ranges below are scaled to match.
+  global_batch_size: 2048
+  # ABSOLUTE Adam learning rate per parameter group. Base ranges came from the
+  # 10-trial default-start scan (doc/.../..._defaultstart) read in effective
+  # (lr * lr_scale) units, at a global batch of ~512:
+  #   efficiency  clean signal -- top trials 1.3e-3 .. 7.6e-3; <5e-4 stalled and
+  #               1.5e-2 blew the loss up to 23.
+  #   scale       weak signal, top trials 3.0e-4 .. 2.9e-3.
+  #   resolution  no val-loss signal (top and bottom overlap); bounded because a
+  #               fast resolution group drove the post-best NH slide in the
+  #               photon-merger round.
+  # SCALED x2 for the 512 -> 2048 global batch: Adam noise falls as sqrt(batch),
+  # so the sqrt rule (x4 batch -> x2 lr) applies, NOT the linear SGD rule.
+  #
+  # `init` is REQUIRED and is what the seed trial runs -- the x2 image of the
+  # best mee run's effective lrs (res 2.45e-3 / scale 9.4e-4 / eff 7.6e-3 at
+  # batch 512). Trial 0 is therefore fully pinned: known-good optimizer on the
+  # believed-truth card. Without it trial 0 drew random lrs and ranked 11th of 18.
+  #
+  # The FLOORS are deliberately per-group, set by how much each group's low end
+  # is actually known:
+  #   resolution  1e-4: no val-loss signal at all, and a top-5 defaultstart trial
+  #               ran an effective 8.9e-5 @512 (~1.8e-4 here) -- explore freely.
+  #   scale       3e-4: weak signal; the good band bottoms out at 6e-4 here and
+  #               nothing is known below it, so allow one octave of headroom.
+  #   efficiency  1e-3: the one CLEAN signal, and it says stop -- every trial
+  #               below 5e-4 @512 (= 1e-3 here) stalled into the bottom five.
+  # The CEILINGS are scaled failure landmarks, not guesses: 2e-2 is the x2 image
+  # of the 1.5e-2 that blew the loss up to val 23, and 6e-3 the x2 image of the
+  # resolution cap the post-best NH slide argued for.
+  #
+  # NOTE the source trials sampled their inits and ran with lr decay ON; here
+  # every fit starts from the CMS defaults with decay OFF. Re-read the
+  # importances after the first study and retune if a bound is being hit.
+  lr:
+    resolution: {low: 1.0e-4, high: 6.0e-3, log: true, init: 4.9e-3}
+    scale:      {low: 3.0e-4, high: 6.0e-3, log: true, init: 1.9e-3}
+    efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 1.5e-2}
+  # PhotonClusterMerger seed-cone radius, sampled continuously. The R -> 0 limit
+  # IS the merger off (an isolated photon is a cluster of one and passes through
+  # bit-identical), so no off-sentinel is needed. init = the 0.045 calibrated
+  # against CMS PF counts, so the seed trial is the validated baseline.
   # Unlike the acceptance cuts, best-val losses ARE comparable across radii (the
   # target side is untouched). R is deliberately a per-trial constant, not a
-  # gradient-fitted param: each trial's physics params converge self-consistently
-  # at its R (design doc section 6, M3). Give TPE >= ~4-5 trials per choice and
-  # judge the scan on COMPLETE trials' best values: median pruning pools
-  # val-loss across radii, so a slow-adapting radius can be pruned early.
-  # NOTE: on a resumed (--storage) study these choices must match the stored
-  # trials EXACTLY (even reordering breaks optuna categoricals; the search
-  # fails fast with a clear message if they differ).
-  photon_merge_radius:
-    choices: [0.045, 0.0, 0.1]
+  # gradient-fitted param: each trial's physics converges self-consistently at
+  # its R (design doc section 6, M3).
+  photon_merge_radius: {low: 0.0, high: 0.1, init: 0.045}
 
-parameters:
-  # ===== Tracking efficiency (logit; init in (0.005, 0.995)) =====
-  # high=0.99: the believed-truth (cms_target_default.yaml) efficiencies reach
-  # 0.99 and must be inside the search range so the fit can regress to them.
-  ChargedHadronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.99}
-  ChargedHadronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.99}
-  ChargedHadronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.99}
-  ChargedHadronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.99}
-  ElectronTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.99}
-  ElectronTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.99}
-  ElectronTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.99}
-  ElectronTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.99}
-  ElectronTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.99}
-  ElectronTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.99}
-  MuonTrackingEfficiency.eff_logits[0]: {low: 0.15, high: 0.99}
-  MuonTrackingEfficiency.eff_logits[1]: {low: 0.15, high: 0.99}
-  MuonTrackingEfficiency.eff_logits[2]: {low: 0.15, high: 0.99}
-  MuonTrackingEfficiency.eff_logits[3]: {low: 0.15, high: 0.99}
-  MuonTrackingEfficiency.eff_logits[4]: {low: 0.15, high: 0.99}
-  MuonTrackingEfficiency.eff_logits[5]: {low: 0.15, high: 0.99}
-  # Muon high-pt roll-off rate (softplus; small positive)
-  MuonTrackingEfficiency.rate_raw[0]: {low: 1.0e-4, high: 1.0e-2, log: true}
-  MuonTrackingEfficiency.rate_raw[1]: {low: 1.0e-4, high: 1.0e-2, log: true}
+constants:
+  # ---- pinned ----
+  # chad: all charged-hadron energy to HCal, the CMS-card truth. Its 0.0 is below
+  # the 1e-4 SimpleCalorimeter bypass cutoff, so the ECal path stays off (C++
+  # parity: the card's 0.0 routes chad tracks straight to EFlowTrack).
+  HadronFractions.chad_logit:   {value: 0.0}
+  # lambda: dead in these samples (the dijet/mee truth carries no PDG 3122), so
+  # searching it would burn a dimension on a parameter the loss cannot see.
+  HadronFractions.lambda_logit: {value: 0.3}
+  # k0l: pinned this round. It moves the same photon<->NH balance as photon_logit
+  # and the merge radius; three correlated dimensions is more than 40 trials can
+  # resolve. Unpin once the (photon, R) pair is understood.
+  HadronFractions.k0l_logit:    {value: 0.0}
 
-  # ===== Charged-hadron momentum smearing (a/b softplus, scale tanh) =====
-  ChargedHadronMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
-  ChargedHadronMomentumSmearing.resolution_module.a_raw[1]: {low: 5.0e-3, high: 0.5, log: true}
-  ChargedHadronMomentumSmearing.resolution_module.a_raw[2]: {low: 5.0e-3, high: 0.5, log: true}
-  ChargedHadronMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  ChargedHadronMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  ChargedHadronMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]: {low: 0.75, high: 1.28}
-  ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]: {low: 0.75, high: 1.28}
-  ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
-
-  # ===== Electron momentum smearing =====
-  ElectronMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
-  ElectronMomentumSmearing.resolution_module.a_raw[1]: {low: 5.0e-3, high: 0.5, log: true}
-  ElectronMomentumSmearing.resolution_module.a_raw[2]: {low: 5.0e-3, high: 0.5, log: true}
-  ElectronMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  ElectronMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  ElectronMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-4, high: 1.0e-2, log: true}
-  ElectronMomentumSmearing.resolution_module.scale_raw[0]: {low: 0.75, high: 1.28}
-  ElectronMomentumSmearing.resolution_module.scale_raw[1]: {low: 0.75, high: 1.28}
-  ElectronMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
-
-  # ===== Muon momentum smearing =====
-  MuonMomentumSmearing.resolution_module.a_raw[0]: {low: 5.0e-3, high: 0.5, log: true}
-  MuonMomentumSmearing.resolution_module.a_raw[1]: {low: 5.0e-3, high: 0.5, log: true}
-  MuonMomentumSmearing.resolution_module.a_raw[2]: {low: 5.0e-3, high: 0.5, log: true}
-  # low=5e-5: the believed-truth muon b coefficients are 1e-4 - 3.5e-4.
-  MuonMomentumSmearing.resolution_module.b_raw[0]: {low: 5.0e-5, high: 1.0e-2, log: true}
-  MuonMomentumSmearing.resolution_module.b_raw[1]: {low: 5.0e-5, high: 1.0e-2, log: true}
-  MuonMomentumSmearing.resolution_module.b_raw[2]: {low: 5.0e-5, high: 1.0e-2, log: true}
-  MuonMomentumSmearing.resolution_module.scale_raw[0]: {low: 0.75, high: 1.28}
-  MuonMomentumSmearing.resolution_module.scale_raw[1]: {low: 0.75, high: 1.28}
-  MuonMomentumSmearing.resolution_module.scale_raw[2]: {low: 0.75, high: 1.28}
-
-  # ===== Hadron fractions (logit; init in (0.005, 0.995)) =====
-  # chad PINNED at 0.0 (all charged-hadron energy to HCal, the CMS-card truth).
-  # SimpleCalorimeter bypasses the tower/rescale path for fractions < 1e-4
-  # (C++ parity: the card's 0.0 routes chad tracks straight to EFlowTrack), and
-  # the trainable-logit init guard forbids a search range reaching that low.
-  # The old {low: 0.02, high: 0.85} clamped the 1e-6 warm start up to 0.02,
-  # which pushed every charged hadron through the ECal rescale against an
-  # always-zeroed tower and imprinted sharp pT spikes at ~2-3 GeV (fold of
-  # wT/(wT+wC)) plus a 4-9 GeV depletion that C++ Delphes does not produce.
-  # To make the ECal fraction searchable again, use a range inside
-  # (0.005, 0.995) -- every sampled value then legitimately activates the
-  # ECal path -- but round 0 / the believed truth needs the pin below.
-  HadronFractions.chad_logit: {value: 0.0}
-  HadronFractions.k0s_logit: {low: 0.15, high: 0.85}
-  HadronFractions.lambda_logit: {low: 0.15, high: 0.85}
-
-  # ===== ECal energy scale (tanh, init in (0.7, 1.3)) =====
-  ECal.scale_module.scale_raw[0]: {low: 0.75, high: 1.28}
-  ECal.scale_module.scale_raw[1]: {low: 0.75, high: 1.28}
-  ECal.scale_module.scale_raw[2]: {low: 0.75, high: 1.28}
-
-  # ===== ECal resolution (softplus) =====
-  ECal.resolution_func.common_c_E: {low: 5.0e-3, high: 0.5, log: true}
-  ECal.resolution_func.common_c_S: {low: 5.0e-2, high: 5.0, log: true}
-  ECal.resolution_func.common_c_N: {low: 5.0e-2, high: 2.0, log: true}
-  ECal.resolution_func.barrel_a: {low: 0.3, high: 8.0, log: true}   # now tunable (reintroduces ECal degeneracy)
-  ECal.resolution_func.barrel_b: {low: 0.3, high: 8.0, log: true}
-  ECal.resolution_func.endcap_a: {low: 0.3, high: 8.0, log: true}
-  ECal.resolution_func.endcap_b: {low: 0.3, high: 8.0, log: true}
-  ECal.resolution_func.forward_c_E: {low: 5.0e-3, high: 0.5, log: true}
-  ECal.resolution_func.forward_c_S: {low: 5.0e-2, high: 5.0, log: true}
-
-  # ===== HCal energy scale (tanh) =====
-  HCal.scale_module.scale_raw[0]: {low: 0.75, high: 1.28}
-  HCal.scale_module.scale_raw[1]: {low: 0.75, high: 1.28}
-
-  # ===== HCal resolution (softplus) =====
-  HCal.resolution_func.central_c_E: {low: 5.0e-3, high: 0.5, log: true}
-  HCal.resolution_func.central_c_S: {low: 5.0e-2, high: 5.0, log: true}
-  HCal.resolution_func.forward_c_E: {low: 5.0e-3, high: 0.5, log: true}
-  HCal.resolution_func.forward_c_S: {low: 5.0e-2, high: 5.0, log: true}
+  # ---- TPE-sampled constants ----
+  # k0s ECal fraction, windowed to (0.1, 0.5) by construction (K0S_FRAC_BOUNDS).
+  # The gradient fits walked it to the ceiling (0.48 in R1, 0.95 pre-window),
+  # draining the NH stream; the full window lets the study test whether that wall
+  # was physics or an artifact of the missing count gradient.
+  # NOTE 0.1 is a HARD floor: the sigmoid is affinely mapped into
+  # K0S_FRAC_BOUNDS = (0.1, 0.5) (learnable.py), so the parameter physically
+  # cannot represent a smaller fraction and `low: 0.0` makes this file fail to
+  # load. To search below 0.1 you must widen K0S_FRAC_BOUNDS itself -- but do
+  # that only on evidence from a run with a HEALTHY update count: the mee
+  # restructure round drove k0s toward this floor (0.147-0.171 in its best
+  # trials) while its fits were starved of ~10x their Adam updates by the
+  # global-batch bug, so that pull is not yet trustworthy.
+  HadronFractions.k0s_logit:    {low: 0.1, high: 0.5, init: 0.3}
+  # photon ECal fraction (window 0.8-1.0). 1.0 = no leak; below it, (1-f) of each
+  # photon's energy goes to HCal, which is the lever on the NH deficit at high E.
+  # Floor 0.9: the A0 frozen-card scan showed f <= 0.93 pushing photon totals
+  # under the 0.9 gate, so lower values are known-bad territory -- but the fit
+  # adapts, and TPE can still rediscover "no leak" at the top of the range.
+  # NOTE this is sampled TOGETHER with photon_merge_radius. Both cut photon yield,
+  # so their optima are correlated -- but they are NOT degenerate: only the
+  # fraction moves energy into the HCal/NH stream, and merging HARDENS the photon
+  # spectrum (merged = sum of members) where a leak SOFTENS it. The per-pid shape
+  # terms and the hcal_nh count term separate them. Read the fANOVA importances
+  # printed at the end of the study before trusting a single best trial.
+  HadronFractions.photon_logit: {low: 0.9, high: 1.0, init: 1.0}

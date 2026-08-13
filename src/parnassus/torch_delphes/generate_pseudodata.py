@@ -42,7 +42,7 @@ Event generation
      plays the role of "CMS full simulation" for the fitting target.
      The config (``--param-config``, see
      :mod:`parnassus.torch_delphes.param_config`) sets every one of the
-     66 learnable parameters to a physical ground-truth value; the
+     68 learnable parameters to a physical ground-truth value; the
      shipped default perturbs the three energy/momentum scales (CHAD
      1.25, ECal 1.20, HCal 0.90). These values are exactly what Adam
      should recover when we fit the trainee against the ``pflow_*``
@@ -272,7 +272,7 @@ def make_target_card(
 ) -> CMSEnergyFlowDefault:
     """Build a learnable CMS card initialized from a parameter config.
 
-    Every one of the card's 66 learnable parameters is set to the physical
+    Every one of the card's 68 learnable parameters is set to the physical
     ``value`` of the matching entry in ``param_config`` (see
     :mod:`parnassus.torch_delphes.param_config`), then the card is frozen and
     put in eval mode. These values play the role of the ground-truth detector

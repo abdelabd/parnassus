@@ -1,6 +1,6 @@
 """Fit the learnable CMS TorchDelphes card to CMS full-simulation reco.
 
-This package fits the 66 learnable parameters of
+This package fits the 68 learnable parameters of
 :class:`parnassus.torch_delphes.defaults.CMSEnergyFlowDefault` so that its
 reconstructed observable distributions match a CMS full-simulation sample.
 It used to be a single ``tune_cms_fullsim.py`` module; it is now split by

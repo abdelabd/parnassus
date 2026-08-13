@@ -1,11 +1,10 @@
 """Comet experiment setup shared by the Adam fit paths.
 
-The GEBO scan (:mod:`.gebo_search`) has logged to Comet for a while; this module
-factors that same setup so the plain Adam CLI (:mod:`.cli`) and the Optuna+Adam
-search (:mod:`.optuna_search`) get it too, without three copies of the
-"is Comet available / enabled / keyed?" dance.
+Shared by the plain Adam CLI (:mod:`.cli`) and the Optuna+Adam search
+(:mod:`.optuna_search`), so there is one copy of the "is Comet available /
+enabled / keyed?" dance rather than one per entry point.
 
-The rules, matching :mod:`.gebo_search`:
+The rules:
 
 - ``comet_ml`` is an OPTIONAL dependency; if it is not installed, everything here
   degrades to ``None`` and the callers keep running.
@@ -32,8 +31,8 @@ try:
 except ImportError:  # optional dependency
     _HAS_COMET = False
 
-# Same Comet project the GEBO scans report into, so Adam / Optuna+Adam /
-# GEBO runs are all comparable in one place.
+# One Comet project for every fit path, so Adam and Optuna+Adam runs are
+# comparable in one place.
 COMET_PROJECT_NAME = "DiffDelphes"
 
 

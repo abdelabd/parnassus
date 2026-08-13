@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 from pathlib import Path
 
 import matplotlib as mpl
@@ -362,7 +363,17 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
                 y = vals.clamp(0.7 + 1e-6, 1.3 - 1e-6)
                 raw = torch.atanh((y - 1.0) / 0.3)
             elif name.endswith((".eff_logits", "_logit")):
-                y = vals.clamp(1e-6, 1.0 - 1e-6)
+                lo, hi = pc.logit_bounds(name)
+                if bool(torch.any((vals < lo) | (vals > hi))):
+                    if os.environ.get("MCGEN_ALLOW_SNAPSHOT_CLAMP") != "1":
+                        raise ValueError(
+                            f"{name}: snapshot value(s) {vals.tolist()} outside the "
+                            f"physical window ({lo}, {hi}) -- a pre-window artifact. "
+                            f"Replot with the matching old checkout, or set "
+                            f"MCGEN_ALLOW_SNAPSHOT_CLAMP=1 to clamp into the window."
+                        )
+                    print(f"[warn] {name}: snapshot value outside ({lo}, {hi}); clamping")
+                y = ((vals - lo) / (hi - lo)).clamp(1e-6, 1.0 - 1e-6)
                 raw = torch.log(y / (1.0 - y))
             elif name.endswith((".rate_raw", ".a_raw", ".b_raw")) or name.startswith((
                 "ECal.resolution_func",

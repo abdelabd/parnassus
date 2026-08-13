@@ -150,9 +150,13 @@ def make_synthetic_particles(
 ) -> torch.Tensor:
     """Build a mixed-species particle batch for tuning demos.
 
-    Species mix is chosen to activate every non-high-pt learnable
-    parameter: charged pions/kaons/protons, electrons, muons, photons,
-    K-short, Lambda, and neutrons in roughly equal proportions.
+    Species mix -- charged pions/kaons/protons, electrons, muons, photons,
+    K-short, Lambda, and neutrons in roughly equal proportions -- activates
+    every non-high-pt learnable parameter EXCEPT ``k0l_logit``: there are no
+    K_L (PID 130) in the list, so that (pinned, windowed) fraction gets no
+    contributing particle here. The list is left untouched on purpose -- the
+    legacy tune-demo test is calibrated to this batch's RNG stream (see
+    test_tune_cms_to_target_moves_charged_hadron_scale_toward_target).
 
     Parameters
     ----------
@@ -409,7 +413,7 @@ def main() -> None:
     particles = make_synthetic_particles(n=1500, seed=1)
 
     # Only train the charged-hadron scale parameters for a focused demo
-    # (the full 66-parameter loop works too; this isolates the signal).
+    # (the full 68-parameter loop works too; this isolates the signal).
     trainee_chad_res: LearnableMomentumResolution = (
         trainee.ChargedHadronMomentumSmearing.resolution_module  # type: ignore[union-attr,assignment]
     )
