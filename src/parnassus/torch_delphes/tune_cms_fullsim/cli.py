@@ -70,14 +70,16 @@ from .comet_utils import end_comet_experiment, init_comet_experiment
 from .config import (
     _DEFAULT_LR,
     DEFAULT_ABS_ETA_CUT,
+    DEFAULT_MODE,
     DEFAULT_PHOTON_MERGE_RADIUS,
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
+    MODE_CHOICES,
 )
 
 from .dataloader import DelphesDataLoader
 
-from .runner import load_split_datasets, write_history_json
+from .runner import load_split_datasets, resolve_acceptance_cuts, write_history_json
 
 from .loss import (
     CALO_COUNT_WEIGHT,
@@ -229,6 +231,18 @@ def main() -> None:
             "keep the mean-1 invariant. A small floor (e.g. 0.1) protects a rare species' "
             "gradient in a low-statistics batch. Only meaningful with --pid-weighting "
             "fraction/sqrt_fraction."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=MODE_CHOICES,
+        default=DEFAULT_MODE,
+        help=(
+            "Target flavour. fullsim (default): apply --truth-pt-cut/--reco-pt-cut/"
+            "--eta-cut and the chad truncation so the trainee matches the CMS "
+            "selection. delphes: no acceptance cuts, no chad truncation, count "
+            "terms ungated (those four flags are ignored) -- diff-Delphes has to "
+            "reproduce Delphes as-is."
         ),
     )
     parser.add_argument(
@@ -408,16 +422,14 @@ def main() -> None:
         )
     log(f"Loading full-simulation events from {root_file}")
 
-    # Resolve the acceptance-cut args (<= 0 disables the respective part).
-    truth_pt_cut = args.truth_pt_cut if args.truth_pt_cut > 0 else None
-    reco_pt_cut = args.reco_pt_cut if args.reco_pt_cut > 0 else None
-    abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
-    truncate_chads = not args.no_chad_truncation
+    # Resolve --mode + the acceptance-cut args (shared with optuna_search via runner).
+    truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
     photon_merge_radius = (
         args.photon_merge_radius if args.photon_merge_radius > 0 else None
     )
     log(
-        f"[filter] truth cut: pt >= {truth_pt_cut}, |eta| <= {abs_eta_cut} | "
+        f"[filter] mode={args.mode} | "
+        f"truth cut: pt >= {truth_pt_cut}, |eta| <= {abs_eta_cut} | "
         f"reco cut (target+trainee, all classes): pt >= {reco_pt_cut}, "
         f"|eta| <= {abs_eta_cut} | chad truncation at n_truth_chad: "
         f"{'ON' if truncate_chads else 'OFF'} | photon merge radius: "
@@ -612,8 +624,9 @@ def main() -> None:
             # notebook cache key can detect changes). 0 = disabled.
             "early_stopping_patience": max(0, args.early_stopping_patience),
             "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
-            # Acceptance cuts + truncation (resolved values; None = disabled).
-            # Losses are NOT comparable across different settings of these.
+            # --mode + acceptance cuts + truncation (resolved values; None =
+            # disabled). Losses are NOT comparable across different settings.
+            "mode": args.mode,
             "truth_pt_cut": truth_pt_cut,
             "reco_pt_cut": reco_pt_cut,
             "eta_cut": abs_eta_cut,

@@ -4,6 +4,9 @@ This module factors the two pieces that the single-fit CLI (:mod:`.cli`) and the
 Optuna hyperparameter search (:mod:`.optuna_search`) both need, so they stay a
 single source of truth:
 
+- :func:`resolve_acceptance_cuts` — turn the ``--mode`` / ``--*-cut`` /
+  ``--no-chad-truncation`` CLI args into the resolved cut values (``None`` /
+  ``False`` = disabled) both entrypoints feed to the loaders, the card and the fit.
 - :func:`load_split_datasets` — read a CMS full-simulation ROOT file and build
   the train/val :class:`~.dataloader.DelphesDataSet` pair (ragged, memory-light),
   exactly as the tuning CLI does. The caller wraps these in dataloaders (and, for
@@ -19,6 +22,7 @@ from __future__ import annotations
 import gc
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 import torch
 
@@ -30,6 +34,38 @@ from .data import (
     split_truth_objects_jagged,
 )
 from .dataloader import DelphesDataSet
+
+
+class AcceptanceCuts(NamedTuple):
+    """Resolved ``--mode`` / ``--*-cut`` CLI args (``None`` / ``False`` = disabled)."""
+
+    truth_pt_cut: float | None
+    reco_pt_cut: float | None
+    abs_eta_cut: float | None
+    truncate_chads: bool
+
+
+def resolve_acceptance_cuts(args) -> AcceptanceCuts:
+    """Resolve ``--mode`` + the acceptance-cut args (shared by cli and optuna_search).
+
+    ``fullsim``: ``<= 0`` disables the respective part and ``--no-chad-truncation``
+    turns the truncation off. ``delphes``: everything off -- diff-Delphes has to
+    reproduce Delphes without any CMS selection, so the cut flags are ignored.
+
+    Returns
+    -------
+    AcceptanceCuts
+        ``(truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads)``; ``None`` /
+        ``False`` = disabled, ready to unpack into the loader / card / fit kwargs.
+    """
+    if args.mode == "delphes":
+        return AcceptanceCuts(None, None, None, truncate_chads=False)
+    return AcceptanceCuts(
+        args.truth_pt_cut if args.truth_pt_cut > 0 else None,
+        args.reco_pt_cut if args.reco_pt_cut > 0 else None,
+        args.eta_cut if args.eta_cut > 0 else None,
+        truncate_chads=not args.no_chad_truncation,
+    )
 
 
 def load_split_datasets(

@@ -130,8 +130,10 @@ from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
 from .comet_utils import end_comet_experiment, init_comet_experiment
 from .config import (
     DEFAULT_ABS_ETA_CUT,
+    DEFAULT_MODE,
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
+    MODE_CHOICES,
 )
 from .dataloader import DelphesDataLoader
 from .distributed import _cleanup_distributed, _init_distributed
@@ -143,7 +145,7 @@ from .loss import (
     LOSS_CHOICES,
     PID_WEIGHTING_CHOICES,
 )
-from .runner import load_split_datasets, write_history_json
+from .runner import load_split_datasets, resolve_acceptance_cuts, write_history_json
 from .training import fit_card_to_fullsim
 
 # The three lr groups, mirroring param_config.default_lr_scale: resolution
@@ -695,6 +697,16 @@ def main() -> None:
     parser.add_argument("--count-rate-floor", type=float, default=COUNT_RATE_FLOOR)
     parser.add_argument("--event-weight", type=float, default=EVENT_WEIGHT)
     parser.add_argument(
+        "--mode",
+        choices=MODE_CHOICES,
+        default=DEFAULT_MODE,
+        help=(
+            "Target flavour: fullsim (default) applies the acceptance cuts + chad "
+            "truncation below; delphes turns them all off and ignores those flags "
+            "(see the tune_cms_fullsim CLI help)."
+        ),
+    )
+    parser.add_argument(
         "--truth-pt-cut",
         type=float,
         default=DEFAULT_TRUTH_PT_CUT,
@@ -813,11 +825,8 @@ def main() -> None:
             fitted, pc.load_param_config(args.init_config), str(args.init_config)
         )
 
-    # Resolve the acceptance-cut args (<= 0 disables the respective part).
-    truth_pt_cut = args.truth_pt_cut if args.truth_pt_cut > 0 else None
-    reco_pt_cut = args.reco_pt_cut if args.reco_pt_cut > 0 else None
-    abs_eta_cut = args.eta_cut if args.eta_cut > 0 else None
-    truncate_chads = not args.no_chad_truncation
+    # Resolve --mode + the acceptance-cut args (shared with the tuning CLI via runner).
+    truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
 
     r_lo, r_hi, _r_log, r_init = _parse_sampled(
         "search.photon_merge_radius", search["photon_merge_radius"]
@@ -826,7 +835,7 @@ def main() -> None:
     log(
         f"[optuna] world_size={world_size} device={device} n_trials={n_trials} "
         f"batch={global_batch_size} global ({batch_size}/rank) loss={args.loss!r} "
-        f"pid_weighting={args.pid_weighting!r} "
+        f"pid_weighting={args.pid_weighting!r} mode={args.mode} "
         f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
         f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'} "
         f"photon_merge_radius=[{r_lo}, {r_hi}] "
@@ -1111,8 +1120,9 @@ def main() -> None:
             "world_size": world_size,
             "early_stopping_patience": max(0, args.early_stopping_patience),
             "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
-            # Acceptance cuts + truncation (resolved values; None = disabled).
-            # Losses are NOT comparable across different settings of these.
+            # --mode + acceptance cuts + truncation (resolved values; None =
+            # disabled). Losses are NOT comparable across different settings.
+            "mode": args.mode,
             "truth_pt_cut": truth_pt_cut,
             "reco_pt_cut": reco_pt_cut,
             "eta_cut": abs_eta_cut,

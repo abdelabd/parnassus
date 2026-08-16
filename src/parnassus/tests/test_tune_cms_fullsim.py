@@ -12,6 +12,7 @@ Zenodo sample) and rerun.
 
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
 
@@ -54,6 +55,7 @@ from parnassus.torch_delphes.tune_cms_fullsim.dataloader import (
 from parnassus.torch_delphes.tune_cms_fullsim.config import (
     CALO_COUNT_TERM_KEYS,
     COUNT_TERM_KEYS,
+    DEFAULT_MODE,
 )
 from parnassus.torch_delphes.tune_cms_fullsim.loss import (
     LOSS_CHOICES,
@@ -65,6 +67,10 @@ from parnassus.torch_delphes.tune_cms_fullsim.loss import (
     per_pid_soft_hist_loss,
     per_pid_wasserstein_1d_loss,
     quantile_wasserstein_distance,
+)
+from parnassus.torch_delphes.tune_cms_fullsim.runner import (
+    AcceptanceCuts,
+    resolve_acceptance_cuts,
 )
 
 
@@ -1015,6 +1021,30 @@ def test_apply_chad_truncation_synthetic():
     out["ht"].sum().backward()
     assert obs["pt"].grad is not None
     assert obs["pt"].grad[1].tolist() == [0.0, 0.0, 0.0, 0.0, 0.0]
+
+
+def test_resolve_acceptance_cuts_modes():
+    """Mode fullsim honours the cut flags (<= 0 disables); delphes turns everything off."""
+
+    def ns(**kw) -> argparse.Namespace:
+        base = {
+            "mode": DEFAULT_MODE,
+            "truth_pt_cut": 0.25,
+            "reco_pt_cut": 1.0,
+            "eta_cut": 2.7,
+            "no_chad_truncation": False,
+        }
+        return argparse.Namespace(**{**base, **kw})
+
+    assert DEFAULT_MODE == "fullsim"
+    assert resolve_acceptance_cuts(ns()) == AcceptanceCuts(0.25, 1.0, 2.7, truncate_chads=True)
+    assert resolve_acceptance_cuts(
+        ns(reco_pt_cut=0.0, eta_cut=-1.0, no_chad_truncation=True)
+    ) == (0.25, None, None, False)
+    # delphes: cuts + truncation off regardless of the (ignored) cut flags.
+    assert resolve_acceptance_cuts(ns(mode="delphes", reco_pt_cut=10.0, eta_cut=1.0)) == (
+        None, None, None, False,
+    )
 
 
 def test_count_terms_pid_weighting():

@@ -75,6 +75,12 @@ DEFAULT_TRUTH_PT_CUT: float = 0.25
 DEFAULT_RECO_PT_CUT: float = 1.0
 DEFAULT_ABS_ETA_CUT: float = 2.7
 
+# --mode for the tune entrypoints. fullsim = the acceptance cuts + chad truncation
+# above (default); delphes = all of them off (diff-Delphes must reproduce Delphes
+# without any CMS selection), the --*-cut / --no-chad-truncation flags are ignored.
+MODE_CHOICES: tuple[str, ...] = ("fullsim", "delphes")
+DEFAULT_MODE: str = "fullsim"
+
 # Default PhotonClusterMerger seed-cone radius for the tune entrypoints (M2:
 # frozen constant; <= 0 disables). Calibrated against CMS PF photon counts on
 # the dijet sample (docs/photon_merger_fraction_design.md sec 3.1 + M0/M1).

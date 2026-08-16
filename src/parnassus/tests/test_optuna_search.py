@@ -601,6 +601,10 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
     assert history["metadata"]["global_batch_size"] == 2048
     assert history["metadata"]["batch_size"] == 2048
     assert history["metadata"]["updates_per_epoch"] >= 1
+    # No --mode given -> fullsim with the acceptance cuts on (pins the default).
+    assert history["metadata"]["mode"] == "fullsim"
+    assert history["metadata"]["reco_pt_cut"] == pytest.approx(1.0)
+    assert history["metadata"]["chad_truncation"] is True
 
     # The before-fit baseline resolves to the best round's materialized config
     # (NOT constructor defaults) -- this is what makes plot_fit_results honest.
