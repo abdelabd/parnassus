@@ -465,15 +465,51 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         """
         spec = eff_module.region_spec
         effs = eff_module.get_efficiencies()  # (n_regions,)
+        # A module with per-particle structure INSIDE a region (currently only the
+        # muon efficiency, whose top-pt bins roll off as exp(0.5 - rate * pt)) needs
+        # the per-particle reweight below; the per-region scalar cannot reach those
+        # ``rate_raw`` constants. See the branch comment further down.
+        has_rates = hasattr(eff_module, "get_rates")
         if eflow_objects.shape[0] == 0:
-            # Graph-connected zeros so backward() always has a path through effs.
-            return effs * 0.0
+            # Graph-connected zeros so backward() always has a path through effs
+            # (and through rate_raw for the muon module, whose gradient would
+            # otherwise be missing on a batch with no tracks of this species).
+            zeros = effs * 0.0
+            if has_rates:
+                zeros = zeros + eff_module.get_rates().sum() * 0.0
+            return zeros
         eff_det = effs.detach().clamp_min(1e-12)  # guard the 1/eff division
         pt = eflow_objects[:, ColumnMap.PT]
         abs_eta = eflow_objects[:, ColumnMap.ETA].abs()
         region = eflow_objects[:, ColumnMap.EFF_REGION]  # global label; 0 = untagged
         valid = pt > 0  # drop efficiency-killed ghosts (zeroed momentum)
         offset = spec.label_offset
+
+        if has_rates:
+            # PER-PARTICLE reweight ``eff_i / eff_i.detach()``, summed into the
+            # track's reco bin. Identical in VALUE to the per-region form below
+            # (every ratio is exactly 1, so the forward count is unchanged and the
+            # fixed point at the true efficiency is preserved), but it carries
+            # gradient to any parameter ``compute_efficiency`` uses -- including the
+            # muon ``rate_raw`` roll-off constants, which enter non-multiplicatively
+            # inside exp() and are therefore invisible to a per-region scalar.
+            #
+            # Only valid where reco pt == pre-reco pt, i.e. the efficiency can be
+            # re-evaluated at the track's CURRENT kinematics. Muons satisfy this
+            # (their ECal/HCal energy fractions are 0, so they traverse both
+            # calorimeters unrescaled); charged hadrons and electrons do NOT -- the
+            # PF rescale moves their pt -- so those keep the per-region path.
+            # ETA_OUTER (not ETA) is used because that is what the efficiency module
+            # itself binned on; both columns are carried through unchanged.
+            eta_outer = eflow_objects[:, ColumnMap.ETA_OUTER]
+            per_particle = eff_module.compute_efficiency(pt, eta_outer)
+            weight = per_particle / per_particle.detach().clamp_min(1e-12)
+            in_species = (region > offset) & (region <= offset + spec.n_regions)
+            expected = []
+            for b_mask in spec.region_masks(pt, abs_eta):
+                sel = (valid & b_mask & in_species).to(weight.dtype)
+                expected.append((weight * sel).sum())
+            return torch.stack(expected)
 
         # For each reco bin, find which pre-reco region the survivors came from, then
         # add their counts reweighted by eff/eff.detach(); the ratio is 1 in value

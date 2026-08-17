@@ -101,6 +101,32 @@ def test_load_rejects_trainable_logit_at_dead_gradient_tails(tmp_path: Path) -> 
     pc.load_param_config(_PARAM_CONFIG_DIR / "cms_target_default.yaml")
 
 
+def test_saturated_guard_can_be_disabled_for_warm_starts(tmp_path: Path) -> None:
+    """``enforce_saturated_guard=False`` keeps a converged (saturated) trainable logit.
+
+    The window is a conditioning heuristic on the STARTING value only -- nothing
+    constrains a logit during training -- so warm-starting from a converged fit must
+    be able to reproduce its values exactly rather than clamping them back inside.
+    """
+    import yaml
+
+    key = "ChargedHadronTrackingEfficiency.eff_logits[0]"
+
+    def _write(value: float) -> Path:
+        p = tmp_path / "sat.yaml"
+        with p.open("w") as f:
+            yaml.safe_dump({key: {"value": value, "trainable": True}}, f)
+        return p
+
+    for value in (0.0, 0.05, 0.9808, 0.9915, 1.0):
+        cfg = pc.load_param_config(_write(value), enforce_saturated_guard=False)
+        assert cfg[key]["value"] == value
+        assert cfg[key]["trainable"] is True
+        # Still rejected on the default path, so the guard is opt-out, not removed.
+        with pytest.raises(ValueError, match="trainable logit"):
+            pc.load_param_config(_write(value))
+
+
 def test_apply_validates_coverage(tmp_path: Path) -> None:
     """A config missing an entry is rejected against the card."""
     card = _fresh_card()

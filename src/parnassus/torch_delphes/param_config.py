@@ -196,12 +196,34 @@ def _scalar_keys(name: str, param: torch.Tensor) -> list[str]:
 # =============================================================================
 
 
-def load_param_config(path: str | Path) -> dict[str, dict]:
+def load_param_config(
+    path: str | Path, enforce_saturated_guard: bool = True
+) -> dict[str, dict]:
     """Parse a YAML param config into a flat ``{scalar_key: spec}`` dict.
 
     Each ``spec`` is normalized to ``{"value": float, "trainable": bool,
     "lr_scale": float}``. ``trainable`` defaults to ``False`` and
     ``lr_scale`` to :func:`default_lr_scale` when omitted.
+
+    Parameters
+    ----------
+    enforce_saturated_guard : bool
+        Whether to reject a *trainable* ``logit`` whose init lies outside
+        ``(_TRAINABLE_LOGIT_MIN, _TRAINABLE_LOGIT_MAX)``. On by default.
+
+        Pass ``False`` when the values come from a **converged fit** rather than
+        a hand-written guess -- i.e. warm-starting / fine-tuning. The guard is a
+        conditioning heuristic on the STARTING point only: nothing constrains a
+        logit during training, and Adam demonstrably walks them far outside the
+        window and keeps moving them there (it normalizes by the gradient's RMS,
+        so a smaller Jacobian does not give a proportionally smaller step). The
+        card's own constructor defaults (0.99, 0.98, ...) and several truth
+        values also sit outside it. Forcing a converged value back inside would
+        corrupt the warm start for no benefit.
+
+        Also pass ``False`` when merely READING values out of a config (e.g. to
+        draw a plot), where no parameter is being initialized for optimization
+        and the heuristic has no meaning.
 
     Returns
     -------
@@ -226,7 +248,7 @@ def load_param_config(path: str | Path) -> dict[str, dict]:
         # A non-trainable logit may sit anywhere in [0, 1] (it never moves), but a
         # *fitted* one initialized outside (0.1, 0.9) starts where the sigmoid
         # Jacobian ~ 0, so Adam cannot move it (e.g. value 1.0 -> raw logit ~ +13.8).
-        if trainable and param_transform_kind(base) == "logit":
+        if enforce_saturated_guard and trainable and param_transform_kind(base) == "logit":
             if not (_TRAINABLE_LOGIT_MIN < value < _TRAINABLE_LOGIT_MAX):
                 raise ValueError(
                     f"{path}: {key!r} is a trainable logit parameter with value {value}, "
@@ -234,7 +256,10 @@ def load_param_config(path: str | Path) -> dict[str, dict]:
                     f"({_TRAINABLE_LOGIT_MIN}, {_TRAINABLE_LOGIT_MAX}). Initializing a "
                     f"fitted efficiency/fraction at the 0/1 tails maps to a saturated raw "
                     f"logit with a vanishing gradient, so the fit cannot move it. Use an "
-                    f"interior value (e.g. 0.85); only pin the boundary with trainable: false."
+                    f"interior value (e.g. 0.85), or pin the boundary with trainable: false. "
+                    f"If this value came from a CONVERGED fit (warm start / fine-tune), the "
+                    f"guard does not apply -- pass --allow-saturated-init to the tuning CLI "
+                    f"(or enforce_saturated_guard=False to this function) to keep it exactly."
                 )
         out[str(key)] = {
             "value": value,

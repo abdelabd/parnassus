@@ -237,6 +237,20 @@ def main() -> None:
             "live under parnassus/torch_delphes/param_configs/."
         ),
     )
+    parser.add_argument(
+        "--allow-saturated-init",
+        action="store_true",
+        help=(
+            "Allow --param-config to initialize a TRAINABLE efficiency/fraction logit "
+            "outside the (0.1, 0.9) window that load_param_config otherwise enforces. "
+            "Use this when warm-starting / fine-tuning from a CONVERGED fit (e.g. a config "
+            "built by history_to_config.py): the window is a conditioning heuristic on the "
+            "STARTING value only -- nothing constrains a logit during training, and Adam "
+            "routinely walks them well outside it -- so clamping a converged value back "
+            "inside would corrupt the warm start for no benefit. Do NOT use it to paper "
+            "over a genuinely badly-initialized hand-written config."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--history-path",
@@ -397,7 +411,9 @@ def main() -> None:
     # gradient mask for partially-trainable tensors), and ``lr_scale`` sets each
     # parameter's effective Adam lr = ``args.lr * lr_scale`` (used to build the
     # optimizer's parameter groups).
-    param_cfg = pc.load_param_config(args.param_config)
+    param_cfg = pc.load_param_config(
+        args.param_config, enforce_saturated_guard=not args.allow_saturated_init
+    )
     pc.apply_param_config(trainee, param_cfg)
     params_to_train, param_groups = pc.select_trainable(trainee, param_cfg, global_lr=args.lr)
     if not params_to_train:

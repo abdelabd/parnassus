@@ -144,6 +144,62 @@ def _load_history(path: Path) -> dict:
     }
 
 
+def splice_histories(base: dict, finetune: dict) -> tuple[dict, int]:
+    """Join a base run and a fine-tune run onto one continuous epoch axis.
+
+    The fine-tune warm-starts from the base run's BEST (min-validation-loss)
+    epoch, not its last one -- an early-stopped run keeps training for
+    ``patience`` more epochs after the best. So the base curve is truncated at
+    ``base["best_result"]["step"]`` and the fine-tune's epochs are appended
+    directly after it. Plotting the base run's post-best tail would make the
+    joined trajectory jump backwards at the splice.
+
+    Returns
+    -------
+    (joined, splice_at)
+        ``joined`` carries the concatenated ``step`` / ``loss`` / ``val_loss`` /
+        ``parameters`` lists (plus the fine-tune's ``metadata`` /
+        ``best_result``); ``splice_at`` is the x-position where the fine-tune
+        begins, for shading.
+    """
+    best_step = (base.get("best_result") or {}).get("step")
+    if best_step is None:
+        raise SystemExit(
+            "--base-history has no best_result.step, so the warm-start point is "
+            "unknown. Re-run the base fit with the current history schema."
+        )
+    keep = [i for i, st in enumerate(base["step"]) if st <= best_step]
+    if not keep:
+        raise SystemExit(f"--base-history has no epoch <= best_result.step ({best_step}).")
+
+    if not base.get("parameters") or not finetune.get("parameters"):
+        raise SystemExit("both histories need per-epoch 'parameters' snapshots to be spliced.")
+    base_keys = set(base["parameters"][keep[0]])
+    ft_keys = set(finetune["parameters"][0])
+    if base_keys != ft_keys:
+        only_base = sorted(base_keys - ft_keys)[:5]
+        only_ft = sorted(ft_keys - base_keys)[:5]
+        raise SystemExit(
+            "--base-history and --history describe different parameter sets, so their "
+            f"trajectories cannot be joined: {len(base_keys - ft_keys)} only in base "
+            f"(e.g. {only_base}), {len(ft_keys - base_keys)} only in fine-tune (e.g. {only_ft})."
+        )
+
+    splice_at = best_step + 1
+    joined = {
+        "step": [base["step"][i] for i in keep] + [splice_at + st for st in finetune["step"]],
+        "loss": [base["loss"][i] for i in keep] + list(finetune["loss"]),
+        "val_loss": (
+            [base.get("val_loss", [])[i] if i < len(base.get("val_loss", [])) else None for i in keep]
+            + list(finetune.get("val_loss", []))
+        ),
+        "parameters": [base["parameters"][i] for i in keep] + list(finetune["parameters"]),
+        "metadata": finetune.get("metadata", {}),
+        "best_result": finetune.get("best_result", {}),
+    }
+    return joined, splice_at
+
+
 def plot_loss(history: dict, output_path: Path) -> None:
     """Plot the train/val loss trajectory on a log-y axis.
 
@@ -200,6 +256,8 @@ def plot_all_param_drift(
     output_path: Path,
     ncols: int = 4,
     title: str = "All parameter trajectories during Adam fit",
+    splice_at: int | None = None,
+    splice_label: str = "muon-gun fine-tune",
 ) -> None:
     """Plot EVERY parameter in the history snapshots vs Adam step.
 
@@ -211,6 +269,11 @@ def plot_all_param_drift(
 
     This covers the full parameter set, so the whole fit can be inspected at a
     glance.
+
+    ``splice_at`` (from :func:`splice_histories`) marks where a fine-tune run was
+    appended to a base run: every subplot gets a vertical line there and shading
+    over the fine-tune epochs, so the two phases stay distinguishable on one
+    continuous axis. ``None`` (the default) leaves the plot exactly as it was.
     """
     if not history.get("parameters"):
         raise ValueError("history dict has no 'parameters' snapshots")
@@ -241,6 +304,11 @@ def plot_all_param_drift(
             (line,) = ax.plot(steps, trajectory, label=label, linewidth=1.2)
             if key in truth:
                 ax.axhline(truth[key], color=line.get_color(), linestyle="--", alpha=0.4)
+        if splice_at is not None and steps:
+            # Shade the fine-tune epochs and mark the warm-start boundary. Drawn
+            # after the curves so the span sits behind them (zorder=0).
+            ax.axvspan(splice_at, max(steps), color="tab:purple", alpha=0.08, zorder=0)
+            ax.axvline(splice_at, color="tab:purple", linestyle=":", alpha=0.7, linewidth=1.0)
         ax.set_title(_abbrev_tensor(base), fontsize=7)
         ax.tick_params(labelsize=6)
         ax.set_xlabel("Epoch", fontsize=6)
@@ -250,7 +318,10 @@ def plot_all_param_drift(
     for ax in flat_axes[n:]:
         ax.set_visible(False)
 
-    fig.suptitle(f"{title}  ({len(snapshots[0])} parameters)", fontsize=12)
+    suptitle = f"{title}  ({len(snapshots[0])} parameters)"
+    if splice_at is not None:
+        suptitle += f"  --  shaded: {splice_label} (from epoch {splice_at})"
+    fig.suptitle(suptitle, fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.99))
     fig.savefig(output_path)
     plt.close(fig)
@@ -393,7 +464,17 @@ def _load_init_snapshot(
     pkg_configs = Path(pc.__file__).resolve().parent / "param_configs"
     for cand in (cfg, pkg_configs / cfg.name):
         if cand.exists():
-            snap = {k: spec["value"] for k, spec in pc.load_param_config(cand).items()}
+            # enforce_saturated_guard=False: we only READ values here to draw the
+            # before-fit curves -- nothing is initialized for optimization, so the
+            # trainable-logit conditioning window has no meaning. Without this, a
+            # warm-start config from a converged fit (whose logits legitimately sit
+            # outside the window) would fail to plot after training fine.
+            snap = {
+                k: spec["value"]
+                for k, spec in pc.load_param_config(
+                    cand, enforce_saturated_guard=False
+                ).items()
+            }
             return snap, str(cand)
     return None, f"constructor defaults ({cfg} not found)"
 
@@ -873,6 +954,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history", type=Path, required=True)
     parser.add_argument(
+        "--base-history",
+        type=Path,
+        default=None,
+        help=(
+            "Optional EARLIER run that --history warm-started from (e.g. an Optuna "
+            "study's all_optuna.json). When given, param_drift_all.pdf is EXTENDED: "
+            "the base run's trajectory up to its best (min-val) epoch is drawn first, "
+            "then --history's epochs continue on the same axes, with the fine-tune "
+            "region shaded. Only param_drift_all.pdf is affected -- every other figure "
+            "still describes --history alone. Both runs must cover the same parameter set."
+        ),
+    )
+    parser.add_argument(
         "--root-file",
         type=Path,
         default=Path("src/parnassus/tests/benchmark_data/cms_pseudodata.root"),
@@ -948,10 +1042,23 @@ def main() -> None:
 
     history = _load_history(args.history)
 
+    # Optional splice with an earlier run, for the extended drift plot only.
+    drift_history, splice_at = history, None
+    if args.base_history is not None:
+        base_history = _load_history(args.base_history)
+        drift_history, splice_at = splice_histories(base_history, history)
+        print(
+            f"  drift plot spliced: {args.base_history} epochs 0-"
+            f"{base_history['best_result']['step']} (its best epoch) + "
+            f"{len(history['step'])} fine-tune epochs from {splice_at}"
+        )
+
     # Ground-truth physical value of every scalar, keyed by the same name[i]
     # form the history snapshots use. These come from the GENERATION config; a
     # training config would give a trained param's start value, not its truth.
-    flat_truth_cfg = pc.load_param_config(args.truth_config)
+    # Read-only: the truth config supplies reference lines, not an init. See the
+    # note in _load_init_snapshot for why the saturated guard is off here.
+    flat_truth_cfg = pc.load_param_config(args.truth_config, enforce_saturated_guard=False)
     n_trainable = sum(1 for spec in flat_truth_cfg.values() if spec["trainable"])
     if n_trainable:
         print(
@@ -976,9 +1083,10 @@ def main() -> None:
 
     # ----- 2. All parameter trajectories (one subplot per tensor) -----
     plot_all_param_drift(
-        history,
+        drift_history,
         truth,
         args.output_dir / "param_drift_all.pdf",
+        splice_at=splice_at,
     )
     print("  wrote param_drift_all.pdf")
 

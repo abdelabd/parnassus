@@ -587,16 +587,22 @@ class CMSMuonLearnableEfficiency(_LearnableEfficiencyBase):
     :meth:`Efficiency._muon_cms_efficiency`. Binning + region labels come from
     ``CMS_EFF_REGION_SPECS["muon"]``.
 
-    Count-term note. The differentiable count term reweights each region's
-    survivors by ``eff_r / eff_r.detach()``. For the 6 ``eff_logits`` this is
-    exact even in the exponential bins (the coefficient enters ``eff``
-    multiplicatively, so ``dE[N]/d coeff = E[N]/coeff``). The ``rate_raw``
-    constants, however, enter ``eff`` *non*-multiplicatively (inside the
-    exponent), so the per-region scalar reweight carries NO gradient to them --
-    ``rate_raw`` is intentionally left frozen. Fitting it would require a
-    per-particle reweight ``eff_i(pt_i) / eff_i(pt_i).detach()`` (valid because
-    muon reco pt == pre-reco pt -- muons get no PF rescale) AND a sample with
-    ``pt > 1 TeV`` muons, which the QCD-dijet pseudodata does not provide.
+    Count-term note. The differentiable count term reweights survivors by
+    ``eff / eff.detach()``. A per-REGION scalar reweight is exact for the 6
+    ``eff_logits`` (the coefficient enters ``eff`` multiplicatively, so
+    ``dE[N]/d coeff = E[N]/coeff``) but carries NO gradient to ``rate_raw``,
+    which enters *non*-multiplicatively inside the exponent. So
+    ``CMSEnergyFlowDefault._expected_reco_counts`` uses a PER-PARTICLE reweight
+    ``eff_i(pt_i) / eff_i(pt_i).detach()`` for this module -- identical in value
+    (every ratio is 1, so the forward count and its fixed point at the true
+    efficiency are unchanged) but differentiable wrt ``rate_raw`` too. It is
+    valid here because muon reco pt == pre-reco pt (muons get no PF rescale);
+    the charged-hadron and electron efficiencies, which ARE rescaled, keep the
+    per-region path.
+
+    Fitting ``rate_raw`` also needs a sample with ``pt > 1 TeV`` muons, which the
+    QCD-dijet pseudodata does not provide -- see ``torch_delphes/muon_gun.cmnd``
+    for a gun sample built to cover it.
     """
 
     # (low/mid/high-coeff)-barrel, then (low/mid/high-coeff)-endcap
