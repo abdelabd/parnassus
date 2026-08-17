@@ -273,6 +273,15 @@ def gun_flag(gun, key, default=False):
 def append_gun_event(pythia, gun_cfg):
     \"\"\"Fill pythia.event with one gun event: two bookkeeping beams + N particles.
 
+    Two sampling modes, selected by ``gun_cfg["mode"]``:
+
+    ``"pt"``      sample transverse momentum, derive pz from eta (the original
+                  behavior, used by muon_gun.cmnd / electron_gun.cmnd).
+    ``"energy"``  sample total energy, split it across (pt, pz) at the sampled
+                  eta. Right for calorimeter guns -- ECal resolution is a
+                  function of E -- and the only mode that stays physical out to
+                  the forward region (see photon_gun.cmnd).
+
     The two beam entries are required: Pythia8ToHepMC3._get_vertices treats any
     particle whose mother list is empty as a beam particle and builds NO
     production vertex for it, so gun particles appended with mother 0 would all
@@ -284,9 +293,10 @@ def append_gun_event(pythia, gun_cfg):
     \"\"\"
     ids = gun_cfg["ids"]
     n_per_event = gun_cfg["n_per_event"]
-    pt_min = gun_cfg["pt_min"]
-    pt_max = gun_cfg["pt_max"]
-    pt_log = gun_cfg["pt_log"]
+    mode = gun_cfg["mode"]                 # "pt" or "energy"
+    v_min = gun_cfg["v_min"]
+    v_max = gun_cfg["v_max"]
+    v_log = gun_cfg["v_log"]
     eta_min = gun_cfg["eta_min"]
     eta_max = gun_cfg["eta_max"]
     e_beam = gun_cfg["e_beam"]
@@ -300,18 +310,40 @@ def append_gun_event(pythia, gun_cfg):
 
     for _ in range(n_per_event):
         u = rndm.flat()
-        if pt_log:
-            pt = pt_min * (pt_max / pt_min) ** u
+        if v_log:
+            sampled = v_min * (v_max / v_min) ** u
         else:
-            pt = pt_min + (pt_max - pt_min) * u
+            sampled = v_min + (v_max - v_min) * u
         eta = eta_min + (eta_max - eta_min) * rndm.flat()
         phi = 2.0 * math.pi * rndm.flat()
         pid = ids[min(int(rndm.flat() * len(ids)), len(ids) - 1)]
         mass = pythia.particleData.m0(abs(pid))
-        px = pt * math.cos(phi)
-        py = pt * math.sin(phi)
-        pz = pt * math.sinh(eta)
-        energy = math.sqrt(px * px + py * py + pz * pz + mass * mass)
+
+        if mode == "energy":
+            # ENERGY mode: sample E, then split it across (pt, pz) at the sampled
+            # eta. Calorimeter response is a function of E, not pt, and a
+            # pt-sampled gun goes unphysical forward (at |eta| = 5, pt = 1 TeV
+            # implies E = 74 TeV, far above the beam). The exact massive-particle
+            # relations below satisfy pt^2 + pz^2 == p^2 identically, so the
+            # four-vector is on-shell for any species, not just massless photons.
+            energy = sampled
+            if energy <= mass:
+                # Degenerate request (E at or below rest mass): emit at rest.
+                pt = 0.0
+                pz = 0.0
+            else:
+                momentum = math.sqrt(energy * energy - mass * mass)
+                pt = momentum / math.cosh(eta)
+                pz = momentum * math.tanh(eta)
+            px = pt * math.cos(phi)
+            py = pt * math.sin(phi)
+        else:
+            pt = sampled
+            px = pt * math.cos(phi)
+            py = pt * math.sin(phi)
+            pz = pt * math.sinh(eta)
+            energy = math.sqrt(px * px + py * py + pz * pz + mass * mass)
+
         event.append(pid, 1, 1, 2, 0, 0, 0, 0, px, py, pz, energy, mass)
 
     # Beams point at the thrown particles (entries 3 .. 2 + n_per_event).
@@ -360,18 +392,51 @@ def main() -> int:
         if not ids:
             LOG.info("HepMC3Generator: Gun:on is set but Gun:ids is empty!")
             return 1
+        # Exactly one of the pT / energy key groups must be present.
+        has_pt = any(k in gun for k in ("gun:ptmin", "gun:ptmax", "gun:ptlog"))
+        has_e = any(k in gun for k in ("gun:emin", "gun:emax", "gun:elog"))
+        if has_pt and has_e:
+            LOG.info(
+                "HepMC3Generator: give EITHER Gun:pTmin/pTmax/pTlog OR "
+                "Gun:eMin/eMax/eLog, not both!"
+            )
+            return 1
+        if not has_pt and not has_e:
+            LOG.info(
+                "HepMC3Generator: Gun:on is set but neither Gun:pTmin/pTmax nor "
+                "Gun:eMin/eMax was given!"
+            )
+            return 1
+        if has_e:
+            mode, lo, hi, use_log = (
+                "energy",
+                float(gun.get("gun:emin", 1.0)),
+                float(gun.get("gun:emax", 1000.0)),
+                gun_flag(gun, "gun:elog", True),
+            )
+        else:
+            mode, lo, hi, use_log = (
+                "pt",
+                float(gun.get("gun:ptmin", 1.0)),
+                float(gun.get("gun:ptmax", 100.0)),
+                gun_flag(gun, "gun:ptlog", True),
+            )
         gun_cfg = {
             "ids": ids,
             "n_per_event": int(float(gun.get("gun:nperevent", 1))),
-            "pt_min": float(gun.get("gun:ptmin", 1.0)),
-            "pt_max": float(gun.get("gun:ptmax", 100.0)),
-            "pt_log": gun_flag(gun, "gun:ptlog", True),
+            "mode": mode,
+            "v_min": lo,
+            "v_max": hi,
+            "v_log": use_log,
             "eta_min": float(gun.get("gun:etamin", -2.5)),
             "eta_max": float(gun.get("gun:etamax", 2.5)),
             "e_beam": 0.5 * float(pythia.settings.parm("Beams:eCM")),
         }
-        if gun_cfg["pt_log"] and gun_cfg["pt_min"] <= 0.0:
-            LOG.info("HepMC3Generator: Gun:pTlog needs Gun:pTmin > 0!")
+        if gun_cfg["v_log"] and gun_cfg["v_min"] <= 0.0:
+            LOG.info(f"HepMC3Generator: log sampling needs a positive {mode} minimum!")
+            return 1
+        if not gun_cfg["v_min"] < gun_cfg["v_max"]:
+            LOG.info(f"HepMC3Generator: gun {mode} min must be < max!")
             return 1
         LOG.info(f"HepMC3Generator: particle gun active: {gun_cfg}")
         os.unlink(pythia_cmnd)
