@@ -62,6 +62,7 @@ import matplotlib as mpl
 mpl.use("Agg")  # non-interactive backend for CI / headless runs
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
 import torch
 
@@ -144,60 +145,94 @@ def _load_history(path: Path) -> dict:
     }
 
 
-def splice_histories(base: dict, finetune: dict) -> tuple[dict, int]:
-    """Join a base run and a fine-tune run onto one continuous epoch axis.
+# Shading colors for successive warm-started stages, in order.
+_SPLICE_COLORS: tuple[str, ...] = ("tab:purple", "tab:orange", "tab:green", "tab:red")
 
-    The fine-tune warm-starts from the base run's BEST (min-validation-loss)
-    epoch, not its last one -- an early-stopped run keeps training for
-    ``patience`` more epochs after the best. So the base curve is truncated at
-    ``base["best_result"]["step"]`` and the fine-tune's epochs are appended
-    directly after it. Plotting the base run's post-best tail would make the
-    joined trajectory jump backwards at the splice.
+
+def splice_histories(
+    histories: list[dict], labels: list[str] | None = None
+) -> tuple[dict, list[tuple[int, int, str]]]:
+    """Join a chain of successively warm-started runs onto one continuous epoch axis.
+
+    ``histories`` is in chronological order, oldest first, e.g.
+    ``[qcd_optuna, muon_finetune, electron_finetune]``. Each stage warm-starts
+    from the previous stage's BEST (min-validation-loss) epoch, not its last one
+    -- an early-stopped run keeps training for ``patience`` more epochs after the
+    best. So every stage except the final one is truncated at its own
+    ``best_result["step"]``, and each subsequent stage's epochs are offset to
+    continue the axis. Plotting a stage's post-best tail would make the joined
+    trajectory jump backwards at the join.
 
     Returns
     -------
-    (joined, splice_at)
+    (joined, spans)
         ``joined`` carries the concatenated ``step`` / ``loss`` / ``val_loss`` /
-        ``parameters`` lists (plus the fine-tune's ``metadata`` /
-        ``best_result``); ``splice_at`` is the x-position where the fine-tune
-        begins, for shading.
+        ``parameters`` lists (plus the LAST stage's ``metadata`` /
+        ``best_result``); ``spans`` is one ``(start, end, label)`` per stage
+        AFTER the first, for shading. The first stage is the unshaded baseline.
     """
-    best_step = (base.get("best_result") or {}).get("step")
-    if best_step is None:
+    if len(histories) < 2:
+        raise SystemExit("splice_histories needs at least two histories to join.")
+    if labels is None:
+        labels = [f"stage {i}" for i in range(len(histories))]
+    if len(labels) != len(histories):
         raise SystemExit(
-            "--base-history has no best_result.step, so the warm-start point is "
-            "unknown. Re-run the base fit with the current history schema."
-        )
-    keep = [i for i, st in enumerate(base["step"]) if st <= best_step]
-    if not keep:
-        raise SystemExit(f"--base-history has no epoch <= best_result.step ({best_step}).")
-
-    if not base.get("parameters") or not finetune.get("parameters"):
-        raise SystemExit("both histories need per-epoch 'parameters' snapshots to be spliced.")
-    base_keys = set(base["parameters"][keep[0]])
-    ft_keys = set(finetune["parameters"][0])
-    if base_keys != ft_keys:
-        only_base = sorted(base_keys - ft_keys)[:5]
-        only_ft = sorted(ft_keys - base_keys)[:5]
-        raise SystemExit(
-            "--base-history and --history describe different parameter sets, so their "
-            f"trajectories cannot be joined: {len(base_keys - ft_keys)} only in base "
-            f"(e.g. {only_base}), {len(ft_keys - base_keys)} only in fine-tune (e.g. {only_ft})."
+            f"got {len(histories)} histories but {len(labels)} stage labels; "
+            "pass one label per history (base histories first, --history last)."
         )
 
-    splice_at = best_step + 1
-    joined = {
-        "step": [base["step"][i] for i in keep] + [splice_at + st for st in finetune["step"]],
-        "loss": [base["loss"][i] for i in keep] + list(finetune["loss"]),
-        "val_loss": (
-            [base.get("val_loss", [])[i] if i < len(base.get("val_loss", [])) else None for i in keep]
-            + list(finetune.get("val_loss", []))
-        ),
-        "parameters": [base["parameters"][i] for i in keep] + list(finetune["parameters"]),
-        "metadata": finetune.get("metadata", {}),
-        "best_result": finetune.get("best_result", {}),
-    }
-    return joined, splice_at
+    # Every stage must describe the same parameter set, or the trajectories cannot
+    # be joined. Checked against the first stage's keys.
+    key_sets = []
+    for i, h in enumerate(histories):
+        if not h.get("parameters"):
+            raise SystemExit(f"history {labels[i]!r} has no per-epoch 'parameters' snapshots.")
+        key_sets.append(set(h["parameters"][0]))
+    for i in range(1, len(key_sets)):
+        if key_sets[i] != key_sets[0]:
+            only_a = sorted(key_sets[0] - key_sets[i])[:5]
+            only_b = sorted(key_sets[i] - key_sets[0])[:5]
+            raise SystemExit(
+                f"stage {labels[i]!r} describes a different parameter set from "
+                f"{labels[0]!r}, so their trajectories cannot be joined: "
+                f"{len(key_sets[0] - key_sets[i])} only in the first (e.g. {only_a}), "
+                f"{len(key_sets[i] - key_sets[0])} only in this one (e.g. {only_b})."
+            )
+
+    joined: dict[str, list] = {"step": [], "loss": [], "val_loss": [], "parameters": []}
+    spans: list[tuple[int, int, str]] = []
+    offset = 0
+    for i, h in enumerate(histories):
+        is_last = i == len(histories) - 1
+        if is_last:
+            keep = list(range(len(h["step"])))
+        else:
+            best_step = (h.get("best_result") or {}).get("step")
+            if best_step is None:
+                raise SystemExit(
+                    f"stage {labels[i]!r} has no best_result.step, so the point the next "
+                    "stage warm-started from is unknown. Re-run it with the current "
+                    "history schema."
+                )
+            keep = [j for j, st in enumerate(h["step"]) if st <= best_step]
+            if not keep:
+                raise SystemExit(
+                    f"stage {labels[i]!r} has no epoch <= best_result.step ({best_step})."
+                )
+
+        seg_steps = [offset + h["step"][j] for j in keep]
+        vl = h.get("val_loss", [])
+        joined["step"].extend(seg_steps)
+        joined["loss"].extend(h["loss"][j] for j in keep)
+        joined["val_loss"].extend(vl[j] if j < len(vl) else None for j in keep)
+        joined["parameters"].extend(h["parameters"][j] for j in keep)
+        if i > 0:
+            spans.append((seg_steps[0], seg_steps[-1], labels[i]))
+        offset = seg_steps[-1] + 1
+
+    joined["metadata"] = histories[-1].get("metadata", {})
+    joined["best_result"] = histories[-1].get("best_result", {})
+    return joined, spans
 
 
 def plot_loss(history: dict, output_path: Path) -> None:
@@ -256,8 +291,7 @@ def plot_all_param_drift(
     output_path: Path,
     ncols: int = 4,
     title: str = "All parameter trajectories during Adam fit",
-    splice_at: int | None = None,
-    splice_label: str = "muon-gun fine-tune",
+    splices: list[tuple[int, int, str]] | None = None,
 ) -> None:
     """Plot EVERY parameter in the history snapshots vs Adam step.
 
@@ -270,10 +304,11 @@ def plot_all_param_drift(
     This covers the full parameter set, so the whole fit can be inspected at a
     glance.
 
-    ``splice_at`` (from :func:`splice_histories`) marks where a fine-tune run was
-    appended to a base run: every subplot gets a vertical line there and shading
-    over the fine-tune epochs, so the two phases stay distinguishable on one
-    continuous axis. ``None`` (the default) leaves the plot exactly as it was.
+    ``splices`` (from :func:`splice_histories`) is one ``(start, end, label)`` per
+    warm-started stage appended after the baseline: every subplot gets a vertical
+    line at each start and shading over that stage's epochs, so the phases stay
+    distinguishable on one continuous axis. ``None`` (the default) leaves the plot
+    exactly as it was.
     """
     if not history.get("parameters"):
         raise ValueError("history dict has no 'parameters' snapshots")
@@ -304,11 +339,13 @@ def plot_all_param_drift(
             (line,) = ax.plot(steps, trajectory, label=label, linewidth=1.2)
             if key in truth:
                 ax.axhline(truth[key], color=line.get_color(), linestyle="--", alpha=0.4)
-        if splice_at is not None and steps:
-            # Shade the fine-tune epochs and mark the warm-start boundary. Drawn
-            # after the curves so the span sits behind them (zorder=0).
-            ax.axvspan(splice_at, max(steps), color="tab:purple", alpha=0.08, zorder=0)
-            ax.axvline(splice_at, color="tab:purple", linestyle=":", alpha=0.7, linewidth=1.0)
+        if splices and steps:
+            # Shade each warm-started stage and mark its boundary. Drawn after the
+            # curves so the spans sit behind them (zorder=0).
+            for si, (s_start, s_end, _lbl) in enumerate(splices):
+                color = _SPLICE_COLORS[si % len(_SPLICE_COLORS)]
+                ax.axvspan(s_start, s_end, color=color, alpha=0.08, zorder=0)
+                ax.axvline(s_start, color=color, linestyle=":", alpha=0.7, linewidth=1.0)
         ax.set_title(_abbrev_tensor(base), fontsize=7)
         ax.tick_params(labelsize=6)
         ax.set_xlabel("Epoch", fontsize=6)
@@ -319,8 +356,32 @@ def plot_all_param_drift(
         ax.set_visible(False)
 
     suptitle = f"{title}  ({len(snapshots[0])} parameters)"
-    if splice_at is not None:
-        suptitle += f"  --  shaded: {splice_label} (from epoch {splice_at})"
+    if splices:
+        if len(splices) == 1:
+            s_start, _s_end, lbl = splices[0]
+            suptitle += f"  --  shaded: {lbl} (from epoch {s_start})"
+        else:
+            parts = ", ".join(f"{lbl} (from {s_start})" for s_start, _e, lbl in splices)
+            suptitle += f"  --  shaded stages: {parts}"
+            # A legend earns its place only once there is more than one stage to
+            # tell apart; with a single span the suptitle already names it, and
+            # adding a legend would change the existing single-stage figure.
+            handles = [
+                Patch(
+                    facecolor=_SPLICE_COLORS[si % len(_SPLICE_COLORS)],
+                    alpha=0.25,
+                    label=lbl,
+                )
+                for si, (_s, _e, lbl) in enumerate(splices)
+            ]
+            fig.legend(
+                handles=handles,
+                loc="upper right",
+                fontsize=8,
+                ncol=len(handles),
+                frameon=False,
+                bbox_to_anchor=(0.995, 0.997),
+            )
     fig.suptitle(suptitle, fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.99))
     fig.savefig(output_path)
@@ -956,14 +1017,29 @@ def main() -> None:
     parser.add_argument(
         "--base-history",
         type=Path,
+        action="append",
         default=None,
         help=(
             "Optional EARLIER run that --history warm-started from (e.g. an Optuna "
             "study's all_optuna.json). When given, param_drift_all.pdf is EXTENDED: "
-            "the base run's trajectory up to its best (min-val) epoch is drawn first, "
-            "then --history's epochs continue on the same axes, with the fine-tune "
-            "region shaded. Only param_drift_all.pdf is affected -- every other figure "
-            "still describes --history alone. Both runs must cover the same parameter set."
+            "each base run's trajectory up to its best (min-val) epoch is drawn first, "
+            "then --history's epochs continue on the same axes, with each warm-started "
+            "stage shaded in its own color. REPEATABLE for a chain of successive "
+            "fine-tunes -- pass them oldest first, e.g. `--base-history qcd.json "
+            "--base-history muon.json` with --history pointing at the electron run. "
+            "Only param_drift_all.pdf is affected -- every other figure still describes "
+            "--history alone. All runs must cover the same parameter set."
+        ),
+    )
+    parser.add_argument(
+        "--stage-labels",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated names for the spliced stages, in the same order "
+            "(--base-history values oldest first, then --history), e.g. "
+            "'QCD,muon-gun fine-tune,electron-gun fine-tune'. Used in the shading "
+            "legend and suptitle. Defaults to each history file's stem."
         ),
     )
     parser.add_argument(
@@ -1042,16 +1118,26 @@ def main() -> None:
 
     history = _load_history(args.history)
 
-    # Optional splice with an earlier run, for the extended drift plot only.
-    drift_history, splice_at = history, None
-    if args.base_history is not None:
-        base_history = _load_history(args.base_history)
-        drift_history, splice_at = splice_histories(base_history, history)
-        print(
-            f"  drift plot spliced: {args.base_history} epochs 0-"
-            f"{base_history['best_result']['step']} (its best epoch) + "
-            f"{len(history['step'])} fine-tune epochs from {splice_at}"
-        )
+    # Optional splice with earlier run(s), for the extended drift plot only.
+    drift_history, splices = history, None
+    if args.base_history:
+        chain_paths = [*args.base_history, args.history]
+        chain = [_load_history(p) for p in chain_paths]
+        if args.stage_labels:
+            labels = [lbl.strip() for lbl in args.stage_labels.split(",")]
+            if len(labels) != len(chain):
+                raise SystemExit(
+                    f"--stage-labels gave {len(labels)} names but there are {len(chain)} "
+                    f"stages ({len(args.base_history)} --base-history + 1 --history)."
+                )
+        else:
+            labels = [p.stem for p in chain_paths]
+        drift_history, splices = splice_histories(chain, labels)
+        print(f"  drift plot spliced over {len(chain)} stages:")
+        for (s_start, s_end, lbl), path in zip(
+            [(0, splices[0][0] - 1, labels[0]), *splices], chain_paths
+        ):
+            print(f"    epochs {s_start:>4}-{s_end:<4}  {lbl}  ({path})")
 
     # Ground-truth physical value of every scalar, keyed by the same name[i]
     # form the history snapshots use. These come from the GENERATION config; a
@@ -1086,7 +1172,7 @@ def main() -> None:
         drift_history,
         truth,
         args.output_dir / "param_drift_all.pdf",
-        splice_at=splice_at,
+        splices=splices,
     )
     print("  wrote param_drift_all.pdf")
 

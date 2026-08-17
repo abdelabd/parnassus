@@ -1,0 +1,75 @@
+! electron_gun.cmnd
+! Flat-in-log-pT electron gun for the CMS full-simulation pseudodata generator
+! (parnassus.torch_delphes.generate_pseudodata).
+!
+! PURPOSE
+!   Companion to muon_gun.cmnd, for the 15 electron parameters of
+!   CMSEnergyFlowDefault:
+!
+!     ElectronTrackingEfficiency.eff_logits[0..5]   6 (|eta|, pt) regions
+!     ElectronMomentumSmearing.resolution_module.{a,b,scale}_raw[0..2]
+!
+!   The QCD-dijet sample contains few electrons, so these are weakly constrained
+!   there. Unlike the muon efficiency, the electron efficiency has NO rate_raw
+!   high-pt roll-off -- it is 6 plain piecewise constants -- so no TeV reach is
+!   needed and the per-particle count reweight added for muons does not apply.
+!
+! COVERAGE (see learnable.py CMS_EFF_REGION_SPECS["electron"])
+!   Efficiency regions: |eta| bins [0, 1.5] and (1.5, 2.5];
+!                       pt bins (0.1, 1], (1, 100], (100, inf).
+!                       NOTE the top edge is 100 GeV, not the muon's 1000.
+!   Smearing regions:   |eta| bins [0, 0.5], (0.5, 1.5], (1.5, 2.5].
+!   Log-uniform pt in [0.2, 1000] GeV puts ~19% of electrons in (0.2, 1],
+!   ~54% in (1, 100] and ~27% above 100 GeV, so all six efficiency regions are
+!   populated with headroom above the top edge for the resolution b-term (which
+!   needs pt lever arm). Uniform eta in [-2.5, 2.5] fills every eta bin of both
+!   modules (|eta| > 2.5 is in no region, so the range stops there).
+!
+! IMPORTANT -- THIS SAMPLE IS NOT ELECTRON-ONLY IN ITS EFFECTS
+!   Electrons have ECal energy fraction 1.0 (CMSDefault._setup_ECal, `11: 1.0`),
+!   where muons have 0.0. So unlike the muon gun -- whose events leave every
+!   non-muon parameter without gradient -- these events fully populate the
+!   calorimeter, and the ECal scale (3) and ECal resolution (9) parameters WILL
+!   receive gradient alongside the 15 electron ones. A clean electron sample is
+!   an excellent ECal calibration handle, but it contains no hadrons to balance
+!   those parameters against, so inspect the ECal trajectories in
+!   param_drift_all.pdf before trusting a fit that leaves them trainable.
+!
+! NOTES
+!   * The Gun:* keys below are NOT Pythia settings. They are parsed and
+!     STRIPPED by parnassus.pythia.HepMC3Generator's single-job driver before
+!     the rest of this file is handed to Pythia's readFile(), so Pythia never
+!     sees an unknown setting. Everything else here is ordinary Pythia.
+!   * Do NOT set Random:seed here. The per-worker seed is injected by the
+!     driver before this file is read, and it also drives the gun sampling,
+!     so each worker throws a statistically independent set of electrons.
+!   * generate_pseudodata.py skips its --pt-hat-min injection for gun configs
+!     (there is no hard process to cut on).
+
+! ---- Gun definition (consumed by the driver, stripped before Pythia) ----
+Gun:on = on
+Gun:ids = 11 -11                    ! sampled uniformly (charge-symmetric)
+Gun:nPerEvent = 20                  ! electrons thrown per event
+Gun:pTmin = 0.2                     ! GeV
+Gun:pTmax = 1000.                   ! GeV -- well above the 100 GeV top bin edge
+Gun:pTlog = on                      ! log-uniform in pt (flat in ln pt)
+Gun:etaMin = -2.5
+Gun:etaMax = 2.5
+
+! ---- Pythia: no hard process, we fill the event record ourselves ----
+ProcessLevel:all = off
+Beams:idA = 2212
+Beams:idB = 2212
+Beams:eCM = 13000.                  ! only sets the bookkeeping beam particles
+
+! ---- Suppress per-event and initialization printout ----
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off
