@@ -11,7 +11,7 @@
 #                    card default (== the generation truth).
 # Run (delphes mode: no acceptance cuts, no photon merger):
 #   python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
-#     --root-file /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_all.root \
+#     --root-file /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_all_dijet.root \
 #     --optuna-config src/parnassus/torch_delphes/param_configs/optuna_config_all.yaml \
 #     --n-events 100000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --mode delphes \
 #     --output-base doc/figure_pseudodata --history-path doc/figure_pseudodata/all_optuna.json

@@ -116,11 +116,11 @@ in `--batch-size` chunks through the target card before the ROOT file is written
 | `--output` | path | `src/parnassus/tests/benchmark_data/cms_pseudodata.root` | Output ROOT file. |
 | `--n-events` | int | `20000` | Exact number of events to generate. |
 | `--n-workers` | int | `None` (all CPU cores, capped at `--n-events`) | Parallel Pythia8 **CPU** processes for event generation. Independent of `--device`. |
-| `--pt-hat-min` | float | `100.0` | Pythia8 `PhaseSpace:pTHatMin` (GeV) — minimum hard-scatter pT. Lower → softer, higher-multiplicity events. |
+| `--process` | `dijet` \| `HZZ4l` \| `muongun` | `dijet` | Physics process; selects the shipped `processes/<name>.cmnd` (QCD dijet, VBF H→ZZ→4l, flat-in-log-pT muon gun). |
+| `--pt-hat-min` | float | `None` (→ `100` for `dijet`, no override otherwise) | Pythia8 `PhaseSpace:pTHatMin` (GeV) appended to the process `.cmnd`; `dijet` always gets it. Lower → softer, higher-multiplicity events. |
 | `--batch-size` | int | `512` | Events per TorchDelphes forward pass in phase 2 (memory knob; does not change the output). |
 | `--seed` | int | `1` | Seeds **both** phases: Pythia worker `i` gets `Random:seed = seed*n_workers + i` (disjoint ranges across seeds at fixed `--n-workers`, so array tasks produce distinct events) and torch is seeded for the target card's stochastic smearing / Gumbel-ST in phase 2. |
 | `--device` | str | `None` (auto: `cuda` if a GPU is available, else `cpu`) | Device for the **phase-2 TorchDelphes forward pass only**. Pythia generation (phase 1) is always CPU-parallel. |
-| `--cmnd-file` | path | shipped `qcd_dijet.cmnd` | Base Pythia `.cmnd` configuration; `--pt-hat-min` is appended as an override. |
 | `--work-dir` | path | `None` (temp dir, auto-removed) | Scratch directory for intermediate HepMC files / per-job logs. |
 | `--keep-hepmc` | flag | `False` | Keep the intermediate HepMC files instead of deleting the auto-created temp dir (no effect with `--work-dir`). |
 | `--param-config` | path | `param_configs/cms_target_default.yaml` | YAML whose physical `value` fields define the **ground-truth** detector response written into the `pflow_*` branches. This is the truth you later try to recover. **May be partial**: only the listed scalars are changed, every other parameter keeps its card default (see [Partial generation configs](#partial-generation-configs)). |
@@ -157,15 +157,16 @@ Run from a login node; `--config` is **required** and may be a partial config (s
 ```bash
 bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
     --config src/parnassus/torch_delphes/param_configs/param_config_chadtrkeff.yaml \
-    --n_events 100000 --n_tasks 10          # both optional (these are the defaults)
-# -> /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_chadtrkeff.root
+    --process dijet --n_events 100000 --n_tasks 10   # all optional (these are the defaults)
+# -> /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_chadtrkeff_dijet.root
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--config` | (required) | Generation param config (may be partial); its stem names the output. |
+| `--process` | `dijet` | Physics process (`dijet`, `HZZ4l`, `muongun`; see `generate_pseudodata --process`); appended to the output name. |
 | `--n_events` | `100000` | **Total** events; must be a multiple of `--n_tasks` (each task generates `n_events / n_tasks`). |
-| `--n_tasks` | `10` | Number of array tasks (= seeds `1..n_tasks`). A task costs ~0.11 s/event (~18 min per 10k), ~0.22 s/event with `--debug`; keep `n_events / n_tasks` inside `TIME_LIMIT`. |
+| `--n_tasks` | `10` | Number of array tasks (= seeds `1..n_tasks`). A dijet task costs ~0.11 s/event (~18 min per 10k), ~0.22 s/event with `--debug`; keep `n_events / n_tasks` inside `TIME_LIMIT`. |
 | `--debug` | off | Also write the ~400 per-module intermediate branches (`generate_pseudodata --debug`, needed only for `plot_fit_results --debug`). Doubles the runtime (single-threaded uproot write) and gives ~7× larger files. |
 
 Everything else is configurable via environment variables (shown with defaults):
@@ -175,8 +176,8 @@ Everything else is configurable via environment variables (shown with defaults):
 | `OUTBASE` | `/global/cfs/cdirs/m3246/diff_delphes` | Output base. Parts go in `$OUTBASE/parts/`, logs in `$OUTBASE/logs/`, merged file in `$OUTBASE/`. **Must be a shared filesystem** (CFS / scratch), not node-local `/tmp`. |
 | `N_WORKERS` | `32` | Pythia CPU workers per task (matches the job's `-c 32`). |
 | `TIME_LIMIT` | `00:30:00` | SLURM `-t` per array task (the driver prints an estimated per-task runtime at submit). |
-| `PT_HAT_MIN` | `100` | Pythia `PhaseSpace:pTHatMin`. |
-| `MERGED_NAME` | `pseudo_data_<total>_<config-stem>[_debug].root` | Final merged filename under `$OUTBASE` (`<total>` = `100k` for whole thousands, else the plain count; `_debug` suffix when `--debug`). The per-seed parts share the stem (`<stem>_seed<i>.root`), so different configs can share `parts/`. |
+| `PT_HAT_MIN` | (unset) | Pythia `PhaseSpace:pTHatMin` override; unset → `generate_pseudodata` default (100 for `dijet`, none otherwise). |
+| `MERGED_NAME` | `pseudo_data_<total>_<config-stem>_<process>[_debug].root` | Final merged filename under `$OUTBASE` (`<total>` = `100k` for whole thousands, else the plain count; `_debug` suffix when `--debug`). The per-seed parts share the stem (`<stem>_seed<i>.root`), so different configs can share `parts/`. |
 
 The jobs run on the **CPU partition** with `--device cpu`: the TorchDelphes forward is only a few
 minutes per 10k events, so a GPU node would sit idle. The driver runs `setup.sh`

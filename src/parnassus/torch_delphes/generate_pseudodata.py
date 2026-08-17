@@ -13,16 +13,19 @@ calorimeter simulation.
 
 Event generation
 ----------------
-1. :class:`parnassus.pythia.HepMC3Generator` generates hard QCD dijet
-   events at ``sqrt(s) = 13 TeV`` (see the shipped ``qcd_dijet.cmnd``,
-   with ``pTHatMin`` overridable via ``--pt-hat-min``) across
+1. :class:`parnassus.pythia.HepMC3Generator` generates events of the
+   selected ``--process`` at ``sqrt(s) = 13 TeV`` (``dijet`` = hard QCD
+   2->2, ``HZZ4l`` = VBF H->ZZ->4l, ``muongun`` = flat-in-log-pT muon
+   gun; the Pythia ``.cmnd`` files live in ``processes/``) across
    ``--n-workers`` parallel Pythia8 processes, retries failed events so
    the merged HepMC3 file contains *exactly* ``--n-events`` events, and
-   merges the per-worker outputs into one file. Hadronization and
-   final-state radiation are on, producing a realistic mix of charged
-   hadrons, electrons, muons, photons, K-shorts, Lambdas, and neutrons --
-   the exact particle zoo that exercises every learnable parameter in
-   ``CMSEnergyFlowDefault``.
+   merges the per-worker outputs into one file. For ``dijet`` a
+   ``PhaseSpace:pTHatMin`` override (``--pt-hat-min``, default 100) is
+   always appended; the other processes only get it when the flag is
+   given. Hadronization and final-state radiation are on, producing a
+   realistic mix of charged hadrons, electrons, muons, photons,
+   K-shorts, Lambdas, and neutrons -- the exact particle zoo that
+   exercises every learnable parameter in ``CMSEnergyFlowDefault``.
 
 2. The merged HepMC3 file is read back event by event; each event's
    final-state particles (HepMC ``status == 1``) are converted to the
@@ -135,10 +138,13 @@ _DEFAULT_PARAM_CONFIG: Path = (
     Path(__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
 )
 
-# QCD-dijet Pythia8 configuration consumed by HepMC3Generator. The random seed
-# is injected per-worker by the generator and the pTHatMin is overridden by the
-# --pt-hat-min flag, so this file only carries the process / beam definition.
-_DEFAULT_CMND_FILE: Path = Path(__file__).resolve().parent / "qcd_dijet.cmnd"
+# --process name -> shipped Pythia8 .cmnd consumed by HepMC3Generator. The random
+# seed is injected per-worker by the generator, so these files only carry the
+# process / beam definition. Only dijet has a hard-process pT-hat cut.
+_PROCESS_DIR: Path = Path(__file__).resolve().parent / "processes"
+PROCESS_CMND = {"dijet": "qcd_dijet.cmnd", "HZZ4l": "HZZ4l.cmnd", "muongun": "muon_gun.cmnd"}
+DIJET_PT_HAT_MIN = 100.0
+
 
 def resolve_device(device=None) -> torch.device:
     if device is not None:
@@ -154,9 +160,9 @@ def build_effective_cmnd(
 
     Pythia applies settings in order, so appending
     ``PhaseSpace:pTHatMin = <pt_hat_min>`` after the base file's contents makes
-    the ``--pt-hat-min`` CLI flag always win over whatever the shipped
-    ``qcd_dijet.cmnd`` declares. The effective file is written into
-    ``dest_dir`` (typically the run's scratch directory) and its path returned.
+    the ``--pt-hat-min`` CLI flag always win over whatever the shipped process
+    ``.cmnd`` declares. The effective file is written into ``dest_dir``
+    (typically the run's scratch directory) and its path returned.
 
     Returns
     -------
@@ -603,11 +609,11 @@ def truth_arrays_to_pflow(
 def generate(
     output_path: Path,
     n_events: int = 20_000,
-    pt_hat_min: float = 100.0,
+    process: str = "dijet",
+    pt_hat_min: float | None = None,
     n_workers: int | None = None,
     batch_size: int = 512,
     seed: int = 1,
-    cmnd_file: str | Path = _DEFAULT_CMND_FILE,
     param_config: str | Path = _DEFAULT_PARAM_CONFIG,
     debug: bool = False,
     work_dir: str | Path | None = None,
@@ -625,9 +631,13 @@ def generate(
     ----------
     n_events : int
         Exact number of events to generate.
-    pt_hat_min : float
-        ``PhaseSpace:pTHatMin`` for the QCD dijet generation (overrides the
-        value in ``cmnd_file``).
+    process : str
+        Key into :data:`PROCESS_CMND` selecting the shipped Pythia ``.cmnd``
+        (``"dijet"``, ``"HZZ4l"`` or ``"muongun"``).
+    pt_hat_min : float | None
+        ``PhaseSpace:pTHatMin`` override appended to the process ``.cmnd``.
+        ``None`` means no override, except for ``dijet`` which always runs
+        with :data:`DIJET_PT_HAT_MIN`.
     n_workers : int | None
         Number of parallel Pythia8 processes. ``None`` defaults to
         ``os.cpu_count()`` (capped at ``n_events`` so no worker gets zero
@@ -638,8 +648,6 @@ def generate(
         Seeds BOTH phases: Pythia workers use ``Random:seed`` in
         ``seed*n_workers+1 .. (seed+1)*n_workers`` (disjoint across seeds at a
         fixed ``n_workers``), and torch is seeded for the card's smearing.
-    cmnd_file : str | Path
-        Base Pythia ``.cmnd`` file (defaults to the shipped ``qcd_dijet.cmnd``).
     param_config : str | Path
         Generation/truth param config; may be PARTIAL (see
         :func:`make_target_card`).
@@ -688,15 +696,19 @@ def generate(
 
     try:
         # ----- Phase 1: generate ALL Pythia events up front, in parallel. -----
-        eff_cmnd = build_effective_cmnd(cmnd_file, pt_hat_min, work_dir)
+        cmnd = _PROCESS_DIR / PROCESS_CMND[process]
+        if process == "dijet" and pt_hat_min is None:
+            pt_hat_min = DIJET_PT_HAT_MIN  # dijet always runs with an explicit pTHatMin
+        if pt_hat_min is not None:
+            cmnd = build_effective_cmnd(cmnd, pt_hat_min, work_dir)
         print(
-            f"[1/3] Generating {n_events} Pythia events on {n_workers} CPU worker(s) "
-            f"(pTHatMin={pt_hat_min})..."
+            f"[1/3] Generating {n_events} Pythia {process} events on {n_workers} CPU "
+            f"worker(s) (pTHatMin={pt_hat_min})..."
         )
         # Pythia seeds seed*n_workers+1 .. (seed+1)*n_workers: disjoint across
         # --seed values (at fixed n_workers), so array tasks give distinct events.
         hepmc_path = generate_truth_events(
-            eff_cmnd, n_events, n_workers, work_dir, seed_offset=seed * n_workers
+            cmnd, n_events, n_workers, work_dir, seed_offset=seed * n_workers
         )
 
         # ----- Phase 2a: read HepMC back into class-based truth arrays. -----
@@ -757,7 +769,21 @@ def main() -> None:
             "Defaults to all available CPU cores (capped at --n-events)."
         ),
     )
-    parser.add_argument("--pt-hat-min", type=float, default=100.0)
+    parser.add_argument(
+        "--process",
+        choices=PROCESS_CMND,
+        default="dijet",
+        help="Physics process; selects the shipped processes/<name>.cmnd (default: dijet).",
+    )
+    parser.add_argument(
+        "--pt-hat-min",
+        type=float,
+        default=None,
+        help=(
+            "Append a PhaseSpace:pTHatMin override to the process .cmnd. Default: "
+            f"{DIJET_PT_HAT_MIN} for dijet (always applied), no override otherwise."
+        ),
+    )
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -783,15 +809,6 @@ def main() -> None:
             "Device for the TorchDelphes forward pass (e.g. 'cuda', 'cuda:0', "
             "'cpu'). Defaults to auto-detect: 'cuda' if a GPU is available, "
             "else 'cpu'. Pythia generation is always CPU-parallel."
-        ),
-    )
-    parser.add_argument(
-        "--cmnd-file",
-        type=Path,
-        default=_DEFAULT_CMND_FILE,
-        help=(
-            "Base Pythia .cmnd configuration. The --pt-hat-min flag is appended "
-            "as an override. Defaults to the shipped qcd_dijet.cmnd."
         ),
     )
     parser.add_argument(
@@ -844,19 +861,18 @@ def main() -> None:
     print(
         f"Generating pseudodata -> {args.output}\n"
         f"  n_events={args.n_events}  cpu-workers={args.n_workers or 'auto'} (Pythia)  "
-        f"pTHatMin={args.pt_hat_min}  seed={args.seed}\n"
+        f"process={args.process}  pTHatMin={args.pt_hat_min}  seed={args.seed}\n"
         f"  device={resolved_device} (TorchDelphes phase-2 only; Pythia always CPU)  "
-        f"cmnd-file={args.cmnd_file}  "
         f"param-config={args.param_config}  debug={args.debug}"
     )
     n = generate(
         args.output,
         n_events=args.n_events,
+        process=args.process,
         pt_hat_min=args.pt_hat_min,
         n_workers=args.n_workers,
         batch_size=args.batch_size,
         seed=args.seed,
-        cmnd_file=args.cmnd_file,
         param_config=args.param_config,
         debug=args.debug,
         work_dir=args.work_dir,

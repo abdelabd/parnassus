@@ -12,7 +12,7 @@
 # submit_pseudodata.sh into $OUTBASE/$MERGED_NAME, validate the total event
 # count, then delete the parts. Normally submitted by submit_pseudodata.sh with
 # --dependency=afterok, but can also be run standalone once the parts exist:
-#   OUTBASE=... MERGED_NAME=pseudo_data_100k_<cfg>.root \
+#   OUTBASE=... MERGED_NAME=pseudo_data_100k_<cfg>_<process>.root \
 #       sbatch src/parnassus/torch_delphes/slurm_scripts/merge_pseudodata.sbatch
 # Config comes from the environment (same vars as submit_pseudodata.sh);
 # PART_PREFIX defaults to the MERGED_NAME stem.
@@ -29,7 +29,7 @@ source "$ENV_PREFIX/bin/activate"
 
 export OUTBASE="${OUTBASE:-/global/cfs/cdirs/m3246/diff_delphes}"
 export PARTS_DIR="${PARTS_DIR:-$OUTBASE/parts}"
-export MERGED_NAME="${MERGED_NAME:?MERGED_NAME must be set (e.g. pseudo_data_100k_<cfg>.root)}"
+export MERGED_NAME="${MERGED_NAME:?MERGED_NAME must be set (e.g. pseudo_data_100k_<cfg>_<process>.root)}"
 export PART_PREFIX="${PART_PREFIX:-${MERGED_NAME%.root}}"
 export NJOBS="${NJOBS:-10}"
 

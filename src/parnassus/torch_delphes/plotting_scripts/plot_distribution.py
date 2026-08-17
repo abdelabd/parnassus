@@ -8,7 +8,7 @@ One PDF page per (species, observable): counts on log-y with a ratio-to-target p
 
     python -m parnassus.torch_delphes.plotting_scripts.plot_distribution \\
         --workspace doc/figure_pseudodata_all \\
-        --sample /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_all.root
+        --sample /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_all_dijet.root
 """
 
 import argparse
@@ -139,7 +139,10 @@ def main():
         for title, pid in SPECIES.items():
             for key, xlabel in OBSERVABLES.items():
                 samples = {"target": target, "initial": initial, "tuned": tuned}
-                draw_page(pdf, title, xlabel, {n: values(o, pid, key) for n, o in samples.items()})
+                arrays = {n: values(o, pid, key) for n, o in samples.items()}
+                if not sum(len(v) for v in arrays.values()):
+                    continue  # species absent from this sample (e.g. muon gun)
+                draw_page(pdf, title, xlabel, arrays)
     print(f"Wrote {output}")
 
 

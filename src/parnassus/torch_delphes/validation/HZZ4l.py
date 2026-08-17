@@ -12,7 +12,7 @@ def main():
     and verifying the number of events in the merged output file.
     """
     generator = HepMC3Generator(
-        cmnd_file="pythia_cards/HZZ4l.cmnd",
+        cmnd_file="src/parnassus/torch_delphes/processes/HZZ4l.cmnd",
         output_dir="data/HZZ4l",
         log_dir="logs/Parnassus_Pythia/HZZ4l",
     )
