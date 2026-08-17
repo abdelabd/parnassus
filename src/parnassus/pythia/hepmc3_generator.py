@@ -226,6 +226,10 @@ class HepMC3Generator:
 
 SINGLE_JOB_SCRIPT = """
 #!/usr/bin/env python3
+import math
+import os
+import tempfile
+
 import pythia8mc
 import pyhepmc
 from parnassus.pythia import Pythia8ToHepMC3
@@ -233,6 +237,86 @@ from parnassus.utils.logger import setup_logger
 import argparse
 
 LOG = setup_logger()
+
+PROTON_MASS = 0.93827208816
+
+
+def split_gun_block(cmnd_file):
+    \"\"\"Split a .cmnd into its ``Gun:*`` settings and the Pythia-only remainder.
+
+    ``Gun:*`` keys are NOT Pythia settings -- they configure the particle gun
+    implemented in this driver (see torch_delphes/muon_gun.cmnd). They are
+    stripped here so Pythia's readFile() never sees an unknown setting.
+
+    Returns (gun_settings_dict, pythia_only_text).
+    \"\"\"
+    gun = {}
+    kept = []
+    with open(cmnd_file) as f:
+        for line in f:
+            bare = line.split("!", 1)[0].strip()
+            if bare.lower().startswith("gun:") and "=" in bare:
+                key, value = bare.split("=", 1)
+                gun[key.strip().lower()] = value.strip()
+            else:
+                kept.append(line)
+    return gun, "".join(kept)
+
+
+def gun_flag(gun, key, default=False):
+    raw = gun.get(key)
+    if raw is None:
+        return default
+    return raw.lower() in ("on", "true", "yes", "1")
+
+
+def append_gun_event(pythia, gun_cfg):
+    \"\"\"Fill pythia.event with one gun event: two bookkeeping beams + N particles.
+
+    The two beam entries are required: Pythia8ToHepMC3._get_vertices treats any
+    particle whose mother list is empty as a beam particle and builds NO
+    production vertex for it, so gun particles appended with mother 0 would all
+    be classified as beams and dropped from the HepMC output (empty events).
+    Giving every thrown particle mothers (1, 2) makes the converter build one
+    production vertex at the origin with the beams incoming. The beams' daughter
+    range must be set to match, or Pythia::check() rejects the record with
+    "mismatch in daughter and mother lists".
+    \"\"\"
+    ids = gun_cfg["ids"]
+    n_per_event = gun_cfg["n_per_event"]
+    pt_min = gun_cfg["pt_min"]
+    pt_max = gun_cfg["pt_max"]
+    pt_log = gun_cfg["pt_log"]
+    eta_min = gun_cfg["eta_min"]
+    eta_max = gun_cfg["eta_max"]
+    e_beam = gun_cfg["e_beam"]
+
+    pz_beam = math.sqrt(max(e_beam * e_beam - PROTON_MASS * PROTON_MASS, 0.0))
+    rndm = pythia.rndm
+    event = pythia.event
+    event.reset()
+    event.append(2212, -12, 0, 0, 0, 0, 0, 0, 0.0, 0.0, pz_beam, e_beam, PROTON_MASS)
+    event.append(2212, -12, 0, 0, 0, 0, 0, 0, 0.0, 0.0, -pz_beam, e_beam, PROTON_MASS)
+
+    for _ in range(n_per_event):
+        u = rndm.flat()
+        if pt_log:
+            pt = pt_min * (pt_max / pt_min) ** u
+        else:
+            pt = pt_min + (pt_max - pt_min) * u
+        eta = eta_min + (eta_max - eta_min) * rndm.flat()
+        phi = 2.0 * math.pi * rndm.flat()
+        pid = ids[min(int(rndm.flat() * len(ids)), len(ids) - 1)]
+        mass = pythia.particleData.m0(abs(pid))
+        px = pt * math.cos(phi)
+        py = pt * math.sin(phi)
+        pz = pt * math.sinh(eta)
+        energy = math.sqrt(px * px + py * py + pz * pz + mass * mass)
+        event.append(pid, 1, 1, 2, 0, 0, 0, 0, px, py, pz, energy, mass)
+
+    # Beams point at the thrown particles (entries 3 .. 2 + n_per_event).
+    event[1].daughters(3, 2 + n_per_event)
+    event[2].daughters(3, 2 + n_per_event)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate events with Pythia8 on a single core and save to HepMC3 format.")
@@ -248,16 +332,49 @@ def main() -> int:
 
     pythia = pythia8mc.Pythia()
 
-    # Random seed
+    # Random seed. Set BEFORE the .cmnd is read, and it also drives the gun
+    # sampling below, so each worker throws an independent set of particles.
     pythia.readString("Random:setSeed = on")
     pythia.readString(f"Random:seed = {args.seed}")
 
+    # Split off any Gun:* keys (not Pythia settings) and hand Pythia the rest.
+    gun, pythia_only = split_gun_block(args.cmnd)
+    gun_on = gun_flag(gun, "gun:on")
+    if gun_on:
+        with tempfile.NamedTemporaryFile("w", suffix=".cmnd", delete=False) as tf:
+            tf.write(pythia_only)
+            pythia_cmnd = tf.name
+    else:
+        pythia_cmnd = args.cmnd
+
     # Read settings from .cmnd file
-    pythia.readFile(args.cmnd)
+    pythia.readFile(pythia_cmnd)
 
     if not pythia.init():
         LOG.info("HepMC3Generator: Pythia initialization failed!")
         return 1
+
+    gun_cfg = None
+    if gun_on:
+        ids = [int(tok) for tok in gun.get("gun:ids", "13 -13").replace(",", " ").split()]
+        if not ids:
+            LOG.info("HepMC3Generator: Gun:on is set but Gun:ids is empty!")
+            return 1
+        gun_cfg = {
+            "ids": ids,
+            "n_per_event": int(float(gun.get("gun:nperevent", 1))),
+            "pt_min": float(gun.get("gun:ptmin", 1.0)),
+            "pt_max": float(gun.get("gun:ptmax", 100.0)),
+            "pt_log": gun_flag(gun, "gun:ptlog", True),
+            "eta_min": float(gun.get("gun:etamin", -2.5)),
+            "eta_max": float(gun.get("gun:etamax", 2.5)),
+            "e_beam": 0.5 * float(pythia.settings.parm("Beams:eCM")),
+        }
+        if gun_cfg["pt_log"] and gun_cfg["pt_min"] <= 0.0:
+            LOG.info("HepMC3Generator: Gun:pTlog needs Gun:pTmin > 0!")
+            return 1
+        LOG.info(f"HepMC3Generator: particle gun active: {gun_cfg}")
+        os.unlink(pythia_cmnd)
 
     # HepMC3 writer
     converter = Pythia8ToHepMC3(m_hadronization_on=args.hadronization_on)
@@ -267,6 +384,8 @@ def main() -> int:
     n_written = 0
     idx_event = 0
     while n_written < args.n_events:
+        if gun_cfg is not None:
+            append_gun_event(pythia, gun_cfg)
         if not pythia.next():
             continue  # event failed, try again
 

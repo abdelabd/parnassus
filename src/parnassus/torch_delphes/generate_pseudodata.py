@@ -164,13 +164,36 @@ def build_effective_cmnd(
         Path to the written effective ``.cmnd`` file.
     """
     base = Path(base_cmnd).read_text()
-    override = (
-        "\n! ---- Override injected by generate_pseudodata.py ----\n"
-        f"PhaseSpace:pTHatMin = {pt_hat_min}\n"
-    )
+    # A particle-gun config (see muon_gun.cmnd) has no hard process -- it runs
+    # with ProcessLevel:all = off and the driver fills the event record itself --
+    # so a pTHatMin cut is meaningless there. Skip the injection rather than
+    # write an inert setting that misleads anyone reading the effective file.
+    if _declares_gun(base):
+        override = (
+            "\n! ---- generate_pseudodata.py: particle-gun config detected, "
+            "--pt-hat-min not injected ----\n"
+        )
+    else:
+        override = (
+            "\n! ---- Override injected by generate_pseudodata.py ----\n"
+            f"PhaseSpace:pTHatMin = {pt_hat_min}\n"
+        )
     dest = Path(dest_dir) / "effective.cmnd"
     dest.write_text(base + override)
     return dest
+
+
+def _declares_gun(cmnd_text: str) -> bool:
+    """True if a ``.cmnd`` body switches the driver's particle gun on.
+
+    Mirrors ``HepMC3Generator``'s ``Gun:on`` parsing (comment-stripped,
+    case-insensitive) so the two agree on what counts as a gun config.
+    """
+    for line in cmnd_text.splitlines():
+        bare = line.split("!", 1)[0].strip().lower()
+        if bare.startswith("gun:on") and "=" in bare:
+            return bare.split("=", 1)[1].strip() in ("on", "true", "yes", "1")
+    return False
 
 
 @contextlib.contextmanager

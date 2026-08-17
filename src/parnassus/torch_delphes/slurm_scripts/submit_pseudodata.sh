@@ -28,11 +28,15 @@ PT_HAT_MIN="${PT_HAT_MIN:-100}"
 N_WORKERS="${N_WORKERS:-32}"
 NJOBS="${NJOBS:-10}"
 MERGED_NAME="${MERGED_NAME:-cms_pseudodata_100k.root}"
+# Pythia .cmnd handed to generate_pseudodata. Empty = use its shipped default
+# (qcd_dijet.cmnd). Set to .../muon_gun.cmnd for the muon-gun sample; that
+# config runs ProcessLevel:all = off and PT_HAT_MIN is ignored for it.
+CMND_FILE="${CMND_FILE:-}"
 
 # Exported so the array tasks and the merge job inherit them (sbatch propagates
 # the submitting environment by default, SLURM_EXPORT_ENV=ALL).
 export REPO ENV_PREFIX OUTBASE PARTS_DIR LOGDIR \
-    N_EVENTS_PER_JOB PT_HAT_MIN N_WORKERS NJOBS MERGED_NAME
+    N_EVENTS_PER_JOB PT_HAT_MIN N_WORKERS NJOBS MERGED_NAME CMND_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -42,12 +46,20 @@ echo "  PARTS_DIR=$PARTS_DIR"
 echo "  LOGDIR=$LOGDIR"
 echo "  NJOBS=$NJOBS  N_EVENTS_PER_JOB=$N_EVENTS_PER_JOB  (total $((NJOBS * N_EVENTS_PER_JOB)) events)"
 echo "  N_WORKERS=$N_WORKERS  PT_HAT_MIN=$PT_HAT_MIN  MERGED_NAME=$MERGED_NAME"
+echo "  CMND_FILE=${CMND_FILE:-<generate_pseudodata default: qcd_dijet.cmnd>}"
 
 # ---- Build/activate the uv env once here on the login node, so the NJOBS array
 #      tasks don't each fire a concurrent `uv sync` (CFS/GPFS flock contention). ----
-echo "[submit] sourcing setup.sh to ensure the uv env is built ..."
-# shellcheck disable=SC1091
-source "$REPO/setup.sh"
+if [ -f "$REPO/setup.sh" ]; then
+    echo "[submit] sourcing setup.sh to ensure the uv env is built ..."
+    # shellcheck disable=SC1091
+    source "$REPO/setup.sh"
+elif [ -f "$ENV_PREFIX/bin/activate" ]; then
+    echo "[submit] no $REPO/setup.sh; using prebuilt env $ENV_PREFIX"
+else
+    echo "[submit] ERROR: neither $REPO/setup.sh nor $ENV_PREFIX/bin/activate exists." >&2
+    exit 1
+fi
 
 mkdir -p "$PARTS_DIR" "$LOGDIR"
 
@@ -76,6 +88,7 @@ PARTS_DIR="${PARTS_DIR:-/global/cfs/cdirs/m3246/Runze/MCGen/data/parts}"
 N_EVENTS_PER_JOB="${N_EVENTS_PER_JOB:-10000}"
 N_WORKERS="${N_WORKERS:-32}"
 PT_HAT_MIN="${PT_HAT_MIN:-100}"
+CMND_FILE="${CMND_FILE:-}"
 
 # shellcheck disable=SC1091
 source "$ENV_PREFIX/bin/activate"
@@ -84,12 +97,18 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
 OUT="$PARTS_DIR/cms_pseudodata_seed${SLURM_ARRAY_TASK_ID}.root"
 echo "[gen] seed=$SLURM_ARRAY_TASK_ID  n_events=$N_EVENTS_PER_JOB  -> $OUT"
 
+CMND_ARGS=()
+if [ -n "$CMND_FILE" ]; then
+    CMND_ARGS=(--cmnd-file "$CMND_FILE")
+fi
+
 python -m parnassus.torch_delphes.generate_pseudodata \
     --output "$OUT" \
     --n-events "$N_EVENTS_PER_JOB" \
     --n-workers "$N_WORKERS" \
     --pt-hat-min "$PT_HAT_MIN" \
     --seed "$SLURM_ARRAY_TASK_ID" \
+    "${CMND_ARGS[@]}" \
     --device cpu \
     --debug
 EOF
