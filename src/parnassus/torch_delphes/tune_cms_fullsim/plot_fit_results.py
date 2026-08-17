@@ -946,7 +946,8 @@ def main() -> None:
         help=(
             "The GENERATION/truth config that made the ROOT file -- its physical "
             "'value' fields are drawn as the truth reference lines on the "
-            "parameter-drift plots. Do NOT pass a training config: a trained "
+            "parameter-drift plots (may be PARTIAL; unlisted scalars = card "
+            "defaults). Do NOT pass a training config: a trained "
             "parameter's 'value' there is its off-truth STARTING point, not its "
             "truth, so the reference line would be wrong. Defaults to "
             "cms_target_default.yaml."
@@ -1031,9 +1032,13 @@ def main() -> None:
     history = _load_history(args.history)
 
     # Ground-truth physical value of every scalar, keyed by the same name[i]
-    # form the history snapshots use. These come from the GENERATION config; a
-    # training config would give a trained param's start value, not its truth.
-    flat_truth_cfg = pc.load_param_config(args.truth_config)
+    # form the history snapshots use. These come from the GENERATION config (which
+    # may be partial: unlisted scalars = card defaults, exactly as generation
+    # applied it); a training config would give a trained param's start value,
+    # not its truth.
+    flat_truth_cfg = pc.load_param_config_over_defaults(
+        args.truth_config, CMSEnergyFlowDefault(debug=False, learnable=True)
+    )
     n_trainable = sum(1 for spec in flat_truth_cfg.values() if spec["trainable"])
     if n_trainable:
         print(

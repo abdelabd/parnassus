@@ -268,20 +268,13 @@ def test_select_trainable_rejects_mixed_lr_scale(tmp_path: Path) -> None:
         pc.select_trainable(card, flat, global_lr=0.1)
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "cms_target_default.yaml",
-        "debug_all_params.yaml",
-        "debug_all_params_v2.yaml",
-    ],
-)
+@pytest.mark.parametrize("name", ["cms_target_default.yaml"])
 def test_shipped_configs_load_and_apply(name: str) -> None:
-    """The shipped configs cover the card exactly, apply, and select cleanly.
+    """The shipped full configs cover the card exactly, apply, and select cleanly.
 
     Asserted at the *mechanism* level (apply reproduces every config value;
     select_trainable returns exactly the tensors with a trainable element), so
-    the test is robust to editing which parameter a debug config trains.
+    the test is robust to editing which parameter a config trains.
     """
     flat = pc.load_param_config(_PARAM_CONFIG_DIR / name)
     card = _fresh_card()
@@ -308,3 +301,32 @@ def test_shipped_configs_load_and_apply(name: str) -> None:
     assert got == expected
     if expected:
         assert groups  # at least one optimizer group when something trains
+
+
+def test_partial_config_over_defaults(tmp_path: Path) -> None:
+    """A PARTIAL generation config overrides only the scalars it lists.
+
+    ``load_param_config_over_defaults`` lays the file over
+    ``card_default_config``: listed keys take the file's value, everything
+    else stays at the card default (frozen); unknown keys still fail apply.
+    """
+    partial_path = _PARAM_CONFIG_DIR / "param_config_chadtrkeff.yaml"
+    partial = pc.load_param_config(partial_path)
+    card = _fresh_card()
+    defaults = pc.card_default_config(card)
+    merged = pc.load_param_config_over_defaults(partial_path, card)
+
+    assert set(merged) == set(defaults)
+    assert set(partial) < set(defaults)
+    for key, spec in merged.items():
+        assert spec == (partial[key] if key in partial else defaults[key])
+    assert not any(spec["trainable"] for spec in merged.values())
+    pc.apply_param_config(card, merged)  # full cover -> applies cleanly
+    applied = pc.card_default_config(card)
+    for key, spec in merged.items():
+        assert applied[key]["value"] == pytest.approx(spec["value"], abs=1e-6)
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("NoSuchModule.scale_raw[0]:\n  value: 1.1\n")
+    with pytest.raises(ValueError, match="unknown entries"):
+        pc.apply_param_config(_fresh_card(), pc.load_param_config_over_defaults(bad, card))

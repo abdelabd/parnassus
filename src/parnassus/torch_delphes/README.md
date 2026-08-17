@@ -89,7 +89,7 @@ Key files in this directory:
 | [tune_cms_fullsim/optuna_search.py](tune_cms_fullsim/optuna_search.py) | Step 2b — Optuna hyperparameter search (TPE + median pruning) |
 | [tune_cms_fullsim/plot_fit_results.py](tune_cms_fullsim/plot_fit_results.py) | Step 3 — validation plots |
 | [param_config.py](param_config.py) | YAML loader, raw↔physical transforms, `select_trainable` |
-| [param_configs/](param_configs/) | shipped configs + [make_default_configs.py](param_configs/make_default_configs.py) |
+| [param_configs/](param_configs/) | shipped configs: [cms_target_default.yaml](param_configs/cms_target_default.yaml) (full card defaults) + partial generation configs such as [param_config_chadtrkeff.yaml](param_configs/param_config_chadtrkeff.yaml) |
 | [param_configs/optuna_config.yaml](param_configs/optuna_config.yaml) | Optuna search-space config (per-group lrs + the `constants:` subset) |
 | [run_optuna.sh](run_optuna.sh) | multi-GPU launcher for Step 2b (`torchrun`; one study, DDP fit per trial) |
 | [defaults/](defaults/) | the `CMSEnergyFlowDefault` detector card definition |
@@ -118,12 +118,12 @@ in `--batch-size` chunks through the target card before the ROOT file is written
 | `--n-workers` | int | `None` (all CPU cores, capped at `--n-events`) | Parallel Pythia8 **CPU** processes for event generation. Independent of `--device`. |
 | `--pt-hat-min` | float | `100.0` | Pythia8 `PhaseSpace:pTHatMin` (GeV) — minimum hard-scatter pT. Lower → softer, higher-multiplicity events. |
 | `--batch-size` | int | `512` | Events per TorchDelphes forward pass in phase 2 (memory knob; does not change the output). |
-| `--seed` | int | `1` | **Torch** RNG seed for the target card's stochastic smearing / Gumbel-ST in phase 2. (Pythia per-worker seeds are assigned internally by `HepMC3Generator`.) |
+| `--seed` | int | `1` | Seeds **both** phases: Pythia worker `i` gets `Random:seed = seed*n_workers + i` (disjoint ranges across seeds at fixed `--n-workers`, so array tasks produce distinct events) and torch is seeded for the target card's stochastic smearing / Gumbel-ST in phase 2. |
 | `--device` | str | `None` (auto: `cuda` if a GPU is available, else `cpu`) | Device for the **phase-2 TorchDelphes forward pass only**. Pythia generation (phase 1) is always CPU-parallel. |
 | `--cmnd-file` | path | shipped `qcd_dijet.cmnd` | Base Pythia `.cmnd` configuration; `--pt-hat-min` is appended as an override. |
 | `--work-dir` | path | `None` (temp dir, auto-removed) | Scratch directory for intermediate HepMC files / per-job logs. |
 | `--keep-hepmc` | flag | `False` | Keep the intermediate HepMC files instead of deleting the auto-created temp dir (no effect with `--work-dir`). |
-| `--param-config` | path | `param_configs/cms_target_default.yaml` | YAML whose physical `value` fields define the **ground-truth** detector response written into the `pflow_*` branches. This is the truth you later try to recover. |
+| `--param-config` | path | `param_configs/cms_target_default.yaml` | YAML whose physical `value` fields define the **ground-truth** detector response written into the `pflow_*` branches. This is the truth you later try to recover. **May be partial**: only the listed scalars are changed, every other parameter keeps its card default (see [Partial generation configs](#partial-generation-configs)). |
 | `--debug` | flag | `False` | Also write ~150 intermediate per-module branches (`<ModuleName>.<Var>`); large files, leave off for plain training. |
 
 ### Output
@@ -147,25 +147,33 @@ per-seed files. Two scripts in [slurm_scripts/](slurm_scripts/) do this:
 
 | Script | Role |
 |---|---|
-| [slurm_scripts/submit_pseudodata.sh](slurm_scripts/submit_pseudodata.sh) | Login-node driver: submits an `NJOBS`-task array (seed = array index) on the **CPU** partition, each generating `N_EVENTS_PER_JOB` events, then submits the merge job with `--dependency=afterok`. |
+| [slurm_scripts/submit_pseudodata.sh](slurm_scripts/submit_pseudodata.sh) | Login-node driver: submits an `NJOBS`-task array (seed = array index; each task draws a disjoint Pythia seed range, so tasks give distinct events) on the **CPU** partition, each generating `N_EVENTS_PER_JOB` events with the `--config` param config, then submits the merge job with `--dependency=afterok`. |
 | [slurm_scripts/merge_pseudodata.sbatch](slurm_scripts/merge_pseudodata.sbatch) | The merge job: uproot-concatenates the per-seed files into one, validates the total event count, then deletes the parts. |
 
-Run from a login node (defaults give 10 × 10000 = 100k events):
+Run from a login node; `--config` is **required** and may be a partial config (see
+[Partial generation configs](#partial-generation-configs)):
 
 ```bash
-bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh
+bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
+    --config src/parnassus/torch_delphes/param_configs/param_config_chadtrkeff.yaml \
+    --n_events 100000 --n_tasks 10          # both optional (these are the defaults)
+# -> /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_chadtrkeff.root
 ```
 
-Everything is configurable via environment variables (shown with defaults):
+| Flag | Default | Meaning |
+|---|---|---|
+| `--config` | (required) | Generation param config (may be partial); its stem names the output. |
+| `--n_events` | `100000` | **Total** events; must be a multiple of `--n_tasks` (each task generates `n_events / n_tasks`). |
+| `--n_tasks` | `10` | Number of array tasks (= seeds `1..n_tasks`; ~36 min per 10k-event task under the 59-min limit). |
+
+Everything else is configurable via environment variables (shown with defaults):
 
 | Var | Default | Meaning |
 |---|---|---|
-| `OUTBASE` | `/global/cfs/cdirs/m3246/Runze/MCGen/data` | Output base. Parts go in `$OUTBASE/parts/`, logs in `$OUTBASE/logs/`, merged file in `$OUTBASE/`. **Must be a shared filesystem** (CFS / scratch), not node-local `/tmp`. |
-| `NJOBS` | `10` | Number of array tasks (= number of seeds, `1..NJOBS`). |
-| `N_EVENTS_PER_JOB` | `10000` | Events per task (total = `NJOBS × N_EVENTS_PER_JOB`). |
+| `OUTBASE` | `/global/cfs/cdirs/m3246/diff_delphes` | Output base. Parts go in `$OUTBASE/parts/`, logs in `$OUTBASE/logs/`, merged file in `$OUTBASE/`. **Must be a shared filesystem** (CFS / scratch), not node-local `/tmp`. |
 | `N_WORKERS` | `32` | Pythia CPU workers per task (matches the job's `-c 32`). |
 | `PT_HAT_MIN` | `100` | Pythia `PhaseSpace:pTHatMin`. |
-| `MERGED_NAME` | `cms_pseudodata_100k.root` | Final merged filename under `$OUTBASE`. |
+| `MERGED_NAME` | `pseudo_data_<total>_<config-stem>.root` | Final merged filename under `$OUTBASE` (`<total>` = `100k` for whole thousands, else the plain count). The per-seed parts share the stem (`<stem>_seed<i>.root`), so different configs can share `parts/`. |
 
 The jobs run on the **CPU partition** with `--device cpu`: the GPU is used for only ~12s (the
 TorchDelphes forward) of a ~13-min job, so a GPU node would sit idle. The driver runs `setup.sh`
@@ -179,14 +187,16 @@ concurrent `uv sync`.
 
 > **Failed tasks.** The `afterok` dependency runs the merge only if **all** tasks succeed. If one
 > fails, rerun that seed (`sbatch --array=<i> ...`) and then submit the merge by hand
-> (`sbatch slurm_scripts/merge_pseudodata.sbatch`), or switch the dependency to `afterany` to merge
-> whatever did succeed.
+> (`OUTBASE=... MERGED_NAME=... sbatch slurm_scripts/merge_pseudodata.sbatch`), or switch the
+> dependency to `afterany` to merge whatever did succeed.
 
 Cheap dry run (2 jobs × 100 events on scratch):
 
 ```bash
-N_EVENTS_PER_JOB=100 NJOBS=2 OUTBASE=$SCRATCH/mcgen_dryrun \
-    bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh
+OUTBASE=$SCRATCH/mcgen_dryrun \
+    bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
+    --config src/parnassus/torch_delphes/param_configs/cms_target_default.yaml \
+    --n_events 200 --n_tasks 2
 ```
 
 ---
@@ -538,19 +548,25 @@ Parameters cover, by particle type and detector region: tracking efficiencies (`
 (`chad_logit`, `k0s_logit`, `lambda_logit`, `photon_logit`, `k0l_logit`), and ECal/HCal energy
 scales and resolution functions.
 
-### Truth vs debug config
+### Partial generation configs
 
-The two shipped configs differ in exactly one parameter block —
-`ChargedHadronMomentumSmearing.resolution_module.scale_raw[0..2]`:
+A **generation** config (`generate_pseudodata --param-config`, `plot_fit_results --truth-config`)
+is laid over the card defaults (`param_config.load_param_config_over_defaults`), so it only needs
+to list the scalars it perturbs — everything else keeps its CMS-card default value and is frozen.
+`trainable`/`lr_scale` may be omitted (default `false` / group default). Unknown keys are rejected.
+Example, [param_configs/param_config_chadtrkeff.yaml](param_configs/param_config_chadtrkeff.yaml):
 
-| Config | `value` | `trainable` |
-|---|---|---|
-| [param_configs/cms_target_default.yaml](param_configs/cms_target_default.yaml) (truth) | `1.25` | `false` |
-| [param_configs/debug_train_chad_scale_barrel.yaml](param_configs/debug_train_chad_scale_barrel.yaml) (fit) | `0.71` | `true` |
+```yaml
+ChargedHadronTrackingEfficiency.eff_logits[0]:
+  value: 0.5
+ChargedHadronTrackingEfficiency.eff_logits[1]:
+  value: 0.6
+```
 
-So the debug config starts the charged-hadron momentum scale at `0.71` (off-truth, but inside the
-valid interval) and asks the fit to recover the true `1.25`. To create or regenerate configs
-programmatically, see [param_configs/make_default_configs.py](param_configs/make_default_configs.py).
+[param_configs/cms_target_default.yaml](param_configs/cms_target_default.yaml) is the full
+68-scalar listing at the card defaults (a pure-default target; also the reference for every key
+name). To dump the current defaults as a full template: `pc.dump_param_config(card, path)`.
+A **training** config (`tune_cms_fullsim --param-config`) must still cover every scalar.
 
 ---
 

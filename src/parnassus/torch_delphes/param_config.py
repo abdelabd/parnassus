@@ -432,6 +432,22 @@ def card_default_config(card: nn.Module) -> dict[str, dict]:
     return out
 
 
+def load_param_config_over_defaults(path: str | Path, card: nn.Module) -> dict[str, dict]:
+    """Load a possibly PARTIAL param config on top of ``card``'s defaults.
+
+    Entries in the YAML at ``path`` override :func:`card_default_config`;
+    every scalar the file omits keeps the card's current (default) value with
+    ``trainable: false``. Unknown keys are still rejected downstream by
+    :func:`apply_param_config` / :func:`select_trainable`.
+
+    Returns
+    -------
+    dict[str, dict]
+        The full flat per-scalar configuration.
+    """
+    return {**card_default_config(card), **load_param_config(path)}
+
+
 def dump_param_config(card: nn.Module, path: str | Path) -> None:
     """Write ``card``'s current physical values to a flat per-scalar YAML.
 

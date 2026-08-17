@@ -8,12 +8,14 @@
 #SBATCH -c 4
 #SBATCH -J mergepseudo
 #
-# Merge the per-seed cms_pseudodata_seed*.root files produced by
-# submit_pseudodata.sh into one ROOT file, validate the total event count, then
-# delete the parts. Normally submitted by submit_pseudodata.sh with
+# Merge the per-seed ${PART_PREFIX}_seed*.root files produced by
+# submit_pseudodata.sh into $OUTBASE/$MERGED_NAME, validate the total event
+# count, then delete the parts. Normally submitted by submit_pseudodata.sh with
 # --dependency=afterok, but can also be run standalone once the parts exist:
-#   sbatch src/parnassus/torch_delphes/slurm_scripts/merge_pseudodata.sbatch
-# Config comes from the environment (same vars as submit_pseudodata.sh).
+#   OUTBASE=... MERGED_NAME=pseudo_data_100k_<cfg>.root \
+#       sbatch src/parnassus/torch_delphes/slurm_scripts/merge_pseudodata.sbatch
+# Config comes from the environment (same vars as submit_pseudodata.sh);
+# PART_PREFIX defaults to the MERGED_NAME stem.
 #
 # Concatenation is safe: the ROOT files carry no persisted event-number branch
 # (event identity is the TTree entry index), so appending entries yields globally
@@ -25,9 +27,10 @@ ENV_PREFIX="${ENV_PREFIX:-/global/cfs/cdirs/m3246/Runze/MCGen/envs/parnassus}"
 # shellcheck disable=SC1091
 source "$ENV_PREFIX/bin/activate"
 
-export OUTBASE="${OUTBASE:-/global/cfs/cdirs/m3246/Runze/MCGen/data}"
+export OUTBASE="${OUTBASE:-/global/cfs/cdirs/m3246/diff_delphes}"
 export PARTS_DIR="${PARTS_DIR:-$OUTBASE/parts}"
-export MERGED_NAME="${MERGED_NAME:-cms_pseudodata_100k.root}"
+export MERGED_NAME="${MERGED_NAME:?MERGED_NAME must be set (e.g. pseudo_data_100k_<cfg>.root)}"
+export PART_PREFIX="${PART_PREFIX:-${MERGED_NAME%.root}}"
 export NJOBS="${NJOBS:-10}"
 
 python - <<'PY'
@@ -40,10 +43,11 @@ import uproot
 OUTBASE = os.environ["OUTBASE"]
 PARTS_DIR = os.environ["PARTS_DIR"]
 MERGED = os.path.join(OUTBASE, os.environ["MERGED_NAME"])
+PART_PREFIX = os.environ["PART_PREFIX"]
 NJOBS = int(os.environ["NJOBS"])
 TREE = "event_tree"
 
-parts = sorted(glob.glob(os.path.join(PARTS_DIR, "cms_pseudodata_seed*.root")))
+parts = sorted(glob.glob(os.path.join(PARTS_DIR, f"{PART_PREFIX}_seed*.root")))
 if not parts:
     sys.exit(f"[merge] ERROR: no part files found in {PARTS_DIR}")
 if len(parts) != NJOBS:

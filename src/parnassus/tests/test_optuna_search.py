@@ -501,7 +501,8 @@ def test_epoch_callback_breaks_loop(fixture_root: Path):
 
     torch.manual_seed(0)
     card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
-    cfg = pc.load_param_config(PARAM_CONFIGS / "debug_all_params_v2.yaml")
+    cfg = pc.card_default_config(card)
+    cfg["ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]"]["trainable"] = True
     pc.apply_param_config(card, cfg)
     _, param_groups = pc.select_trainable(card, cfg, global_lr=1e-2)
 
