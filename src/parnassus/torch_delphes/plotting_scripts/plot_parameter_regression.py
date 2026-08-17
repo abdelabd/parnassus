@@ -21,6 +21,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
 plt.style.use(hep.style.ATLAS)
+plt.rcParams["lines.linewidth"] = 3
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "param_configs" / "cms_target_default.yaml"
 
