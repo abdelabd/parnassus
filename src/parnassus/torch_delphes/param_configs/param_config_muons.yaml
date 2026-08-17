@@ -1,0 +1,34 @@
+MuonTrackingEfficiency.eff_logits[0]:
+  value: 0.9608   # default 0.75 (+28%)
+MuonTrackingEfficiency.eff_logits[1]:
+  value: 0.5823   # default 0.99 (-41%)
+MuonTrackingEfficiency.eff_logits[2]:
+  value: 0.6475   # default 0.99 (-35%)
+MuonTrackingEfficiency.eff_logits[3]:
+  value: 0.3534   # default 0.7 (-50%)
+MuonTrackingEfficiency.eff_logits[4]:
+  value: 0.5756   # default 0.98 (-41%)
+MuonTrackingEfficiency.eff_logits[5]:
+  value: 0.6397   # default 0.98 (-35%)
+MuonTrackingEfficiency.rate_raw[0]:
+  value: 0.0007152   # default 0.0005 (+43%)
+MuonTrackingEfficiency.rate_raw[1]:
+  value: 0.0003362   # default 0.0005 (-33%)
+MuonMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.01489   # default 0.01 (+49%)
+MuonMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.02034   # default 0.015 (+36%)
+MuonMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.01253   # default 0.025 (-50%)
+MuonMomentumSmearing.resolution_module.b_raw[0]:
+  value: 6.35e-05   # default 0.0001 (-37%)
+MuonMomentumSmearing.resolution_module.b_raw[1]:
+  value: 9.385e-05   # default 0.00015 (-37%)
+MuonMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.0001937   # default 0.00035 (-45%)
+MuonMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 1.173   # default 1 (+17%)
+MuonMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 0.8068   # default 1 (-19%)
+MuonMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 1.173   # default 1 (+17%)
