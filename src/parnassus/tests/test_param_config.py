@@ -224,3 +224,55 @@ def test_shipped_configs_load_and_apply(name: str) -> None:
     assert got == expected
     if expected:
         assert groups  # at least one optimizer group when something trains
+
+
+def test_history_to_config_can_chain_its_own_output(tmp_path: Path) -> None:
+    """history_to_config must be able to READ a config it previously wrote.
+
+    The multi-stage pipeline chains warm starts (QCD -> muon -> electron -> ...),
+    so stage N's --source-config is stage N-1's output, which legitimately carries
+    saturated trainable logits from a converged fit. Reading it must not enforce the
+    trainable-logit window: the source supplies only `trainable` / `lr_scale`, and no
+    parameter is initialized from it.
+    """
+    import json
+
+    import yaml
+
+    from parnassus.torch_delphes.tune_cms_fullsim.history_to_config import (
+        history_to_flat_config,
+    )
+
+    key = "ChargedHadronTrackingEfficiency.eff_logits[0]"
+    other = "ChargedHadronTrackingEfficiency.eff_logits[1]"
+
+    # A "stage N-1 output": a trainable logit sitting outside (0.1, 0.9).
+    source = tmp_path / "stage_n_minus_1.yaml"
+    with source.open("w") as f:
+        yaml.safe_dump(
+            {
+                key: {"value": 0.97, "trainable": True, "lr_scale": 2.5},
+                other: {"value": 0.5, "trainable": True, "lr_scale": 2.5},
+            },
+            f,
+        )
+
+    history = tmp_path / "stage_n_minus_1.json"
+    with history.open("w") as f:
+        json.dump(
+            {
+                "metadata": {},
+                "history": {"epoch_0": {"step": 0, "train_loss": 1.0, "val_loss": 1.0,
+                                        "parameters": {key: 0.985, other: 0.6}}},
+                "best_result": {"step": 0, "parameters": {key: 0.985, other: 0.6}},
+            },
+            f,
+        )
+
+    flat, saturated = history_to_flat_config(history, source)
+    # Converged value kept EXACTLY, still trainable, lr_scale carried over.
+    assert flat[key]["value"] == 0.985
+    assert flat[key]["trainable"] is True
+    assert flat[key]["lr_scale"] == 2.5
+    # ...and reported as saturated so the caller knows --allow-saturated-init is needed.
+    assert [k for k, _ in saturated] == [key]

@@ -1,0 +1,89 @@
+! pion_gun.cmnd
+! Flat-in-log-pT charged-pion gun for the CMS full-simulation pseudodata
+! generator (parnassus.torch_delphes.generate_pseudodata).
+!
+! PURPOSE
+!   Fourth gun in the muon -> electron -> photon -> pion chain. It exists for
+!   three CHARGED-HADRON momentum-resolution parameters that no other sample in
+!   the chain can reach:
+!
+!     ChargedHadronMomentumSmearing.resolution_module.b_raw[0..2]
+!
+!   sigma_rel = sqrt(a^2 + (pt*b)^2), so the b (pt-dependent) term is invisible
+!   below the crossover pt* = a/b. Those crossovers sit at 46 / 59 / 81 GeV, and
+!   QCD dijets supply only 0.055 / 0.041 / 0.007 tracks per event above them --
+!   so in the QCD fit all three b_raw collapsed 5-100x below truth, unopposed.
+!   Log-uniform pt in [0.2, 1000] GeV puts ~27% of pions above 100 GeV, which is
+!   orders of magnitude more lever arm.
+!
+!   Also in scope, though NOT a sparsity problem:
+!     ChargedHadronMomentumSmearing.resolution_module.a_raw[2]
+!   ended 100% wrong (0.0008 vs truth 0.25) despite sitting in the densest region
+!   of the whole sample. That is a degeneracy, and more statistics alone may not
+!   fix it.
+!
+! WHY PIONS -- THE SPECIES IS ESSENTIALLY ARBITRARY HERE
+!   pdg_filters.charged_hadron_filter selects by CHARGE, not species ("charged
+!   particles that are NOT electrons or muons"), and both calorimeter
+!   energy-fraction LUTs route every charged hadron through the default key 0
+!   (ECal 0.0 / HCal 1.0). Only K0s and Lambda get species-specific fractions,
+!   and both are neutral and absent from the truth record anyway. So pi+-, K+-, p
+!   and pbar produce IDENTICAL detector response in this model. Pions are chosen
+!   because they are ~84% of the charged hadrons QCD actually produces (200 of
+!   238 per event) and, being lightest, give pt ~= p and the most data-like
+!   log_E distribution. Mass is the only place species enters at all, via
+!   E = sqrt(p^2 + m^2) at low pt.
+!
+! WARNING -- LARGEST FOOTPRINT OF ANY GUN, AND A KNOWN PATHOLOGY
+!   A probe run moved 29 of 66 parameters (photon gun: 12, muon gun: 15). Charged
+!   hadrons deposit in the HCal and feed the PF track/tower rescale, so this
+!   sample also drives ECal (9), HCal (6) and HadronFractions.chad_logit.
+!
+!   HadronFractions.chad_logit has truth 1e-6 but currently sits ~0.155. It is
+!   sigmoid-parameterized, so truth is raw logit -13.8 against a current -1.7 --
+!   thousands of epochs away at the usual lr, with the Jacobian shrinking as it
+!   approaches 0. On THIS sample that routes ~15% of every pion's energy into the
+!   ECal, manufacturing photons the target does not contain: a 3-epoch probe gave
+!   val_loss ~200 (other stages run ~1e-2) with the EcalPhoton count term at ~240
+!   against every other term at ~1e-3, and b_raw[2]/a_raw[2] moving AWAY from
+!   truth. Check the direction of travel after ~20 epochs before committing a
+!   full run. Mitigations, if needed: raise chad_logit's own lr_scale in the
+!   param config, pin it, or lower --calo-count-weight.
+!
+! NOTES
+!   * The Gun:* keys below are NOT Pythia settings. They are parsed and STRIPPED
+!     by parnassus.pythia.HepMC3Generator's single-job driver before the rest of
+!     this file reaches Pythia's readFile(). Give EITHER the pT keys (here) or
+!     the energy keys (see photon_gun.cmnd), never both.
+!   * eta stops at 2.5: this gun targets TRACK resolution, and beyond the
+!     tracking acceptance there is no track to smear.
+!   * Do NOT set Random:seed here -- the driver injects a per-worker seed, which
+!     also drives the gun sampling.
+
+! ---- Gun definition (consumed by the driver, stripped before Pythia) ----
+Gun:on = on
+Gun:ids = 211 -211                  ! charged pions, sampled uniformly (charge-symmetric)
+Gun:nPerEvent = 20                  ! pions thrown per event
+Gun:pTmin = 0.2                     ! GeV
+Gun:pTmax = 1000.                   ! GeV; at |eta|=2.5 that is E=6.1 TeV, just under the beam
+Gun:pTlog = on                      ! log-uniform in pt (flat in ln pt)
+Gun:etaMin = -2.5                   ! tracking acceptance
+Gun:etaMax = 2.5
+
+! ---- Pythia: no hard process, we fill the event record ourselves ----
+ProcessLevel:all = off
+Beams:idA = 2212
+Beams:idB = 2212
+Beams:eCM = 13000.                  ! only sets the bookkeeping beam particles
+
+! ---- Suppress per-event and initialization printout ----
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off

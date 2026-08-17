@@ -94,7 +94,12 @@ def history_to_flat_config(
     if not Path(source_config).exists():
         raise SystemExit(f"--source-config {source_config} does not exist.")
 
-    src = pc.load_param_config(source_config)
+    # enforce_saturated_guard=False: the source config is read ONLY for its
+    # `trainable` / `lr_scale` fields -- no parameter is initialized here, so the
+    # conditioning window is meaningless. It must be off for the chained case,
+    # where the source is itself an output of this tool (stage N-1's warm start)
+    # and legitimately carries saturated trainable logits from a converged fit.
+    src = pc.load_param_config(source_config, enforce_saturated_guard=False)
     if set(src) != set(best):
         missing = sorted(set(src) - set(best))[:5]
         extra = sorted(set(best) - set(src))[:5]
