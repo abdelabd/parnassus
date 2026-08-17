@@ -13,9 +13,11 @@ the *same* Adam fit in an Optuna study: each trial samples
 - one value per entry of the ``optuna_config.yaml`` ``constants:`` block.
 
 Every scalar NOT listed in ``constants:`` starts at its card constructor default
-and is fitted by Adam. Every scalar that IS listed is a per-trial CONSTANT
-(``trainable: false``), either pinned (``{value}``) or TPE-sampled
-(``{low, high, init}``). The shipped block lists the five ``HadronFractions``
+and is fitted by Adam -- unless the optional ``parameters:`` block (a per-scalar
+``{trainable: bool}`` mask, unlisted = true) marks it ``trainable: false``, which
+pins it at that default. Every scalar that IS listed in ``constants:`` is a
+per-trial CONSTANT (``trainable: false``), either pinned (``{value}``) or
+TPE-sampled (``{low, high, init}``). The shipped block lists the five ``HadronFractions``
 logits: their count-level effects are invisible to Adam (the soft-count gate
 reads a DETACHED energy), but they are visible to the study, which is scored on
 the val-loss VALUE -- count terms included.
@@ -280,11 +282,16 @@ def load_search_config(path: str | Path) -> tuple[dict, dict]:
     card, so the full-cover invariant and the ``to_raw`` guards are exercised at
     load time.
 
+    The optional ``parameters:`` block is a per-scalar trainable mask
+    (``{key: {trainable: bool}}``; unlisted keys default to ``true``). A key
+    marked ``trainable: false`` that is not in ``constants`` is folded in here as
+    a constant pinned at its card default, so every consumer sees ONE frozen set.
+
     Returns
     -------
     (search, constants)
         ``search`` is the study/hyperparameter block; ``constants`` maps each
-        listed scalar key to its spec (``{value}`` pinned or ``{low, high, log,
+        frozen scalar key to its spec (``{value}`` pinned or ``{low, high, log,
         init}`` TPE-sampled). Both are per-trial CONSTANTS; every scalar absent
         from ``constants`` is fitted, starting from its card default.
     """
@@ -293,23 +300,58 @@ def load_search_config(path: str | Path) -> tuple[dict, dict]:
     if not isinstance(raw, dict) or "constants" not in raw or "search" not in raw:
         raise SystemExit(
             f"{path}: expected a mapping with top-level 'search' and 'constants' "
-            "sections (see param_configs/optuna_config.yaml). Pre-2026-08 configs "
-            "used a full-cover 'parameters:' block whose {low, high} entries meant "
-            "'sampled INIT of a trainable param'; that format is gone -- listed "
-            "entries are now per-trial constants and everything else is fitted "
-            "from the card defaults."
+            "sections plus an optional 'parameters' trainable mask (see "
+            "param_configs/optuna_config.yaml). Listed 'constants' entries are "
+            "per-trial constants; everything else is fitted from the card defaults "
+            "unless 'parameters' marks it trainable: false."
         )
     search = raw["search"] or {}
     constants = raw["constants"] or {}
+    probe = CMSEnergyFlowDefault(debug=False, learnable=True)
+    defaults = pc.card_default_config(probe)
+    frozen = _parse_trainable_mask(path, raw.get("parameters") or {}, constants, set(defaults))
+    constants = {**{k: {"value": defaults[k]["value"]} for k in frozen}, **constants}
     try:
-        _validate_search_config(path, search, constants)
+        _validate_search_config(path, search, constants, probe)
     except ValueError as e:
         # _parse_range's message names the offending key but not the file.
         raise SystemExit(f"{path}: {e}") from e
     return search, constants
 
 
-def _validate_search_config(path: str | Path, search: dict, constants: dict) -> None:
+def _parse_trainable_mask(
+    path: str | Path, parameters: dict, constants: dict, card_keys: set[str]
+) -> set[str]:
+    """Keys the ``parameters:`` mask freezes (``trainable: false``) beyond ``constants``.
+
+    Returns
+    -------
+    set[str]
+        Scalar keys to pin at their card default. Unknown keys and a
+        ``trainable: true`` on a ``constants`` entry are contradictions and fail.
+    """
+    if not isinstance(parameters, dict):
+        raise SystemExit(f"{path}: 'parameters' must be a mapping of scalar_key -> {{trainable}}.")
+    unknown = sorted(set(parameters) - card_keys)
+    if unknown:
+        raise SystemExit(f"{path}: 'parameters' names keys the card does not have: {unknown}")
+    frozen: set[str] = set()
+    for key, spec in parameters.items():
+        if not isinstance(spec, dict) or not isinstance(spec.get("trainable"), bool):
+            raise SystemExit(f"{path}: parameters.{key} must be {{trainable: true|false}}.")
+        if spec["trainable"] and key in constants:
+            raise SystemExit(
+                f"{path}: parameters.{key} is trainable: true but also listed in "
+                "'constants' (a per-trial constant is never trainable)."
+            )
+        if not spec["trainable"] and key not in constants:
+            frozen.add(key)
+    return frozen
+
+
+def _validate_search_config(
+    path: str | Path, search: dict, constants: dict, probe: CMSEnergyFlowDefault
+) -> None:
     """Fail fast on a malformed ``search`` / ``constants`` pair (see caller)."""
     # Absolute per-group Adam learning rates. `lr` and the old `lr_scale` were
     # exactly degenerate (select_trainable only ever uses their product), so the
@@ -355,16 +397,15 @@ def _validate_search_config(path: str | Path, search: dict, constants: dict) -> 
             f"low >= 0 (got [{r_lo}, {r_hi}])."
         )
 
-    probe = CMSEnergyFlowDefault(debug=False, learnable=True)
     card_keys = set(pc.card_default_config(probe))
     unknown = sorted(set(constants) - card_keys)
     if unknown:
         raise SystemExit(f"{path}: 'constants' names keys the card does not have: {unknown}")
     if set(constants) == card_keys:
         raise SystemExit(
-            f"{path}: 'constants' covers every card scalar, so nothing would be "
-            "fitted. It is a SUBSET block -- list only the parameters you want "
-            "frozen at a per-trial value."
+            f"{path}: 'constants' (plus the 'parameters' trainable: false mask) covers "
+            "every card scalar, so nothing would be fitted. List only the parameters "
+            "you want frozen at a per-trial value."
         )
 
     # Per-constant guards, then a merged probe apply (coverage + to_raw).

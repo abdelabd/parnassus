@@ -1,0 +1,168 @@
+# Optuna config for the charged-hadron tracking-efficiency CLOSURE test.
+#
+# Target: pseudodata generated with param_config_chadtrkeff.yaml (only the four
+# ChargedHadronTrackingEfficiency.eff_logits[0..3] differ from the card
+# defaults). Same format as optuna_config.yaml (see its header); here
+#   - `search`     : identical study knobs / lr ranges to optuna_config.yaml;
+#   - `constants`  : empty -- nothing is TPE-sampled;
+#   - `parameters` : the trainable mask fits ONLY the four perturbed
+#                    efficiencies; every other scalar is pinned at its card
+#                    default, which is exactly the generation truth.
+# Run (delphes mode: no acceptance cuts, no photon merger):
+#   python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
+#     --root-file /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_chadtrkeff.root \
+#     --optuna-config src/parnassus/torch_delphes/param_configs/optuna_config_chadtrkeff.yaml \
+#     --n-events 100000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --mode delphes \
+#     --output-base doc/figure_pseudodata --history-path doc/figure_pseudodata/all_optuna.json
+
+search:
+  n_trials: 40
+  seed: 0
+  global_batch_size: 2048
+  lr:
+    resolution: {low: 1.0e-4, high: 6.0e-3, log: true, init: 4.9e-3}
+    scale:      {low: 3.0e-4, high: 6.0e-3, log: true, init: 1.9e-3}
+    efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 1.5e-2}
+  # Required by the loader; ignored (merger OFF) in --mode delphes.
+  photon_merge_radius: {low: 0.0, high: 0.1, init: 0.045}
+
+constants: {}
+
+# Trainable mask: only the four perturbed charged-hadron efficiencies are fitted.
+parameters:
+  ChargedHadronTrackingEfficiency.eff_logits[0]:
+    trainable: true
+  ChargedHadronTrackingEfficiency.eff_logits[1]:
+    trainable: true
+  ChargedHadronTrackingEfficiency.eff_logits[2]:
+    trainable: true
+  ChargedHadronTrackingEfficiency.eff_logits[3]:
+    trainable: true
+  ElectronTrackingEfficiency.eff_logits[0]:
+    trainable: false
+  ElectronTrackingEfficiency.eff_logits[1]:
+    trainable: false
+  ElectronTrackingEfficiency.eff_logits[2]:
+    trainable: false
+  ElectronTrackingEfficiency.eff_logits[3]:
+    trainable: false
+  ElectronTrackingEfficiency.eff_logits[4]:
+    trainable: false
+  ElectronTrackingEfficiency.eff_logits[5]:
+    trainable: false
+  MuonTrackingEfficiency.eff_logits[0]:
+    trainable: false
+  MuonTrackingEfficiency.eff_logits[1]:
+    trainable: false
+  MuonTrackingEfficiency.eff_logits[2]:
+    trainable: false
+  MuonTrackingEfficiency.eff_logits[3]:
+    trainable: false
+  MuonTrackingEfficiency.eff_logits[4]:
+    trainable: false
+  MuonTrackingEfficiency.eff_logits[5]:
+    trainable: false
+  MuonTrackingEfficiency.rate_raw[0]:
+    trainable: false
+  MuonTrackingEfficiency.rate_raw[1]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[0]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[1]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[2]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[0]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[1]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[2]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.a_raw[0]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.a_raw[1]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.a_raw[2]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.b_raw[0]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.b_raw[1]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.b_raw[2]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.scale_raw[0]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.scale_raw[1]:
+    trainable: false
+  ElectronMomentumSmearing.resolution_module.scale_raw[2]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.a_raw[0]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.a_raw[1]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.a_raw[2]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.b_raw[0]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.b_raw[1]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.b_raw[2]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.scale_raw[0]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.scale_raw[1]:
+    trainable: false
+  MuonMomentumSmearing.resolution_module.scale_raw[2]:
+    trainable: false
+  HadronFractions.chad_logit:
+    trainable: false
+  HadronFractions.k0s_logit:
+    trainable: false
+  HadronFractions.lambda_logit:
+    trainable: false
+  HadronFractions.photon_logit:
+    trainable: false
+  HadronFractions.k0l_logit:
+    trainable: false
+  ECal.scale_module.scale_raw[0]:
+    trainable: false
+  ECal.scale_module.scale_raw[1]:
+    trainable: false
+  ECal.scale_module.scale_raw[2]:
+    trainable: false
+  ECal.resolution_func.common_c_E:
+    trainable: false
+  ECal.resolution_func.common_c_S:
+    trainable: false
+  ECal.resolution_func.common_c_N:
+    trainable: false
+  ECal.resolution_func.barrel_a:
+    trainable: false
+  ECal.resolution_func.barrel_b:
+    trainable: false
+  ECal.resolution_func.endcap_a:
+    trainable: false
+  ECal.resolution_func.endcap_b:
+    trainable: false
+  ECal.resolution_func.forward_c_E:
+    trainable: false
+  ECal.resolution_func.forward_c_S:
+    trainable: false
+  HCal.scale_module.scale_raw[0]:
+    trainable: false
+  HCal.scale_module.scale_raw[1]:
+    trainable: false
+  HCal.resolution_func.central_c_E:
+    trainable: false
+  HCal.resolution_func.central_c_S:
+    trainable: false
+  HCal.resolution_func.forward_c_E:
+    trainable: false
+  HCal.resolution_func.forward_c_S:
+    trainable: false

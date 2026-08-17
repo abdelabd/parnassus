@@ -89,8 +89,13 @@ def test_shipped_config_parses_and_merges_to_full_cover(card_defaults):
     assert search["global_batch_size"] == 2048
     assert search["photon_merge_radius"] == {"low": 0.0, "high": 0.1, "init": 0.045}
 
-    # constants: a SUBSET (the fractions), not a full cover.
+    # constants: a SUBSET (the fractions), not a full cover; the `parameters:`
+    # mask lists every scalar and marks exactly the fractions non-trainable.
     assert set(constants) == FRACTION_KEYS
+    with SHIPPED_OPTUNA_CONFIG.open() as f:
+        mask = yaml.safe_load(f)["parameters"]
+    assert set(mask) == set(card_defaults)
+    assert {k for k, v in mask.items() if not v["trainable"]} == FRACTION_KEYS
     assert set(constants) < set(card_defaults)
     assert len(card_defaults) == 68
 
@@ -100,6 +105,50 @@ def test_shipped_config_parses_and_merges_to_full_cover(card_defaults):
     assert constants["HadronFractions.k0l_logit"] == {"value": 0.0}
     for key in ("HadronFractions.k0s_logit", "HadronFractions.photon_logit"):
         assert {"low", "high", "init"} <= set(constants[key])
+
+
+def test_parameters_trainable_mask(tmp_path: Path, card_defaults):
+    """`parameters:` freezes keys at their card default; contradictions fail fast."""
+    k_eff = "ChargedHadronTrackingEfficiency.eff_logits[0]"
+    k_scale = "ECal.scale_module.scale_raw[1]"
+
+    def _write(parameters: dict, constants: dict | None = None) -> Path:
+        p = tmp_path / "mask.yaml"
+        with p.open("w") as f:
+            yaml.safe_dump(
+                {"search": GOOD_SEARCH, "constants": constants or {}, "parameters": parameters}, f
+            )
+        return p
+
+    # Unlisted keys default to trainable; false pins the key at its card default.
+    _search, constants = osearch.load_search_config(
+        _write({k_eff: {"trainable": True}, k_scale: {"trainable": False}})
+    )
+    assert constants == {k_scale: {"value": card_defaults[k_scale]["value"]}}
+    trial = optuna.create_study().ask()
+    cfg, _lr = osearch.sample_trial(trial, GOOD_SEARCH, constants, card_defaults)
+    assert not cfg[k_scale]["trainable"]
+    assert cfg[k_eff]["trainable"]
+    assert sum(spec["trainable"] for spec in cfg.values()) == len(card_defaults) - 1
+
+    # A `constants` entry may be marked false (consistent) but never true.
+    pin = {"HadronFractions.chad_logit": {"value": 0.0}}
+    osearch.load_search_config(_write({"HadronFractions.chad_logit": {"trainable": False}}, pin))
+    with pytest.raises(SystemExit, match="also listed in 'constants'"):
+        osearch.load_search_config(_write({"HadronFractions.chad_logit": {"trainable": True}}, pin))
+    # Unknown key, malformed entry, and a mask that leaves nothing to fit.
+    with pytest.raises(SystemExit, match="does not have"):
+        osearch.load_search_config(_write({"Nope.x": {"trainable": True}}))
+    with pytest.raises(SystemExit, match=r"trainable: true\|false"):
+        osearch.load_search_config(_write({k_eff: {"trainable": "yes"}}))
+    with pytest.raises(SystemExit, match="nothing would be fitted"):
+        osearch.load_search_config(_write({k: {"trainable": False} for k in card_defaults}))
+
+    # Shipped closure config: exactly the four perturbed chad efficiencies are fitted.
+    _s, c = osearch.load_search_config(PARAM_CONFIGS / "optuna_config_chadtrkeff.yaml")
+    fitted = set(card_defaults) - set(c)
+    assert fitted == {f"ChargedHadronTrackingEfficiency.eff_logits[{i}]" for i in range(4)}
+    assert all("value" in spec for spec in c.values())  # nothing TPE-sampled
 
 
 def test_group_classification():

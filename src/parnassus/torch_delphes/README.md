@@ -316,7 +316,7 @@ directory and, after the study, the best trial's history is copied out:
 ### The `optuna_config.yaml` search space
 
 A **separate format** ([param_configs/optuna_config.yaml](param_configs/optuna_config.yaml)), distinct
-from the Step-2 param-config. Two top-level sections:
+from the Step-2 param-config. Two required top-level sections plus an optional trainable mask:
 
 ```yaml
 search:
@@ -329,9 +329,13 @@ search:
     efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 1.5e-2}
   photon_merge_radius: {low: 0.0, high: 0.1, init: 0.045}   # continuous; R -> 0 is merger off
 
-constants:                   # a SUBSET; everything unlisted is FITTED from its card default
+constants:                   # a SUBSET; everything unlisted is FITTED from its card default ...
   HadronFractions.chad_logit:   {value: 0.0}                      # pinned every trial
   HadronFractions.k0s_logit:    {low: 0.1, high: 0.5, init: 0.3}  # TPE picks one per trial
+
+parameters:                  # ... unless this per-scalar mask says trainable: false (unlisted = true)
+  ChargedHadronTrackingEfficiency.eff_logits[0]: {trainable: true}
+  ECal.scale_module.scale_raw[0]:                {trainable: false}   # pinned at its card default
 ```
 
 - **`constants:` is a subset, not a cover.** Every entry is a per-trial **constant**
@@ -340,6 +344,13 @@ constants:                   # a SUBSET; everything unlisted is FITTED from its 
   at its **card constructor default** (== the CMS card) and is fitted by Adam at its group's sampled
   lr. The materialized config each trial writes is still **full-cover (68 scalars)**, so Step 3's
   before-fit baseline is unchanged.
+- **`parameters:` is a trainable mask.** `{key: {trainable: bool}}`; unlisted keys default to
+  `true`; `false` pins the scalar at its **card default** (a constant that is not searched — the
+  loader folds it into `constants`). A `constants` entry can never be `trainable: true`. The
+  shipped [optuna_config.yaml](param_configs/optuna_config.yaml) lists all 68 scalars (63 fitted,
+  the 5 fractions are constants); [optuna_config_chadtrkeff.yaml](param_configs/optuna_config_chadtrkeff.yaml)
+  is the closure config for `param_config_chadtrkeff.yaml` pseudodata — only the four perturbed
+  `ChargedHadronTrackingEfficiency.eff_logits[i]` are fitted, no sampled constants.
 - **`init:` is required on every sampled entry AND on every `lr` group**, and together they define
   the **seed trial**: trial 0 runs the known-good lrs on the believed-truth constants at the `init`
   radius, with every fitted scalar at its card default — the CMS-default baseline card, with no
