@@ -49,8 +49,25 @@ class HepMC3Generator:
         self.hadronization_on = self._is_hadronization_on()
 
     def generate(
-        self, n_events: int, max_workers: int, debug: bool = False, verbose: int = 100
+        self,
+        n_events: int,
+        max_workers: int,
+        debug: bool = False,
+        verbose: int = 100,
+        seed_offset: int = 0,
     ) -> Path:
+        """Generate ``n_events`` across ``max_workers`` Pythia8 processes and merge.
+
+        Worker ``i`` (1-based) uses Pythia ``Random:seed = seed_offset + i``, so
+        callers producing several independent samples pass disjoint offsets
+        (e.g. ``seed_offset = k * max_workers`` for sample ``k``); the default 0
+        keeps seeds ``1..max_workers``. Pythia requires seeds in ``1..900_000_000``.
+
+        Returns
+        -------
+        Path
+            The merged HepMC3 file.
+        """
         tic = time.time()
 
         n_events_per_job = n_events // max_workers
@@ -59,7 +76,7 @@ class HepMC3Generator:
         n_events_list = [
             n_events_per_job + (1 if i < n_remainder else 0) for i in range(max_workers)
         ]
-        seeds = list(range(1, max_workers + 1))
+        seeds = list(range(seed_offset + 1, seed_offset + max_workers + 1))
         fpaths_output = [Path(self.output_dir) / f"events_part_{i}.hepmc" for i in seeds]
         fpaths_log = [Path(self.log_dir) / f"job_{i}.log" for i in seeds]
 

@@ -41,12 +41,12 @@ Event generation
    - A **learnable card initialized from a parameter config** which
      plays the role of "CMS full simulation" for the fitting target.
      The config (``--param-config``, see
-     :mod:`parnassus.torch_delphes.param_config`) sets every one of the
-     68 learnable parameters to a physical ground-truth value; the
-     shipped default perturbs the three energy/momentum scales (CHAD
-     1.25, ECal 1.20, HCal 0.90). These values are exactly what Adam
-     should recover when we fit the trainee against the ``pflow_*``
-     branches.
+     :mod:`parnassus.torch_delphes.param_config`) may be PARTIAL: the
+     scalars it lists are set to their physical ground-truth ``value``,
+     every other learnable parameter keeps its card default. The shipped
+     default (``cms_target_default.yaml``) is the pure card default. These
+     values are exactly what Adam should recover when we fit the trainee
+     against the ``pflow_*`` branches.
 
 Output schema
 -------------
@@ -125,12 +125,12 @@ from parnassus.torch_delphes.tune_cms_fullsim.debug import (
 from parnassus.utils import pid_to_class
 from parnassus.utils.logger import is_terminal
 
-# The "target" (fake full-sim) card's parameters are taken verbatim from a
-# declarative parameter config (see parnassus.torch_delphes.param_config). The
-# shipped default sets the three energy/momentum scales to reachable
-# ground-truth values (CHAD 1.25, ECal 1.20, HCal 0.90) and leaves everything
-# else at its model default. Point --param-config at a different file to change
-# which knobs the generated sample perturbs.
+# The "target" (fake full-sim) card's parameters come from a declarative param
+# config (see parnassus.torch_delphes.param_config) laid over the card defaults,
+# so a config only needs to list the scalars it perturbs. The shipped default is
+# the pure card default (every value = CMS card constant). Point --param-config
+# at a different (possibly partial) file to change which knobs the generated
+# sample perturbs.
 _DEFAULT_PARAM_CONFIG: Path = (
     Path(__file__).resolve().parent / "param_configs" / "cms_target_default.yaml"
 )
@@ -219,13 +219,14 @@ def generate_truth_events(
     n_events: int,
     n_workers: int,
     work_dir: str | Path,
+    seed_offset: int = 0,
 ) -> Path:
     """Generate ``n_events`` Pythia events in parallel into one HepMC3 file.
 
     Thin wrapper around :class:`parnassus.pythia.HepMC3Generator`: it launches
-    ``n_workers`` single-core Pythia8 jobs (each seeded distinctly by the
-    generator), retries failed events so exactly ``n_events`` are produced, and
-    merges the per-worker outputs into a single HepMC3 file.
+    ``n_workers`` single-core Pythia8 jobs (worker ``i`` seeded with
+    ``seed_offset + i``), retries failed events so exactly ``n_events`` are
+    produced, and merges the per-worker outputs into a single HepMC3 file.
 
     Parameters
     ----------
@@ -238,6 +239,9 @@ def generate_truth_events(
     work_dir : str | Path
         Scratch directory; the HepMC files and per-job logs are written under
         ``<work_dir>/hepmc`` and ``<work_dir>/hepmc_logs``.
+    seed_offset : int
+        Added to every worker's Pythia ``Random:seed`` so independent samples
+        (e.g. SLURM array tasks) draw disjoint seed ranges.
 
     Returns
     -------
@@ -261,7 +265,11 @@ def generate_truth_events(
         )
     ):
         return generator.generate(
-            n_events=n_events, max_workers=n_workers, debug=False, verbose=0
+            n_events=n_events,
+            max_workers=n_workers,
+            debug=False,
+            verbose=0,
+            seed_offset=seed_offset,
         )
 
 
@@ -272,17 +280,18 @@ def make_target_card(
 ) -> CMSEnergyFlowDefault:
     """Build a learnable CMS card initialized from a parameter config.
 
-    Every one of the card's 68 learnable parameters is set to the physical
-    ``value`` of the matching entry in ``param_config`` (see
-    :mod:`parnassus.torch_delphes.param_config`), then the card is frozen and
-    put in eval mode. These values play the role of the ground-truth detector
-    response that the tuning harness should recover.
+    Every scalar listed in ``param_config`` (see
+    :mod:`parnassus.torch_delphes.param_config`) is set to its physical
+    ``value``; the config may be PARTIAL -- unlisted parameters keep the card
+    defaults (:func:`param_config.load_param_config_over_defaults`). The card
+    is then frozen and put in eval mode. These values play the role of the
+    ground-truth detector response that the tuning harness should recover.
 
     Parameters
     ----------
     param_config : str | Path
-        Path to a YAML parameter config. Defaults to the shipped
-        ``param_configs/cms_target_default.yaml``.
+        Path to a (possibly partial) YAML parameter config. Defaults to the
+        shipped ``param_configs/cms_target_default.yaml`` (= card defaults).
     debug : bool
         If True, build the card in debug mode so it returns every
         intermediate per-module tensor in addition to the final
@@ -299,7 +308,7 @@ def make_target_card(
         A frozen learnable card whose parameters match the config values.
     """
     card = CMSEnergyFlowDefault(debug=debug, learnable=True)
-    cfg = pc.load_param_config(param_config)
+    cfg = pc.load_param_config_over_defaults(param_config, card)
     pc.apply_param_config(card, cfg)
     for p in card.parameters():
         p.requires_grad_(False)
@@ -625,8 +634,15 @@ def generate(
         events).
     batch_size : int
         Number of events per TorchDelphes forward pass in phase 2.
+    seed : int
+        Seeds BOTH phases: Pythia workers use ``Random:seed`` in
+        ``seed*n_workers+1 .. (seed+1)*n_workers`` (disjoint across seeds at a
+        fixed ``n_workers``), and torch is seeded for the card's smearing.
     cmnd_file : str | Path
         Base Pythia ``.cmnd`` file (defaults to the shipped ``qcd_dijet.cmnd``).
+    param_config : str | Path
+        Generation/truth param config; may be PARTIAL (see
+        :func:`make_target_card`).
     work_dir : str | Path | None
         Scratch directory for the intermediate HepMC files / logs. ``None``
         creates (and, unless ``keep_hepmc``, removes) a temporary directory.
@@ -677,7 +693,11 @@ def generate(
             f"[1/3] Generating {n_events} Pythia events on {n_workers} CPU worker(s) "
             f"(pTHatMin={pt_hat_min})..."
         )
-        hepmc_path = generate_truth_events(eff_cmnd, n_events, n_workers, work_dir)
+        # Pythia seeds seed*n_workers+1 .. (seed+1)*n_workers: disjoint across
+        # --seed values (at fixed n_workers), so array tasks give distinct events.
+        hepmc_path = generate_truth_events(
+            eff_cmnd, n_events, n_workers, work_dir, seed_offset=seed * n_workers
+        )
 
         # ----- Phase 2a: read HepMC back into class-based truth arrays. -----
         print(f"[2/3] Reading {hepmc_path.name} -> truth particles...")
@@ -744,7 +764,17 @@ def main() -> None:
         default=512,
         help="Number of events per TorchDelphes forward pass.",
     )
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help=(
+            "Seeds both phases: Pythia workers get Random:seed in "
+            "seed*n_workers+1 .. (seed+1)*n_workers (disjoint across seeds at fixed "
+            "--n-workers, so SLURM array tasks produce distinct events) and torch "
+            "is seeded for the target card's stochastic smearing."
+        ),
+    )
     parser.add_argument(
         "--device",
         type=str,
@@ -789,7 +819,9 @@ def main() -> None:
         help=(
             "Path to a YAML parameter config whose physical 'value' fields define "
             "the ground-truth detector response written into the pflow_* branches. "
-            "Defaults to the shipped param_configs/cms_target_default.yaml."
+            "May be PARTIAL: only the listed scalars are changed, everything else "
+            "keeps the card default. Defaults to the shipped "
+            "param_configs/cms_target_default.yaml (= card defaults)."
         ),
     )
     parser.add_argument(
