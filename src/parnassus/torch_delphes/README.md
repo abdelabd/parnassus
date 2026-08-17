@@ -141,7 +141,8 @@ The `*_class` branches use the 5-class encoding:
 
 ### Batch generation on SLURM (large samples)
 
-A single run takes ~13 min for 10k events, so a large training sample is built by fanning
+A single 10k-event run takes ~18 min (~10 min Pythia+HepMC on 32 cores, the rest single-threaded
+read/torch/write; ~36 min with `--debug`), so a large sample is built by fanning
 generation out across a SLURM job array (NERSC Perlmutter, project `m3246`) and merging the
 per-seed files. Two scripts in [slurm_scripts/](slurm_scripts/) do this:
 
@@ -164,7 +165,8 @@ bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
 |---|---|---|
 | `--config` | (required) | Generation param config (may be partial); its stem names the output. |
 | `--n_events` | `100000` | **Total** events; must be a multiple of `--n_tasks` (each task generates `n_events / n_tasks`). |
-| `--n_tasks` | `10` | Number of array tasks (= seeds `1..n_tasks`; ~36 min per 10k-event task under the 59-min limit). |
+| `--n_tasks` | `10` | Number of array tasks (= seeds `1..n_tasks`). A task costs ~0.11 s/event (~18 min per 10k), ~0.22 s/event with `--debug`; keep `n_events / n_tasks` inside `TIME_LIMIT`. |
+| `--debug` | off | Also write the ~400 per-module intermediate branches (`generate_pseudodata --debug`, needed only for `plot_fit_results --debug`). Doubles the runtime (single-threaded uproot write) and gives ~7× larger files. |
 
 Everything else is configurable via environment variables (shown with defaults):
 
@@ -172,11 +174,12 @@ Everything else is configurable via environment variables (shown with defaults):
 |---|---|---|
 | `OUTBASE` | `/global/cfs/cdirs/m3246/diff_delphes` | Output base. Parts go in `$OUTBASE/parts/`, logs in `$OUTBASE/logs/`, merged file in `$OUTBASE/`. **Must be a shared filesystem** (CFS / scratch), not node-local `/tmp`. |
 | `N_WORKERS` | `32` | Pythia CPU workers per task (matches the job's `-c 32`). |
+| `TIME_LIMIT` | `00:30:00` | SLURM `-t` per array task (the driver prints an estimated per-task runtime at submit). |
 | `PT_HAT_MIN` | `100` | Pythia `PhaseSpace:pTHatMin`. |
-| `MERGED_NAME` | `pseudo_data_<total>_<config-stem>.root` | Final merged filename under `$OUTBASE` (`<total>` = `100k` for whole thousands, else the plain count). The per-seed parts share the stem (`<stem>_seed<i>.root`), so different configs can share `parts/`. |
+| `MERGED_NAME` | `pseudo_data_<total>_<config-stem>[_debug].root` | Final merged filename under `$OUTBASE` (`<total>` = `100k` for whole thousands, else the plain count; `_debug` suffix when `--debug`). The per-seed parts share the stem (`<stem>_seed<i>.root`), so different configs can share `parts/`. |
 
-The jobs run on the **CPU partition** with `--device cpu`: the GPU is used for only ~12s (the
-TorchDelphes forward) of a ~13-min job, so a GPU node would sit idle. The driver runs `setup.sh`
+The jobs run on the **CPU partition** with `--device cpu`: the TorchDelphes forward is only a few
+minutes per 10k events, so a GPU node would sit idle. The driver runs `setup.sh`
 once up front so the array tasks activate the prebuilt uv env directly instead of each firing a
 concurrent `uv sync`.
 
