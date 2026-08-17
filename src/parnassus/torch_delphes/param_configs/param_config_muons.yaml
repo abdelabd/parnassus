@@ -1,3 +1,6 @@
+# MuonTrackingEfficiency.rate_raw[0,1] are deliberately NOT listed: they stay at the CMS default
+# (0.0005) on both the generation and the fit side -- the trainee gives rate_raw no gradient
+# (see learnable.py CMSMuonLearnableEfficiency), so a perturbed rate would only bias eff_logits[2,5].
 MuonTrackingEfficiency.eff_logits[0]:
   value: 0.9608   # default 0.75 (+28%)
 MuonTrackingEfficiency.eff_logits[1]:
@@ -10,10 +13,6 @@ MuonTrackingEfficiency.eff_logits[4]:
   value: 0.5756   # default 0.98 (-41%)
 MuonTrackingEfficiency.eff_logits[5]:
   value: 0.6397   # default 0.98 (-35%)
-MuonTrackingEfficiency.rate_raw[0]:
-  value: 0.0007152   # default 0.0005 (+43%)
-MuonTrackingEfficiency.rate_raw[1]:
-  value: 0.0003362   # default 0.0005 (-33%)
 MuonMomentumSmearing.resolution_module.a_raw[0]:
   value: 0.01489   # default 0.01 (+49%)
 MuonMomentumSmearing.resolution_module.a_raw[1]:

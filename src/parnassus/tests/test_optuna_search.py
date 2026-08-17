@@ -39,6 +39,9 @@ FRACTION_KEYS = {
     "HadronFractions.photon_logit",
     "HadronFractions.k0l_logit",
 }
+# Pinned at the CMS default on both generation and fit side: the trainee gives
+# rate_raw no gradient (see learnable.py CMSMuonLearnableEfficiency).
+RATE_KEYS = {"MuonTrackingEfficiency.rate_raw[0]", "MuonTrackingEfficiency.rate_raw[1]"}
 
 GOOD_SEARCH = {
     "global_batch_size": 256,
@@ -77,7 +80,7 @@ def _write_cfg(tmp_path: Path, search: dict, constants: dict, name: str = "cfg.y
 
 
 def test_shipped_config_parses_and_merges_to_full_cover(card_defaults):
-    """The shipped config freezes exactly the 5 fractions; the merge covers 68."""
+    """Shipped config: 5 fractions (constants) + 2 muon rate_raw (mask) pinned; merge covers 68."""
     search, constants = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)
     assert {"lr", "global_batch_size", "photon_merge_radius"} <= set(search)
     # Every lr group carries an init (required): it is what the seed trial runs.
@@ -89,13 +92,14 @@ def test_shipped_config_parses_and_merges_to_full_cover(card_defaults):
     assert search["global_batch_size"] == 2048
     assert search["photon_merge_radius"] == {"low": 0.0, "high": 0.1, "init": 0.045}
 
-    # constants: a SUBSET (the fractions), not a full cover; the `parameters:`
-    # mask lists every scalar and marks exactly the fractions non-trainable.
-    assert set(constants) == FRACTION_KEYS
+    # constants: a SUBSET (the fractions, plus the mask-pinned rate_raw folded in by
+    # the loader), not a full cover; the `parameters:` mask lists every scalar and
+    # marks exactly the fractions + rate_raw non-trainable.
+    assert set(constants) == FRACTION_KEYS | RATE_KEYS
     with SHIPPED_OPTUNA_CONFIG.open() as f:
         mask = yaml.safe_load(f)["parameters"]
     assert set(mask) == set(card_defaults)
-    assert {k for k, v in mask.items() if not v["trainable"]} == FRACTION_KEYS
+    assert {k for k, v in mask.items() if not v["trainable"]} == FRACTION_KEYS | RATE_KEYS
     assert set(constants) < set(card_defaults)
     assert len(card_defaults) == 68
 

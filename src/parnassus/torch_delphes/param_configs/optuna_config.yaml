@@ -185,10 +185,11 @@ parameters:
     trainable: true
   MuonTrackingEfficiency.eff_logits[5]:
     trainable: true
+  # rate_raw pinned at the CMS default on both sides (no gradient path; see learnable.py).
   MuonTrackingEfficiency.rate_raw[0]:
-    trainable: true
+    trainable: false
   MuonTrackingEfficiency.rate_raw[1]:
-    trainable: true
+    trainable: false
   ChargedHadronMomentumSmearing.resolution_module.a_raw[0]:
     trainable: true
   ChargedHadronMomentumSmearing.resolution_module.a_raw[1]:
