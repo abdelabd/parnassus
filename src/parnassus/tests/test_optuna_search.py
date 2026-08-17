@@ -670,3 +670,67 @@ def test_optuna_search_radius_is_per_trial_and_reaches_the_card(
     # The card each trial actually fitted used exactly the radius its metadata
     # records: one merger per trial, in trial order, same values.
     assert built == pytest.approx(radii)
+
+
+def test_optuna_search_delphes_mode_disables_merger(
+    fixture_root: Path, tmp_path: Path, monkeypatch
+):
+    """--mode delphes: no PhotonClusterMerger is ever built (seed trial included),
+    the radius is not a search dimension, every round records mode/cuts/radius
+    off, and a study cannot be resumed under the other mode.
+    """
+    import json
+
+    built: list[float] = []
+    real_merger = osearch.PhotonClusterMerger
+
+    class SpyMerger(real_merger):
+        def __init__(self, merge_radius):
+            built.append(merge_radius)
+            super().__init__(merge_radius)
+
+    monkeypatch.setattr(osearch, "PhotonClusterMerger", SpyMerger)
+
+    out_base = tmp_path / "fit_results"
+    storage = f"sqlite:///{tmp_path / 'study.db'}"
+    argv = [
+        "optuna_search",
+        "--root-file", str(fixture_root),
+        "--optuna-config", str(SHIPPED_OPTUNA_CONFIG),
+        "--mode", "delphes",
+        "--n-trials", "2",
+        "--n-steps", "2",
+        "--n-events", "80",
+        "--plot-every", "1",
+        "--output-base", str(out_base),
+        "--history-path", str(out_base / "all.json"),
+        "--storage", storage,
+        "--study-name", "delphes_t",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    osearch.main()
+
+    assert built == [], f"merger built in delphes mode with radii {built}"
+    for i in range(2):
+        with (out_base / f"round_{i}" / "history.json").open() as f:
+            meta = json.load(f)["metadata"]
+        assert meta["mode"] == "delphes"
+        assert meta["photon_merge_radius"] is None
+        assert meta["truth_pt_cut"] is None
+        assert meta["reco_pt_cut"] is None
+        assert meta["eta_cut"] is None
+        assert meta["chad_truncation"] is False
+
+    # The radius is not a TPE dimension: absent from every trial, and the pinned
+    # seed trial carries only the group lrs + the sampled constants.
+    study = optuna.load_study(study_name="delphes_t", storage=storage)
+    assert study.user_attrs["mode"] == "delphes"
+    assert all("photon_merge_radius" not in t.params for t in study.trials)
+    _search, constants = osearch.load_search_config(SHIPPED_OPTUNA_CONFIG)
+    sampled = {k for k, s in constants.items() if "value" not in s}
+    assert set(study.trials[0].params) == {f"lr[{g}]" for g in osearch.LR_GROUPS} | sampled
+
+    # One study == one mode: resuming it as fullsim is refused.
+    monkeypatch.setattr(sys, "argv", [a if a != "delphes" else "fullsim" for a in argv])
+    with pytest.raises(SystemExit, match="--mode delphes"):
+        osearch.main()

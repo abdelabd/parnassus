@@ -7,7 +7,9 @@ the *same* Adam fit in an Optuna study: each trial samples
 - one ABSOLUTE learning rate per parameter GROUP (resolution / scale /
   efficiency) -- ``lr`` and ``lr_scale`` are exactly degenerate (Adam only ever
   sees their product), so the search parameterizes the product directly,
-- the ``photon_merge_radius`` (continuous; its 0 limit is the merger off), and
+- the ``photon_merge_radius`` (continuous; its 0 limit is the merger off;
+  ``--mode fullsim`` only -- ``--mode delphes`` forces the merger OFF and does
+  not search it, Delphes having no supercluster-scale merging), and
 - one value per entry of the ``optuna_config.yaml`` ``constants:`` block.
 
 Every scalar NOT listed in ``constants:`` starts at its card constructor default
@@ -702,8 +704,10 @@ def main() -> None:
         default=DEFAULT_MODE,
         help=(
             "Target flavour: fullsim (default) applies the acceptance cuts + chad "
-            "truncation below; delphes turns them all off and ignores those flags "
-            "(see the tune_cms_fullsim CLI help)."
+            "truncation below and searches the photon merge radius; delphes turns "
+            "the cuts/truncation off (ignoring those flags) and forces the photon "
+            "merger OFF -- the radius is not searched (search.photon_merge_radius "
+            "is validated but ignored). See the tune_cms_fullsim CLI help."
         ),
     )
     parser.add_argument(
@@ -827,6 +831,10 @@ def main() -> None:
 
     # Resolve --mode + the acceptance-cut args (shared with the tuning CLI via runner).
     truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
+    # delphes: Delphes has no supercluster-scale photon merging -> merger OFF and
+    # the radius is NOT searched (search.photon_merge_radius stays validated by
+    # load_search_config but is ignored).
+    search_radius = args.mode != "delphes"
 
     r_lo, r_hi, _r_log, r_init = _parse_sampled(
         "search.photon_merge_radius", search["photon_merge_radius"]
@@ -838,25 +846,25 @@ def main() -> None:
         f"pid_weighting={args.pid_weighting!r} mode={args.mode} "
         f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
         f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'} "
-        f"photon_merge_radius=[{r_lo}, {r_hi}] "
+        f"photon_merge_radius={f'[{r_lo}, {r_hi}]' if search_radius else 'OFF (delphes)'} "
         f"lr_decay={'ON' if args.lr_scheduler_patience > 0 else 'OFF'}"
     )
     log(
-        f"[optuna] search space: 3 group lrs + radius + {n_sampled} sampled "
-        f"constant(s); {len(defaults) - len(constants)} scalars fitted from "
-        f"{'--init-config-overridden ' if args.init_config else ''}card defaults, "
-        f"{len(constants)} frozen"
+        f"[optuna] search space: 3 group lrs + {'radius + ' if search_radius else ''}"
+        f"{n_sampled} sampled constant(s); {len(defaults) - len(constants)} scalars "
+        f"fitted from {'--init-config-overridden ' if args.init_config else ''}card "
+        f"defaults, {len(constants)} frozen"
     )
     if args.init_config is not None:
         log(f"[optuna] init override: {len(overridden)} fitted scalars from {args.init_config}")
-    if r_lo < r_hi:
+    if search_radius and r_lo < r_hi:
         log(
             "[optuna] NOTE: the radius is searched -- median pruning pools "
             "val-loss across radii, so a slow-adapting radius can be pruned "
             "before it converges. Judge on COMPLETE trials' best values."
         )
     coupled = coupled_photon_constants(constants)
-    if coupled:
+    if coupled and search_radius:
         log(
             "[optuna] NOTE: sampling " + ", ".join(coupled) + " together with "
             "photon_merge_radius -- all move the photon<->NH balance, so their "
@@ -1037,7 +1045,7 @@ def main() -> None:
 
     def objective(trial: optuna.Trial) -> float:
         flat_cfg, group_lr = sample_trial(trial, search, constants, defaults)
-        trial_merge_radius = sample_photon_merge_radius(trial, search)
+        trial_merge_radius = sample_photon_merge_radius(trial, search) if search_radius else None
         round_dir = args.output_base / f"round_{trial.number}"
         round_dir.mkdir(parents=True, exist_ok=True)
         _dump_flat_config(flat_cfg, round_dir / "materialized_config.yaml")
@@ -1162,6 +1170,18 @@ def main() -> None:
         study.sampler = TPESampler(
             multivariate=True, group=True, n_startup_trials=10, seed=sampler_seed + n_existing
         )
+    # One study == one --mode: the mode fixes the selection AND whether the radius
+    # is a search dimension, so cross-mode trials are incomparable (and the old
+    # seed would suppress the new one). Studies predating the attr were fullsim.
+    study_mode = study.user_attrs.get("mode", "fullsim" if n_existing else args.mode)
+    if study_mode != args.mode:
+        if world_size > 1:  # release the mirror-loop ranks before bailing out
+            dist.broadcast_object_list([{"stop": True}], src=0)
+        raise SystemExit(
+            f"[optuna] study {args.study_name!r} was run with --mode {study_mode}; "
+            f"use a different --study-name for --mode {args.mode}."
+        )
+    study.set_user_attr("mode", args.mode)
     # Seed trial (rank 0 only -- ranks != 0 returned into the mirror loop above):
     # the config's `init:` values, i.e. the believed-truth constants at the
     # calibrated radius. (Re-)enqueued whenever the study has no
@@ -1172,13 +1192,14 @@ def main() -> None:
         log("[optuna] seed trial already waiting or evaluated; NOT re-enqueueing")
     else:
         # Trial 0 is fully determined: known-good lrs, believed-truth constants,
-        # calibrated radius. That makes it an exactly reproducible baseline rather
-        # than the truth physics plus an arbitrary optimizer draw.
+        # calibrated radius (fullsim). That makes it an exactly reproducible
+        # baseline rather than the truth physics plus an arbitrary optimizer draw.
         enqueue_params = {f"lr[{g}]": float(search["lr"][g]["init"]) for g in LR_GROUPS}
         enqueue_params.update(
             {key: float(spec["init"]) for key, spec in constants.items() if "value" not in spec}
         )
-        enqueue_params["photon_merge_radius"] = r_init
+        if search_radius:
+            enqueue_params["photon_merge_radius"] = r_init
         study.enqueue_trial(
             enqueue_params,
             user_attrs={"warm_start_config": f"{args.optuna_config}#init"},

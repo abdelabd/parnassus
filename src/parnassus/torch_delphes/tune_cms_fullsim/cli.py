@@ -239,10 +239,11 @@ def main() -> None:
         default=DEFAULT_MODE,
         help=(
             "Target flavour. fullsim (default): apply --truth-pt-cut/--reco-pt-cut/"
-            "--eta-cut and the chad truncation so the trainee matches the CMS "
-            "selection. delphes: no acceptance cuts, no chad truncation, count "
-            "terms ungated (those four flags are ignored) -- diff-Delphes has to "
-            "reproduce Delphes as-is."
+            "--eta-cut, the chad truncation and the photon merger so the trainee "
+            "matches the CMS selection + supercluster scale. delphes: no acceptance "
+            "cuts, no chad truncation, count terms ungated, photon merger OFF "
+            "(those flags incl. --photon-merge-radius are ignored) -- diff-Delphes "
+            "has to reproduce Delphes as-is."
         ),
     )
     parser.add_argument(
@@ -303,7 +304,8 @@ def main() -> None:
             "eflow photon stream (CMS supercluster scale), with the ecal_photon "
             "count term recomputed from the merged clusters. Frozen constant "
             f"(not fitted). Default {DEFAULT_PHOTON_MERGE_RADIUS}. <= 0 "
-            "disables. Losses are not comparable across different settings."
+            "disables; ignored (merger OFF) in --mode delphes. Losses are not "
+            "comparable across different settings."
         ),
     )
     parser.add_argument(
@@ -424,8 +426,12 @@ def main() -> None:
 
     # Resolve --mode + the acceptance-cut args (shared with optuna_search via runner).
     truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
+    # Delphes has no supercluster-scale photon merging -> merger OFF regardless of
+    # the flag in delphes mode.
     photon_merge_radius = (
-        args.photon_merge_radius if args.photon_merge_radius > 0 else None
+        args.photon_merge_radius
+        if args.mode != "delphes" and args.photon_merge_radius > 0
+        else None
     )
     log(
         f"[filter] mode={args.mode} | "
