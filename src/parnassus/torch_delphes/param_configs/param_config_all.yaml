@@ -100,7 +100,7 @@ ECal.resolution_func.common_c_S:
 ECal.resolution_func.common_c_N:
   value: 0.5232   # default 0.4 (+31%)
 ECal.resolution_func.barrel_a:
-  value: 0.5191   # default 1 (-48%)
+  value: 1
 ECal.resolution_func.barrel_b:
   value: 0.8862   # default 0.64 (+38%)
 ECal.resolution_func.endcap_a:

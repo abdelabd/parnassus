@@ -5,7 +5,7 @@
 #
 # USAGE (run on a login node, from anywhere):
 #   bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
-#       --config <param_config.yaml> [--process dijet|HZZ4l|muongun] [--n_events 100000] [--n_tasks 10] [--debug]
+#       --config <param_config.yaml> [--process dijet|HZZ4l|muongun|electrongun|ksgun] [--n_events 100000] [--n_tasks 10] [--debug]
 #
 # --config is REQUIRED: the (possibly partial) generation param config, passed
 # to generate_pseudodata --param-config; its basename and the process name the output,
@@ -33,7 +33,7 @@
 set -euo pipefail
 
 # ---- CLI: --config <yaml> (required), --process <name>, --n_events <total>, --n_tasks <n> ----
-USAGE="usage: $0 --config <param_config.yaml> [--process dijet|HZZ4l|muongun] [--n_events <total, default 100000>] [--n_tasks <n, default 10>] [--debug]"
+USAGE="usage: $0 --config <param_config.yaml> [--process dijet|HZZ4l|muongun|electrongun|ksgun] [--n_events <total, default 100000>] [--n_tasks <n, default 10>] [--debug]"
 PARAM_CONFIG=""
 PROCESS="dijet"
 DEBUG_FLAG=""
@@ -57,7 +57,7 @@ if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$NJOBS" =~ ^[0-9]+$ ]] || (( NJOBS < 1 || TOTAL
     echo "$USAGE  (--n_events=$TOTAL must be a positive multiple of --n_tasks=$NJOBS)" >&2
     exit 2
 fi
-if ! [[ "$PROCESS" =~ ^(dijet|HZZ4l|muongun)$ ]]; then
+if ! [[ "$PROCESS" =~ ^(dijet|HZZ4l|muongun|electrongun|ksgun)$ ]]; then
     echo "$USAGE  (unknown --process: '$PROCESS')" >&2
     exit 2
 fi
@@ -71,7 +71,7 @@ ENV_PREFIX="${ENV_PREFIX:-/global/cfs/cdirs/m3246/Runze/MCGen/envs/parnassus}"
 OUTBASE="${OUTBASE:-/global/cfs/cdirs/m3246/diff_delphes}"
 PARTS_DIR="${PARTS_DIR:-$OUTBASE/parts}"
 LOGDIR="${LOGDIR:-$OUTBASE/logs}"
-PT_HAT_MIN="${PT_HAT_MIN:-}"           # empty = generate_pseudodata default (100 for dijet, none otherwise)
+PT_HAT_MIN="${PT_HAT_MIN:-}"           # empty = generate_pseudodata default (20 for dijet, none otherwise)
 N_WORKERS="${N_WORKERS:-32}"
 TIME_LIMIT="${TIME_LIMIT:-00:30:00}"   # per array task (sbatch -t)
 # Merged filename: pseudo_data_<total>_<config-stem>_<process>[_debug].root, total as

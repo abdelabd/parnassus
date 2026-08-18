@@ -37,6 +37,9 @@ from .loss import (
     COUNT_WEIGHT,
     EVENT_WEIGHT,
     LOSS_CHOICES,
+    PAIR_MASS_WEIGHT,
+    attach_truth_pair_lnm,
+    compute_pair_masses,
     get_loss_fn,
 )
 
@@ -75,6 +78,9 @@ def fit_card_to_fullsim(
     loss_name: str = "wasserstein",
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
+    eta_split: bool = True,
+    pair_mass: bool = True,
+    pair_mass_weight: float = PAIR_MASS_WEIGHT,
     reco_pt_cut: float | None = None,
     reco_abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
@@ -163,6 +169,23 @@ def fit_card_to_fullsim(
         Lower clamp on the per-pid shape weight (default 0.0 = off), re-normalized to keep
         the mean-1 invariant -- protects a rare species' gradient in a low-stat batch.
         Surfaced on the CLI as ``--pid-weight-floor``.
+    eta_split : bool
+        Split the per-pid ``log_E`` / ``log_pt`` shape terms of the two per-pid losses by
+        the reco |eta| region (``loss.SHAPE_ETA_EDGES``; default True, CLI
+        ``--eta-split/--no-eta-split``). Needed so per-region detector parameters
+        (momentum-smearing scale/resolution, calo scale) are attributable instead of being
+        fitted as an eta-mixture. ``False`` reproduces the pooled terms bit-for-bit. Ignored
+        by the sliced ``wasserstein`` loss.
+    pair_mass : bool
+        Add the per-event leading-2 pair-mass shape terms (``loss.compute_pair_masses``:
+        the response ln(m_reco / m_truth) of m_ee / m_mumu / m_hh per truth-mass group and
+        |eta|-region pair; default True, CLI
+        ``--pair-mass/--no-pair-mass``). On a resonance-gun sample the peak width is the
+        track resolution -- the only 1-D lever on ``a_raw``/``b_raw``. Ignored by the
+        sliced ``wasserstein`` loss.
+    pair_mass_weight : float
+        Weight of every pair-mass term (default ``loss.PAIR_MASS_WEIGHT``; CLI
+        ``--pair-mass-weight``).
     reco_pt_cut, reco_abs_eta_cut : float | None
         Reco acceptance cut applied to the PRED side only, right before the loss
         (``apply_reco_acceptance_cut``): the TARGET already carries the same cut
@@ -210,8 +233,13 @@ def fit_card_to_fullsim(
     """
     # All training losses accept the same count_weight / calo_count_weight / event_weight
     # and per-pid pid_weighting / pid_weight_floor knobs, so wrap unconditionally to inject
-    # them.
+    # them. The eta-split / pair-mass knobs exist only on the two per-pid losses.
     base_loss_fn = get_loss_fn(loss_name)
+    per_pid_kwargs = (
+        {"eta_split": eta_split, "pair_mass": pair_mass, "pair_mass_weight": pair_mass_weight}
+        if loss_name in {"soft_hist", "wasserstein_1d"}
+        else {}
+    )
 
     def loss_fn(
         pred: dict[str, torch.Tensor],
@@ -231,6 +259,7 @@ def fit_card_to_fullsim(
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
             return_breakdown=want_breakdown,
+            **per_pid_kwargs,
         )
 
     opt = torch.optim.Adam(param_groups)
@@ -499,6 +528,9 @@ def fit_card_to_fullsim(
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+            # Per-event truth leading-2 pair masses (the pair-mass terms compare the
+            # response ln(m_reco / m_truth)); one label per event, shared by both sides.
+            attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)
             # Acceptance cut (pred side only -- the target was cut in the loader),
             # then the truth-ceiling chad truncation (cut first: the ranking must
             # only see in-acceptance chads).
@@ -553,7 +585,7 @@ def fit_card_to_fullsim(
                 f"(raw=pre-weight, weighted=post-weight; mean over {n_b} batches)"
             )
             grand = 0.0
-            for cat in ("pid_shape", "event", "count"):
+            for cat in ("pid_shape", "pair", "event", "count"):
                 keys = sorted(k for k in bd_wtd if k[0] == cat)
                 if not keys:
                     continue
@@ -614,6 +646,7 @@ def fit_card_to_fullsim(
                     pred_observables[pred_key] = out[out_key]
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+                attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)
                 # Same pred-side acceptance cut + chad truncation as the train
                 # loop (the target is cut/truncated statically in the loader);
                 # the intermediate-plot accumulators below therefore collect the
@@ -646,6 +679,15 @@ def fit_card_to_fullsim(
                             pv, tv = pv.reshape(-1), tv.reshape(-1)
                         acc_pred.setdefault(key, []).append(pv.detach().cpu())
                         acc_tgt.setdefault(key, []).append(tv.detach().cpu())
+                    # Per-event leading-2 pair-mass responses (the loss's pair-mass
+                    # observable): flat ln(m_reco/m_truth) + |eta|-region pair category +
+                    # truth-mass group per class, computed here while the event structure
+                    # is still available.
+                    for obs, acc in ((pred_observables, acc_pred), (target_observables, acc_tgt)):
+                        for pid_p, (resp, cat, grp) in compute_pair_masses(obs).items():
+                            acc.setdefault(f"pair_r:{pid_p}", []).append(resp.detach().cpu())
+                            acc.setdefault(f"pair_cat:{pid_p}", []).append(cat.detach().cpu())
+                            acc.setdefault(f"pair_grp:{pid_p}", []).append(grp.detach().cpu())
             val_loss_acc /= len(val_dataloader)
             val_loss_acc = _all_reduce_mean(val_loss_acc)
             print_val_loss = float(val_loss_acc)

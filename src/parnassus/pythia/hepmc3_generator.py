@@ -262,8 +262,23 @@ def split_gun_block(cmnd_file):
     \"\"\"Split a .cmnd into its ``Gun:*`` settings and the Pythia-only remainder.
 
     ``Gun:*`` keys are NOT Pythia settings -- they configure the particle gun
-    implemented in this driver (see torch_delphes/muon_gun.cmnd). They are
-    stripped here so Pythia's readFile() never sees an unknown setting.
+    implemented in this driver (see torch_delphes/processes/*_gun.cmnd). They
+    are stripped here so Pythia's readFile() never sees an unknown setting.
+
+    Recognised keys (case-insensitive):
+      Gun:on, Gun:ids (pdg ids, one drawn uniformly per thrown particle),
+      Gun:nPerEvent, Gun:etaMin / Gun:etaMax,
+      Gun:pTmin / Gun:pTmax  -- one value, or one value PER id (same order as
+                                Gun:ids) so e.g. a soft J/psi and a hard Z can
+                                share one file,
+      Gun:pTlog              -- log-uniform in [pTmin, pTmax] (default on),
+      Gun:pTpower = k        -- dN/dpT ~ pT^-k on [pTmin, pTmax]; overrides pTlog
+                                (k = 1 is log-uniform).
+    Every thrown particle gets its mass from ``ParticleData::mSel`` (Breit-Wigner
+    for resonances, m0 otherwise) and, being appended with status 1, is decayed by
+    Pythia's normal decay machinery in ``pythia.next()`` -- so ``Gun:ids = 23``
+    with ``23:onMode = off`` / ``23:onIfAny = 13`` (ordinary Pythia settings, left
+    in the file) is a Z->mumu gun. Beam energy is taken from ``Beams:eCM``.
 
     Returns (gun_settings_dict, pythia_only_text).
     \"\"\"
@@ -301,9 +316,10 @@ def append_gun_event(pythia, gun_cfg):
     \"\"\"
     ids = gun_cfg["ids"]
     n_per_event = gun_cfg["n_per_event"]
-    pt_min = gun_cfg["pt_min"]
-    pt_max = gun_cfg["pt_max"]
+    pt_min = gun_cfg["pt_min"]  # list, one per id
+    pt_max = gun_cfg["pt_max"]  # list, one per id
     pt_log = gun_cfg["pt_log"]
+    pt_power = gun_cfg["pt_power"]  # None -> pt_log / linear draw
     eta_min = gun_cfg["eta_min"]
     eta_max = gun_cfg["eta_max"]
     e_beam = gun_cfg["e_beam"]
@@ -316,15 +332,23 @@ def append_gun_event(pythia, gun_cfg):
     event.append(2212, -12, 0, 0, 0, 0, 0, 0, 0.0, 0.0, -pz_beam, e_beam, PROTON_MASS)
 
     for _ in range(n_per_event):
+        k_id = min(int(rndm.flat() * len(ids)), len(ids) - 1)
+        pid = ids[k_id]
+        lo, hi = pt_min[k_id], pt_max[k_id]
         u = rndm.flat()
-        if pt_log:
-            pt = pt_min * (pt_max / pt_min) ** u
+        if pt_power is not None and abs(pt_power - 1.0) > 1e-12:
+            # dN/dpT ~ pT^-k on [lo, hi]: inverse CDF of the power law.
+            g = 1.0 - pt_power
+            pt = (lo**g + u * (hi**g - lo**g)) ** (1.0 / g)
+        elif pt_power is not None or pt_log:
+            pt = lo * (hi / lo) ** u  # log-uniform (k == 1)
         else:
-            pt = pt_min + (pt_max - pt_min) * u
+            pt = lo + (hi - lo) * u
         eta = eta_min + (eta_max - eta_min) * rndm.flat()
         phi = 2.0 * math.pi * rndm.flat()
-        pid = ids[min(int(rndm.flat() * len(ids)), len(ids) - 1)]
-        mass = pythia.particleData.m0(abs(pid))
+        # Breit-Wigner-sampled mass for resonances (within the id's mMin/mMax
+        # window, settable in the .cmnd), the nominal mass otherwise.
+        mass = pythia.particleData.mSel(abs(pid))
         px = pt * math.cos(phi)
         py = pt * math.sin(phi)
         pz = pt * math.sinh(eta)
@@ -377,18 +401,34 @@ def main() -> int:
         if not ids:
             LOG.info("HepMC3Generator: Gun:on is set but Gun:ids is empty!")
             return 1
+        def per_id(key, default):
+            # One value for all ids, or one value per id (same order as Gun:ids).
+            vals = [float(tok) for tok in gun.get(key, str(default)).replace(",", " ").split()]
+            if len(vals) == 1:
+                vals = vals * len(ids)
+            if len(vals) != len(ids):
+                raise SystemExit(
+                    f"HepMC3Generator: {key} must have 1 or len(Gun:ids)={len(ids)} values, got {len(vals)}"
+                )
+            return vals
+
+        pt_power_raw = gun.get("gun:ptpower")
         gun_cfg = {
             "ids": ids,
             "n_per_event": int(float(gun.get("gun:nperevent", 1))),
-            "pt_min": float(gun.get("gun:ptmin", 1.0)),
-            "pt_max": float(gun.get("gun:ptmax", 100.0)),
+            "pt_min": per_id("gun:ptmin", 1.0),
+            "pt_max": per_id("gun:ptmax", 100.0),
             "pt_log": gun_flag(gun, "gun:ptlog", True),
+            "pt_power": float(pt_power_raw) if pt_power_raw is not None else None,
             "eta_min": float(gun.get("gun:etamin", -2.5)),
             "eta_max": float(gun.get("gun:etamax", 2.5)),
             "e_beam": 0.5 * float(pythia.settings.parm("Beams:eCM")),
         }
-        if gun_cfg["pt_log"] and gun_cfg["pt_min"] <= 0.0:
-            LOG.info("HepMC3Generator: Gun:pTlog needs Gun:pTmin > 0!")
+        if any(hi <= lo for lo, hi in zip(gun_cfg["pt_min"], gun_cfg["pt_max"])):
+            LOG.info("HepMC3Generator: Gun:pTmax must exceed Gun:pTmin for every id!")
+            return 1
+        if (gun_cfg["pt_power"] is not None or gun_cfg["pt_log"]) and min(gun_cfg["pt_min"]) <= 0.0:
+            LOG.info("HepMC3Generator: Gun:pTlog / Gun:pTpower need Gun:pTmin > 0!")
             return 1
         LOG.info(f"HepMC3Generator: particle gun active: {gun_cfg}")
         os.unlink(pythia_cmnd)

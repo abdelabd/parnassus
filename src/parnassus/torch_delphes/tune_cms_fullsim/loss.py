@@ -381,6 +381,241 @@ OBJECT_LEVEL_OBSERVABLES: list[str] = ["log_E", "log_pt", "eta", "pid"]
 # tensor (the first three columns of OBJECT_LEVEL_OBSERVABLES, in order).
 _OBS_COL: dict[str, int] = {"log_E": 0, "log_pt": 1, "eta": 2}
 
+# ---------------------------------------------------------------------------
+# |eta|-region split of the per-pid shape terms and the pair-mass terms
+# ---------------------------------------------------------------------------
+# Fixed detector regions = the tracker momentum-smearing regions of the CMS card
+# (learnable.py LearnableTrackResolution boundaries; they contain the tracking-
+# efficiency |eta| edges 1.5/2.5 and the ECal barrel/endcap edge). Bins:
+# [0, 0.5], (0.5, 1.5], (1.5, 2.5], (2.5, inf) -- the overflow bin holds forward
+# calorimeter objects (photons / neutral hadrons up to |eta| 5; empty for tracks).
+SHAPE_ETA_EDGES: tuple[float, ...] = (0.5, 1.5, 2.5)
+N_SHAPE_ETA_REGIONS: int = len(SHAPE_ETA_EDGES) + 1
+# Observables whose per-pid shape term is split by region (``eta`` itself stays one
+# pooled term: it is not affected by the smearing and a per-region eta term would be
+# a near-tautology).
+SHAPE_SPLIT_OBS: tuple[str, ...] = ("log_E", "log_pt")
+
+# Pair-mass terms: per event, the two leading-pt reco objects of each of these pids
+# form one pair; the mass hypothesis is the class mass (there is no K/pi/p separation
+# in the reco on either side, so every charged hadron is a pion -- exact for K_S).
+PAIR_MASS_HYPOTHESIS: dict[int, float] = {11: 0.000511, 13: 0.1056584, 211: 0.1395704}
+PAIR_MASS_WEIGHT: float = 1.0
+_PAIR_M_FLOOR: float = 1e-6  # GeV; guards ln(m) for collinear / degenerate pairs
+# The pair-mass terms compare the per-event RESPONSE ``ln(m_reco / m_truth)`` -- the
+# leading-2 reco pair of the class over the leading-2 TRUTH pair of the same class in
+# the same event (truth is the shared input of both sides, so it is a label, not a fitted
+# quantity) -- grouped by a fixed generic grid in ``ln m_truth`` of this width (a factor
+# e^0.5 = 1.65 in mass; label ``mt{lo}-{hi}`` in GeV). Why not the reco mass itself: the
+# leading-2 mass of a J/psi + Z gun sample is BIMODAL, and the quantile-W2 of two finite
+# samples of the same bimodal distribution has a floor set by the binomial noise of the
+# J/psi : Z fraction (~2 % of the pairs matched across Delta ln m ~ 3.4 -> W2^2 ~ 0.1 per
+# category even at the truth) whose only reduction is WIDER peaks -- a rectified
+# "increase a_raw / b_raw" gradient every batch (first M1 muon fit, 2026-08-17: a_raw ran
+# to 6-27x truth while scale / eff converged; the all-truth 1-D scan had its minimum at
+# a ~ 6x truth). Grouping by the common truth mass makes every term unimodal by
+# construction (no resonance knowledge: any sample just populates whatever groups it
+# occupies; a resonance straddling a grid edge splits identically on both sides), and
+# the response removes the truth spread (Breit-Wigner, continuum) event by event, so its
+# width IS the resolution and its center the scale -- the standardization by the target
+# response std then sees a 17 % scale error as ~10 sigma instead of the ~1e-5 the pooled
+# ln m std gave.
+PAIR_TRUTH_LNM_WIDTH: float = 0.5
+
+
+def _pair_truth_group(ln_m_truth: torch.Tensor) -> torch.Tensor:
+    """Truth-mass group index ``floor(ln m_truth / PAIR_TRUTH_LNM_WIDTH)`` (long, gradient-free).
+
+    Returns
+    -------
+    torch.Tensor
+        Long tensor, same shape as ``ln_m_truth``.
+    """
+    return torch.floor(ln_m_truth.detach() / PAIR_TRUTH_LNM_WIDTH).long()
+
+
+def _pair_truth_group_label(group: int) -> str:
+    """Human label of a truth-mass group, e.g. ``"mt2.72-4.48"`` (GeV).
+
+    Returns
+    -------
+    str
+        ``"mt{lo}-{hi}"`` with the group's mass edges in ``%.3g``.
+    """
+    lo = math.exp(group * PAIR_TRUTH_LNM_WIDTH)
+    hi = math.exp((group + 1) * PAIR_TRUTH_LNM_WIDTH)
+    return f"mt{lo:.3g}-{hi:.3g}"
+
+
+def _leading2_ln_mass(
+    pt: torch.Tensor,
+    eta: torch.Tensor,
+    phi: torch.Tensor,
+    sel: torch.Tensor,
+    mass: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``ln m`` of the two highest-``pt`` selected objects per event.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ``(ln_m (n_pairs,), event_index (n_pairs,), eta2 (n_pairs, 2))`` for the events
+        with at least two selected objects; ``ln_m`` is differentiable through ``pt``.
+    """
+    ev = (sel.sum(dim=1) >= 2).nonzero(as_tuple=True)[0]
+    if ev.numel() == 0:
+        empty = pt.new_zeros(0)
+        return empty, ev, pt.new_zeros(0, 2)
+    ranked = torch.where(sel, pt, torch.full_like(pt, float("-inf")))
+    _vals, idx = ranked.topk(2, dim=1)  # gradient-free choice
+    idx = idx[ev]
+    rows = ev.unsqueeze(1)
+    pt2, eta2, phi2 = pt[rows, idx], eta[rows, idx], phi[rows, idx]  # differentiable gathers
+    px = pt2 * torch.cos(phi2)
+    py = pt2 * torch.sin(phi2)
+    pz = pt2 * torch.sinh(eta2)
+    e = torch.sqrt(px * px + py * py + pz * pz + mass * mass)
+    m2 = e.sum(dim=1) ** 2 - px.sum(dim=1) ** 2 - py.sum(dim=1) ** 2 - pz.sum(dim=1) ** 2
+    return 0.5 * torch.log(m2.clamp(min=_PAIR_M_FLOOR**2)), ev, eta2
+
+
+def attach_truth_pair_lnm(truth_particles: torch.Tensor, *obs: dict[str, torch.Tensor]) -> None:
+    """Store the per-event truth leading-2 pair ``ln m`` of every pair class into each
+    ``obs`` dict as ``"truth_pair_lnm:{pid}"`` (``(n_events,)``, NaN for events with fewer
+    than two truth objects of the class). ``truth_particles`` is the padded
+    ``(n_events, n_particles, N_FEATURES)`` batch tensor -- the SAME events, in the same
+    order, as the pred and target dicts (``restore_event_format`` aligns them by event
+    id). Class from the truth PDG id: |pid| 11 / 13 for e / mu, every other charged
+    particle for 211 (the pion hypothesis on both sides, exact for K_S).
+    """
+    from parnassus.data.particle_io import ColumnMap  # noqa: PLC0415 (avoid a data<->loss cycle)
+
+    tp = truth_particles.detach()
+    pid = tp[..., ColumnMap.PID].abs()
+    charged = tp[..., ColumnMap.CHARGE] != 0
+    pt, eta, phi = tp[..., ColumnMap.PT], tp[..., ColumnMap.ETA], tp[..., ColumnMap.PHI]
+    for p, mass in PAIR_MASS_HYPOTHESIS.items():
+        sel = charged & ((pid == p) if p != 211 else ((pid != 11) & (pid != 13)))
+        ln_m, ev, _eta2 = _leading2_ln_mass(pt, eta, phi, sel, mass)
+        lab = torch.full((tp.shape[0],), float("nan"), dtype=pt.dtype, device=pt.device)
+        lab[ev] = ln_m
+        for o in obs:
+            o[f"truth_pair_lnm:{p}"] = lab
+
+
+def _eta_region_index(eta: torch.Tensor) -> torch.Tensor:
+    """Region index in ``[0, N_SHAPE_ETA_REGIONS)`` of ``|eta|`` w.r.t.
+    :data:`SHAPE_ETA_EDGES` (``|eta| <= 0.5`` -> 0, ``(0.5, 1.5]`` -> 1, ...; same
+    ``searchsorted`` semantics as ``LearnableTrackResolution._region_index``).
+
+    Returns
+    -------
+    torch.Tensor
+        Long tensor of region indices, same shape as ``eta``; gradient-free.
+    """
+    edges = torch.tensor(SHAPE_ETA_EDGES, dtype=eta.dtype, device=eta.device)
+    return torch.bucketize(eta.detach().abs(), edges, right=False)
+
+
+def _pair_category(r1: torch.Tensor, r2: torch.Tensor) -> torch.Tensor:
+    """Symmetric pair category of two region indices.
+
+    Returns
+    -------
+    torch.Tensor
+        ``min(r1, r2) * N_SHAPE_ETA_REGIONS + max(r1, r2)`` (label ``eta{r1}{r2}`` with
+        ``r1 <= r2``, see :func:`_pair_category_label`).
+    """
+    lo = torch.minimum(r1, r2)
+    hi = torch.maximum(r1, r2)
+    return lo * N_SHAPE_ETA_REGIONS + hi
+
+
+def _pair_category_label(cat: int) -> str:
+    """Human label of a pair category (inverse of :func:`_pair_category`).
+
+    Returns
+    -------
+    str
+        ``"eta{r1}{r2}"`` with ``r1 <= r2``.
+    """
+    return f"eta{cat // N_SHAPE_ETA_REGIONS}{cat % N_SHAPE_ETA_REGIONS}"
+
+
+def compute_pair_masses(
+    obs: dict[str, torch.Tensor],
+    hypotheses: dict[int, float] | None = None,
+) -> dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Per-event leading-2 pair-mass RESPONSE per class.
+
+    For every pid in ``hypotheses`` (default :data:`PAIR_MASS_HYPOTHESIS`): in each event
+    take the two highest-``pt`` reco objects of that pid (``pt > 0``, so efficiency-
+    killed / padding slots never pair); events with fewer than two contribute no pair.
+    The invariant mass is built from ``(pt, eta, phi)`` with the class mass hypothesis
+    on BOTH sides (no truth matching, no charge, no resonance knowledge -- the SAME rule
+    on a J/psi / Z / K_S gun sample, where the leading pair IS the resonance, and on dijet /
+    HZZ4l, where it is a combinatorial continuum identical on target and trainee). The
+    response is ``ln m_reco - ln m_truth`` with the event's truth leading-2 pair mass of
+    the same class from ``obs["truth_pair_lnm:{pid}"]`` (see :func:`attach_truth_pair_lnm`;
+    REQUIRED -- a class with reco pairs but no truth label raises); pairs whose event has
+    no truth pair (NaN label) are dropped.
+
+    Differentiable through ``pt`` (the smeared / rescaled momentum) on the pred side;
+    ``eta`` / ``phi`` carry no gradient in the trainee (tracks keep their truth angles).
+
+    If ``obs`` already carries precomputed ``"pair_r:{pid}"`` / ``"pair_cat:{pid}"`` /
+    ``"pair_grp:{pid}"`` entries (the DDP wrapper gathers those across ranks) they are
+    returned as-is; if the per-object ``pt``/``eta``/``phi``/``pid`` keys are missing the
+    result is empty.
+
+    Returns
+    -------
+    dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+        ``{pid: (response (n_pairs,), category (n_pairs,) long, truth_group (n_pairs,)
+        long)}`` -- ``category`` from :func:`_pair_category` on the two reco objects'
+        :func:`_eta_region_index`, ``truth_group`` from :func:`_pair_truth_group` on the
+        truth pair mass; pids without a single pair are omitted.
+    """
+    hyp = hypotheses if hypotheses is not None else PAIR_MASS_HYPOTHESIS
+    out: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+    pre = {int(k.split(":", 1)[1]) for k in obs if k.startswith("pair_r:")}
+    if pre:
+        for pid in sorted(pre):
+            r = obs[f"pair_r:{pid}"].reshape(-1)
+            if r.numel():
+                out[pid] = (
+                    r,
+                    obs[f"pair_cat:{pid}"].reshape(-1).long(),
+                    obs[f"pair_grp:{pid}"].reshape(-1).long(),
+                )
+        return out
+    if any(k not in obs for k in ("pt", "eta", "phi", "pid")):
+        return out
+    pt, eta, phi, pid = obs["pt"], obs["eta"], obs["phi"], obs["pid"]
+    if pt.dim() != 2 or pt.shape[1] < 2:
+        return out
+    for p, mass in hyp.items():
+        ln_m, ev, eta2 = _leading2_ln_mass(pt, eta, phi, (pid == p) & (pt > 0), mass)
+        if ev.numel() == 0:
+            continue
+        key = f"truth_pair_lnm:{p}"
+        if key not in obs:
+            raise KeyError(
+                f"compute_pair_masses: {key!r} missing -- call attach_truth_pair_lnm("
+                "truth_particles, pred, target) before the loss"
+            )
+        ln_mt = obs[key].reshape(-1)[ev]
+        keep = torch.isfinite(ln_mt)
+        if not bool(keep.any()):
+            continue
+        r = _eta_region_index(eta2[keep])
+        out[int(p)] = (
+            (ln_m - ln_mt)[keep],
+            _pair_category(r[:, 0], r[:, 1]),
+            _pair_truth_group(ln_mt[keep]),
+        )
+    return out
+
 
 def _group_objects_by_pid(input_tensor: torch.Tensor) -> dict[int, torch.Tensor]:
     """Flatten ``(n_events, max_n_particles, n_obs)`` -> ``(N, n_obs)``, drop
@@ -960,6 +1195,11 @@ DEFAULT_SOFT_HIST_BIN_EDGES: dict[str, torch.Tensor] = {
     "multiplicity": torch.linspace(0.0, 400.0, 41, dtype=torch.float64),
     "ht": torch.linspace(0.0, 2000.0, 41, dtype=torch.float64),
     "log_ht": torch.linspace(0.0, 8.0, 41, dtype=torch.float64),
+    # Leading-2 pair-mass response ln(m_reco / m_truth): 0.02-wide bins over +-0.8 (the
+    # scale_raw range (0.7, 1.3) is +-0.36). NOTE: coarser than the 1-3 % resolutions
+    # the terms resolve; the bin-free wasserstein_1d is the loss of choice for those --
+    # this grid only keeps soft_hist functional.
+    "pair_r": torch.linspace(-0.8, 0.8, 81, dtype=torch.float64),
 }
 
 # Relative weight of each per-pid kinematic observable in the per-pid soft-histogram
@@ -991,6 +1231,9 @@ def _per_pid_obs_loss(
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
     return_breakdown: bool = False,
+    eta_split: bool = True,
+    pair_mass: bool = True,
+    pair_mass_weight: float = PAIR_MASS_WEIGHT,
 ) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """Shared body of the per-pid, per-observable shape losses
     (:func:`per_pid_soft_hist_loss` and :func:`per_pid_wasserstein_1d_loss`).
@@ -1009,11 +1252,40 @@ def _per_pid_obs_loss(
 
     ``pid_weighting`` / ``pid_weight_floor`` (:func:`_pid_population_weights`) optionally
     scale each pid's shape terms by its population fraction; ``"equal"`` (default) is a
-    no-op. Only the per-pid shape terms are weighted -- the ``log(HT)`` and count terms
-    are untouched.
+    no-op. Only the per-pid shape terms are weighted -- the ``log(HT)``, pair-mass and
+    count terms are untouched.
+
+    ``eta_split`` (default True): the ``log_E`` / ``log_pt`` shape terms
+    (:data:`SHAPE_SPLIT_OBS`) are split by the reco object's |eta| region
+    (:data:`SHAPE_ETA_EDGES`), one term per ``(pid, obs, region)`` present on BOTH sides
+    (key ``"{pid}:{obs}:eta{r}"``), weighted by ``pid_weight * obj_weight * f_r`` with
+    ``f_r`` the TARGET population fraction of that pid in region r (sum_r f_r = 1, so the
+    sum stays on the scale of the pooled term -- W2^2(mixture) <= sum_r f_r W2^2_r by
+    convexity -- and sparse regions cannot dominate). ``eta`` stays one pooled term.
+    Rationale: the momentum-smearing / calo parameters are per-region; pooled over eta a
+    per-region scale can only be fitted as a mixture. ``False`` reproduces the pooled
+    terms bit-for-bit.
+
+    ``pair_mass`` (default True): adds the per-event pair-mass shape terms
+    (:func:`compute_pair_masses`: the RESPONSE ``ln(m_reco / m_truth)`` of the two
+    leading-pt reco objects of each of pids 11/13/211 under the class mass hypothesis
+    over the event's truth leading-2 pair; needs the ``truth_pair_lnm:{pid}`` labels of
+    :func:`attach_truth_pair_lnm` on both dicts), one term per ``(pid, truth-mass group,
+    |eta|-region pair category)`` present on both sides (key
+    ``"pair:{pid}:mt{lo}-{hi}:eta{r1}{r2}"``, category ``"pair"``; groups from the fixed
+    ``ln m_truth`` grid :data:`PAIR_TRUTH_LNM_WIDTH` -- see the note there on why the
+    reco-mass mixture must not be compared as a whole), weight ``pair_mass_weight * f``
+    with ``f`` the fraction of ALL target pairs (every class) in that (pid, group,
+    category) -- the pair terms sum to ``pair_mass_weight`` and a class with a handful of
+    stray pairs fades; standardized by the target response std pooled over classes.
+    Count-blind like every shape term. On a resonance-gun sample (one J/psi / Z / K_S per
+    event) the response width IS the track resolution (``a_raw``/``b_raw``) and its
+    center the ``scale_raw`` -- the only 1-D observable that carries the smearing width
+    on a smooth spectrum; on other samples the leading pair is a combinatorial
+    continuum, identical on both sides.
 
     When ``return_breakdown`` is True the function returns ``(loss, components)`` -- a
-    list of :class:`LossComponent` (one per ``pid:obs`` shape term, the ``log_ht`` event
+    list of :class:`LossComponent` (one per shape term, pair term, the ``log_ht`` event
     term, and each per-class count term) carrying the raw (pre-weight) value, the weight
     applied, and the weighted (post-weight) value, with ``sum(c.weighted) == loss``.
     ``False`` (default) returns the bare scalar exactly as before, with zero extra work.
@@ -1051,14 +1323,59 @@ def _per_pid_obs_loss(
     for pid in present_pids:
         x = pred_groups[pid]  # (n_pred, 3), differentiable
         y = target_groups[pid]  # (n_tgt, 3), reference (detached inside term_fn)
+        if eta_split:
+            # Region of every object (reco |eta|, column 2), and the target population
+            # fraction per region (detached plain floats).
+            rx = _eta_region_index(x[:, _OBS_COL["eta"]])
+            ry = _eta_region_index(y[:, _OBS_COL["eta"]])
+            n_y = torch.bincount(ry, minlength=N_SHAPE_ETA_REGIONS).tolist()
+            n_x = torch.bincount(rx, minlength=N_SHAPE_ETA_REGIONS).tolist()
+            tot_y = float(sum(n_y))
         for obs in ("log_E", "log_pt", "eta"):
             col = _OBS_COL[obs]
+            base_weight = pid_weights[pid] * float(obj_weights.get(obs, 1.0))
+            if eta_split and obs in SHAPE_SPLIT_OBS:
+                for r in range(N_SHAPE_ETA_REGIONS):
+                    if n_x[r] == 0 or n_y[r] == 0:
+                        continue  # region absent on one side: no term (sum f_r < 1)
+                    key = f"{pid}:{obs}:eta{r}"
+                    raw = term_fn(x[rx == r, col], y[ry == r, col], obs)
+                    weight = base_weight * (n_y[r] / tot_y)
+                    pid_obs_raw[key] = raw
+                    pid_obs_weight[key] = weight
+                    pid_obs_terms[key] = weight * raw
+                continue
             key = f"{pid}:{obs}"
             raw = term_fn(x[:, col], y[:, col], obs)
-            weight = pid_weights[pid] * float(obj_weights.get(obs, 1.0))
             pid_obs_raw[key] = raw
-            pid_obs_weight[key] = weight
-            pid_obs_terms[key] = weight * raw
+            pid_obs_weight[key] = base_weight
+            pid_obs_terms[key] = base_weight * raw
+
+    # Per-event pair-mass terms (leading-2 objects of each class, per |eta|-region pair
+    # category); count-blind; the pred side keeps its graph through pt.
+    pair_terms: dict[str, torch.Tensor] = {}
+    pair_raw: dict[str, torch.Tensor] = {}
+    pair_weight: dict[str, float] = {}
+    if pair_mass and abs(pair_mass_weight) > 0.0:
+        pred_pairs = compute_pair_masses(pred)
+        tgt_pairs = compute_pair_masses(target)
+        tot_t = float(sum(r.numel() for r, _c, _g in tgt_pairs.values()))  # all target pairs
+        for pid in sorted(set(pred_pairs) & set(tgt_pairs)):
+            rp, cp, gp = pred_pairs[pid]
+            rt, ct, gt = tgt_pairs[pid]
+            rt = rt.detach()
+            for g in torch.unique(torch.cat([gp, gt])).tolist():
+                for cat in range(N_SHAPE_ETA_REGIONS**2):
+                    sp = (gp == g) & (cp == cat)
+                    st = (gt == g) & (ct == cat)
+                    if not (bool(sp.any()) and bool(st.any())):
+                        continue
+                    key = f"pair:{pid}:{_pair_truth_group_label(g)}:{_pair_category_label(cat)}"
+                    raw = term_fn(rp[sp], rt[st], "pair_r")
+                    weight = pair_mass_weight * (float(st.sum()) / tot_t)
+                    pair_raw[key] = raw
+                    pair_weight[key] = weight
+                    pair_terms[key] = weight * raw
 
     # Event-level term: the same shape distance on the per-event log(HT) distribution,
     # down-weighted by event_weight (mirrors the Wasserstein event term; multiplicity is
@@ -1090,6 +1407,7 @@ def _per_pid_obs_loss(
     )
     terms = (
         list(pid_obs_terms.values())
+        + list(pair_terms.values())
         + ([event_term] if event_term is not None else [])
         + count_terms
     )
@@ -1100,11 +1418,12 @@ def _per_pid_obs_loss(
     # loss: confirms the count terms sit on the same O(1) scale as the per-pid shape terms.
     if os.environ.get("MCGEN_LOSS_DEBUG"):
         pidh = {k: float(v) for k, v in pid_obs_terms.items()}
+        pairh = {k: float(v) for k, v in pair_terms.items()}
         evt = float(event_term) if event_term is not None else 0.0
         cnt = [float(c) for c in count_terms]
         print(
-            f"[loss] {debug_label}={pidh} event(w)={evt:.4f} count(w)={cnt} "
-            f"total={float(torch.stack(terms).sum()):.4f}",
+            f"[loss] {debug_label}={pidh} pair(w)={pairh} event(w)={evt:.4f} "
+            f"count(w)={cnt} total={float(torch.stack(terms).sum()):.4f}",
             flush=True,
         )
     total = torch.stack(terms).sum()
@@ -1123,6 +1442,11 @@ def _per_pid_obs_loss(
         weights.append(pid_obs_weight[key])
         raw_tensors.append(pid_obs_raw[key])
         wtd_tensors.append(pid_obs_terms[key])
+    for key, wtd in pair_terms.items():
+        cat_label.append(("pair", key))
+        weights.append(pair_weight[key])
+        raw_tensors.append(pair_raw[key])
+        wtd_tensors.append(wtd)
     if event_term is not None:
         cat_label.append(("event", "log_ht"))
         weights.append(float(event_weight))
@@ -1156,6 +1480,9 @@ def per_pid_soft_hist_loss(
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
     return_breakdown: bool = False,
+    eta_split: bool = True,
+    pair_mass: bool = True,
+    pair_mass_weight: float = PAIR_MASS_WEIGHT,
 ) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """Per-PID, per-observable soft-histogram MSE loss (feature parity with
     :func:`per_event_wasserstein_loss`).
@@ -1211,6 +1538,9 @@ def per_pid_soft_hist_loss(
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
         return_breakdown=return_breakdown,
+        eta_split=eta_split,
+        pair_mass=pair_mass,
+        pair_mass_weight=pair_mass_weight,
     )
 
 
@@ -1244,6 +1574,19 @@ def _pooled_target_obs_std(
         if tv.numel()
         else torch.ones((), dtype=tv.dtype)
     )
+    # Pair-mass terms: ONE scale on the target's response ln(m_reco/m_truth), pooled over
+    # classes, truth groups and |eta| pair categories (the response is dimensionless and
+    # centered alike everywhere, so the pooled std is the resolution; a per-class /
+    # per-group std would collapse on a class with a handful of stray pairs).
+    has_labels = any(k.startswith(("truth_pair_lnm:", "pair_r:")) for k in target)
+    resp = [r.detach() for r, _c, _g in (compute_pair_masses(target) if has_labels else {}).values()]
+    v = torch.cat(resp) if resp else torch.zeros(0, dtype=target_particles.dtype)
+    v = v[torch.isfinite(v)]
+    scales["pair_r"] = (
+        v.std(unbiased=False).clamp(min=eps_floor)
+        if v.numel() > 1
+        else torch.ones((), dtype=target_particles.dtype)
+    )
     return scales
 
 
@@ -1261,6 +1604,9 @@ def per_pid_wasserstein_1d_loss(
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
     return_breakdown: bool = False,
+    eta_split: bool = True,
+    pair_mass: bool = True,
+    pair_mass_weight: float = PAIR_MASS_WEIGHT,
 ) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """Per-PID, per-observable BIN-FREE 1D Wasserstein loss.
 
@@ -1317,6 +1663,9 @@ def per_pid_wasserstein_1d_loss(
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
         return_breakdown=return_breakdown,
+        eta_split=eta_split,
+        pair_mass=pair_mass,
+        pair_mass_weight=pair_mass_weight,
     )
 
 
@@ -1334,6 +1683,9 @@ def per_pid_wasserstein_1d_loss_distributed(
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
     return_breakdown: bool = False,
+    eta_split: bool = True,
+    pair_mass: bool = True,
+    pair_mass_weight: float = PAIR_MASS_WEIGHT,
 ) -> torch.Tensor | tuple[torch.Tensor, list[LossComponent]]:
     """DDP-aware wrapper: gathers pred/target across ranks before computing the
     bin-free 1D Wasserstein loss.
@@ -1362,6 +1714,9 @@ def per_pid_wasserstein_1d_loss_distributed(
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
             return_breakdown=return_breakdown,
+            eta_split=eta_split,
+            pair_mass=pair_mass,
+            pair_mass_weight=pair_mass_weight,
         )
 
     pred_gathered: dict[str, torch.Tensor] = {}
@@ -1388,6 +1743,31 @@ def per_pid_wasserstein_1d_loss_distributed(
         target_gathered["log_ht"] = _all_gather_varlen(
             target["log_ht"].detach().reshape(-1), differentiable=False
         )
+
+    # ---- per-event pair-mass responses ---------------------------------------
+    # Computed per rank from the (per-event) pt/eta/phi/pid + truth labels, then gathered
+    # as flat arrays; the inner loss picks the precomputed "pair_r/pair_cat/pair_grp:{pid}"
+    # entries up (compute_pair_masses) instead of recomputing from per-event tensors,
+    # which the gathered dicts no longer carry. Every rank must issue the same
+    # collectives, so gather every hypothesis pid (possibly empty on this rank).
+    if pair_mass:
+        pred_pairs = compute_pair_masses(pred)
+        tgt_pairs = compute_pair_masses(target)
+        dt, dev = pred["pt"].dtype, pred["pt"].device
+        empty = (
+            torch.zeros(0, dtype=dt, device=dev),
+            torch.zeros(0, dtype=torch.long, device=dev),
+            torch.zeros(0, dtype=torch.long, device=dev),
+        )
+        for pid in sorted(PAIR_MASS_HYPOTHESIS):
+            rp, cp, gp = pred_pairs.get(pid, empty)
+            rt, ct, gt = tgt_pairs.get(pid, empty)
+            pred_gathered[f"pair_r:{pid}"] = _all_gather_varlen(rp, differentiable=True)
+            pred_gathered[f"pair_cat:{pid}"] = _all_gather_varlen(cp.to(dt), differentiable=False)
+            pred_gathered[f"pair_grp:{pid}"] = _all_gather_varlen(gp.to(dt), differentiable=False)
+            target_gathered[f"pair_r:{pid}"] = _all_gather_varlen(rt.detach(), differentiable=False)
+            target_gathered[f"pair_cat:{pid}"] = _all_gather_varlen(ct.to(dt), differentiable=False)
+            target_gathered[f"pair_grp:{pid}"] = _all_gather_varlen(gt.to(dt), differentiable=False)
 
     # ---- differentiable expected-count terms --------------------------------
     for _out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
@@ -1417,6 +1797,9 @@ def per_pid_wasserstein_1d_loss_distributed(
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
         return_breakdown=return_breakdown,
+        eta_split=eta_split,
+        pair_mass=pair_mass,
+        pair_mass_weight=pair_mass_weight,
     )
 
 

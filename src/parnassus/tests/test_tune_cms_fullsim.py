@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -59,9 +60,13 @@ from parnassus.torch_delphes.tune_cms_fullsim.config import (
 )
 from parnassus.torch_delphes.tune_cms_fullsim.loss import (
     LOSS_CHOICES,
+    N_SHAPE_ETA_REGIONS,
     PID_WEIGHTING_CHOICES,
+    SHAPE_ETA_EDGES,
     _count_terms,
     _pid_population_weights,
+    attach_truth_pair_lnm,
+    compute_pair_masses,
     get_loss_fn,
     per_event_wasserstein_loss,
     per_pid_soft_hist_loss,
@@ -429,6 +434,7 @@ def test_wasserstein_1d_one_step_gradient_is_finite(fixture_root: Path):
     out = card(truth[mask])
     eflow = restore_event_format(out["EFlowObject"], mask)
     pred = load_pflow_targets_from_tensor(eflow)
+    attach_truth_pair_lnm(truth, pred, target)
     for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred[pred_key] = out[out_key]
 
@@ -468,6 +474,7 @@ def test_soft_hist_one_step_gradient_is_finite(fixture_root: Path):
     out = card(truth[mask])
     eflow = restore_event_format(out["EFlowObject"], mask)
     pred = load_pflow_targets_from_tensor(eflow)
+    attach_truth_pair_lnm(truth, pred, target)
     # Inject BOTH the tracking and calo expected counts so every count term fires,
     # exactly as training.py does.
     for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
@@ -552,6 +559,7 @@ def test_pid_weighting_wired_and_equal_default(fixture_root: Path, loss_fn):
     mask = torch.any(truth != 0, dim=-1)
     out = card(truth[mask])
     pred = load_pflow_targets_from_tensor(restore_event_format(out["EFlowObject"], mask))
+    attach_truth_pair_lnm(truth, pred, target)
     for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred[pred_key] = out[out_key]
 
@@ -610,9 +618,10 @@ def test_pid_weighting_downweights_rare_pid(loss_fn):
 
 def test_pid_weighting_keeps_leptons_learnable(fixture_root: Path):
     """Under 'sqrt_fraction' the muon/electron momentum-smearing params still receive a
-    finite, nonzero gradient (their only gradient path is the shape term), and under the
-    aggressive 'fraction' mode that same gradient is SMALLER -- confirming the per-pid
-    weight actually reaches the parameter gradient."""
+    finite, nonzero gradient (their only gradient path here is the per-pid shape term:
+    the pair-mass terms -- a second, un-weighted path -- are switched off to isolate the
+    per-pid weighting), and under the aggressive 'fraction' mode that same gradient is
+    SMALLER -- confirming the per-pid weight actually reaches the parameter gradient."""
     arrays = load_cms_flow_root(fixture_root, n_events=300)
     truth = load_truth_events(arrays)
     target = load_pflow_targets(arrays)
@@ -627,7 +636,7 @@ def test_pid_weighting_keeps_leptons_learnable(fixture_root: Path):
         pred = load_pflow_targets_from_tensor(restore_event_format(out["EFlowObject"], mask))
         for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
             pred[pred_key] = out[out_key]
-        loss = per_pid_wasserstein_1d_loss(pred, target, pid_weighting=mode)
+        loss = per_pid_wasserstein_1d_loss(pred, target, pid_weighting=mode, pair_mass=False)
         assert torch.isfinite(loss)
         loss.backward()
         total = 0.0
@@ -661,6 +670,7 @@ def test_count_terms_shared_between_losses(fixture_root: Path):
     out = card(truth[mask])
     eflow = restore_event_format(out["EFlowObject"], mask)
     pred = load_pflow_targets_from_tensor(eflow)
+    attach_truth_pair_lnm(truth, pred, target)
     for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
         pred[pred_key] = out[out_key]
 
@@ -1284,6 +1294,26 @@ def test_intermediate_plots_include_per_pid_pages(tmp_path: Path):
     # Every PID group is populated, so we get exactly one extra page per group.
     assert _page_count(p_pid) - _page_count(p_nopid) == len(_PID_GROUPS)
 
+    # Pair-mass pages: one extra page per class whose "pair_r:{pid}" / "pair_cat:{pid}"
+    # arrays are present (here muons and charged hadrons, not electrons).
+    def with_pairs(d: dict, shift: float) -> dict:
+        d = dict(d)
+        for pid_abs in (13, 211):
+            d[f"pair_r:{pid_abs}"] = torch.randn(300, dtype=torch.float64) * 0.02 + shift
+            d[f"pair_cat:{pid_abs}"] = torch.randint(0, 6, (300,))
+            d[f"pair_grp:{pid_abs}"] = torch.randint(2, 4, (300,))
+        return d
+
+    p_pair = save_intermediate_observable_plots(
+        with_pairs(pred, 0.01),
+        with_pairs(target, 0.0),
+        OBSERVABLES,
+        step=5,
+        output_dir=tmp_path,
+        init_by_key=with_pairs(init, 0.02),
+    )
+    assert _page_count(p_pair) - _page_count(p_pid) == 2
+
 
 # ---------------------------------------------------------------------------
 # Real-Pythia pseudodata end-to-end test
@@ -1335,3 +1365,294 @@ def test_fit_against_committed_pseudodata(tmp_path: Path):
     assert max_shift > 0.01, f"ECal scale barely moved from 1.0: after={after_ecal.tolist()}"
     # None should have diverged the wrong way.
     assert float(after_ecal.min()) > 0.95, f"ECal scale drifted below 0.95: {after_ecal.tolist()}"
+
+
+# ---------------------------------------------------------------------------
+# |eta|-split shape terms + leading-2 pair-mass terms
+# ---------------------------------------------------------------------------
+
+
+def _make_ref_obs(seed: int, shift: float = 0.0) -> dict[str, torch.Tensor]:
+    """Deterministic synthetic padded observables: 64 events x up to 12 objects of pids
+    211/11/13/22, pt log-uniform ~0.5-200 GeV, |eta| < 3, phi uniform; log_E from
+    pt cosh(eta). Used to pin the OFF/OFF loss values to the pre-split implementation.
+    """
+    g = torch.Generator().manual_seed(seed)
+    n_ev, width = 64, 12
+    n_obj = torch.randint(2, width + 1, (n_ev,), generator=g)
+    pt = torch.zeros(n_ev, width, dtype=torch.float64)
+    eta = torch.zeros_like(pt)
+    phi = torch.zeros_like(pt)
+    pid = torch.zeros_like(pt)
+    pids = torch.tensor([211.0, 211.0, 11.0, 13.0, 22.0], dtype=torch.float64)
+    for i in range(n_ev):
+        k = int(n_obj[i])
+        pt[i, :k] = torch.exp(torch.rand(k, generator=g, dtype=torch.float64) * 6.0 - 0.7) * (
+            1.0 + shift
+        )
+        eta[i, :k] = torch.rand(k, generator=g, dtype=torch.float64) * 6.0 - 3.0
+        phi[i, :k] = torch.rand(k, generator=g, dtype=torch.float64) * math.tau
+        pid[i, :k] = pids[torch.randint(0, 5, (k,), generator=g)]
+    valid = pt != 0
+    e = pt * torch.cosh(eta)
+    return {
+        "pt": pt,
+        "eta": eta,
+        "phi": phi,
+        "pid": pid,
+        "log_pt": torch.where(valid, torch.log(pt.clamp(min=1e-6)), torch.zeros_like(pt)),
+        "log_E": torch.where(valid, torch.log(e.clamp(min=1e-6)), torch.zeros_like(pt)),
+        "multiplicity": valid.sum(dim=1).to(pt.dtype),
+        "ht": pt.sum(dim=1),
+        "log_ht": torch.log(pt.sum(dim=1).clamp(min=1e-6)),
+    }
+
+
+def test_eta_split_and_pair_mass_off_reproduce_pooled_loss_exactly():
+    """``eta_split=False, pair_mass=False`` reproduces the pre-split per-pid losses
+    bit-for-bit (values frozen from the implementation before the split was added).
+    """
+    pred, tgt = _make_ref_obs(1, shift=0.05), _make_ref_obs(2)
+    w, wc = per_pid_wasserstein_1d_loss(
+        pred, tgt, eta_split=False, pair_mass=False, return_breakdown=True
+    )
+    h, hc = per_pid_soft_hist_loss(
+        pred, tgt, eta_split=False, pair_mass=False, return_breakdown=True
+    )
+    assert float(w) == pytest.approx(3.583771651462262e-01, rel=1e-12, abs=0.0)
+    assert float(h) == pytest.approx(2.522655773210395e-03, rel=1e-12, abs=0.0)
+    assert len(wc) == len(hc) == 13  # 4 pids x 3 obs + log_ht, no region / pair keys
+    assert not any(re.search(r":eta\d", c.label) or c.category == "pair" for c in wc)
+
+
+def test_eta_split_keys_and_weights():
+    """With the split ON: ``log_E``/``log_pt`` come as one term per populated |eta| region
+    (``{pid}:{obs}:eta{r}``), ``eta`` stays a single pooled term, and the region weights of
+    a pid/obs sum to the pooled pid weight x obj weight (target-fraction weights, all four
+    regions populated here).
+    """
+    pred, tgt = _make_ref_obs(1, shift=0.05), _make_ref_obs(2)
+    _, comps = per_pid_wasserstein_1d_loss(
+        pred, tgt, eta_split=True, pair_mass=False, return_breakdown=True
+    )
+    labels = {c.label for c in comps}
+    for r in range(N_SHAPE_ETA_REGIONS):
+        assert f"211:log_pt:eta{r}" in labels
+        assert f"211:log_E:eta{r}" in labels
+    assert "211:eta" in labels
+    assert "211:log_pt" not in labels
+    w_split = sum(c.weight for c in comps if c.label.startswith("211:log_pt:eta"))
+    assert w_split == pytest.approx(0.5, abs=1e-12)  # obj weight 0.5 x pid weight 1 (equal)
+    assert not any(c.category == "pair" for c in comps)
+
+
+def test_eta_split_attributes_a_shift_to_its_region():
+    """Shifting ONLY the region-1 objects of a pid on the pred side changes ONLY that
+    pid's ``:eta1`` terms (the other regions' terms are bit-identical), which is exactly
+    the attribution the pooled term cannot provide.
+    """
+    tgt = _make_ref_obs(3)
+    pred = {k: v.clone() for k, v in tgt.items()}
+    lo, hi = SHAPE_ETA_EDGES[0], SHAPE_ETA_EDGES[1]
+    in_r1 = (pred["pid"] == 211) & (pred["eta"].abs() > lo) & (pred["eta"].abs() <= hi)
+    pred["log_pt"] = torch.where(in_r1, pred["log_pt"] + 0.3, pred["log_pt"])
+    pred["log_E"] = torch.where(in_r1, pred["log_E"] + 0.3, pred["log_E"])
+    _, base = per_pid_wasserstein_1d_loss(tgt, tgt, pair_mass=False, return_breakdown=True)
+    _, comps = per_pid_wasserstein_1d_loss(pred, tgt, pair_mass=False, return_breakdown=True)
+    base_by = {c.label: c.raw for c in base}
+    for c in comps:
+        if c.label.startswith("211:log_pt:eta") or c.label.startswith("211:log_E:eta"):
+            if c.label.endswith(":eta1"):
+                assert c.raw > base_by[c.label] + 1e-6, c.label
+            else:
+                assert c.raw == pytest.approx(base_by[c.label], abs=1e-12), c.label
+
+
+def test_pair_masses_analytic_and_categories():
+    """Leading-2 pair mass: analytic mass of a hand-built muon pair (third, softer muon
+    ignored), category from the two objects' |eta| regions, and no pair for events with
+    fewer than two objects of the class.
+    """
+    obs = _mk_padded_obs(
+        pt_rows=[[10.0, 10.0, 3.0], [5.0], [2.0, 2.0]],
+        pid_rows=[[13, 13, 13], [13], [211, 13]],
+        eta_rows=[[0.0, 0.3, 1.0], [0.0], [0.0, 2.0]],
+    )
+    obs["phi"] = torch.tensor(
+        [[0.0, math.pi, 0.5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64
+    )
+    # Truth pair mass label 1 GeV (ln = 0) -> the response IS ln m_reco; the analytic
+    # check below therefore reads the reco mass off the response.
+    obs["truth_pair_lnm:13"] = torch.zeros(3, dtype=torch.float64)
+    obs["truth_pair_lnm:211"] = torch.zeros(3, dtype=torch.float64)
+    pairs = compute_pair_masses(obs)
+    assert set(pairs) == {13}  # event 1: one muon; event 2: one muon + one chad -> no pair
+    ln_m, cat, grp = pairs[13]
+    assert ln_m.shape == cat.shape == grp.shape == (1,)
+    assert int(grp[0]) == 0  # ln m_truth = 0 -> group 0 (mass 1-1.65 GeV)
+    m_mu = 0.1056584
+    e1 = math.sqrt(100.0 + m_mu**2)
+    e2 = math.sqrt(100.0 * math.cosh(0.3) ** 2 + m_mu**2)
+    pz2 = 10.0 * math.sinh(0.3)
+    m_hand = math.sqrt((e1 + e2) ** 2 - pz2**2)  # px, py cancel (back-to-back)
+    assert math.exp(float(ln_m[0])) == pytest.approx(m_hand, rel=1e-12)
+    assert int(cat[0]) == 0  # both objects in region 0 -> category eta00
+    # A pair straddling regions 0 and 2 -> sorted category (0, 2).
+    obs2 = _mk_padded_obs([[4.0, 4.0]], [[211, 211]], [[0.2, -2.0]])
+    obs2["phi"] = torch.tensor([[0.0, 1.0]], dtype=torch.float64)
+    obs2["truth_pair_lnm:211"] = torch.tensor([math.log(91.0)], dtype=torch.float64)
+    _, cat2, grp2 = compute_pair_masses(obs2)[211]
+    assert int(cat2[0]) == 0 * N_SHAPE_ETA_REGIONS + 2
+    assert int(grp2[0]) == 9  # ln 91 = 4.51 -> group [4.5, 5.0) = 90-148 GeV
+    # A missing truth label for a class with reco pairs is an error, not a silent skip;
+    # an event without a truth pair (NaN label) drops that pair.
+    del obs2["truth_pair_lnm:211"]
+    with pytest.raises(KeyError):
+        compute_pair_masses(obs2)
+    obs2["truth_pair_lnm:211"] = torch.tensor([float("nan")], dtype=torch.float64)
+    assert compute_pair_masses(obs2) == {}
+
+
+def _truth_from_obs(obs: dict[str, torch.Tensor]) -> torch.Tensor:
+    """A padded ``(n_events, width, N_FEATURES)`` truth tensor whose PID / CHARGE / PT /
+    ETA / PHI columns mirror ``obs`` (211/11/13 charged, 22 neutral), for
+    :func:`attach_truth_pair_lnm` in the synthetic tests.
+    """
+    pt = obs["pt"]
+    t = torch.zeros(*pt.shape, N_FEATURES, dtype=pt.dtype)
+    t[..., ColumnMap.PID] = obs["pid"]
+    t[..., ColumnMap.CHARGE] = (obs["pid"] != 22) & (obs["pid"] != 0)
+    t[..., ColumnMap.PT] = pt
+    t[..., ColumnMap.ETA] = obs["eta"]
+    t[..., ColumnMap.PHI] = obs["phi"]
+    return t
+
+
+def _make_gun_obs(
+    pts: list[float], seed: int = 0, truth_pts: list[float] | None = None
+) -> dict[str, torch.Tensor]:
+    """One back-to-back muon pair per event at eta = 0 (category eta00), both legs with
+    the given reco pt, so the pair mass is ``sqrt(4 pt^2 + 2 m_mu^2)`` -- pt 1.55 ->
+    J/psi-like 3.1 GeV, 45.5 -> Z-like 91 GeV. The truth pair label
+    (``truth_pair_lnm:13``) is the same formula on ``truth_pts`` (default = ``pts``, i.e.
+    response 0). Deterministic.
+    """
+    g = torch.Generator().manual_seed(seed)
+    n = len(pts)
+    pt = torch.zeros(n, 3, dtype=torch.float64)
+    pt[:, 0] = torch.tensor(pts, dtype=torch.float64)
+    pt[:, 1] = pt[:, 0]
+    phi0 = torch.rand(n, generator=g, dtype=torch.float64) * math.tau
+    phi = torch.zeros_like(pt)
+    phi[:, 0] = phi0
+    phi[:, 1] = torch.remainder(phi0 + math.pi, math.tau)
+    eta = torch.zeros_like(pt)
+    pid = torch.zeros_like(pt)
+    pid[:, :2] = 13.0
+    valid = pt != 0
+    e = pt * torch.cosh(eta)
+    tpt = torch.tensor(truth_pts if truth_pts is not None else pts, dtype=torch.float64)
+    m_mu = 0.1056584
+    return {
+        "pt": pt,
+        "eta": eta,
+        "phi": phi,
+        "pid": pid,
+        "log_pt": torch.where(valid, torch.log(pt.clamp(min=1e-6)), torch.zeros_like(pt)),
+        "log_E": torch.where(valid, torch.log(e.clamp(min=1e-6)), torch.zeros_like(pt)),
+        "multiplicity": valid.sum(dim=1).to(pt.dtype),
+        "ht": pt.sum(dim=1),
+        "log_ht": torch.log(pt.sum(dim=1).clamp(min=1e-6)),
+        "truth_pair_lnm:13": 0.5 * torch.log(4.0 * tpt**2 + 2.0 * m_mu**2),
+    }
+
+
+def test_pair_mass_terms_are_responses_grouped_by_truth_mass():
+    """Pair terms compare the response ln(m_reco/m_truth), one term per (pid, truth-mass
+    group, category): a J/psi-like + Z-like sample gives ``pair:13:mt2.72-4.48:eta00`` and
+    ``pair:13:mt90-148:eta00``; the term weight is the target fraction of all pairs in the
+    (pid, group, category); an identical response on both sides gives a ZERO term regardless of
+    the J/psi : Z mixture fraction (the bimodal reco-mass mixture that widened ``a_raw``
+    in the first M1 fit cannot enter); a momentum-scale shift lights both group terms up
+    with the response centered at ln(scale).
+    """
+    tgt = _make_gun_obs([1.55] * 30 + [45.5] * 50, seed=1)  # 80 pairs
+    pred = _make_gun_obs([1.55] * 50 + [45.5] * 10, seed=2)  # 60 pairs, other mixture
+    _, comps = per_pid_wasserstein_1d_loss(
+        pred, tgt, eta_split=False, pair_mass=True, pair_mass_weight=0.7, return_breakdown=True
+    )
+    pair = {c.label: c for c in comps if c.category == "pair"}
+    assert set(pair) == {"pair:13:mt2.72-4.48:eta00", "pair:13:mt90-148:eta00"}
+    assert pair["pair:13:mt2.72-4.48:eta00"].weight == pytest.approx(0.7 * 30 / 80)
+    assert pair["pair:13:mt90-148:eta00"].weight == pytest.approx(0.7 * 50 / 80)
+    assert all(abs(c.raw) < 1e-12 for c in pair.values())  # response 0 on both sides
+    truth = [1.55] * 50 + [45.5] * 10
+    shifted = _make_gun_obs([1.1 * t for t in truth], seed=2, truth_pts=truth)
+    resp, _cat, grp = compute_pair_masses(shifted)[13]
+    # not exactly ln 1.1: the muon-mass term in m^2 = 4 pt^2 + 2 m_mu^2 does not scale
+    assert torch.allclose(resp, torch.full_like(resp, math.log(1.1)), atol=2e-3)
+    assert set(grp.tolist()) == {2, 9}
+    _, comps_s = per_pid_wasserstein_1d_loss(
+        shifted, tgt, eta_split=False, pair_mass=True, pair_mass_weight=0.7, return_breakdown=True
+    )
+    pair_s = {c.label: c for c in comps_s if c.category == "pair"}
+    assert set(pair_s) == set(pair)
+    assert all(c.raw > 1e-3 for c in pair_s.values())
+
+
+def test_pair_mass_terms_keys_weights_and_gradient():
+    """Pair terms appear per (pid, window, category) present on both sides with weights
+    summing to at most ``pair_mass_weight`` per pid, are absent with ``pair_mass=False``
+    or weight 0, and carry a finite, non-zero gradient to the pred pt.
+    """
+    pred, tgt = _make_ref_obs(1, shift=0.05), _make_ref_obs(2)
+    attach_truth_pair_lnm(_truth_from_obs(tgt), pred, tgt)  # shared truth = the target's
+    pred["pt"] = pred["pt"].clone().requires_grad_(True)
+    loss, comps = per_pid_wasserstein_1d_loss(
+        pred, tgt, eta_split=False, pair_mass=True, pair_mass_weight=0.7, return_breakdown=True
+    )
+    pair = [c for c in comps if c.category == "pair"]
+    assert pair, "no pair terms"
+    # weights = target fractions over ALL pairs (every class); (group, category) cells
+    # present on BOTH sides only, so the sum is <= pair_mass_weight
+    assert 0.0 < sum(c.weight for c in pair) <= 0.7 + 1e-12
+    assert all(re.fullmatch(r"pair:\d+:mt[\d.e+-]+-[\d.e+-]+:eta\d\d", c.label) for c in pair)
+    loss.backward()
+    g = pred["pt"].grad
+    assert g is not None
+    assert torch.isfinite(g).all()
+    assert float(g.abs().sum()) > 0
+    _, comps_off = per_pid_wasserstein_1d_loss(
+        pred, tgt, eta_split=False, pair_mass=False, return_breakdown=True
+    )
+    assert not any(c.category == "pair" for c in comps_off)
+    _, comps_w0 = per_pid_wasserstein_1d_loss(
+        pred, tgt, eta_split=False, pair_mass=True, pair_mass_weight=0.0, return_breakdown=True
+    )
+    assert not any(c.category == "pair" for c in comps_w0)
+
+
+def test_pair_mass_and_eta_split_one_step_gradient_is_finite(fixture_root: Path):
+    """One real forward/backward through the trainee card with the full new loss
+    (eta_split + pair_mass ON, both per-pid losses): finite loss, finite grads.
+    """
+    arrays = load_cms_flow_root(fixture_root, n_events=200)
+    truth = load_truth_events(arrays)
+    target = load_pflow_targets(arrays)
+    for loss_fn in (per_pid_wasserstein_1d_loss, per_pid_soft_hist_loss):
+        torch.manual_seed(3)
+        card = CMSEnergyFlowDefault(debug=False, learnable=True)
+        mask = torch.any(truth != 0, dim=-1)
+        out = card(truth[mask])
+        pred = load_pflow_targets_from_tensor(restore_event_format(out["EFlowObject"], mask))
+        for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+            pred[pred_key] = out[out_key]
+        attach_truth_pair_lnm(truth, pred, target)
+        loss, comps = loss_fn(pred, target, eta_split=True, pair_mass=True, return_breakdown=True)
+        assert torch.isfinite(loss)
+        assert any(":eta" in c.label for c in comps)
+        assert any(c.category == "pair" for c in comps)
+        loss.backward()
+        for name, p in card.named_parameters():
+            if p.grad is not None:
+                assert torch.isfinite(p.grad).all(), name

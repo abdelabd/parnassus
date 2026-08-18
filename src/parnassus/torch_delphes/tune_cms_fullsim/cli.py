@@ -87,6 +87,7 @@ from .loss import (
     COUNT_WEIGHT,
     EVENT_WEIGHT,
     LOSS_CHOICES,
+    PAIR_MASS_WEIGHT,
     PID_WEIGHTING_CHOICES,
 )
 from .distributed import (
@@ -232,6 +233,36 @@ def main() -> None:
             "gradient in a low-statistics batch. Only meaningful with --pid-weighting "
             "fraction/sqrt_fraction."
         ),
+    )
+    parser.add_argument(
+        "--eta-split",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Split the per-pid log_E / log_pt shape terms of the per-pid losses "
+            "(soft_hist, wasserstein_1d) by reco |eta| region (edges 0.5/1.5/2.5 = the "
+            "tracker smearing regions), one term per (pid, obs, region) weighted by the "
+            "target population fraction. Default ON. --no-eta-split reproduces the old "
+            "pooled terms bit-for-bit. Losses are NOT comparable across this switch."
+        ),
+    )
+    parser.add_argument(
+        "--pair-mass",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Add the per-event pair-mass shape terms (m_ee, m_mumu, m_hh from the two "
+            "leading-pt objects of each class under the class mass hypothesis, per "
+            "|eta|-region pair) to the per-pid losses. On a resonance-gun sample the peak "
+            "width is the track resolution -- the only 1-D lever on a_raw / b_raw. "
+            "Default ON. Losses are NOT comparable across this switch."
+        ),
+    )
+    parser.add_argument(
+        "--pair-mass-weight",
+        type=float,
+        default=PAIR_MASS_WEIGHT,
+        help=f"Weight of every pair-mass term (default {PAIR_MASS_WEIGHT}).",
     )
     parser.add_argument(
         "--mode",
@@ -599,6 +630,9 @@ def main() -> None:
         loss_name=args.loss,
         pid_weighting=args.pid_weighting,
         pid_weight_floor=args.pid_weight_floor,
+        eta_split=args.eta_split,
+        pair_mass=args.pair_mass,
+        pair_mass_weight=args.pair_mass_weight,
         reco_pt_cut=reco_pt_cut,
         reco_abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
@@ -638,6 +672,12 @@ def main() -> None:
             "eta_cut": abs_eta_cut,
             "chad_truncation": truncate_chads,
             "photon_merge_radius": photon_merge_radius,
+            # Loss-definition switches (per-pid losses only). Losses are NOT
+            # comparable across different settings.
+            "loss": args.loss,
+            "eta_split": bool(args.eta_split),
+            "pair_mass": bool(args.pair_mass),
+            "pair_mass_weight": args.pair_mass_weight,
         }
         # The {metadata, history, best_result} schema (best = min val loss) is the
         # single source of truth shared with the Optuna search and consumed by

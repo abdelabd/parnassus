@@ -15,12 +15,14 @@ Event generation
 ----------------
 1. :class:`parnassus.pythia.HepMC3Generator` generates events of the
    selected ``--process`` at ``sqrt(s) = 13 TeV`` (``dijet`` = hard QCD
-   2->2, ``HZZ4l`` = VBF H->ZZ->4l, ``muongun`` = flat-in-log-pT muon
-   gun; the Pythia ``.cmnd`` files live in ``processes/``) across
+   2->2, ``HZZ4l`` = VBF H->ZZ->4l; calibration resonance guns, one parent
+   per event decayed by Pythia: ``muongun`` = J/psi + Z -> mu mu, ``electrongun``
+   = J/psi + Z -> e e, ``ksgun`` = K_S -> pi+ pi-; the Pythia ``.cmnd`` files
+   live in ``processes/``) across
    ``--n-workers`` parallel Pythia8 processes, retries failed events so
    the merged HepMC3 file contains *exactly* ``--n-events`` events, and
    merges the per-worker outputs into one file. For ``dijet`` a
-   ``PhaseSpace:pTHatMin`` override (``--pt-hat-min``, default 100) is
+   ``PhaseSpace:pTHatMin`` override (``--pt-hat-min``, default 20) is
    always appended; the other processes only get it when the flag is
    given. Hadronization and final-state radiation are on, producing a
    realistic mix of charged hadrons, electrons, muons, photons,
@@ -91,7 +93,7 @@ Usage
         --output src/parnassus/tests/benchmark_data/cms_pseudodata.root \
         --n-events 20000 \
         --n-workers 32 \
-        --pt-hat-min 100
+        --pt-hat-min 20
 
 By default, the output lives in ``src/parnassus/tests/benchmark_data/``
 so it can be committed and consumed by
@@ -142,8 +144,14 @@ _DEFAULT_PARAM_CONFIG: Path = (
 # seed is injected per-worker by the generator, so these files only carry the
 # process / beam definition. Only dijet has a hard-process pT-hat cut.
 _PROCESS_DIR: Path = Path(__file__).resolve().parent / "processes"
-PROCESS_CMND = {"dijet": "qcd_dijet.cmnd", "HZZ4l": "HZZ4l.cmnd", "muongun": "muon_gun.cmnd"}
-DIJET_PT_HAT_MIN = 100.0
+PROCESS_CMND = {
+    "dijet": "qcd_dijet.cmnd",
+    "HZZ4l": "HZZ4l.cmnd",
+    "muongun": "muon_gun.cmnd",  # J/psi + Z -> mu mu resonance gun (muon calibration)
+    "electrongun": "electron_gun.cmnd",  # J/psi + Z -> e e (electron calibration)
+    "ksgun": "kshort_gun.cmnd",  # K_S -> pi+ pi- (charged-hadron calibration)
+}
+DIJET_PT_HAT_MIN = 20.0  # 100 -> 20 (2026-08-18): populate the calo thresholds (soft photons / NH) and broaden HT
 
 
 def resolve_device(device=None) -> torch.device:
@@ -633,7 +641,7 @@ def generate(
         Exact number of events to generate.
     process : str
         Key into :data:`PROCESS_CMND` selecting the shipped Pythia ``.cmnd``
-        (``"dijet"``, ``"HZZ4l"`` or ``"muongun"``).
+        (``"dijet"``, ``"HZZ4l"``, ``"muongun"``, ``"electrongun"`` or ``"ksgun"``).
     pt_hat_min : float | None
         ``PhaseSpace:pTHatMin`` override appended to the process ``.cmnd``.
         ``None`` means no override, except for ``dijet`` which always runs

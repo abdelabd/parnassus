@@ -98,6 +98,7 @@ from .debug import (
     extract_variable,
     filter_valid_rows,
 )
+from .loss import attach_truth_pair_lnm, compute_pair_masses
 from parnassus.torch_delphes.plotting import (
     combined_vars_for,
     plot_comparison_with_ratio,
@@ -477,6 +478,9 @@ def _trainee_observables(
 
     Both ``pred`` and ``target`` are returned already flattened to 1-D and
     co-indexed: per-particle observables (pt/eta/log_E/log_pt/pid) are stripped
+    (plus the flat per-event leading-2 pair-mass responses ``pair_r:{pid}`` / categories
+    ``pair_cat:{pid}`` / truth-mass groups ``pair_grp:{pid}`` of
+    :func:`loss.compute_pair_masses`, when a class has pairs)
     of padding/ghosts with the same ``pt != 0`` cut the loss uses (so the per-PID
     plots' element-aligned selection keeps working), and per-event observables
     pass through. ``*_region_counts`` keys are skipped (no predicted counterpart
@@ -497,6 +501,16 @@ def _trainee_observables(
             if reco_pt_cut is not None or abs_eta_cut is not None:
                 pred = apply_reco_acceptance_cut(pred, reco_pt_cut, abs_eta_cut)
             target = {k: batch[k] for k in batch if k != "truth_particles"}
+            # Per-event leading-2 pair-mass responses (the loss's pair-mass observable),
+            # computed here while the event structure is still available: flat
+            # ln(m_reco/m_truth) per class under "pair_r:{pid}" (+ the |eta|-region pair
+            # category "pair_cat:{pid}" and truth-mass group "pair_grp:{pid}").
+            attach_truth_pair_lnm(truth_particles, pred, target)
+            for obs, acc in ((pred, acc_pred), (target, acc_tgt)):
+                for pid, (resp, cat, grp) in compute_pair_masses(obs).items():
+                    acc.setdefault(f"pair_r:{pid}", []).append(resp.detach().cpu())
+                    acc.setdefault(f"pair_cat:{pid}", []).append(cat.detach().cpu())
+                    acc.setdefault(f"pair_grp:{pid}", []).append(grp.detach().cpu())
             for key in OBSERVABLES:
                 if key not in pred or key not in target:
                     continue  # skips *_region_counts (no predicted counterpart)

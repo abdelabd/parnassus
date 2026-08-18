@@ -1,55 +1,79 @@
 ! muon_gun.cmnd
-! Flat-in-log-pT muon gun for the CMS full-simulation pseudodata generator
-! (parnassus.torch_delphes.generate_pseudodata).
+! Muon CALIBRATION sample: J/psi -> mu mu  +  Z -> mu mu resonance gun for the CMS
+! full-simulation pseudodata generator (parnassus.torch_delphes.generate_pseudodata
+! --process muongun).
 !
 ! PURPOSE
-!   The shipped qcd_dijet.cmnd sample contains very few muons, and essentially
-!   none above 1 TeV. That starves the 17 muon-related parameters of
-!   CMSEnergyFlowDefault:
-!
-!     MuonTrackingEfficiency.eff_logits[0..5]   6 (|eta|, pt) regions
-!     MuonTrackingEfficiency.rate_raw[0..1]     pt > 1 TeV efficiency roll-off
+!   The shipped qcd_dijet.cmnd sample contains very few muons. That starves the
+!   muon parameters of CMSEnergyFlowDefault:
+!     MuonTrackingEfficiency.eff_logits[0..5]     6 (|eta|, pt) regions
 !     MuonMomentumSmearing.resolution_module.{a,b,scale}_raw[0..2]
 !
-!   learnable.py's CMSMuonLearnableEfficiency docstring calls this out
-!   explicitly: rate_raw is left frozen partly because fitting it needs
-!   "a sample with pt > 1 TeV muons, which the QCD-dijet pseudodata does not
-!   provide". This file provides exactly that.
+! WHY RESONANCES (not a continuous single-muon spectrum, not pT lines)
+!   The muon smearing is log-normal in pT: in ln(pT) it is a shift (per-region
+!   scale) plus a Gaussian convolution of width sqrt(a^2 + (b*pT)^2). Any SMOOTH
+!   single-muon spectrum (flat-in-log, power law, ...) is invariant under the
+!   convolution away from its edges, so a_raw / low-pT b_raw leave the reco pT
+!   marginal unchanged and cannot be fitted from it (measured: gradient SNR
+!   < 0.5 per batch for every smooth spectrum; see
+!   .claude/docs/muon_gun_lines_eta_split_plan.md). What carries the width is a
+!   feature sharper than the resolution -- a resonance mass peak, which is
+!   physical: its width IS the resolution, its position the scale. The tuning
+!   loss therefore forms the pair mass of the two leading muons per event
+!   (per |eta|-region pair) and this file throws exactly ONE resonance per event
+!   so that pair is unambiguous. scale_raw needs no special spectrum (the
+!   quantile-W2 sees a shift at full strength once the shape terms are split by
+!   |eta| region); eff_logits come from the per-region count terms as before.
+!
+!   J/psi (m = 3.097 GeV): soft daughters (~0.3-10 GeV) -> populate the eff bin
+!     (0.1, 1] and give the low-pT (a-dominated) mass peak.
+!   Z (m = 91.19 GeV, window 70-110 GeV): daughters ~20-250 GeV -> a in every
+!     region, some b lever from the boosted tail (b*pT >~ a above ~100 GeV),
+!     the (1, 1000] eff bins. There are NO muons above 1 TeV: eff_logits[2,5]
+!     and rate_raw stay pinned at their defaults on both sides.
 !
 ! COVERAGE (see the region binning in learnable.py CMS_EFF_REGION_SPECS)
 !   Muon efficiency regions: |eta| bins [0, 1.5] and (1.5, 2.5];
 !                            pt bins (0.1, 1], (1, 1000], (1000, inf).
 !   Muon smearing regions:   |eta| bins [0, 0.5], (0.5, 1.5], (1.5, 2.5].
-!   Log-uniform pt in [0.2, 3000] GeV puts ~17% of muons in (0.2, 1],
-!   ~72% in (1, 1000] and ~11% above 1 TeV, so every efficiency region AND
-!   both rate_raw roll-off bins are populated. Uniform eta in [-2.5, 2.5]
-!   fills every eta bin of both modules (|eta| > 2.5 is in no region, so the
-!   range deliberately stops there).
+!   Parents uniform in eta in [-2.5, 2.5]; daughters of soft J/psi spread beyond
+!   that (out of every region -> simply not reconstructed).
 !
 ! NOTES
-!   * The Gun:* keys below are NOT Pythia settings. They are parsed and
-!     STRIPPED by parnassus.pythia.HepMC3Generator's single-job driver before
-!     the rest of this file is handed to Pythia's readFile(), so Pythia never
-!     sees an unknown setting. Everything else here is ordinary Pythia.
-!   * Gun events contain ONLY muons -- no underlying event, no hadrons. Use
-!     this to fit the muon parameters; the charged-hadron / photon / neutral
-!     -hadron loss terms will be empty (loss.py returns a graph-connected zero
-!     for an empty cloud, so the fit runs, those terms just contribute 0).
+!   * The Gun:* keys are NOT Pythia settings: parnassus.pythia.HepMC3Generator's
+!     single-job driver parses and STRIPS them before handing the rest of this
+!     file to Pythia's readFile(). Everything else here is ordinary Pythia -- in
+!     particular the decay-channel settings below are what turn the thrown
+!     parents into mu+ mu- pairs (the driver appends each parent with status 1
+!     and its mass from ParticleData::mSel, then pythia.next() decays it; QED
+!     FSR photons off the muons appear and are physical).
+!   * ONE parent per event (Gun:nPerEvent = 1) -- required by the leading-2
+!     pair-mass rule of the loss.
+!   * Gun events contain ONLY the decay products (plus FSR photons) -- no
+!     underlying event. Use this to fit the muon block; the other species'
+!     terms are empty (graph-connected zeros).
 !   * Do NOT set Random:seed here. The per-worker seed is injected by the
-!     driver before this file is read, and it also drives the gun sampling,
-!     so each worker throws a statistically independent set of muons.
+!     driver before this file is read, and it also drives the gun sampling.
 !   * generate_pseudodata.py injects --pt-hat-min only for the dijet process by
 !     default (there is no hard process to cut on here).
 
 ! ---- Gun definition (consumed by the driver, stripped before Pythia) ----
 Gun:on = on
-Gun:ids = 13 -13                    ! sampled uniformly (charge-symmetric)
-Gun:nPerEvent = 20                  ! muons thrown per event
-Gun:pTmin = 0.2                     ! GeV
-Gun:pTmax = 3000.                   ! GeV -- must exceed 1 TeV to feed rate_raw
-Gun:pTlog = on                      ! log-uniform in pt (flat in ln pt)
+Gun:ids = 443 23                    ! J/psi and Z, one of them per event (uniform)
+Gun:nPerEvent = 1
+Gun:pTmin = 1. 1.                   ! GeV, per id (J/psi, Z)
+Gun:pTmax = 500. 500.               ! GeV, per id
+Gun:pTpower = 1.5                   ! dN/dpT ~ pT^-1.5 (falling)
 Gun:etaMin = -2.5
 Gun:etaMax = 2.5
+
+! ---- Decays: force the mu+ mu- channels (ordinary Pythia settings) ----
+443:onMode = off
+443:onIfMatch = 13 -13
+23:onMode = off
+23:onIfAny = 13
+23:mMin = 70.                       ! Z line shape window (kills the Breit-Wigner tail)
+23:mMax = 110.
 
 ! ---- Pythia: no hard process, we fill the event record ourselves ----
 ProcessLevel:all = off

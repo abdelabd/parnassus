@@ -3,7 +3,10 @@ r"""Per-species feature distributions of one Optuna trial: target vs trainee.
 The trainee card is run on the truth particles of ``--sample`` at the trial's initial
 parameters (``materialized_config.yaml``) and at its best-epoch parameters
 (``history.json`` ``best_result``); both are overlaid on the sample's pflow target for
-log pT / log E / eta of charged hadron, neutral hadron, electron, muon and photon.
+log pT / log E / eta of charged hadron, neutral hadron, electron, muon and photon,
+plus the leading-2 pair-mass response ln(m_reco / m_truth) of electrons, muons and
+charged hadrons -- the loss's pair-mass observable (a peak at ln(scale) whose width is
+the track resolution on the resonance-gun samples).
 One PDF page per (species, observable): counts on log-y with a ratio-to-target panel.
 
     python -m parnassus.torch_delphes.plotting_scripts.plot_distribution \\
@@ -34,6 +37,10 @@ from parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results import (
 plt.style.use(hep.style.ATLAS)  # after the plot_fit_results import, so this style wins
 
 SPECIES = {"Charged hadron": 211, "Neutral hadron": 111, "Electron": 11, "Muon": 13, "Photon": 22}
+# Leading-2 pair-mass response pages (the loss's pair-mass observable,
+# loss.compute_pair_masses): one page per class, truth-mass groups and |eta|-region pair
+# categories pooled.
+PAIR_SPECIES = {"Electron": 11, "Muon": 13, "Charged hadron": 211}
 OBSERVABLES = {
     "log_pt": r"$\log(p_\mathrm{T}\,/\,\mathrm{GeV})$",
     "log_E": r"$\log(E\,/\,\mathrm{GeV})$",
@@ -143,6 +150,18 @@ def main():
                 if not sum(len(v) for v in arrays.values()):
                     continue  # species absent from this sample (e.g. muon gun)
                 draw_page(pdf, title, xlabel, arrays)
+        for title, pid in PAIR_SPECIES.items():
+            key = f"pair_r:{pid}"
+            samples = {"target": target, "initial": initial, "tuned": tuned}
+            if not all(key in o for o in samples.values()):
+                continue  # class has no pairs in this sample
+            arrays = {n: o[key].numpy() for n, o in samples.items()}  # ln(m_reco/m_truth)
+            draw_page(
+                pdf,
+                f"{title} pair-mass response (leading 2)",
+                r"$\ln(m_{\mathrm{pair}}^{\mathrm{reco}}\,/\,m_{\mathrm{pair}}^{\mathrm{truth}})$",
+                arrays,
+            )
     print(f"Wrote {output}")
 
 

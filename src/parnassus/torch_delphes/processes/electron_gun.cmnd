@@ -1,0 +1,73 @@
+! electron_gun.cmnd
+! Electron CALIBRATION sample: J/psi -> e e  +  Z -> e e resonance gun for the CMS
+! full-simulation pseudodata generator (parnassus.torch_delphes.generate_pseudodata
+! --process electrongun).
+!
+! PURPOSE
+!   Feed the electron block of CMSEnergyFlowDefault:
+!     ElectronTrackingEfficiency.eff_logits[0..5]   6 (|eta|, pt) regions
+!     ElectronMomentumSmearing.resolution_module.{a,scale}_raw[0..2]
+!   and, through Z -> ee, the ECal resolution / scale.
+!
+! WHY RESONANCES -- see muon_gun.cmnd (same argument: only a feature sharper than
+!   the resolution -- a mass peak -- carries the smearing width; the loss forms
+!   the pair mass of the two leading electrons per event, per |eta|-region pair,
+!   so ONE parent per event).
+!
+! WHAT EACH PARENT CONSTRAINS (PF electron energy = inverse-variance combination
+!   of the smeared TRACK and the ECal tower, SimpleCalorimeter.py Case B; the
+!   ECal's 0.4 GeV noise term makes the TRACK dominate below ~10 GeV: track
+!   weight 74-99 % at 1.5-10 GeV in barrel/mid, 36-94 % in the endcap; ~10 % at
+!   45 GeV; ~1 % at 100 GeV):
+!   J/psi (m = 3.097 GeV), thrown SOFT (pT 1-20 GeV) so its daughters stay
+!     <~ 10 GeV: the m_ee peak there is the electron TRACK resolution / scale ->
+!     ElectronMomentumSmearing a_raw / scale_raw; also the (0.1, 1] eff bins.
+!   Z (m = 91.19 GeV, window 70-110): daughters ~20-250 GeV, ECal-dominated ->
+!     ECal resolution/scale lever, the (1, 100] and (100, inf) eff bins, and a
+!     weak track-scale lever.
+!   Electron track b_raw matters only where the track weight is a few % -> it is
+!     NOT constrainable and stays pinned at the default on both sides.
+!
+! COVERAGE (learnable.py CMS_EFF_REGION_SPECS)
+!   Electron efficiency regions: |eta| bins [0, 1.5] and (1.5, 2.5];
+!                                pt bins (0.1, 1], (1, 100], (100, inf).
+!   Electron smearing regions:   |eta| bins [0, 0.5], (0.5, 1.5], (1.5, 2.5].
+!
+! NOTES -- as muon_gun.cmnd (Gun:* keys are driver keys, stripped before Pythia;
+!   one parent per event; decay products only; do NOT set Random:seed here).
+
+! ---- Gun definition (consumed by the driver, stripped before Pythia) ----
+Gun:on = on
+Gun:ids = 443 23                    ! J/psi and Z, one of them per event (uniform)
+Gun:nPerEvent = 1
+Gun:pTmin = 1. 1.                   ! GeV, per id (J/psi, Z)
+Gun:pTmax = 20. 500.                ! GeV, per id -- J/psi kept soft (track-dominated daughters)
+Gun:pTpower = 1.5                   ! dN/dpT ~ pT^-1.5 (falling)
+Gun:etaMin = -2.5
+Gun:etaMax = 2.5
+
+! ---- Decays: force the e+ e- channels (ordinary Pythia settings) ----
+443:onMode = off
+443:onIfMatch = 11 -11
+23:onMode = off
+23:onIfAny = 11
+23:mMin = 70.                       ! Z line shape window (kills the Breit-Wigner tail)
+23:mMax = 110.
+
+! ---- Pythia: no hard process, we fill the event record ourselves ----
+ProcessLevel:all = off
+Beams:idA = 2212
+Beams:idB = 2212
+Beams:eCM = 13000.                  ! only sets the bookkeeping beam particles
+
+! ---- Suppress per-event and initialization printout ----
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off

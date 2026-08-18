@@ -34,7 +34,7 @@ uv run python -m parnassus.torch_delphes.generate_pseudodata \
     --output src/parnassus/tests/benchmark_data/cms_pseudodata.root \
     --n-events 5000 \
     --n-workers 32 \
-    --pt-hat-min 100 \
+    --pt-hat-min 20 \
     --seed 1
 
 # 2. Fit a learnable card whose charged-hadron scale starts off-truth, recovering the truth
@@ -116,8 +116,8 @@ in `--batch-size` chunks through the target card before the ROOT file is written
 | `--output` | path | `src/parnassus/tests/benchmark_data/cms_pseudodata.root` | Output ROOT file. |
 | `--n-events` | int | `20000` | Exact number of events to generate. |
 | `--n-workers` | int | `None` (all CPU cores, capped at `--n-events`) | Parallel Pythia8 **CPU** processes for event generation. Independent of `--device`. |
-| `--process` | `dijet` \| `HZZ4l` \| `muongun` | `dijet` | Physics process; selects the shipped `processes/<name>.cmnd` (QCD dijet, VBF H→ZZ→4l, flat-in-log-pT muon gun). |
-| `--pt-hat-min` | float | `None` (→ `100` for `dijet`, no override otherwise) | Pythia8 `PhaseSpace:pTHatMin` (GeV) appended to the process `.cmnd`; `dijet` always gets it. Lower → softer, higher-multiplicity events. |
+| `--process` | `dijet` \| `HZZ4l` \| `muongun` \| `electrongun` \| `ksgun` | `dijet` | Physics process; selects the shipped `processes/<name>.cmnd` (QCD dijet, VBF H→ZZ→4l, or a calibration resonance gun with ONE parent per event decayed by Pythia: J/ψ+Z→μμ, J/ψ+Z→ee, K_S→π⁺π⁻ — see the cmnd headers for what each constrains). |
+| `--pt-hat-min` | float | `None` (→ `20` for `dijet`, no override otherwise) | Pythia8 `PhaseSpace:pTHatMin` (GeV) appended to the process `.cmnd`; `dijet` always gets it. Lower → softer, higher-multiplicity events. |
 | `--batch-size` | int | `512` | Events per TorchDelphes forward pass in phase 2 (memory knob; does not change the output). |
 | `--seed` | int | `1` | Seeds **both** phases: Pythia worker `i` gets `Random:seed = seed*n_workers + i` (disjoint ranges across seeds at fixed `--n-workers`, so array tasks produce distinct events) and torch is seeded for the target card's stochastic smearing / Gumbel-ST in phase 2. |
 | `--device` | str | `None` (auto: `cuda` if a GPU is available, else `cpu`) | Device for the **phase-2 TorchDelphes forward pass only**. Pythia generation (phase 1) is always CPU-parallel. |
@@ -164,7 +164,7 @@ bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
 | Flag | Default | Meaning |
 |---|---|---|
 | `--config` | (required) | Generation param config (may be partial); its stem names the output. |
-| `--process` | `dijet` | Physics process (`dijet`, `HZZ4l`, `muongun`; see `generate_pseudodata --process`); appended to the output name. |
+| `--process` | `dijet` | Physics process (`dijet`, `HZZ4l`, `muongun`, `electrongun`, `ksgun`; see `generate_pseudodata --process`); appended to the output name. |
 | `--n_events` | `100000` | **Total** events; must be a multiple of `--n_tasks` (each task generates `n_events / n_tasks`). |
 | `--n_tasks` | `10` | Number of array tasks (= seeds `1..n_tasks`). A dijet task costs ~0.11 s/event (~18 min per 10k), ~0.22 s/event with `--debug`; keep `n_events / n_tasks` inside `TIME_LIMIT`. |
 | `--debug` | off | Also write the ~400 per-module intermediate branches (`generate_pseudodata --debug`, needed only for `plot_fit_results --debug`). Doubles the runtime (single-threaded uproot write) and gives ~7× larger files. |
@@ -176,7 +176,7 @@ Everything else is configurable via environment variables (shown with defaults):
 | `OUTBASE` | `/global/cfs/cdirs/m3246/diff_delphes` | Output base. Parts go in `$OUTBASE/parts/`, logs in `$OUTBASE/logs/`, merged file in `$OUTBASE/`. **Must be a shared filesystem** (CFS / scratch), not node-local `/tmp`. |
 | `N_WORKERS` | `32` | Pythia CPU workers per task (matches the job's `-c 32`). |
 | `TIME_LIMIT` | `00:30:00` | SLURM `-t` per array task (the driver prints an estimated per-task runtime at submit). |
-| `PT_HAT_MIN` | (unset) | Pythia `PhaseSpace:pTHatMin` override; unset → `generate_pseudodata` default (100 for `dijet`, none otherwise). |
+| `PT_HAT_MIN` | (unset) | Pythia `PhaseSpace:pTHatMin` override; unset → `generate_pseudodata` default (20 for `dijet`, none otherwise). |
 | `MERGED_NAME` | `pseudo_data_<total>_<config-stem>_<process>[_debug].root` | Final merged filename under `$OUTBASE` (`<total>` = `100k` for whole thousands, else the plain count; `_debug` suffix when `--debug`). The per-seed parts share the stem (`<stem>_seed<i>.root`), so different configs can share `parts/`. |
 
 The jobs run on the **CPU partition** with `--device cpu`: the TorchDelphes forward is only a few

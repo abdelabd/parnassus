@@ -575,3 +575,129 @@ def test_hepmc3_generator():
             assert n_events_merged == N_EVENTS, (
                 f"HepMC3Generator: Merged file has {n_events_merged} events, expected {N_EVENTS}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Particle / resonance gun (Gun:* keys consumed by the single-job driver, see
+# torch_delphes/processes/*_gun.cmnd)
+# ---------------------------------------------------------------------------
+
+_GUN_TAIL = """
+ProcessLevel:all = off
+Beams:idA = 2212
+Beams:idB = 2212
+Beams:eCM = 13000.
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off
+"""
+
+
+def _run_gun(cmnd_text: str, n_events: int):
+    """Generate ``n_events`` gun events with the real driver; return, per event, the
+    list of final-state (pid, px, py, pz, E) tuples.
+    """
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        tempfile.TemporaryDirectory() as log_dir,
+        tempfile.TemporaryDirectory() as output_dir,
+    ):
+        cmnd = Path(tmp) / "gun.cmnd"
+        cmnd.write_text(cmnd_text)
+        generator = HepMC3Generator(cmnd_file=str(cmnd), output_dir=output_dir, log_dir=log_dir)
+        fpath = generator.generate(n_events=n_events, max_workers=N_JOBS, debug=False)
+        with pyhepmc.open(fpath, "r") as f:
+            events = [
+                [
+                    (p.pid, p.momentum.px, p.momentum.py, p.momentum.pz, p.momentum.e)
+                    for p in ev.particles
+                    if p.status == 1
+                ]
+                for ev in f
+            ]
+        assert len(events) == n_events
+        return events
+
+
+def _pair_mass(a, b):
+    e = a[4] + b[4]
+    px, py, pz = a[1] + b[1], a[2] + b[2], a[3] + b[3]
+    return math.sqrt(max(e * e - px * px - py * py - pz * pz, 0.0))
+
+
+def test_gun_resonance_z_mumu_and_pt_power():
+    """A Z gun (``Gun:ids = 23`` + forced ``23:onIfAny = 13``) yields exactly two
+    final-state muons per event (plus optional FSR photons) whose pair mass sits in the
+    ``23:mMin/mMax`` window; ``Gun:pTpower`` draws a falling parent pT.
+    """
+    cmnd = (
+        "Gun:on = on\nGun:ids = 23\nGun:nPerEvent = 1\n"
+        "Gun:pTmin = 1.\nGun:pTmax = 500.\nGun:pTpower = 1.5\n"
+        "Gun:etaMin = -2.5\nGun:etaMax = 2.5\n"
+        "23:onMode = off\n23:onIfAny = 13\n23:mMin = 70.\n23:mMax = 110.\n"
+    ) + _GUN_TAIL
+    events = _run_gun(cmnd, n_events=40)
+    parent_pt = []
+    for parts in events:
+        mus = sorted([p for p in parts if abs(p[0]) == 13], key=lambda p: -math.hypot(p[1], p[2]))
+        others = [p for p in parts if abs(p[0]) != 13]
+        assert len(mus) == 2, parts
+        assert {p[0] for p in others} <= {22}  # only FSR photons besides the muons
+        m = _pair_mass(mus[0], mus[1])
+        assert 40.0 < m < 112.0, m  # in the window, minus FSR losses
+        parent_pt.append(math.hypot(mus[0][1] + mus[1][1], mus[0][2] + mus[1][2]))
+    # falling spectrum on [1, 500]: the median parent pT of pT^-1.5 is ~4 GeV
+    parent_pt.sort()
+    assert parent_pt[len(parent_pt) // 2] < 40.0
+    assert min(parent_pt) >= 0.5
+
+
+def test_gun_resonance_jpsi_ee_and_kshort_pipi_per_id_ranges():
+    """J/psi -> ee with a per-id pT range (two ids, two ranges); K_S -> pi+ pi- forced."""
+    cmnd = (
+        "Gun:on = on\nGun:ids = 443 310\nGun:nPerEvent = 1\n"
+        "Gun:pTmin = 1. 2.\nGun:pTmax = 20. 300.\nGun:pTpower = 1.5\n"
+        "Gun:etaMin = -2.5\nGun:etaMax = 2.5\n"
+        "443:onMode = off\n443:onIfMatch = 11 -11\n"
+        "310:mayDecay = on\n310:onMode = off\n310:onIfMatch = 211 -211\n"
+        "ParticleDecays:limitTau0 = off\n"
+    ) + _GUN_TAIL
+    events = _run_gun(cmnd, n_events=40)
+    seen = set()
+    for parts in events:
+        ids = sorted(abs(p[0]) for p in parts)
+        if ids == [11, 11]:
+            seen.add(443)
+            m = _pair_mass(parts[0], parts[1])
+            assert abs(m - 3.097) < 0.01, m
+            assert math.hypot(parts[0][1] + parts[1][1], parts[0][2] + parts[1][2]) <= 20.5
+        elif ids == [211, 211]:
+            seen.add(310)
+            m = _pair_mass(parts[0], parts[1])
+            assert abs(m - 0.4976) < 0.002, m
+            assert math.hypot(parts[0][1] + parts[1][1], parts[0][2] + parts[1][2]) >= 1.9
+        else:
+            raise AssertionError(f"unexpected final state {ids}")
+    assert seen == {443, 310}
+
+
+def test_gun_continuous_muons_still_work():
+    """The plain single-particle gun (log-uniform pT, no decays) is unchanged."""
+    cmnd = (
+        "Gun:on = on\nGun:ids = 13 -13\nGun:nPerEvent = 20\n"
+        "Gun:pTmin = 0.2\nGun:pTmax = 3000.\nGun:pTlog = on\n"
+        "Gun:etaMin = -2.5\nGun:etaMax = 2.5\n"
+    ) + _GUN_TAIL
+    events = _run_gun(cmnd, n_events=10)
+    for parts in events:
+        assert len(parts) == 20
+        assert {abs(p[0]) for p in parts} == {13}
+        for p in parts:
+            assert 0.2 <= math.hypot(p[1], p[2]) <= 3000.0

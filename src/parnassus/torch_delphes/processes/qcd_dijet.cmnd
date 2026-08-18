@@ -22,7 +22,7 @@ Beams:eCM = 13000.                  ! 13 TeV center-of-mass energy
 
 ! 2) Hard process: inclusive QCD 2->2
 HardQCD:all = on
-PhaseSpace:pTHatMin = 100.          ! default; overridden by --pt-hat-min
+PhaseSpace:pTHatMin = 20.           ! default; overridden by --pt-hat-min
 
 ! 3) Suppress per-event and initialization printout
 Next:numberShowInfo = 0

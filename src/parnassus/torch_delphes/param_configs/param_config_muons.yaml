@@ -1,18 +1,25 @@
-# MuonTrackingEfficiency.rate_raw[0,1] are deliberately NOT listed: they stay at the CMS default
-# (0.0005) on both the generation and the fit side -- the trainee gives rate_raw no gradient
-# (see learnable.py CMSMuonLearnableEfficiency), so a perturbed rate would only bias eff_logits[2,5].
+# Muon calibration truth config (M1 of .claude/docs/muon_gun_lines_eta_split_plan.md):
+# generation-side truth for --process muongun (J/psi + Z -> mu mu, one per event).
+# PINNED at the CMS default on both sides (deliberately NOT listed here, trainable: false in
+# optuna_config_muons.yaml):
+#   MuonTrackingEfficiency.eff_logits[2,5]  -- the (1000, inf) pt bins: the resonance gun has no
+#                                              muons above 1 TeV, so they are unconstrainable.
+#   MuonTrackingEfficiency.rate_raw[0,1]    -- no gradient path (see learnable.py
+#                                              CMSMuonLearnableEfficiency); a perturbed rate would
+#                                              only bias eff_logits[2,5].
+# Expected recovery (plan M1 table, updated after M0 T1): eff_logits[1,4] and scale_raw[1] fast;
+# eff_logits[0,3], a_raw[0..2], scale_raw[0] fine; b_raw[0..2] PARTIAL (weak lever: only muons with
+# b*pT >~ a, i.e. boosted-Z daughters above ~100 GeV; M0 T1 gave SNR 0.9 / 0.04 / 0.6 at batch 256,
+# differences within the 8-batch noise -- all three kept perturbed + trainable by user decision, M1
+# decides empirically); scale_raw[2] / a_raw[2] SLOW (endcap categories hold ~10 % of the pairs).
 MuonTrackingEfficiency.eff_logits[0]:
   value: 0.9608   # default 0.75 (+28%)
 MuonTrackingEfficiency.eff_logits[1]:
   value: 0.5823   # default 0.99 (-41%)
-MuonTrackingEfficiency.eff_logits[2]:
-  value: 0.6475   # default 0.99 (-35%)
 MuonTrackingEfficiency.eff_logits[3]:
   value: 0.3534   # default 0.7 (-50%)
 MuonTrackingEfficiency.eff_logits[4]:
   value: 0.5756   # default 0.98 (-41%)
-MuonTrackingEfficiency.eff_logits[5]:
-  value: 0.6397   # default 0.98 (-35%)
 MuonMomentumSmearing.resolution_module.a_raw[0]:
   value: 0.01489   # default 0.01 (+49%)
 MuonMomentumSmearing.resolution_module.a_raw[1]:

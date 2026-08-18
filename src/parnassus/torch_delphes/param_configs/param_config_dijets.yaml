@@ -1,0 +1,36 @@
+ECal.scale_module.scale_raw[0]:
+  value: 0.8032   # default 1 (-20%)
+ECal.scale_module.scale_raw[1]:
+  value: 1.186   # default 1 (+19%)
+ECal.scale_module.scale_raw[2]:
+  value: 0.8043   # default 1 (-20%)
+ECal.resolution_func.common_c_E:
+  value: 0.01195   # default 0.008 (+49%)
+ECal.resolution_func.common_c_S:
+  value: 0.05988   # default 0.11 (-46%)
+ECal.resolution_func.common_c_N:
+  value: 0.5232   # default 0.4 (+31%)
+ECal.resolution_func.barrel_a:
+  value: 1
+ECal.resolution_func.barrel_b:
+  value: 0.8862   # default 0.64 (+38%)
+ECal.resolution_func.endcap_a:
+  value: 3.203   # default 2.16 (+48%)
+ECal.resolution_func.endcap_b:
+  value: 8.025   # default 5.6 (+43%)
+ECal.resolution_func.forward_c_E:
+  value: 0.07949   # default 0.107 (-26%)
+ECal.resolution_func.forward_c_S:
+  value: 1.552   # default 2.08 (-25%)
+HCal.scale_module.scale_raw[0]:
+  value: 0.8487   # default 1 (-15%)
+HCal.scale_module.scale_raw[1]:
+  value: 0.8934   # default 1 (-11%)
+HCal.resolution_func.central_c_E:
+  value: 0.03667   # default 0.05 (-27%)
+HCal.resolution_func.central_c_S:
+  value: 2.036   # default 1.5 (+36%)
+HCal.resolution_func.forward_c_E:
+  value: 0.07923   # default 0.13 (-39%)
+HCal.resolution_func.forward_c_S:
+  value: 3.538   # default 2.7 (+31%)

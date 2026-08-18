@@ -1,0 +1,41 @@
+# Electron calibration truth config (M2 of .claude/docs/muon_gun_lines_eta_split_plan.md):
+# generation-side truth for --process electrongun (J/psi + Z -> e e, one per event).
+# Perturbations copied from param_config_all.yaml (comparable studies).
+# Expected recovery (plan M2 table, updated after M0 T1): eff_logits[1,4] fast, eff_logits[0,3]
+# fine, eff_logits[2,5] (>100 GeV, ~5k electrons per 200k events) partial; a_raw[1] fine, a_raw[0,2]
+# and scale_raw[0..2] SLOW (weak but real levers: the electron pair mass is only partly track-driven,
+# so the signal is a few x smaller than for muons; the endcap categories are sparse).
+# b_raw[0..2] perturbed + trainable "for completeness" (user decision 2026-08-18) but NOT expected
+# to recover: b matters only where the ECal dominates the PF electron energy (track weight <~ 10 %
+# above ~30 GeV), so it is calo-hidden -- a random walk in params_reg.pdf is the expected outcome.
+# The ECal block is NOT trainable in M2 (isolate the electron track/eff parameters; M2b optional).
+ElectronTrackingEfficiency.eff_logits[0]:
+  value: 0.3768   # default 0.73 (-48%)
+ElectronTrackingEfficiency.eff_logits[1]:
+  value: 0.7118   # default 0.95 (-25%)
+ElectronTrackingEfficiency.eff_logits[2]:
+  value: 0.7342   # default 0.99 (-26%)
+ElectronTrackingEfficiency.eff_logits[3]:
+  value: 0.353   # default 0.5 (-29%)
+ElectronTrackingEfficiency.eff_logits[4]:
+  value: 0.5101   # default 0.83 (-39%)
+ElectronTrackingEfficiency.eff_logits[5]:
+  value: 0.5799   # default 0.9 (-36%)
+ElectronMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.03863   # default 0.03 (+29%)
+ElectronMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.07245   # default 0.05 (+45%)
+ElectronMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.1895   # default 0.15 (+26%)
+ElectronMomentumSmearing.resolution_module.b_raw[0]:
+  value: 0.00169   # default 0.0013 (+30%)
+ElectronMomentumSmearing.resolution_module.b_raw[1]:
+  value: 0.002372   # default 0.0017 (+40%)
+ElectronMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.004396   # default 0.0031 (+42%)
+ElectronMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 1.194   # default 1 (+19%)
+ElectronMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 1.111   # default 1 (+11%)
+ElectronMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 0.8073   # default 1 (-19%)

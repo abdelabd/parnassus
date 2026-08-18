@@ -11,7 +11,8 @@ search:
 
 constants: {}
 
-# Trainable mask: only the four perturbed charged-hadron efficiencies are fitted.
+# Trainable mask: the muon block only. eff_logits[2,5] (>1 TeV bins) and rate_raw are PINNED
+# (no muons above 1 TeV in the J/psi + Z gun; see param_config_muons.yaml).
 parameters:
   ChargedHadronTrackingEfficiency.eff_logits[0]:
     trainable: false
@@ -38,13 +39,13 @@ parameters:
   MuonTrackingEfficiency.eff_logits[1]:
     trainable: true
   MuonTrackingEfficiency.eff_logits[2]:
-    trainable: true
+    trainable: false
   MuonTrackingEfficiency.eff_logits[3]:
     trainable: true
   MuonTrackingEfficiency.eff_logits[4]:
     trainable: true
   MuonTrackingEfficiency.eff_logits[5]:
-    trainable: true
+    trainable: false
   # rate_raw pinned at the CMS default on both sides (no gradient path; see learnable.py).
   MuonTrackingEfficiency.rate_raw[0]:
     trainable: false

@@ -1,0 +1,68 @@
+! kshort_gun.cmnd
+! Charged-hadron CALIBRATION sample: K_S -> pi+ pi- resonance gun for the CMS
+! full-simulation pseudodata generator (parnassus.torch_delphes.generate_pseudodata
+! --process ksgun).
+!
+! PURPOSE
+!   Feed the charged-hadron track block of CMSEnergyFlowDefault:
+!     ChargedHadronTrackingEfficiency.eff_logits[0..3]   4 (|eta|, pt) regions
+!     ChargedHadronMomentumSmearing.resolution_module.{a,b,scale}_raw[0..2]
+!
+! WHY K_S -- see muon_gun.cmnd for the general argument (only a feature sharper
+!   than the resolution -- a mass peak -- carries the smearing width). K_S -> pi+pi-
+!   (m = 497.6 MeV, ctau = 2.7 cm) is the standard tracker-calibration resonance;
+!   the loss forms the pair mass of the two leading charged hadrons per event
+!   under the PION mass hypothesis (there is no K/pi/p separation in the reco on
+!   either side -- exact for K_S), per |eta|-region pair, so ONE K_S per event.
+!   The reco chad pT includes the PF track<->HCal rescaling, so the peak
+!   constrains the effective track resolution of the whole chain (which is what
+!   the fit needs). The ParticlePropagator treats the pions as prompt (the
+!   displacement is ignored) -- fine for a calibration sample.
+!   K_S at rest gives 206 MeV pions (below the 0.1 GeV threshold / curling), so
+!   the K_S is thrown with pT >= 1 GeV; the falling spectrum up to 300 GeV puts
+!   pions at ~0.5-150 GeV: a-dominated below ~50 GeV, a b_raw lever from the tail
+!   (b*pT/a ~ 2-3 at 100-150 GeV).
+!
+! COVERAGE (learnable.py CMS_EFF_REGION_SPECS)
+!   Chad efficiency regions: |eta| bins [0, 1.5] and (1.5, 2.5]; pt bins (0.1, 1], (1, inf).
+!   Chad smearing regions:   |eta| bins [0, 0.5], (0.5, 1.5], (1.5, 2.5].
+!
+! NOTES -- as muon_gun.cmnd (Gun:* keys are driver keys, stripped before Pythia;
+!   one parent per event; decay products only; do NOT set Random:seed here).
+!   Pythia decays K_S by default here (ParticleDecays:limitTau0 = off); the
+!   channel is forced to pi+ pi- (69 % naturally, the rest pi0 pi0 -> photons)
+!   so that every event yields a charged pair.
+
+! ---- Gun definition (consumed by the driver, stripped before Pythia) ----
+Gun:on = on
+Gun:ids = 310                       ! K_S, one per event
+Gun:nPerEvent = 1
+Gun:pTmin = 1.                      ! GeV
+Gun:pTmax = 300.                    ! GeV
+Gun:pTpower = 1.5                   ! dN/dpT ~ pT^-1.5 (falling)
+Gun:etaMin = -2.5
+Gun:etaMax = 2.5
+
+! ---- Decays: force K_S -> pi+ pi- (ordinary Pythia settings) ----
+310:mayDecay = on
+310:onMode = off
+310:onIfMatch = 211 -211
+ParticleDecays:limitTau0 = off      ! (default; stated explicitly: never treat K_S as stable here)
+
+! ---- Pythia: no hard process, we fill the event record ourselves ----
+ProcessLevel:all = off
+Beams:idA = 2212
+Beams:idB = 2212
+Beams:eCM = 13000.                  ! only sets the bookkeeping beam particles
+
+! ---- Suppress per-event and initialization printout ----
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off
