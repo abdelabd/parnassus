@@ -1,0 +1,125 @@
+# MuonTrackingEfficiency.rate_raw[0,1] are deliberately NOT listed: they stay at the CMS default
+# (0.0005) on both the generation and the fit side -- the trainee gives rate_raw no gradient
+# (see learnable.py CMSMuonLearnableEfficiency), so a perturbed rate would only bias eff_logits[2,5].
+ChargedHadronTrackingEfficiency.eff_logits[0]:
+  value: 0.4778   # default 0.7 (-32%)
+ChargedHadronTrackingEfficiency.eff_logits[1]:
+  value: 0.7086   # default 0.95 (-25%)
+ChargedHadronTrackingEfficiency.eff_logits[2]:
+  value: 0.3131   # default 0.6 (-48%)
+ChargedHadronTrackingEfficiency.eff_logits[3]:
+  value: 0.4825   # default 0.85 (-43%)
+ElectronTrackingEfficiency.eff_logits[0]:
+  value: 0.3768   # default 0.73 (-48%)
+ElectronTrackingEfficiency.eff_logits[1]:
+  value: 0.7118   # default 0.95 (-25%)
+ElectronTrackingEfficiency.eff_logits[2]:
+  value: 0.7342   # default 0.99 (-26%)
+ElectronTrackingEfficiency.eff_logits[3]:
+  value: 0.353   # default 0.5 (-29%)
+ElectronTrackingEfficiency.eff_logits[4]:
+  value: 0.5101   # default 0.83 (-39%)
+ElectronTrackingEfficiency.eff_logits[5]:
+  value: 0.5799   # default 0.9 (-36%)
+MuonTrackingEfficiency.eff_logits[0]:
+  value: 0.9608   # default 0.75 (+28%)
+MuonTrackingEfficiency.eff_logits[1]:
+  value: 0.5823   # default 0.99 (-41%)
+MuonTrackingEfficiency.eff_logits[2]:
+  value: 0.6475   # default 0.99 (-35%)
+MuonTrackingEfficiency.eff_logits[3]:
+  value: 0.3534   # default 0.7 (-50%)
+MuonTrackingEfficiency.eff_logits[4]:
+  value: 0.5756   # default 0.98 (-41%)
+MuonTrackingEfficiency.eff_logits[5]:
+  value: 0.6397   # default 0.98 (-35%)
+ChargedHadronMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.08834   # default 0.06 (+47%)
+ChargedHadronMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.06606   # default 0.1 (-34%)
+ChargedHadronMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.1674   # default 0.25 (-33%)
+ChargedHadronMomentumSmearing.resolution_module.b_raw[0]:
+  value: 0.0008652   # default 0.0013 (-33%)
+ChargedHadronMomentumSmearing.resolution_module.b_raw[1]:
+  value: 0.002503   # default 0.0017 (+47%)
+ChargedHadronMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.004358   # default 0.0031 (+41%)
+ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 1.183   # default 1 (+18%)
+ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 0.8761   # default 1 (-12%)
+ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 0.8941   # default 1 (-11%)
+ElectronMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.03863   # default 0.03 (+29%)
+ElectronMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.07245   # default 0.05 (+45%)
+ElectronMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.1895   # default 0.15 (+26%)
+ElectronMomentumSmearing.resolution_module.b_raw[0]:
+  value: 0.00169   # default 0.0013 (+30%)
+ElectronMomentumSmearing.resolution_module.b_raw[1]:
+  value: 0.002372   # default 0.0017 (+40%)
+ElectronMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.004396   # default 0.0031 (+42%)
+ElectronMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 1.194   # default 1 (+19%)
+ElectronMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 1.111   # default 1 (+11%)
+ElectronMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 0.8073   # default 1 (-19%)
+MuonMomentumSmearing.resolution_module.a_raw[0]:
+  value: 0.01489   # default 0.01 (+49%)
+MuonMomentumSmearing.resolution_module.a_raw[1]:
+  value: 0.02034   # default 0.015 (+36%)
+MuonMomentumSmearing.resolution_module.a_raw[2]:
+  value: 0.01253   # default 0.025 (-50%)
+MuonMomentumSmearing.resolution_module.b_raw[0]:
+  value: 6.35e-05   # default 0.0001 (-37%)
+MuonMomentumSmearing.resolution_module.b_raw[1]:
+  value: 9.385e-05   # default 0.00015 (-37%)
+MuonMomentumSmearing.resolution_module.b_raw[2]:
+  value: 0.0001937   # default 0.00035 (-45%)
+MuonMomentumSmearing.resolution_module.scale_raw[0]:
+  value: 1.173   # default 1 (+17%)
+MuonMomentumSmearing.resolution_module.scale_raw[1]:
+  value: 0.8068   # default 1 (-19%)
+MuonMomentumSmearing.resolution_module.scale_raw[2]:
+  value: 1.173   # default 1 (+17%)
+ECal.scale_module.scale_raw[0]:
+  value: 0.8032   # default 1 (-20%)
+ECal.scale_module.scale_raw[1]:
+  value: 1.186   # default 1 (+19%)
+ECal.scale_module.scale_raw[2]:
+  value: 0.8043   # default 1 (-20%)
+ECal.resolution_func.common_c_E:
+  value: 0.01195   # default 0.008 (+49%)
+ECal.resolution_func.common_c_S:
+  value: 0.05988   # default 0.11 (-46%)
+ECal.resolution_func.common_c_N:
+  value: 0.5232   # default 0.4 (+31%)
+ECal.resolution_func.barrel_a:
+  value: 1
+ECal.resolution_func.barrel_b:
+  value: 0.8862   # default 0.64 (+38%)
+ECal.resolution_func.endcap_a:
+  value: 3.203   # default 2.16 (+48%)
+ECal.resolution_func.endcap_b:
+  value: 8.025   # default 5.6 (+43%)
+ECal.resolution_func.forward_c_E:
+  value: 0.07949   # default 0.107 (-26%)
+ECal.resolution_func.forward_c_S:
+  value: 1.552   # default 2.08 (-25%)
+HCal.scale_module.scale_raw[0]:
+  value: 0.8487   # default 1 (-15%)
+HCal.scale_module.scale_raw[1]:
+  value: 0.8934   # default 1 (-11%)
+HCal.resolution_func.central_c_E:
+  value: 0.03667   # default 0.05 (-27%)
+HCal.resolution_func.central_c_S:
+  value: 2.036   # default 1.5 (+36%)
+HCal.resolution_func.forward_c_E:
+  value: 0.07923   # default 0.13 (-39%)
+HCal.resolution_func.forward_c_S:
+  value: 3.538   # default 2.7 (+31%)
