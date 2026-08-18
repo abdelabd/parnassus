@@ -245,6 +245,7 @@ SINGLE_JOB_SCRIPT = """
 #!/usr/bin/env python3
 import math
 import os
+import sys
 import tempfile
 
 import pythia8mc
@@ -256,6 +257,16 @@ import argparse
 LOG = setup_logger()
 
 PROTON_MASS = 0.93827208816
+
+# Every Gun:* key the driver understands (lower-cased). split_gun_block rejects
+# anything else rather than letting it fall through to a default.
+GUN_KEYS = frozenset({
+    "gun:on", "gun:ids", "gun:nperevent", "gun:etamin", "gun:etamax",
+    "gun:ptmin", "gun:ptmax", "gun:ptlog", "gun:ptpower",   # pT-sampled guns
+    "gun:emin", "gun:emax", "gun:elog",                     # energy-sampled guns
+})
+GUN_PT_KEYS = frozenset({"gun:ptmin", "gun:ptmax", "gun:ptlog", "gun:ptpower"})
+GUN_E_KEYS = frozenset({"gun:emin", "gun:emax", "gun:elog"})
 
 
 def split_gun_block(cmnd_file):
@@ -273,7 +284,20 @@ def split_gun_block(cmnd_file):
                                 share one file,
       Gun:pTlog              -- log-uniform in [pTmin, pTmax] (default on),
       Gun:pTpower = k        -- dN/dpT ~ pT^-k on [pTmin, pTmax]; overrides pTlog
-                                (k = 1 is log-uniform).
+                                (k = 1 is log-uniform),
+      Gun:eMin / Gun:eMax    -- sample total ENERGY instead of pT (same per-id
+                                rule); pT and pz follow from (E, eta) via the
+                                on-shell relations. Mutually exclusive with the
+                                pT keys -- give one set or the other,
+      Gun:eLog               -- log-uniform in [eMin, eMax] (default on).
+
+    Energy sampling exists for the calorimeter guns: ECal/HCal resolution is a
+    function of E, not pT, and a flat-in-pT draw goes unphysical forward (at
+    |eta| = 5, pT = 100 GeV is already E = 7.4 TeV, above the 6.5 TeV beam).
+
+    Any other ``Gun:*`` key is REJECTED. Silently ignoring one is the worst
+    failure mode this driver has: an unread key means the gun quietly falls back
+    to its defaults and writes a wrong sample that looks fine.
     Every thrown particle gets its mass from ``ParticleData::mSel`` (Breit-Wigner
     for resonances, m0 otherwise) and, being appended with status 1, is decayed by
     Pythia's normal decay machinery in ``pythia.next()`` -- so ``Gun:ids = 23``
@@ -292,6 +316,16 @@ def split_gun_block(cmnd_file):
                 gun[key.strip().lower()] = value.strip()
             else:
                 kept.append(line)
+
+    unknown = sorted(set(gun) - GUN_KEYS)
+    if unknown:
+        raise SystemExit(
+            f"HepMC3Generator: unrecognised Gun:* key(s) in {cmnd_file}: "
+            + ", ".join(unknown)
+            + ".\\nThese are stripped before Pythia sees them, so an unread key "
+            "would silently leave the gun on its defaults and write a wrong "
+            f"sample. Recognised keys: {', '.join(sorted(GUN_KEYS))}."
+        )
     return gun, "".join(kept)
 
 
@@ -316,10 +350,14 @@ def append_gun_event(pythia, gun_cfg):
     \"\"\"
     ids = gun_cfg["ids"]
     n_per_event = gun_cfg["n_per_event"]
+    mode = gun_cfg.get("mode", "pt")
     pt_min = gun_cfg["pt_min"]  # list, one per id
     pt_max = gun_cfg["pt_max"]  # list, one per id
     pt_log = gun_cfg["pt_log"]
     pt_power = gun_cfg["pt_power"]  # None -> pt_log / linear draw
+    e_min = gun_cfg["e_min"]  # list, one per id (energy mode)
+    e_max = gun_cfg["e_max"]
+    e_log = gun_cfg["e_log"]
     eta_min = gun_cfg["eta_min"]
     eta_max = gun_cfg["eta_max"]
     e_beam = gun_cfg["e_beam"]
@@ -334,25 +372,41 @@ def append_gun_event(pythia, gun_cfg):
     for _ in range(n_per_event):
         k_id = min(int(rndm.flat() * len(ids)), len(ids) - 1)
         pid = ids[k_id]
-        lo, hi = pt_min[k_id], pt_max[k_id]
         u = rndm.flat()
-        if pt_power is not None and abs(pt_power - 1.0) > 1e-12:
-            # dN/dpT ~ pT^-k on [lo, hi]: inverse CDF of the power law.
-            g = 1.0 - pt_power
-            pt = (lo**g + u * (hi**g - lo**g)) ** (1.0 / g)
-        elif pt_power is not None or pt_log:
-            pt = lo * (hi / lo) ** u  # log-uniform (k == 1)
-        else:
-            pt = lo + (hi - lo) * u
         eta = eta_min + (eta_max - eta_min) * rndm.flat()
         phi = 2.0 * math.pi * rndm.flat()
         # Breit-Wigner-sampled mass for resonances (within the id's mMin/mMax
         # window, settable in the .cmnd), the nominal mass otherwise.
         mass = pythia.particleData.mSel(abs(pid))
-        px = pt * math.cos(phi)
-        py = pt * math.sin(phi)
-        pz = pt * math.sinh(eta)
-        energy = math.sqrt(px * px + py * py + pz * pz + mass * mass)
+
+        if mode == "energy":
+            # Sample TOTAL energy, then split it with the exact on-shell
+            # relations: p = sqrt(E^2 - m^2), pT = p / cosh(eta), pz = p*tanh(eta)
+            # (pT^2 + pz^2 = p^2 identically). This is the draw the calorimeter
+            # guns want -- calo resolution is a function of E -- and it keeps the
+            # forward region physical, which a flat-in-pT draw does not.
+            lo, hi = e_min[k_id], e_max[k_id]
+            energy = lo * (hi / lo) ** u if e_log else lo + (hi - lo) * u
+            momentum = math.sqrt(max(energy * energy - mass * mass, 0.0))
+            pt = momentum / math.cosh(eta)
+            pz = momentum * math.tanh(eta)
+            px = pt * math.cos(phi)
+            py = pt * math.sin(phi)
+        else:
+            lo, hi = pt_min[k_id], pt_max[k_id]
+            if pt_power is not None and abs(pt_power - 1.0) > 1e-12:
+                # dN/dpT ~ pT^-k on [lo, hi]: inverse CDF of the power law.
+                g = 1.0 - pt_power
+                pt = (lo**g + u * (hi**g - lo**g)) ** (1.0 / g)
+            elif pt_power is not None or pt_log:
+                pt = lo * (hi / lo) ** u  # log-uniform (k == 1)
+            else:
+                pt = lo + (hi - lo) * u
+            px = pt * math.cos(phi)
+            py = pt * math.sin(phi)
+            pz = pt * math.sinh(eta)
+            energy = math.sqrt(px * px + py * py + pz * pz + mass * mass)
+
         event.append(pid, 1, 1, 2, 0, 0, 0, 0, px, py, pz, energy, mass)
 
     # Beams point at the thrown particles (entries 3 .. 2 + n_per_event).
@@ -412,24 +466,57 @@ def main() -> int:
                 )
             return vals
 
+        # pT-sampled or energy-sampled, never both: the two describe the same
+        # kinematics through different variables, so a file carrying both is
+        # ambiguous rather than over-specified.
+        uses_pt = bool(GUN_PT_KEYS & set(gun))
+        uses_e = bool(GUN_E_KEYS & set(gun))
+        if uses_pt and uses_e:
+            LOG.info(
+                "HepMC3Generator: give EITHER the Gun:pT* keys OR the Gun:e* keys, not both "
+                f"(found {sorted(GUN_PT_KEYS & set(gun))} and {sorted(GUN_E_KEYS & set(gun))})."
+            )
+            return 1
+        mode = "energy" if uses_e else "pt"
+
         pt_power_raw = gun.get("gun:ptpower")
         gun_cfg = {
+            "mode": mode,
             "ids": ids,
             "n_per_event": int(float(gun.get("gun:nperevent", 1))),
             "pt_min": per_id("gun:ptmin", 1.0),
             "pt_max": per_id("gun:ptmax", 100.0),
             "pt_log": gun_flag(gun, "gun:ptlog", True),
             "pt_power": float(pt_power_raw) if pt_power_raw is not None else None,
+            "e_min": per_id("gun:emin", 1.0),
+            "e_max": per_id("gun:emax", 100.0),
+            "e_log": gun_flag(gun, "gun:elog", True),
             "eta_min": float(gun.get("gun:etamin", -2.5)),
             "eta_max": float(gun.get("gun:etamax", 2.5)),
             "e_beam": 0.5 * float(pythia.settings.parm("Beams:eCM")),
         }
-        if any(hi <= lo for lo, hi in zip(gun_cfg["pt_min"], gun_cfg["pt_max"])):
-            LOG.info("HepMC3Generator: Gun:pTmax must exceed Gun:pTmin for every id!")
+        lo_key, hi_key = ("e_min", "e_max") if mode == "energy" else ("pt_min", "pt_max")
+        label = "Gun:eMax / Gun:eMin" if mode == "energy" else "Gun:pTmax / Gun:pTmin"
+        if any(hi <= lo for lo, hi in zip(gun_cfg[lo_key], gun_cfg[hi_key])):
+            LOG.info(f"HepMC3Generator: {label}: max must exceed min for every id!")
             return 1
-        if (gun_cfg["pt_power"] is not None or gun_cfg["pt_log"]) and min(gun_cfg["pt_min"]) <= 0.0:
-            LOG.info("HepMC3Generator: Gun:pTlog / Gun:pTpower need Gun:pTmin > 0!")
+        log_draw = gun_cfg["e_log"] if mode == "energy" else (
+            gun_cfg["pt_power"] is not None or gun_cfg["pt_log"]
+        )
+        if log_draw and min(gun_cfg[lo_key]) <= 0.0:
+            LOG.info(f"HepMC3Generator: a log/power draw needs {label.split()[1]} > 0!")
             return 1
+        # E must clear the rest mass, or sqrt(E^2 - m^2) is imaginary. Only bites
+        # for massive ids; the calorimeter guns throw photons.
+        if mode == "energy":
+            for pid, lo in zip(ids, gun_cfg["e_min"]):
+                mass = pythia.particleData.m0(abs(pid))
+                if lo <= mass:
+                    LOG.info(
+                        f"HepMC3Generator: Gun:eMin={lo} for id {pid} is below its "
+                        f"rest mass {mass:.4f} GeV -- raise eMin above it."
+                    )
+                    return 1
         LOG.info(f"HepMC3Generator: particle gun active: {gun_cfg}")
         os.unlink(pythia_cmnd)
 
@@ -459,5 +546,8 @@ def main() -> int:
     return 0
 
 if __name__ == "__main__":
-    main()
+    # PROPAGATE the exit code. main() returns 1 on a bad gun/Pythia config, and
+    # discarding it made every worker exit 0 -- so a broken .cmnd produced empty
+    # parts while the SLURM array reported success and the merge job fired.
+    sys.exit(main())
 """  # noqa: E501

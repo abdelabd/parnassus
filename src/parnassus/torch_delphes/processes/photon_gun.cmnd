@@ -1,0 +1,80 @@
+! photon_gun.cmnd
+! Flat-in-log-ENERGY photon gun for the CMS full-simulation pseudodata generator
+! (parnassus.torch_delphes.generate_pseudodata).
+!
+! PURPOSE
+!   Third gun in the muon -> electron -> photon chain, and structurally different
+!   from the first two. Photons have NO TRACK, so they touch no tracking
+!   efficiency and no momentum smearing. They constrain exactly 12 parameters:
+!
+!     ECal.scale_module.scale_raw[0..2]        barrel / endcap / forward
+!     ECal.resolution_func.common_c_E/_c_S/_c_N
+!     ECal.resolution_func.barrel_a/barrel_b
+!     ECal.resolution_func.endcap_a/endcap_b
+!     ECal.resolution_func.forward_c_E/forward_c_S
+!
+!   Every other card parameter receives zero gradient from this sample.
+!
+! WHY THIS SAMPLE EXISTS -- THE FORWARD REGION
+!   ECal resolution is piecewise in |eta| (see learnable.py
+!   LearnableEcalCMSResolution): barrel |eta| <= 1.5, endcap |eta| <= 2.5, and
+!   FORWARD |eta| > 2.5, with HF towers running out to |eta| = 5
+!   (CMSDefault._setup_ECal, hf_etas). The muon and electron guns both stop at
+!   |eta| = 2.5 because the TRACKING region specs stop there, so forward_c_E,
+!   forward_c_S and scale_raw[2] have never been directly constrained -- only by
+!   whatever forward photons QCD dijets happened to produce. A neutral particle
+!   needs no tracker, so this is the only gun in the chain that can reach them.
+!   It also populates the third ecal_photon_region_counts bin (|eta| > 2.5, see
+!   tune_cms_fullsim/data.py), which loss.py documents as the term that must
+!   out-vote a WRONG-SIGNED Wasserstein gradient on exactly
+!   forward_c_E / forward_c_S / common_c_E.
+!
+! WHY ENERGY AND NOT pT
+!   ECal resolution is a function of ENERGY:
+!     sigma = f(eta) * sqrt(E^2 c_E^2 + E c_S^2 + c_N^2)
+!   so sampling flat in log(E) spans the resolution curve directly and evenly at
+!   every eta. Sampling flat in pT would also go unphysical forward: at
+!   |eta| = 5, pT = 1000 GeV implies E = 74 TeV, eleven times the 6.5 TeV beam.
+!   Gun:eMax = 3000 keeps every photon below the beam energy at all eta.
+!   The driver converts (E, eta) with the exact on-shell relations
+!   p = sqrt(E^2 - m^2), pT = p / cosh(eta), pz = p * tanh(eta).
+!
+! NOTES
+!   * The Gun:* keys below are NOT Pythia settings. They are parsed and
+!     STRIPPED by parnassus.pythia.HepMC3Generator's single-job driver before
+!     the rest of this file is handed to Pythia's readFile(), so Pythia never
+!     sees an unknown setting. Give EITHER the pT keys OR the energy keys.
+!   * Gun:eMin = 1.0 GeV sits just above the ECal tower threshold (0.5 GeV) and
+!     inside the 2-sigma significance turn-on, so the low end deliberately
+!     straddles the soft gate that gives the calo count term its gradient.
+!   * Do NOT set Random:seed here -- the driver injects a per-worker seed, which
+!     also drives the gun sampling.
+!   * generate_pseudodata.py skips its --pt-hat-min injection for gun configs.
+
+! ---- Gun definition (consumed by the driver, stripped before Pythia) ----
+Gun:on = on
+Gun:ids = 22                        ! photons (self-conjugate; no charge to alternate)
+Gun:nPerEvent = 20                  ! photons thrown per event
+Gun:eMin = 1.0                      ! GeV (total energy, not pT)
+Gun:eMax = 3000.                    ! GeV -- stays under the 6.5 TeV beam at all eta
+Gun:eLog = on                       ! log-uniform in E (flat in ln E)
+Gun:etaMin = -5.0                   ! out to the HF calorimeter edge
+Gun:etaMax = 5.0
+
+! ---- Pythia: no hard process, we fill the event record ourselves ----
+ProcessLevel:all = off
+Beams:idA = 2212
+Beams:idB = 2212
+Beams:eCM = 13000.                  ! only sets the bookkeeping beam particles
+
+! ---- Suppress per-event and initialization printout ----
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off
