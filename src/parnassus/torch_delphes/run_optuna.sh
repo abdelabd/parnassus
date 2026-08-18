@@ -43,13 +43,30 @@ HISTORY_PATH="$OUTPUT_BASE/all_optuna.json"
 # this file or change STUDY_NAME above.
 STORAGE="sqlite:///$OUTPUT_BASE/study.db"
 
+# ===== train/val split =====
+# The split is CONTIGUOUS in file order, so by default train/val/test are blocks
+# of the ROOT file. Set SHUFFLE_SPLIT=1 to permute the event order first, which
+# matters whenever the file is ordered -- e.g. a merged sample (the generation
+# array's per-seed parts are concatenated) or a multi-gun merge, where the val
+# block would otherwise cover a different phase space than the train block and
+# the trial scores stop being comparable. Off by default so an existing study
+# resumed by this script keeps the split its earlier trials were scored on.
+SHUFFLE_SPLIT=${SHUFFLE_SPLIT:-0}
+SHUFFLE_SPLIT_SEED=${SHUFFLE_SPLIT_SEED:-0}   # separate from the fit seed; fixes the split
+
+SPLIT_ARGS=()
+if [[ "$SHUFFLE_SPLIT" != "0" ]]; then
+    SPLIT_ARGS+=(--shuffle-split --shuffle-split-seed "$SHUFFLE_SPLIT_SEED")
+fi
+
 # ===== launch =====
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."   # repo root (the paths above are relative to it)
 export PYTHONUNBUFFERED=1       # stream the live log
 export OMP_NUM_THREADS=8        # CPU threads per rank (lower if the N ranks contend for cores)
 
 # N ranks on this node (rank 0 owns the study); each rank uses cuda:LOCAL_RANK.
-"$PYTHON" -m torch.distributed.run --standalone --nproc-per-node="$N_GPUS" \
+# "$PYTHON" -m torch.distributed.run --standalone --nproc-per-node="$N_GPUS" \
+srun "$PYTHON" \
     -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$ROOT_FILE" \
     --optuna-config "$OPTUNA_CONFIG" \
@@ -62,4 +79,5 @@ export OMP_NUM_THREADS=8        # CPU threads per rank (lower if the N ranks con
     --history-path "$HISTORY_PATH" \
     --comet-name "$COMET_NAME" \
     --storage "$STORAGE" \
-    --study-name "$STUDY_NAME"
+    --study-name "$STUDY_NAME" \
+    ${SPLIT_ARGS[@]+"${SPLIT_ARGS[@]}"}

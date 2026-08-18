@@ -35,6 +35,7 @@ from parnassus.torch_delphes.tune_cms_fullsim.data import (
     load_truth_events,
     load_truth_events_ragged,
     restore_event_format,
+    shuffle_events_jagged,
     split_pflow_targets_jagged,
     split_truth_objects_jagged,
 )
@@ -889,3 +890,145 @@ def test_fit_against_committed_pseudodata(tmp_path: Path):
     assert max_shift > 0.01, f"ECal scale barely moved from 1.0: after={after_ecal.tolist()}"
     # None should have diverged the wrong way.
     assert float(after_ecal.min()) > 0.95, f"ECal scale drifted below 0.95: {after_ecal.tolist()}"
+
+
+# =============================================================================
+# Event-order shuffling before the train/val split (--shuffle-split)
+# =============================================================================
+
+def _toy_ragged_sample(n_events: int = 40):
+    """A ragged sample whose event i is trivially identifiable from any field.
+
+    Event ``i`` has ``i % 5 + 1`` reco particles all carrying the value ``i``, so
+    a permutation that broke truth/target alignment -- or that mixed per-particle
+    lists with per-event tensors -- shows up as a mismatched marker, not as a
+    subtle statistical shift.
+    """
+    rng = np.random.default_rng(0)
+    truth = [
+        torch.full((int(rng.integers(1, 6)), N_FEATURES), float(i), dtype=torch.float64)
+        for i in range(n_events)
+    ]
+    mult = torch.tensor([i % 5 + 1 for i in range(n_events)], dtype=torch.int64)
+    target = {
+        # per-particle: ragged lists, one 1-D tensor per event
+        "pt": [torch.full((int(mult[i]),), float(i), dtype=torch.float64) for i in range(n_events)],
+        "pid": [torch.full((int(mult[i]),), float(i), dtype=torch.float64) for i in range(n_events)],
+        # per-event: dense tensors whose dim 0 is the event axis
+        "multiplicity": mult,
+        "ht": torch.arange(n_events, dtype=torch.float64),
+        "chad_region_counts": torch.arange(n_events, dtype=torch.float64).unsqueeze(1).repeat(1, 4),
+    }
+    return truth, target
+
+
+def test_shuffle_events_jagged_keeps_truth_and_targets_aligned():
+    """The permutation must move every field of an event together.
+
+    This is the invariant the whole feature rests on: if the per-particle lists
+    were permuted but the per-event count tensors were not (or vice versa), each
+    event's truth particles would be scored against another event's reco targets
+    and the fit would silently train on garbage.
+    """
+    truth, target = _toy_ragged_sample()
+    n = len(truth)
+
+    shuffled_truth, shuffled_target = shuffle_events_jagged(truth, target, seed=7)
+    perm = np.random.default_rng(7).permutation(n)
+
+    assert len(shuffled_truth) == n
+    for i in range(n):
+        src = int(perm[i])
+        marker = float(src)
+        assert torch.equal(shuffled_truth[i], truth[src])
+        # every field of the moved event still carries the SAME event marker
+        assert torch.all(shuffled_truth[i] == marker)
+        assert torch.all(shuffled_target["pt"][i] == marker)
+        assert torch.all(shuffled_target["pid"][i] == marker)
+        assert float(shuffled_target["ht"][i]) == marker
+        assert torch.all(shuffled_target["chad_region_counts"][i] == marker)
+        # ...and the per-event count still matches the per-particle length
+        assert int(shuffled_target["multiplicity"][i]) == len(shuffled_target["pt"][i])
+
+
+def test_shuffle_events_jagged_is_a_permutation_and_leaves_inputs_alone():
+    """It reorders, it does not resample -- and the caller's lists are untouched."""
+    truth, target = _toy_ragged_sample()
+    before_truth = [t.clone() for t in truth]
+    before_ht = target["ht"].clone()
+
+    shuffled_truth, shuffled_target = shuffle_events_jagged(truth, target, seed=3)
+
+    assert sorted(float(v) for v in shuffled_target["ht"]) == sorted(float(v) for v in before_ht)
+    assert sorted(int(v) for v in shuffled_target["multiplicity"]) == sorted(
+        int(v) for v in target["multiplicity"]
+    )
+    # inputs unmodified (the function returns reordered copies)
+    assert all(torch.equal(a, b) for a, b in zip(truth, before_truth))
+    assert torch.equal(target["ht"], before_ht)
+
+
+def test_shuffle_events_jagged_is_deterministic_and_rng_independent():
+    """Every DDP rank loads the data independently, so all ranks must agree.
+
+    The permutation therefore comes from its own ``default_rng(seed)``, not from
+    the global numpy/torch RNG: perturbing the global state must not change the
+    split (and, symmetrically, shuffling must not perturb the training stream).
+    """
+    truth, target = _toy_ragged_sample()
+
+    np.random.seed(123)
+    torch.manual_seed(123)
+    a_truth, a_target = shuffle_events_jagged(truth, target, seed=11)
+
+    np.random.seed(999)
+    torch.manual_seed(999)
+    b_truth, b_target = shuffle_events_jagged(truth, target, seed=11)
+
+    assert all(torch.equal(x, y) for x, y in zip(a_truth, b_truth))
+    assert torch.equal(a_target["ht"], b_target["ht"])
+
+    c_truth, _ = shuffle_events_jagged(truth, target, seed=12)
+    assert not all(torch.equal(x, y) for x, y in zip(a_truth, c_truth))
+
+
+def test_shuffle_events_jagged_rejects_mismatched_event_counts():
+    """A length mismatch must raise, not silently truncate into a misaligned pair."""
+    truth, target = _toy_ragged_sample()
+    with pytest.raises(ValueError, match="event-count mismatch"):
+        shuffle_events_jagged(truth[:-1], target, seed=0)
+
+
+def test_shuffle_before_split_spreads_the_val_block_over_the_whole_sample():
+    """The point of the flag: val stops being a contiguous tail of the file.
+
+    The split is contiguous, so unshuffled the val block is exactly the file's
+    events [0.7n, 0.9n). Shuffled, it must draw from across the sample while
+    staying disjoint from train and keeping the same block sizes.
+    """
+    truth, target = _toy_ragged_sample(n_events=100)
+
+    _, val_unshuf, _ = split_truth_objects_jagged(truth)
+    shuffled_truth, shuffled_target = shuffle_events_jagged(truth, target, seed=5)
+    train_shuf, val_shuf, _ = split_truth_objects_jagged(shuffled_truth)
+    _, val_target_shuf, _ = split_pflow_targets_jagged(shuffled_target)
+
+    assert len(val_shuf) == len(val_unshuf)  # same block size
+
+    # Recover each block's original event ids from the marker value.
+    unshuf_ids = {int(t[0, 0]) for t in val_unshuf}
+    val_ids = {int(t[0, 0]) for t in val_shuf}
+    train_ids = {int(t[0, 0]) for t in train_shuf}
+
+    # The block bounds come from split_*_jagged's own arithmetic rather than
+    # hardcoded 70/90: 0.7 + 0.2 is 0.8999999999999999 in binary floating point,
+    # so the upper cut lands one event early. That is pre-existing behavior, not
+    # something the shuffle introduces -- it just must not be papered over here.
+    lo, hi = int(0.7 * len(truth)), int((0.7 + 0.2) * len(truth))
+    assert unshuf_ids == set(range(lo, hi))       # contiguous tail, as designed
+    assert not train_ids & val_ids                # no leakage between blocks
+    assert min(val_ids) < lo and max(val_ids) >= lo  # drawn from across the file
+
+    # truth and targets were split in lockstep, so the markers still agree
+    for i, t in enumerate(val_shuf):
+        assert float(val_target_shuf["ht"][i]) == float(t[0, 0])

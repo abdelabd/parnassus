@@ -582,6 +582,69 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = -
 
 
 # =============================================================================
+# Event-order shuffling (applied BEFORE the split)
+# =============================================================================
+
+def shuffle_events_jagged(
+    truth_ragged: list[torch.Tensor],
+    target: dict,
+    seed: int = 0,
+):
+    """Permute the event axis of a ragged sample, truth and targets in lockstep.
+
+    The ``split_*_jagged`` functions below cut the sample into contiguous blocks,
+    so the train/val/test sets inherit whatever event ordering the ROOT file
+    happens to have. That is fine for an i.i.d. sample but wrong whenever the
+    file is ordered (concatenated per-seed generation parts, a merged multi-gun
+    sample, an HT-sorted production): the validation block then covers a
+    different region of phase space than the train block and the val loss stops
+    being a fair score. Shuffling first makes the three blocks exchangeable.
+
+    The permutation is drawn from a *dedicated* :class:`numpy.random.Generator`
+    seeded with ``seed``, not from the global numpy/torch RNG. Two consequences
+    both matter here: every DDP rank loads the data independently and so must
+    derive the **identical** permutation (it does, for a given seed), and
+    enabling the shuffle does not perturb the training RNG stream, so a shuffled
+    run stays comparable to an unshuffled one at the same ``--seed``.
+
+    Parameters
+    ----------
+    truth_ragged : list[torch.Tensor]
+        Per-event truth tensors, as returned by :func:`load_truth_events_ragged`.
+    target : dict
+        Per-observable target dict from :func:`load_pflow_targets_ragged`: values
+        are either per-event ``list``s (the per-particle observables) or dense
+        tensors whose dim 0 is the event axis (multiplicity / ht / region counts).
+    seed : int
+        Seed for the permutation. The same seed reproduces the same split.
+
+    Returns
+    -------
+    (truth_ragged, target)
+        Reordered copies. The inputs are left untouched.
+    """
+    n_events = len(truth_ragged)
+    n_target_events = target["multiplicity"].shape[0]
+    if n_events != n_target_events:
+        raise ValueError(
+            f"truth/target event-count mismatch: {n_events} truth events vs "
+            f"{n_target_events} target events -- refusing to shuffle, since a "
+            "permutation applied to mismatched axes would silently pair each "
+            "event's truth particles with another event's reco targets."
+        )
+
+    perm = np.random.default_rng(seed).permutation(n_events)
+    perm_t = torch.from_numpy(perm.astype(np.int64))
+
+    shuffled_truth = [truth_ragged[i] for i in perm]
+    shuffled_target = {
+        key: ([value[i] for i in perm] if isinstance(value, list) else value[perm_t])
+        for key, value in target.items()
+    }
+    return shuffled_truth, shuffled_target
+
+
+# =============================================================================
 # Train validation splitting
 # =============================================================================
 

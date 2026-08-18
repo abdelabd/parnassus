@@ -379,6 +379,29 @@ def main() -> None:
         help="torch RNG seed (fixed across trials, so trials differ only by hyperparameters).",
     )
     parser.add_argument(
+        "--shuffle-split",
+        action="store_true",
+        help=(
+            "Randomly permute the event order BEFORE the 70/20/10 train/val/test "
+            "split. The split is contiguous, so by default train/val/test are "
+            "blocks of the ROOT file in file order -- which biases the val score "
+            "whenever the file is ordered (per-seed generation parts concatenated "
+            "by the merge, a multi-gun merged sample, an HT-sorted production). "
+            "Off by default so existing runs reproduce exactly."
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-split-seed",
+        type=int,
+        default=0,
+        help=(
+            "Seed for --shuffle-split's permutation. Kept separate from --seed so "
+            "the train/val split can be held fixed while the training RNG varies "
+            "(and vice versa). Drawn from its own generator, so every DDP rank "
+            "derives the same split and the training RNG stream is untouched."
+        ),
+    )
+    parser.add_argument(
         "--plot-every",
         type=int,
         default=10,
@@ -487,8 +510,13 @@ def main() -> None:
     # DistributedSampler shards it per epoch).
     log(f"[optuna] loading events from {args.root_file} ...")
     t0 = time.perf_counter()
+    # Loaded ONCE, outside the trial loop: every trial is therefore scored on the
+    # same train/val split, shuffled or not.
     train_dataset, val_dataset = load_split_datasets(
-        args.root_file, n_events=args.n_events, device=device
+        args.root_file,
+        n_events=args.n_events,
+        device=device,
+        shuffle_seed=args.shuffle_split_seed if args.shuffle_split else None,
     )
     log(
         f"[optuna] loaded {len(train_dataset)} train / {len(val_dataset)} val events "
@@ -683,6 +711,8 @@ def main() -> None:
             "world_size": world_size,
             "early_stopping_patience": max(0, args.early_stopping_patience),
             "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
+            # Which events landed in train vs val -- None = historic file-order split.
+            "shuffle_split_seed": args.shuffle_split_seed if args.shuffle_split else None,
         }
         write_history_json(round_dir / "history.json", history, metadata)
 

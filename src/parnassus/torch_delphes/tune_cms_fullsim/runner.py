@@ -26,6 +26,7 @@ from .data import (
     load_cms_flow_root,
     load_pflow_targets_ragged,
     load_truth_events_ragged,
+    shuffle_events_jagged,
     split_pflow_targets_jagged,
     split_truth_objects_jagged,
 )
@@ -38,6 +39,7 @@ def load_split_datasets(
     device: torch.device,
     train_fraction: float = 0.7,
     val_fraction: float = 0.2,
+    shuffle_seed: int | None = None,
 ) -> tuple[DelphesDataSet, DelphesDataSet]:
     """Load a CMS full-sim ROOT file and build the train/val dataset pair.
 
@@ -58,6 +60,11 @@ def load_split_datasets(
     train_fraction, val_fraction : float
         Fractions of the sample used for the train and validation splits (the
         remainder is held out). Defaults match the CLI (0.7 / 0.2).
+    shuffle_seed : int | None
+        When set, permute the event order with this seed *before* the split (see
+        :func:`.data.shuffle_events_jagged`), so train/val/test are random
+        subsets rather than contiguous blocks of the file. ``None`` (the default)
+        keeps the historic file-order split, so existing runs are unchanged.
 
     Returns
     -------
@@ -73,6 +80,11 @@ def load_split_datasets(
     # the split so peak RSS stays low.
     del arrays
     gc.collect()
+
+    # Shuffle BEFORE the split: the split itself is contiguous, so this is what
+    # decides whether train/val/test are random subsets or blocks of the file.
+    if shuffle_seed is not None:
+        truth_ragged, target = shuffle_events_jagged(truth_ragged, target, seed=shuffle_seed)
 
     train_truth_tensor, val_truth_tensor, _ = split_truth_objects_jagged(
         truth_ragged, train_fraction=train_fraction, val_fraction=val_fraction

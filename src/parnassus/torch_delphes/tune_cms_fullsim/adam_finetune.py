@@ -212,6 +212,15 @@ def main() -> None:
                         help="Override the run's event count (default: reuse).")
     parser.add_argument("--seed", type=int, default=None,
                         help="Override the run's RNG seed (default: reuse).")
+    parser.add_argument("--shuffle-split", action="store_true",
+                        help="Randomly permute the event order BEFORE the contiguous "
+                             "70/20/10 train/val/test split, so train/val are random "
+                             "subsets rather than blocks of the ROOT file in file order. "
+                             "Off by default so existing runs reproduce exactly.")
+    parser.add_argument("--shuffle-split-seed", type=int, default=0,
+                        help="Seed for --shuffle-split's permutation (separate from "
+                             "--seed, so the split can be held fixed while the training "
+                             "RNG varies).")
     parser.add_argument("--root-file", type=Path, default=None,
                         help="Override the run's ROOT file (default: reuse).")
     parser.add_argument("--optuna-config", type=Path, default=None,
@@ -298,7 +307,10 @@ def main() -> None:
     # --- data ----------------------------------------------------------------
     print(f"[adam] loading {n_events} events from {root_file} ...")
     t0 = time.perf_counter()
-    train_dataset, val_dataset = load_split_datasets(root_file, n_events=n_events, device=device)
+    train_dataset, val_dataset = load_split_datasets(
+        root_file, n_events=n_events, device=device,
+        shuffle_seed=args.shuffle_split_seed if args.shuffle_split else None,
+    )
     train_dataloader = DelphesDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_dataloader = DelphesDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     print(f"[adam] loaded in {time.perf_counter() - t0:.1f}s "
@@ -366,6 +378,8 @@ def main() -> None:
         "lr_scale": group_lr_scale,
         "n_steps": args.n_steps,
         "optuna_config": str(optuna_config),
+        # Which events landed in train vs val -- None = historic file-order split.
+        "shuffle_split_seed": args.shuffle_split_seed if args.shuffle_split else None,
         **loss_kwargs,
     }
     write_history_json(output_dir / "history.json", history, metadata)
