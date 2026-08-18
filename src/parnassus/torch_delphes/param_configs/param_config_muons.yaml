@@ -33,8 +33,8 @@ MuonMomentumSmearing.resolution_module.b_raw[1]:
 MuonMomentumSmearing.resolution_module.b_raw[2]:
   value: 0.0001937   # default 0.00035 (-45%)
 MuonMomentumSmearing.resolution_module.scale_raw[0]:
-  value: 1.173   # default 1 (+17%)
+  value: 1.15   # default 1 (+15%)
 MuonMomentumSmearing.resolution_module.scale_raw[1]:
   value: 0.8068   # default 1 (-19%)
 MuonMomentumSmearing.resolution_module.scale_raw[2]:
-  value: 1.173   # default 1 (+17%)
+  value: 1.2   # default 1 (+20%)
