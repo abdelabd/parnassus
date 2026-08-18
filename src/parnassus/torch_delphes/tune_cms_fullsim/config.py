@@ -126,3 +126,9 @@ CALO_COUNT_TERM_KEYS: tuple[tuple[str, str, str], ...] = (
 # ``lr_scale`` comes from the YAML param config and the Adam parameter groups
 # are built by :func:`parnassus.torch_delphes.param_config.select_trainable`.
 _DEFAULT_LR: float = 1e-2
+
+# Default GLOBAL Adam batch size (--batch-size). 4096 was hardcoded in the fit
+# loop; it is the default here so runs made before the flag existed reproduce
+# unchanged. optuna_search's configs set their own (search.global_batch_size),
+# so matching a study means passing that value explicitly.
+_DEFAULT_BATCH_SIZE: int = 4096
