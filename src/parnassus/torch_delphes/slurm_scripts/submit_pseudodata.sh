@@ -5,7 +5,7 @@
 #
 # USAGE (run on a login node, from anywhere):
 #   bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
-#       --config <param_config.yaml> [--process dijet|HZZ4l|muongun|electrongun|ksgun] [--n_events 100000] [--n_tasks 10] [--debug]
+#       --config <param_config.yaml> [--process dijet|HZZ4l|muongun|electrongun|ksgun|photongun] [--n_events 100000] [--n_tasks 10] [--debug]
 #
 # --config is REQUIRED: the (possibly partial) generation param config, passed
 # to generate_pseudodata --param-config; its basename and the process name the output,
@@ -28,12 +28,12 @@
 # min per 10k events). Measured per-task cost (dijet): ~0.11 s/event without --debug
 # (~1.5 s/event/core Pythia+HepMC on 32 cores + serial read/torch/write), ~0.22 s/event
 # with --debug -- pick n_events/n_tasks to fit TIME_LIMIT (default 30 min: ~15k events, ~8k with --debug).
-# The muon gun has no hard process and generates in seconds.
+# The muon/electron/ks/photon guns have no hard process and generate in seconds.
 
 set -euo pipefail
 
 # ---- CLI: --config <yaml> (required), --process <name>, --n_events <total>, --n_tasks <n> ----
-USAGE="usage: $0 --config <param_config.yaml> [--process dijet|HZZ4l|muongun|electrongun|ksgun] [--n_events <total, default 100000>] [--n_tasks <n, default 10>] [--debug]"
+USAGE="usage: $0 --config <param_config.yaml> [--process dijet|HZZ4l|muongun|electrongun|ksgun|photongun] [--n_events <total, default 100000>] [--n_tasks <n, default 10>] [--debug]"
 PARAM_CONFIG=""
 PROCESS="dijet"
 DEBUG_FLAG=""
@@ -57,7 +57,7 @@ if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$NJOBS" =~ ^[0-9]+$ ]] || (( NJOBS < 1 || TOTAL
     echo "$USAGE  (--n_events=$TOTAL must be a positive multiple of --n_tasks=$NJOBS)" >&2
     exit 2
 fi
-if ! [[ "$PROCESS" =~ ^(dijet|HZZ4l|muongun|electrongun|ksgun)$ ]]; then
+if ! [[ "$PROCESS" =~ ^(dijet|HZZ4l|muongun|electrongun|ksgun|photongun)$ ]]; then
     echo "$USAGE  (unknown --process: '$PROCESS')" >&2
     exit 2
 fi

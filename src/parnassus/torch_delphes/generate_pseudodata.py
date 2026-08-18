@@ -17,7 +17,8 @@ Event generation
    selected ``--process`` at ``sqrt(s) = 13 TeV`` (``dijet`` = hard QCD
    2->2, ``HZZ4l`` = VBF H->ZZ->4l; calibration resonance guns, one parent
    per event decayed by Pythia: ``muongun`` = J/psi + Z -> mu mu, ``electrongun``
-   = J/psi + Z -> e e, ``ksgun`` = K_S -> pi+ pi-; the Pythia ``.cmnd`` files
+   = J/psi + Z -> e e, ``ksgun`` = K_S -> pi+ pi-, ``photongun`` = flat-in-log-E
+   photons out to |eta| = 5 for the ECal; the Pythia ``.cmnd`` files
    live in ``processes/``) across
    ``--n-workers`` parallel Pythia8 processes, retries failed events so
    the merged HepMC3 file contains *exactly* ``--n-events`` events, and
@@ -150,6 +151,10 @@ PROCESS_CMND = {
     "muongun": "muon_gun.cmnd",  # J/psi + Z -> mu mu resonance gun (muon calibration)
     "electrongun": "electron_gun.cmnd",  # J/psi + Z -> e e (electron calibration)
     "ksgun": "kshort_gun.cmnd",  # K_S -> pi+ pi- (charged-hadron calibration)
+    # Energy-sampled photon gun: the only sample that reaches the FORWARD ECal
+    # (|eta| > 2.5), since a neutral particle needs no tracker and the other guns
+    # stop at the tracking edge. Constrains the ECal scale/resolution params only.
+    "photongun": "photon_gun.cmnd",
 }
 DIJET_PT_HAT_MIN = 20.0  # 100 -> 20 (2026-08-18): populate the calo thresholds (soft photons / NH) and broaden HT
 
@@ -641,7 +646,8 @@ def generate(
         Exact number of events to generate.
     process : str
         Key into :data:`PROCESS_CMND` selecting the shipped Pythia ``.cmnd``
-        (``"dijet"``, ``"HZZ4l"``, ``"muongun"``, ``"electrongun"`` or ``"ksgun"``).
+        (``"dijet"``, ``"HZZ4l"``, ``"muongun"``, ``"electrongun"``, ``"ksgun"``
+        or ``"photongun"``).
     pt_hat_min : float | None
         ``PhaseSpace:pTHatMin`` override appended to the process ``.cmnd``.
         ``None`` means no override, except for ``dijet`` which always runs
