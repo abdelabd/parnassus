@@ -1,272 +1,310 @@
+# Explicit CMS-default initialization config for tune_cms_fullsim.cli.
+#
+# The 68 card scalars at their CONSTRUCTOR DEFAULT values -- verified identical to
+# param_config.card_default_config(CMSEnergyFlowDefault()), 0/68 differing -- with
+# the trainable mask and learning rates of the optuna_search SEED TRIAL, so that
+# a single Adam fit through this file reproduces
+#   optuna_search --optuna-config optuna_config_all.yaml --n-trials 1
+# exactly. That command runs no search: TPE needs 10 startup trials and the median
+# pruner 5, so trial 0 is the enqueued seed trial and nothing else.
+#
+# LR CONVENTION -- READ THIS BEFORE CHANGING --lr.
+#   Each parameter's effective Adam lr is `--lr * lr_scale` (param_config.select_trainable).
+#   optuna_search materializes its configs with global_lr = 1, i.e. lr_scale holds
+#   the ABSOLUTE lr. This file follows that convention, so it is directly
+#   comparable with any round_<n>/materialized_config.yaml -- and it must be run
+#   with `--lr 1.0`. Passing the old `--lr 1e-3` silently gives every parameter a
+#   1000x smaller step.
+#     resolution (a/b/c softplus coeffs) : 0.0049
+#     scale      (tanh momentum/calo)    : 0.0019
+#     efficiency (sigmoid effs + rate)   : 0.015
+#   These are the calibrated `init:` values of optuna_config_all.yaml's search.lr.
+#
+# TRAINABLE MASK: 60 of 68 fitted. Frozen are the 5 HadronFractions logits (at the
+# generation truth), the 2 muon rate_raw, and ECal.resolution_func.barrel_a -- the
+# last pinned to break the exact ECal barrel/endcap sigma degeneracy. These are the
+# 8 entries of optuna_config_all.yaml's `constants:` block.
+#
+# To reproduce the seed trial (single fit, no study):
+#   srun python -m parnassus.torch_delphes.tune_cms_fullsim \
+#       --root-file <sample.root> --n-events -1 --n-steps 200 \
+#       --lr 1.0 --batch-size 2048 \
+#       --param-config src/parnassus/torch_delphes/param_configs/cms_default_init.yaml \
+#       --loss wasserstein_1d --pid-weighting sqrt_fraction \
+#       --lr-scheduler-patience 0 --mode delphes \
+#       --history-path <out.json>
+#   (--pid-weighting and --lr-scheduler-patience differ from cli.py's own defaults,
+#    which are 'equal' and 4; optuna_search uses 'sqrt_fraction' and 0.)
+
 ChargedHadronTrackingEfficiency.eff_logits[0]:
   value: 0.7
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ChargedHadronTrackingEfficiency.eff_logits[1]:
   value: 0.95
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ChargedHadronTrackingEfficiency.eff_logits[2]:
   value: 0.6
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ChargedHadronTrackingEfficiency.eff_logits[3]:
   value: 0.85
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ElectronTrackingEfficiency.eff_logits[0]:
   value: 0.73
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ElectronTrackingEfficiency.eff_logits[1]:
   value: 0.95
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ElectronTrackingEfficiency.eff_logits[2]:
   value: 0.99
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ElectronTrackingEfficiency.eff_logits[3]:
   value: 0.5
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ElectronTrackingEfficiency.eff_logits[4]:
   value: 0.83
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 ElectronTrackingEfficiency.eff_logits[5]:
   value: 0.9
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.eff_logits[0]:
   value: 0.75
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.eff_logits[1]:
   value: 0.99
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.eff_logits[2]:
   value: 0.99
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.eff_logits[3]:
   value: 0.7
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.eff_logits[4]:
   value: 0.98
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.eff_logits[5]:
   value: 0.98
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.rate_raw[0]:
   value: 0.0005
   trainable: false
-  lr_scale: 1.0
+  lr_scale: 0.015
 MuonTrackingEfficiency.rate_raw[1]:
   value: 0.0005
   trainable: false
-  lr_scale: 1.0
+  lr_scale: 0.015
 ChargedHadronMomentumSmearing.resolution_module.a_raw[0]:
   value: 0.06
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ChargedHadronMomentumSmearing.resolution_module.a_raw[1]:
   value: 0.1
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ChargedHadronMomentumSmearing.resolution_module.a_raw[2]:
   value: 0.25
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ChargedHadronMomentumSmearing.resolution_module.b_raw[0]:
   value: 0.0013
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ChargedHadronMomentumSmearing.resolution_module.b_raw[1]:
   value: 0.0017
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ChargedHadronMomentumSmearing.resolution_module.b_raw[2]:
   value: 0.0031
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ElectronMomentumSmearing.resolution_module.a_raw[0]:
   value: 0.03
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ElectronMomentumSmearing.resolution_module.a_raw[1]:
   value: 0.05
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ElectronMomentumSmearing.resolution_module.a_raw[2]:
   value: 0.15
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ElectronMomentumSmearing.resolution_module.b_raw[0]:
   value: 0.0013
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ElectronMomentumSmearing.resolution_module.b_raw[1]:
   value: 0.0017
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ElectronMomentumSmearing.resolution_module.b_raw[2]:
   value: 0.0031
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ElectronMomentumSmearing.resolution_module.scale_raw[0]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ElectronMomentumSmearing.resolution_module.scale_raw[1]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ElectronMomentumSmearing.resolution_module.scale_raw[2]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 MuonMomentumSmearing.resolution_module.a_raw[0]:
   value: 0.01
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 MuonMomentumSmearing.resolution_module.a_raw[1]:
   value: 0.015
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 MuonMomentumSmearing.resolution_module.a_raw[2]:
   value: 0.025
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 MuonMomentumSmearing.resolution_module.b_raw[0]:
   value: 0.0001
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 MuonMomentumSmearing.resolution_module.b_raw[1]:
   value: 0.00015
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 MuonMomentumSmearing.resolution_module.b_raw[2]:
   value: 0.00035
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 MuonMomentumSmearing.resolution_module.scale_raw[0]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 MuonMomentumSmearing.resolution_module.scale_raw[1]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 MuonMomentumSmearing.resolution_module.scale_raw[2]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 HadronFractions.chad_logit:
   value: 1.0e-06
   trainable: false
-  lr_scale: 1.0
+  lr_scale: 0.015
 HadronFractions.k0s_logit:
   value: 0.3
   trainable: false
-  lr_scale: 1.0
+  lr_scale: 0.015
 HadronFractions.lambda_logit:
   value: 0.3
   trainable: false
-  lr_scale: 1.0
+  lr_scale: 0.015
 HadronFractions.photon_logit:
   value: 1.0
   trainable: false
-  lr_scale: 1.0
+  lr_scale: 0.015
 HadronFractions.k0l_logit:
   value: 0.0
   trainable: false
-  lr_scale: 1.0
+  lr_scale: 0.015
 ECal.scale_module.scale_raw[0]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ECal.scale_module.scale_raw[1]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ECal.scale_module.scale_raw[2]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 ECal.resolution_func.common_c_E:
   value: 0.008
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ECal.resolution_func.common_c_S:
   value: 0.11
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ECal.resolution_func.common_c_N:
   value: 0.4
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ECal.resolution_func.barrel_a:
   value: 1.0
-  trainable: true
-  lr_scale: 0.1
+  trainable: false
+  lr_scale: 0.0049
 ECal.resolution_func.barrel_b:
   value: 0.64
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ECal.resolution_func.endcap_a:
   value: 2.16
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ECal.resolution_func.endcap_b:
   value: 5.6
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ECal.resolution_func.forward_c_E:
   value: 0.107
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 ECal.resolution_func.forward_c_S:
   value: 2.08
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 HCal.scale_module.scale_raw[0]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 HCal.scale_module.scale_raw[1]:
   value: 1.0
   trainable: true
-  lr_scale: 1.0
+  lr_scale: 0.0019
 HCal.resolution_func.central_c_E:
   value: 0.05
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 HCal.resolution_func.central_c_S:
   value: 1.5
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 HCal.resolution_func.forward_c_E:
   value: 0.13
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049
 HCal.resolution_func.forward_c_S:
   value: 2.7
   trainable: true
-  lr_scale: 0.1
+  lr_scale: 0.0049

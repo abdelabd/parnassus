@@ -68,6 +68,7 @@ from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
 
 from .comet_utils import end_comet_experiment, init_comet_experiment
 from .config import (
+    _DEFAULT_BATCH_SIZE,
     _DEFAULT_LR,
     DEFAULT_ABS_ETA_CUT,
     DEFAULT_MODE,
@@ -119,6 +120,20 @@ def main() -> None:
     )
     parser.add_argument("--n-events", type=int, default=-1)
     parser.add_argument("--n-steps", type=int, default=200)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=_DEFAULT_BATCH_SIZE,
+        help=(
+            "GLOBAL Adam batch size (default %(default)s). Under DDP with the "
+            "per-pid Wasserstein losses each rank takes batch_size // world_size "
+            "events and the ranks all_gather, so the combined batch -- and hence "
+            "the number of updates per epoch and the fit itself -- is this value "
+            "regardless of rank count; it must therefore divide evenly by the rank "
+            "count. soft_hist needs no all_gather and takes the full value per "
+            "rank. Pass 2048 to match optuna_search's search.global_batch_size."
+        ),
+    )
     parser.add_argument(
         "--lr",
         type=float,
@@ -522,9 +537,16 @@ def main() -> None:
     # case. For soft_hist, use the full batch size — the loss does not need
     # all_gather and benefits from larger per-rank batches.
     if args.loss in ("wasserstein", "wasserstein_1d"):
-        batch_size = max(1, 4096 // world_size)
+        if args.batch_size % world_size:
+            raise SystemExit(
+                f"--batch-size ({args.batch_size}) must be divisible by the number of "
+                f"ranks ({world_size}); otherwise the ranks take unequal batches and the "
+                "global batch is not the value you asked for. Pick a multiple, or launch "
+                "a different number of ranks."
+            )
+        batch_size = max(1, args.batch_size // world_size)
     else:
-        batch_size = 4096
+        batch_size = args.batch_size
 
     train_dataloader = DelphesDataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, sampler=train_sampler
@@ -657,6 +679,11 @@ def main() -> None:
             "n_steps": args.n_steps,
             "lr": args.lr,
             "param_config": str(args.param_config),
+            # global == the Adam batch (batch_size is the per-rank slice). Two runs
+            # are only comparable at equal global_batch_size: it sets the number of
+            # updates per epoch. Mirrors optuna_search's metadata keys.
+            "global_batch_size": args.batch_size,
+            "batch_size": batch_size,
             "param_group_lrs": sorted({g["lr"] for g in param_groups}),
             "trainable_params": sorted(k for k, spec in param_cfg.items() if spec["trainable"]),
             "world_size": world_size,
