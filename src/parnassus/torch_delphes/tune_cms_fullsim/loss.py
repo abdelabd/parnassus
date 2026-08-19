@@ -248,20 +248,47 @@ def _all_gather_varlen(
     """
     world_size = dist.get_world_size()
 
-    # ---- gather sizes -------------------------------------------------------
+    # ---- gather sizes (+ the autograd-graph flag, see below) ----------------
+    # The second slot rides along on the size gather so the parity check below
+    # costs no extra collective.
     local_size = torch.tensor(
-        [tensor_1d.numel()], dtype=torch.int64, device=tensor_1d.device
+        [tensor_1d.numel(), int(tensor_1d.requires_grad)],
+        dtype=torch.int64,
+        device=tensor_1d.device,
     )
     size_list = [
-        torch.zeros(1, dtype=torch.int64, device=tensor_1d.device)
+        torch.zeros(2, dtype=torch.int64, device=tensor_1d.device)
         for _ in range(world_size)
     ]
     dist.all_gather(size_list, local_size)
-    sizes = [int(s.item()) for s in size_list]
+    sizes = [int(s[0]) for s in size_list]
+    grad_flags = [bool(s[1]) for s in size_list]
     max_size = max(sizes)
 
     if max_size == 0:
+        # Nothing anywhere: every rank returns here, so no gather -- and hence no
+        # backward node -- is created on any rank. Consistent, so no parity check.
         return torch.zeros(0, dtype=tensor_1d.dtype, device=tensor_1d.device)
+
+    # ---- autograd-graph parity ---------------------------------------------
+    # diff_all_gather registers its backward (REDUCE_SCATTER) node ONLY when the
+    # input requires grad. If the ranks disagree, the FORWARD still matches and the
+    # job deadlocks in BACKWARD -- surfacing ~10 min later as an opaque NCCL
+    # watchdog timeout on a mismatched collective. Fail here instead, by name.
+    # The usual cause is a caller substituting a freshly built torch.zeros(0) for a
+    # rank that has no data; slice or mask a graph tensor to zero length instead,
+    # which is empty but keeps grad_fn.
+    if differentiable and len(set(grad_flags)) > 1:
+        with_grad = [r for r, g in enumerate(grad_flags) if g]
+        without = [r for r, g in enumerate(grad_flags) if not g]
+        raise RuntimeError(
+            "_all_gather_varlen(differentiable=True): ranks disagree on whether the "
+            f"input is on the autograd graph -- requires_grad=True on ranks {with_grad}, "
+            f"False on ranks {without} (local sizes {sizes}). The ranks without it would "
+            "skip the backward REDUCE_SCATTER and deadlock the job. Build the empty "
+            "case by slicing a graph tensor to zero length (e.g. pred['pt'].reshape(-1)"
+            "[:0]) rather than with torch.zeros(0)."
+        )
 
     # ---- pad to global max --------------------------------------------------
     if tensor_1d.numel() < max_size:
@@ -1754,14 +1781,24 @@ def per_pid_wasserstein_1d_loss_distributed(
         pred_pairs = compute_pair_masses(pred)
         tgt_pairs = compute_pair_masses(target)
         dt, dev = pred["pt"].dtype, pred["pt"].device
-        empty = (
-            torch.zeros(0, dtype=dt, device=dev),
-            torch.zeros(0, dtype=torch.long, device=dev),
-            torch.zeros(0, dtype=torch.long, device=dev),
-        )
+        empty_idx = torch.zeros(0, dtype=torch.long, device=dev)
+        # compute_pair_masses OMITS a pid it found no pair for, and whether a rank
+        # has a pair for a hypothesis depends on its own data shard. The pred-side
+        # fallback must therefore stay ON the autograd graph even when empty:
+        # all_gather registers its backward (REDUCE_SCATTER) node only when the
+        # input requires grad, so a plain torch.zeros(0) makes THIS rank skip a
+        # collective that every rank WITH a pair still issues. The forward still
+        # matches, and the job then deadlocks in BACKWARD until the NCCL watchdog
+        # kills it ~10 min later. Slicing a graph tensor to zero length is empty but
+        # keeps grad_fn -- the same idiom the per-particle gathers above rely on
+        # (`pred[key].reshape(-1)[pred_valid]` stays on the graph when it selects
+        # nothing). _all_gather_varlen now also asserts this parity across ranks.
+        # The target side is gathered with differentiable=False and needs no care.
+        pred_empty = (pred["pt"].reshape(-1)[:0], empty_idx, empty_idx)
+        tgt_empty = (torch.zeros(0, dtype=dt, device=dev), empty_idx, empty_idx)
         for pid in sorted(PAIR_MASS_HYPOTHESIS):
-            rp, cp, gp = pred_pairs.get(pid, empty)
-            rt, ct, gt = tgt_pairs.get(pid, empty)
+            rp, cp, gp = pred_pairs.get(pid, pred_empty)
+            rt, ct, gt = tgt_pairs.get(pid, tgt_empty)
             pred_gathered[f"pair_r:{pid}"] = _all_gather_varlen(rp, differentiable=True)
             pred_gathered[f"pair_cat:{pid}"] = _all_gather_varlen(cp.to(dt), differentiable=False)
             pred_gathered[f"pair_grp:{pid}"] = _all_gather_varlen(gp.to(dt), differentiable=False)
