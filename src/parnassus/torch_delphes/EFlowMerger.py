@@ -95,6 +95,21 @@ class EFlowMerger(nn.Module):
         if neutral_hadrons.shape[0] > 0:
             neutral_hadrons = self._transform_neutral_hadrons(neutral_hadrons)
 
+        # The three classes do not arrive with the same dtype: ParticlePropagator
+        # hands tracks over as float32 while the calo towers stay float64. torch.cat
+        # promotes, so a batch holding any tower comes out float64 -- but the concat
+        # list below drops EMPTY inputs, so a batch with ONLY tracks (a muon gun
+        # deposits almost nothing in the calorimeters, and small batches then hold no
+        # tower at all) would come out float32 instead. That makes the card's output
+        # dtype depend on which classes the batch happens to contain, and under DDP a
+        # rank whose batch went float32 gathers the same ELEMENT count as its peers
+        # with half the BYTES: NCCL matches counts, not dtypes, so it cannot see the
+        # mismatch and the job hangs until the watchdog fires ~10 min later. Pin the
+        # result to the dtype cat would have produced with all three present.
+        out_dtype = torch.promote_types(
+            torch.promote_types(tracks.dtype, photons.dtype), neutral_hadrons.dtype
+        )
+
         # Concatenate all objects
         all_objects = []
         if tracks.shape[0] > 0:
@@ -108,11 +123,11 @@ class EFlowMerger(nn.Module):
             # No objects - return empty tensor
             return torch.zeros(
                 (0, tracks.shape[1] if tracks.shape[0] > 0 else photons.shape[1]),
-                dtype=tracks.dtype if tracks.shape[0] > 0 else photons.dtype,
+                dtype=out_dtype,
                 device=tracks.device if tracks.shape[0] > 0 else photons.device,
             )
 
-        merged = torch.cat(all_objects, dim=0)
+        merged = torch.cat(all_objects, dim=0).to(out_dtype)
 
         return merged
 

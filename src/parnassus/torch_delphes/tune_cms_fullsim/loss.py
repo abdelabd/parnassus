@@ -213,6 +213,28 @@ def histogram_mse_loss(
 # =============================================================================
 
 
+# Stable integer per dtype so the parity check below can ride along on the int64
+# size gather. Codes are arbitrary but must never be reused for another dtype.
+_DTYPE_BY_CODE: dict[int, str] = {
+    1: "float16", 2: "bfloat16", 3: "float32", 4: "float64",
+    5: "int8", 6: "uint8", 7: "int16", 8: "int32", 9: "int64", 10: "bool",
+}
+_DTYPE_CODES: dict[torch.dtype, int] = {
+    torch.float16: 1, torch.bfloat16: 2, torch.float32: 3, torch.float64: 4,
+    torch.int8: 5, torch.uint8: 6, torch.int16: 7, torch.int32: 8,
+    torch.int64: 9, torch.bool: 10,
+}
+
+
+def _dtype_code(dtype: torch.dtype) -> int:
+    """Integer code of ``dtype``; 0 for anything not in :data:`_DTYPE_CODES`.
+
+    An unlisted dtype codes as 0 on every rank, so it never triggers a false
+    mismatch -- it only makes the check blind to that dtype.
+    """
+    return _DTYPE_CODES.get(dtype, 0)
+
+
 def _all_gather_varlen(
     tensor_1d: torch.Tensor,
     *,
@@ -248,21 +270,22 @@ def _all_gather_varlen(
     """
     world_size = dist.get_world_size()
 
-    # ---- gather sizes (+ the autograd-graph flag, see below) ----------------
-    # The second slot rides along on the size gather so the parity check below
-    # costs no extra collective.
+    # ---- gather sizes (+ the two parity slots, see below) -------------------
+    # The extra slots ride along on the size gather so the parity checks below
+    # cost no extra collective.
     local_size = torch.tensor(
-        [tensor_1d.numel(), int(tensor_1d.requires_grad)],
+        [tensor_1d.numel(), int(tensor_1d.requires_grad), _dtype_code(tensor_1d.dtype)],
         dtype=torch.int64,
         device=tensor_1d.device,
     )
     size_list = [
-        torch.zeros(2, dtype=torch.int64, device=tensor_1d.device)
+        torch.zeros(3, dtype=torch.int64, device=tensor_1d.device)
         for _ in range(world_size)
     ]
     dist.all_gather(size_list, local_size)
     sizes = [int(s[0]) for s in size_list]
     grad_flags = [bool(s[1]) for s in size_list]
+    dtype_codes = [int(s[2]) for s in size_list]
     max_size = max(sizes)
 
     if max_size == 0:
@@ -288,6 +311,29 @@ def _all_gather_varlen(
             "skip the backward REDUCE_SCATTER and deadlock the job. Build the empty "
             "case by slicing a graph tensor to zero length (e.g. pred['pt'].reshape(-1)"
             "[:0]) rather than with torch.zeros(0)."
+        )
+
+    # ---- dtype parity -------------------------------------------------------
+    # NCCL matches collectives on ELEMENT COUNT, never on dtype, so ranks gathering
+    # the same number of float32 and float64 values agree on every number NCCL
+    # checks while disagreeing on the byte count. Nothing errors: the job simply
+    # hangs until the watchdog reports a timeout on a collective whose sizes look
+    # identical on every rank. Fail here instead, by name. The usual cause is an
+    # upstream dtype that depends on the batch's contents (see EFlowMerger, where a
+    # batch holding no calorimeter tower used to skip the float64 promotion).
+    if len(set(dtype_codes)) > 1:
+        by_dtype: dict[int, list[int]] = {}
+        for r, c in enumerate(dtype_codes):
+            by_dtype.setdefault(c, []).append(r)
+        detail = ", ".join(
+            f"{_DTYPE_BY_CODE.get(c, f'code {c}')} on ranks {rs}"
+            for c, rs in sorted(by_dtype.items())
+        )
+        raise RuntimeError(
+            f"_all_gather_varlen: ranks disagree on the input dtype -- {detail} "
+            f"(local sizes {sizes}). The element counts match, so NCCL would not "
+            "detect this and the job would hang in the collective. Make the producing "
+            "code path return one dtype regardless of what the batch contains."
         )
 
     # ---- pad to global max --------------------------------------------------
