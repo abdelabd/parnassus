@@ -88,6 +88,25 @@ def test_gather_rejects_autograd_graph_mismatch_by_name():
     assert "GUARD_FIRED_OK" in proc.stdout, proc.stdout
 
 
+def test_gather_rejects_dtype_mismatch_by_name():
+    """The dtype half of the guard: same element count, different byte width.
+
+    This is the failure NCCL is blind to. It matches collectives on element count
+    and never on dtype, so ranks gathering 49 float32 against 49 float64 agree on
+    every number NCCL checks; the job just hangs, and the watchdog then reports a
+    collective whose sizes look identical on every rank -- a dead end to debug from.
+    The real instance came from EFlowMerger: a batch holding no calorimeter tower
+    skipped the float64 promotion, which happens on a muon gun whenever a small
+    batch is all tracks.
+    """
+    try:
+        proc = _run_ranks("dtype")
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"dtype-parity guard did not fire; job hung for {_TIMEOUT_S}s")
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "DTYPE_GUARD_FIRED_OK" in proc.stdout, proc.stdout
+
+
 def test_pair_mass_loss_matches_single_process():
     """DDP must not just RUN, it must agree with the single-GPU answer.
 
@@ -189,6 +208,34 @@ def _worker_loss() -> int:
         print("PAIR_MASS_BACKWARD_OK", flush=True)
     dist.destroy_process_group()
     return 0
+
+
+def _worker_dtype_guard() -> int:
+    import torch.distributed as dist
+    from parnassus.torch_delphes.tune_cms_fullsim.loss import _all_gather_varlen
+
+    dist.init_process_group("gloo")
+    rank = dist.get_rank()
+
+    # Same LENGTH on both ranks, different dtype -- so every quantity NCCL matches
+    # on agrees and only the byte count differs. Without the guard this is a hang.
+    local = torch.randn(4, dtype=torch.float64 if rank == 0 else torch.float32)
+
+    try:
+        _all_gather_varlen(local, differentiable=False)
+    except RuntimeError as exc:
+        msg = str(exc)
+        assert "disagree on the input dtype" in msg, msg
+        assert "float64 on ranks [0]" in msg, msg
+        assert "float32 on ranks [1]" in msg, msg
+        if rank == 0:
+            print("DTYPE_GUARD_FIRED_OK", flush=True)
+        dist.destroy_process_group()
+        return 0
+
+    print(f"[rank {rank}] FAIL: dtype mismatch was not rejected", flush=True)
+    dist.destroy_process_group()
+    return 1
 
 
 def _worker_guard() -> int:
@@ -311,4 +358,5 @@ def _worker_equiv() -> int:
 if __name__ == "__main__":
     sys.exit({
         "loss": _worker_loss, "guard": _worker_guard, "equiv": _worker_equiv,
+        "dtype": _worker_dtype_guard,
     }[sys.argv[1]]())

@@ -722,3 +722,52 @@ def test_tune_cms_to_target_moves_charged_hadron_scale_toward_target():
     assert dist_after < 0.7 * dist_before, (
         f"L1 distance did not improve enough: before={dist_before:.3g}, after={dist_after:.3g}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. Output dtype must not depend on what the batch contains
+# ---------------------------------------------------------------------------
+
+
+def test_eflow_object_dtype_is_independent_of_species_mix():
+    """A tracks-only batch must come out in the same dtype as a mixed batch.
+
+    ParticlePropagator hands tracks over as float32 while the calo towers stay
+    float64, and EFlowMerger drops empty inputs from its ``torch.cat`` -- so before
+    the fix the merged dtype came from whichever classes the batch happened to hold:
+    float64 with any tower present, float32 for a batch of muons alone (a muon gun
+    deposits almost nothing in the calorimeters, so small batches hold no tower).
+
+    That is not merely cosmetic. Under DDP the loss gathers these observables, and a
+    rank whose batch went float32 gathers the same ELEMENT count as its peers with
+    half the BYTES. NCCL matches counts, not dtypes, so it cannot detect the
+    mismatch: the job hangs until the watchdog kills it ~10 minutes later.
+    """
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+
+    mixed = _make_batch(n=120, seed=0)
+    muons_only = _make_batch(n=120, seed=0)
+    muons_only[:, ColumnMap.PID] = 13
+    muons_only[:, ColumnMap.CHARGE] = 1.0
+
+    out_mixed = card(mixed)
+    out_muons = card(muons_only)
+
+    # The test is only meaningful if the muon batch really produced no tower --
+    # otherwise torch.cat's promotion would hide the bug and this would pass
+    # vacuously.
+    assert out_muons["EFlowPhoton"].shape[0] == 0, "muon batch produced ECal photons"
+    assert out_muons["EFlowNeutralHadron"].shape[0] == 0, (
+        "muon batch produced HCal neutral hadrons"
+    )
+    assert out_muons["EFlowObject"].shape[0] > 0, "muon batch produced no objects at all"
+
+    assert out_muons["EFlowObject"].dtype == out_mixed["EFlowObject"].dtype, (
+        f"EFlowObject dtype depends on the batch contents: "
+        f"{out_muons['EFlowObject'].dtype} for tracks alone vs "
+        f"{out_mixed['EFlowObject'].dtype} for a mixed batch"
+    )
+    assert out_muons["EFlowObject"].dtype == mixed.dtype, (
+        f"EFlowObject dtype {out_muons['EFlowObject'].dtype} does not match the "
+        f"input dtype {mixed.dtype}"
+    )
