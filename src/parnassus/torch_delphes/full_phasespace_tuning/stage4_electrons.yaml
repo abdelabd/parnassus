@@ -1,0 +1,24 @@
+# Stage 4 -- electron gun (J/psi, Z -> e e): the electron track block.
+# Electron energy = track (+) ECal (inverse-variance), so the Z -> ee cells need the ECal
+# scale right: this stage runs AFTER the calorimeter stage. b_raw is kept trainable for
+# completeness but is calo-hidden and not expected to recover; eff_logits[5] (> 100 GeV)
+# couples to b_raw[2] through pt migration.
+name: stage4_electrons
+process: electrongun
+trainable:
+  - ElectronTrackingEfficiency.eff_logits[0]
+  - ElectronTrackingEfficiency.eff_logits[1]
+  - ElectronTrackingEfficiency.eff_logits[2]
+  - ElectronTrackingEfficiency.eff_logits[3]
+  - ElectronTrackingEfficiency.eff_logits[4]
+  - ElectronTrackingEfficiency.eff_logits[5]
+  - ElectronMomentumSmearing.resolution_module.a_raw[0]
+  - ElectronMomentumSmearing.resolution_module.a_raw[1]
+  - ElectronMomentumSmearing.resolution_module.a_raw[2]
+  - ElectronMomentumSmearing.resolution_module.b_raw[0]
+  - ElectronMomentumSmearing.resolution_module.b_raw[1]
+  - ElectronMomentumSmearing.resolution_module.b_raw[2]
+  - ElectronMomentumSmearing.resolution_module.scale_raw[0]
+  - ElectronMomentumSmearing.resolution_module.scale_raw[1]
+  - ElectronMomentumSmearing.resolution_module.scale_raw[2]
+extra_args: []

@@ -74,7 +74,7 @@ def values(obs, pid, key):
     return obs[key][obs["pid"].abs() == pid].numpy()
 
 
-def draw_page(pdf, title, xlabel, samples):
+def draw_page(pdf, title, xlabel, samples, ylabel="Objects"):
     """One page: counts (log-y) of target / initial / tuned plus the ratio-to-target panel."""
     pooled = np.concatenate(list(samples.values()))
     edges = np.linspace(*np.quantile(pooled, QUANTILES), N_BINS + 1)
@@ -89,7 +89,7 @@ def draw_page(pdf, title, xlabel, samples):
     ax.set_yscale("log")
     nonzero = np.concatenate([c[c > 0] for c in counts.values()])
     ax.set_ylim(nonzero.min() / 2, nonzero.max() * 30)  # headroom for the legend
-    ax.set_ylabel("Objects")
+    ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize="x-large")
     ax.legend(loc="upper right")
 

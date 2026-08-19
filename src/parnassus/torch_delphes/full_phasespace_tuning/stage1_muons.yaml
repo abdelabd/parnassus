@@ -1,0 +1,21 @@
+# Stage 1 -- muon gun (J/psi, Z -> mu mu): the muon track block.
+# Muons are track-only (no calorimeter, no cross-talk with any other block), so this
+# is the cleanest first stage. eff_logits[2,5] (pt > 1 TeV) and rate_raw have no lever
+# in the sample and stay frozen (report them as "not measurable").
+name: stage1_muons
+process: muongun
+trainable:
+  - MuonTrackingEfficiency.eff_logits[0]
+  - MuonTrackingEfficiency.eff_logits[1]
+  - MuonTrackingEfficiency.eff_logits[3]
+  - MuonTrackingEfficiency.eff_logits[4]
+  - MuonMomentumSmearing.resolution_module.a_raw[0]
+  - MuonMomentumSmearing.resolution_module.a_raw[1]
+  - MuonMomentumSmearing.resolution_module.a_raw[2]
+  - MuonMomentumSmearing.resolution_module.b_raw[0]
+  - MuonMomentumSmearing.resolution_module.b_raw[1]
+  - MuonMomentumSmearing.resolution_module.b_raw[2]
+  - MuonMomentumSmearing.resolution_module.scale_raw[0]
+  - MuonMomentumSmearing.resolution_module.scale_raw[1]
+  - MuonMomentumSmearing.resolution_module.scale_raw[2]
+extra_args: []

@@ -1,0 +1,21 @@
+# Stage 2 -- K_S gun (K_S -> pi+ pi-): the charged-hadron track block.
+# Track-only response; runs BEFORE the calorimeter stage because the eflow track
+# subtraction needs the charged-hadron tracks right. The calorimeter is still at its
+# card defaults here (second-order for the K_S response: chad pt is the track pt).
+name: stage2_chads
+process: ksgun
+trainable:
+  - ChargedHadronTrackingEfficiency.eff_logits[0]
+  - ChargedHadronTrackingEfficiency.eff_logits[1]
+  - ChargedHadronTrackingEfficiency.eff_logits[2]
+  - ChargedHadronTrackingEfficiency.eff_logits[3]
+  - ChargedHadronMomentumSmearing.resolution_module.a_raw[0]
+  - ChargedHadronMomentumSmearing.resolution_module.a_raw[1]
+  - ChargedHadronMomentumSmearing.resolution_module.a_raw[2]
+  - ChargedHadronMomentumSmearing.resolution_module.b_raw[0]
+  - ChargedHadronMomentumSmearing.resolution_module.b_raw[1]
+  - ChargedHadronMomentumSmearing.resolution_module.b_raw[2]
+  - ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]
+  - ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]
+  - ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]
+extra_args: []

@@ -1,0 +1,28 @@
+# Stage 3 -- dijet: the ECal + HCal block (17 = the 13 with a lever + the four c_E).
+# The c_E only act above ~TeV and are NOT expected to recover (they drifted 1.35-4x in
+# the dijet-only run); they are kept trainable here by decision "let the result speak" --
+# drop them from this list to pin them at the card default. barrel_a stays frozen (anchor
+# of the k-null direction of the ECal formula). Muon + chad blocks are frozen at their
+# stage-1/2 values, the electron block at card defaults (in-jet electrons are rare).
+# --no-pair-mass: the pair terms only carry charged-hadron track information, frozen here.
+name: stage3_calo
+process: dijet
+trainable:
+  - ECal.scale_module.scale_raw[0]
+  - ECal.scale_module.scale_raw[1]
+  - ECal.scale_module.scale_raw[2]
+  - ECal.resolution_func.common_c_E
+  - ECal.resolution_func.common_c_S
+  - ECal.resolution_func.common_c_N
+  - ECal.resolution_func.barrel_b
+  - ECal.resolution_func.endcap_a
+  - ECal.resolution_func.endcap_b
+  - ECal.resolution_func.forward_c_E
+  - ECal.resolution_func.forward_c_S
+  - HCal.scale_module.scale_raw[0]
+  - HCal.scale_module.scale_raw[1]
+  - HCal.resolution_func.central_c_E
+  - HCal.resolution_func.central_c_S
+  - HCal.resolution_func.forward_c_E
+  - HCal.resolution_func.forward_c_S
+extra_args: [--no-pair-mass]
