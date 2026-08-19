@@ -18,8 +18,9 @@ Event generation
    2->2, ``HZZ4l`` = VBF H->ZZ->4l; calibration resonance guns, one parent
    per event decayed by Pythia: ``muongun`` = J/psi + Z -> mu mu, ``electrongun``
    = J/psi + Z -> e e, ``ksgun`` = K_S -> pi+ pi-, ``photongun`` = flat-in-log-E
-   photons out to |eta| = 5 for the ECal; the Pythia ``.cmnd`` files
-   live in ``processes/``) across
+   photons out to |eta| = 5 for the ECal, ``flat_muon_gun`` = flat-in-log-pT
+   muons out to |eta| = 2.5 for the muon rate/eff/smearing parameters; the Pythia
+   ``.cmnd`` files live in ``processes/``) across
    ``--n-workers`` parallel Pythia8 processes, retries failed events so
    the merged HepMC3 file contains *exactly* ``--n-events`` events, and
    merges the per-worker outputs into one file. For ``dijet`` a
@@ -151,6 +152,7 @@ PROCESS_CMND = {
     "muongun": "muon_gun.cmnd",  # J/psi + Z -> mu mu resonance gun (muon calibration)
     "electrongun": "electron_gun.cmnd",  # J/psi + Z -> e e (electron calibration)
     "ksgun": "kshort_gun.cmnd",  # K_S -> pi+ pi- (charged-hadron calibration)
+    "flat_muon_gun": "flat_muon_gun.cmnd",  # flat-in-log-pT muon gun out to |eta|=2.5 (muon rate/eff/smearing)
     # Energy-sampled photon gun: the only sample that reaches the FORWARD ECal
     # (|eta| > 2.5), since a neutral particle needs no tracker and the other guns
     # stop at the tracking edge. Constrains the ECal scale/resolution params only.

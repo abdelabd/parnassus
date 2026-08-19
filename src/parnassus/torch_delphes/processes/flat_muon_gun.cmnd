@@ -1,0 +1,70 @@
+! muon_gun.cmnd
+! Flat-in-log-pT muon gun for the CMS full-simulation pseudodata generator
+! (parnassus.torch_delphes.generate_pseudodata).
+!
+! PURPOSE
+!   The shipped qcd_dijet.cmnd sample contains very few muons, and essentially
+!   none above 1 TeV. That starves the 17 muon-related parameters of
+!   CMSEnergyFlowDefault:
+!
+!     MuonTrackingEfficiency.eff_logits[0..5]   6 (|eta|, pt) regions
+!     MuonTrackingEfficiency.rate_raw[0..1]     pt > 1 TeV efficiency roll-off
+!     MuonMomentumSmearing.resolution_module.{a,b,scale}_raw[0..2]
+!
+!   learnable.py's CMSMuonLearnableEfficiency docstring calls this out
+!   explicitly: rate_raw is left frozen partly because fitting it needs
+!   "a sample with pt > 1 TeV muons, which the QCD-dijet pseudodata does not
+!   provide". This file provides exactly that.
+!
+! COVERAGE (see the region binning in learnable.py CMS_EFF_REGION_SPECS)
+!   Muon efficiency regions: |eta| bins [0, 1.5] and (1.5, 2.5];
+!                            pt bins (0.1, 1], (1, 1000], (1000, inf).
+!   Muon smearing regions:   |eta| bins [0, 0.5], (0.5, 1.5], (1.5, 2.5].
+!   Log-uniform pt in [0.2, 3000] GeV puts ~17% of muons in (0.2, 1],
+!   ~72% in (1, 1000] and ~11% above 1 TeV, so every efficiency region AND
+!   both rate_raw roll-off bins are populated. Uniform eta in [-2.5, 2.5]
+!   fills every eta bin of both modules (|eta| > 2.5 is in no region, so the
+!   range deliberately stops there).
+!
+! NOTES
+!   * The Gun:* keys below are NOT Pythia settings. They are parsed and
+!     STRIPPED by parnassus.pythia.HepMC3Generator's single-job driver before
+!     the rest of this file is handed to Pythia's readFile(), so Pythia never
+!     sees an unknown setting. Everything else here is ordinary Pythia.
+!   * Gun events contain ONLY muons -- no underlying event, no hadrons. Use
+!     this to fit the muon parameters; the charged-hadron / photon / neutral
+!     -hadron loss terms will be empty (loss.py returns a graph-connected zero
+!     for an empty cloud, so the fit runs, those terms just contribute 0).
+!   * Do NOT set Random:seed here. The per-worker seed is injected by the
+!     driver before this file is read, and it also drives the gun sampling,
+!     so each worker throws a statistically independent set of muons.
+!   * generate_pseudodata.py skips its --pt-hat-min injection for gun configs
+!     (there is no hard process to cut on).
+
+! ---- Gun definition (consumed by the driver, stripped before Pythia) ----
+Gun:on = on
+Gun:ids = 13 -13                    ! sampled uniformly (charge-symmetric)
+Gun:nPerEvent = 20                  ! muons thrown per event
+Gun:pTmin = 0.2                     ! GeV
+Gun:pTmax = 3000.                   ! GeV -- must exceed 1 TeV to feed rate_raw
+Gun:pTlog = on                      ! log-uniform in pt (flat in ln pt)
+Gun:etaMin = -2.5
+Gun:etaMax = 2.5
+
+! ---- Pythia: no hard process, we fill the event record ourselves ----
+ProcessLevel:all = off
+Beams:idA = 2212
+Beams:idB = 2212
+Beams:eCM = 13000.                  ! only sets the bookkeeping beam particles
+
+! ---- Suppress per-event and initialization printout ----
+Next:numberShowInfo = 0
+Next:numberShowProcess = 0
+Next:numberShowEvent = 0
+Init:showProcesses = off
+Init:showMultipartonInteractions = off
+Init:showChangedSettings = off
+Init:showChangedParticleData = off
+Stat:showProcessLevel = off
+Stat:showPartonLevel = off
+Stat:showErrors = off
