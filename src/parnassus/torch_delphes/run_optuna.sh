@@ -22,7 +22,7 @@ PYTHON="${PYTHON:-$(command -v python)}"
 # STUDY_NAME=pseudo_100k
 
 # ===== preset: full CMS sim (uncomment this, comment the block above) =====
-ROOT_FILE=${ROOT_FILE:-/global/cfs/cdirs/m3246/diff_delphes/train_1000.root}
+ROOT_FILE=${ROOT_FILE:-/global/cfs/cdirs/m3246/diff_delphes/cms_opendata_zenodo/train_1000.root}
 N_EVENTS=${N_EVENTS:-100000}
 OUTPUT_BASE=${OUTPUT_BASE:-doc/figure_fullsim_results}
 STUDY_NAME=${STUDY_NAME:-fullsim_100k}
