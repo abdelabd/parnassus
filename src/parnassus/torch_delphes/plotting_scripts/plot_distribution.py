@@ -9,9 +9,16 @@ charged hadrons -- the loss's pair-mass observable (a peak at ln(scale) whose wi
 the track resolution on the resonance-gun samples).
 One PDF page per (species, observable): counts on log-y with a ratio-to-target panel.
 
+With ``--mode fullsim`` (the default) the PDF ends with leading-jet pages: each
+sample's reco objects (after the trial's acceptance cuts) are clustered per event
+with anti-kt R=0.5 and the leading jet's log pT / eta / log m / constituent
+multiplicity are overlaid -- the same jet convention as the C++ evaluation
+pipeline (cppDelphes leading_jet_filter: jet pt > 8 GeV, >= 2 constituents,
+|eta| < 2.5). ``--mode delphes`` skips the jet pages.
+
     python -m parnassus.torch_delphes.plotting_scripts.plot_distribution \\
-        --workspace doc/figure_pseudodata_all \\
-        --sample /global/cfs/cdirs/m3246/diff_delphes/pseudo_data_100k_param_config_all_dijet.root
+        --workspace doc/figure_cmsfull_pt5 \\
+        --sample /work/hdd/bhvk/rli35/diffDelphes/samples/train_1000.root
 """
 
 import argparse
@@ -27,7 +34,12 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
-from parnassus.torch_delphes.tune_cms_fullsim.data import load_cms_flow_root
+from parnassus.torch_delphes.tune_cms_fullsim.data import (
+    apply_reco_acceptance_cut,
+    load_cms_flow_root,
+    load_pflow_targets_from_tensor,
+    restore_event_format,
+)
 from parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results import (
     _build_val_dataloader,
     _set_trainee_from_snapshot,
@@ -59,6 +71,19 @@ STYLE = {
 BATCH_SIZE = 2000
 SEED = 0  # re-seeded before each pass: initial and tuned see the same smearing noise
 
+# Leading-jet pages (--mode fullsim): same convention as the C++ evaluation pipeline
+# (cppDelphes/postprocessing data_utils.leading_jet_filter / cluster_jets defaults).
+JET_R = 0.5
+JET_PT_MIN = 8.0  # GeV, fastjet inclusive_jets threshold
+JET_N_CONST_MIN = 2
+JET_ABS_ETA_MAX = 2.5
+JET_OBSERVABLES = {
+    "jet_log_pt": r"$\log(p_\mathrm{T}^{\,\mathrm{jet}}\,/\,\mathrm{GeV})$",
+    "jet_eta": r"$\eta^{\,\mathrm{jet}}$",
+    "jet_log_m": r"$\log(m^{\,\mathrm{jet}}\,/\,\mathrm{GeV})$",
+    "jet_nconst": "Jet constituent multiplicity",
+}
+
 
 def run_card(card, params, loader, meta):
     """Load ``params`` into ``card`` and run it over ``loader`` -> (pred, target) observables."""
@@ -72,6 +97,81 @@ def run_card(card, params, loader, meta):
 def values(obs, pid, key):
     """Flat numpy array of observable ``key`` for the objects with |pid| == ``pid``."""
     return obs[key][obs["pid"].abs() == pid].numpy()
+
+
+def _accumulate_leading_jets(obs, feats):
+    """Cluster one batch's padded per-event objects; append the leading jet's features.
+
+    ``obs`` is a padded 2-D observable dict (``pt``/``eta``/``phi``/``log_E`` of shape
+    ``(n_events, max_n)``, invalid slots have ``pt == 0``). Four-vectors use the same
+    convention as the loss pipeline: ``E = exp(log_E)`` (class-mass hypothesis baked in
+    by :func:`load_pflow_targets_from_tensor`). Events whose jets all fail the
+    ``leading_jet_filter``-style selection are skipped (counted by the caller via
+    array lengths).
+    """
+    try:
+        import fastjet as fj
+    except ImportError as err:  # pragma: no cover - environment guard
+        raise RuntimeError(
+            "--mode fullsim jet pages need the fastjet python package "
+            "(available in the parnassus training env)."
+        ) from err
+
+    jet_def = fj.JetDefinition(fj.antikt_algorithm, JET_R)
+    pt_all = obs["pt"]
+    e_all = torch.exp(obs["log_E"])
+    for i in range(pt_all.shape[0]):
+        valid = pt_all[i] != 0
+        if not bool(valid.any()):
+            continue
+        pt = pt_all[i, valid].numpy()
+        eta = obs["eta"][i, valid].numpy()
+        phi = obs["phi"][i, valid].numpy()
+        e = e_all[i, valid].numpy()
+        px, py, pz = pt * np.cos(phi), pt * np.sin(phi), pt * np.sinh(eta)
+        pjs = [fj.PseudoJet(px[k], py[k], pz[k], e[k]) for k in range(len(pt))]
+        cs = fj.ClusterSequence(pjs, jet_def)  # keep alive while reading constituents
+        jets = [
+            j
+            for j in fj.sorted_by_pt(cs.inclusive_jets(JET_PT_MIN))
+            if len(j.constituents()) >= JET_N_CONST_MIN and abs(j.eta()) < JET_ABS_ETA_MAX
+        ]
+        if not jets:
+            continue
+        lead = jets[0]
+        feats["jet_log_pt"].append(np.log(lead.pt()))
+        feats["jet_eta"].append(lead.eta())
+        feats["jet_log_m"].append(np.log(max(lead.m(), 1e-3)))
+        feats["jet_nconst"].append(float(len(lead.constituents())))
+
+
+def leading_jet_features(loader, card=None, params=None, meta=None):
+    """Leading-jet feature arrays for one sample, preserving per-event structure.
+
+    With ``card``/``params``/``meta`` given, re-runs the trainee batch-by-batch
+    (mirroring ``_trainee_observables``: forward -> ``restore_event_format`` ->
+    ``load_pflow_targets_from_tensor`` -> acceptance cut) and clusters its output;
+    re-seeding with ``SEED`` reproduces the exact smearing noise of the object
+    pages, so the jet pages describe the same reco sample. Without them, clusters
+    the target objects straight from the loader batches (cuts already applied at
+    loader build).
+    """
+    feats = {key: [] for key in JET_OBSERVABLES}
+    if card is not None:
+        _set_trainee_from_snapshot(card, params)
+        torch.manual_seed(SEED)
+    with torch.no_grad():
+        for batch in loader:
+            if card is None:
+                _accumulate_leading_jets(batch, feats)
+                continue
+            truth_particles = batch["truth_particles"]
+            mask = torch.any(truth_particles != 0, dim=-1)
+            out = card(truth_particles[mask])
+            pred = load_pflow_targets_from_tensor(restore_event_format(out["EFlowObject"], mask))
+            pred = apply_reco_acceptance_cut(pred, meta["reco_pt_cut"], meta["eta_cut"])
+            _accumulate_leading_jets(pred, feats)
+    return {key: np.asarray(v) for key, v in feats.items()}
 
 
 def draw_page(pdf, title, xlabel, samples, ylabel="Objects"):
@@ -117,7 +217,14 @@ def main():
     ap.add_argument("--workspace", required=True, type=Path, help="dir containing round_<trial>/")
     ap.add_argument("--trial", type=int, default=0)
     ap.add_argument("--sample", required=True, type=Path, help="ROOT file (truth + pflow target)")
-    ap.add_argument("--n-events", type=int, default=20000, help="first N events of --sample")
+    ap.add_argument("--n-events", type=int, default=50000, help="first N events of --sample")
+    ap.add_argument(
+        "--mode",
+        choices=("fullsim", "delphes"),
+        default="fullsim",
+        help="fullsim (default): append leading-jet pages (anti-kt R=0.5 clustering of "
+        "each sample's reco objects); delphes: object/pair pages only",
+    )
     args = ap.parse_args()
 
     trial_dir = args.workspace / f"round_{args.trial}"
@@ -162,6 +269,27 @@ def main():
                 r"$\ln(m_{\mathrm{pair}}^{\mathrm{reco}}\,/\,m_{\mathrm{pair}}^{\mathrm{truth}})$",
                 arrays,
             )
+        if args.mode == "fullsim":
+            # Leading-jet pages: one extra pass per card (same SEED -> same smearing
+            # realization as the object pages above), target straight from the loader.
+            jet_samples = {
+                "target": leading_jet_features(loader),
+                "initial": leading_jet_features(loader, card, init, meta),
+                "tuned": leading_jet_features(loader, card, best, meta),
+            }
+            n_jets = {name: len(f["jet_log_pt"]) for name, f in jet_samples.items()}
+            print(f"Leading jets passing selection: {n_jets}")
+            for key, xlabel in JET_OBSERVABLES.items():
+                arrays = {name: f[key] for name, f in jet_samples.items()}
+                if not all(len(v) for v in arrays.values()):
+                    continue
+                draw_page(
+                    pdf,
+                    rf"Leading jet (anti-$k_t$, $R = {JET_R}$)",
+                    xlabel,
+                    arrays,
+                    ylabel="Jets",
+                )
     print(f"Wrote {output}")
 
 
