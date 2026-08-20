@@ -101,7 +101,7 @@ def test_shipped_config_parses_and_merges_to_full_cover(card_defaults):
     assert set(mask) == set(card_defaults)
     assert {k for k, v in mask.items() if not v["trainable"]} == FRACTION_KEYS | RATE_KEYS
     assert set(constants) < set(card_defaults)
-    assert len(card_defaults) == 68
+    assert len(card_defaults) == 76
 
     # k0l/lambda/chad pinned this round; k0s/photon TPE-sampled with an init.
     assert constants["HadronFractions.chad_logit"] == {"value": 0.0}
@@ -622,7 +622,7 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
         assert plots, f"no intermediate plots in {rd}"
         # The materialized config stays a full-cover, loadable param config --
         # plot_fit_results needs it for the honest before-fit baseline.
-        assert len(pc.load_param_config(rd / "materialized_config.yaml")) == 68
+        assert len(pc.load_param_config(rd / "materialized_config.yaml")) == 76
 
     # Trial 0 is the seed: constants at their `init:`, fitted scalars at the card
     # defaults, and every constant frozen.

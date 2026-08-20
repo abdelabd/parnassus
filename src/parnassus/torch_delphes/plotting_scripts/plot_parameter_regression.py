@@ -25,7 +25,8 @@ plt.rcParams["lines.linewidth"] = 3
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "param_configs" / "cms_target_default.yaml"
 
-# Parameter i of every block uses COLORS[i] (Petroff 6-colour palette).
+# Parameter i of every block uses COLORS[i % 6] (Petroff 6-colour palette,
+# cycled -- the 12-bin chad efficiency block reuses colours with new styles).
 COLORS = ["#5790fc", "#f89c20", "#e42536", "#964a8b", "#9c9ca1", "#7a21dd"]
 
 
@@ -36,7 +37,7 @@ def indexed(name, n):
 
 # One page per block, in this order. Only blocks with at least one trainable key are drawn.
 BLOCKS = {
-    "ChargedHadronTrackingEfficiency": indexed("ChargedHadronTrackingEfficiency.eff_logits", 4),
+    "ChargedHadronTrackingEfficiency": indexed("ChargedHadronTrackingEfficiency.eff_logits", 12),
     "ElectronTrackingEfficiency": indexed("ElectronTrackingEfficiency.eff_logits", 6),
     "MuonTrackingEfficiency (efficiency)": indexed("MuonTrackingEfficiency.eff_logits", 6),
     "MuonTrackingEfficiency (rate)": indexed("MuonTrackingEfficiency.rate_raw", 2),
@@ -114,8 +115,10 @@ def main():
                 continue
             fig, ax = plt.subplots()
             fig.subplots_adjust(left=0.16, right=0.95, bottom=0.14, top=0.88)  # fixed axes box
-            for key, color in zip(keys, COLORS, strict=False):
-                ax.plot(epochs, curves[key], color=color, label=key.split(".")[-1])
+            for i, key in enumerate(keys):
+                color = COLORS[i % len(COLORS)]
+                style = "-" if i < len(COLORS) else ":"
+                ax.plot(epochs, curves[key], color=color, linestyle=style, label=key.split(".")[-1])
                 ax.axhline(truth[key], color=color, linestyle="--")
             ax.axvline(best_epoch, color="black", linestyle=":", label="Best epoch")
             ax.set_xlim(0, epochs[-1])

@@ -1,14 +1,33 @@
 # MuonTrackingEfficiency.rate_raw[0,1] are deliberately NOT listed: they stay at the CMS default
 # (0.0005) on both the generation and the fit side -- the trainee gives rate_raw no gradient
 # (see learnable.py CMSMuonLearnableEfficiency), so a perturbed rate would only bias eff_logits[2,5].
+# Chad efficiency now has 6 pt bins per |eta| side (barrel [0..5], endcap
+# [6..11]); the legacy perturbed value is replicated across the above-1-GeV
+# sub-bins, preserving the original flat perturbation.
 ChargedHadronTrackingEfficiency.eff_logits[0]:
   value: 0.4778   # default 0.7 (-32%)
 ChargedHadronTrackingEfficiency.eff_logits[1]:
   value: 0.7086   # default 0.95 (-25%)
 ChargedHadronTrackingEfficiency.eff_logits[2]:
-  value: 0.3131   # default 0.6 (-48%)
+  value: 0.7086
 ChargedHadronTrackingEfficiency.eff_logits[3]:
+  value: 0.7086
+ChargedHadronTrackingEfficiency.eff_logits[4]:
+  value: 0.7086
+ChargedHadronTrackingEfficiency.eff_logits[5]:
+  value: 0.7086
+ChargedHadronTrackingEfficiency.eff_logits[6]:
+  value: 0.3131   # default 0.6 (-48%)
+ChargedHadronTrackingEfficiency.eff_logits[7]:
   value: 0.4825   # default 0.85 (-43%)
+ChargedHadronTrackingEfficiency.eff_logits[8]:
+  value: 0.4825
+ChargedHadronTrackingEfficiency.eff_logits[9]:
+  value: 0.4825
+ChargedHadronTrackingEfficiency.eff_logits[10]:
+  value: 0.4825
+ChargedHadronTrackingEfficiency.eff_logits[11]:
+  value: 0.4825
 ElectronTrackingEfficiency.eff_logits[0]:
   value: 0.3768   # default 0.73 (-48%)
 ElectronTrackingEfficiency.eff_logits[1]:

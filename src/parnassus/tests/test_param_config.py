@@ -39,7 +39,7 @@ def test_card_default_config_is_what_dump_writes(tmp_path: Path) -> None:
     """
     card = _fresh_card()
     defaults = pc.card_default_config(card)
-    assert len(defaults) == 68
+    assert len(defaults) == 76
     assert all(set(spec) == {"value", "trainable", "lr_scale"} for spec in defaults.values())
     assert not any(spec["trainable"] for spec in defaults.values())
 
@@ -61,7 +61,7 @@ def test_dump_load_apply_roundtrip(tmp_path: Path) -> None:
     pc.dump_param_config(src, cfg_path)
 
     flat = pc.load_param_config(cfg_path)
-    assert len(flat) == 68  # one entry per learnable scalar
+    assert len(flat) == 76  # one entry per learnable scalar
 
     dst = _fresh_card()
     # Perturb dst so apply has to actually do something.

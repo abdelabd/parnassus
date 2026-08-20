@@ -355,9 +355,21 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
             if len(keys) == 1 and not keys[0].endswith("]"):
                 vals = torch.tensor([snapshot[keys[0]]], dtype=p.dtype)
             else:
+                # A partial vector must be a hard error: silently zero-filling
+                # a missing index would set a *physical* value of 0 (e.g. a
+                # dead efficiency bin). Happens when the snapshot was written
+                # by a card with a different CMS_EFF_REGION_SPECS binning.
+                indices = [int(k[k.rfind("[") + 1 : k.rfind("]")]) for k in keys]
+                if len(keys) != p.numel() or max(indices) >= p.numel():
+                    raise ValueError(
+                        f"{name}: snapshot has {len(keys)} element(s) "
+                        f"{sorted(indices)} but the card expects {p.numel()} -- "
+                        "the snapshot was made with a different parameter "
+                        "binning (e.g. before the 12-bin chad efficiency). "
+                        "Replot with the matching old checkout, or refit."
+                    )
                 vals = torch.zeros(p.numel(), dtype=p.dtype)
-                for k in keys:
-                    i = int(k[k.rfind("[") + 1 : k.rfind("]")])
+                for k, i in zip(keys, indices):
                     vals[i] = snapshot[k]
             # Invert the relevant transform.
             if name.endswith(".scale_raw"):

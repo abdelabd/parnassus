@@ -1,0 +1,193 @@
+# Test-A variant of optuna_config_ptbins.yaml: chad momentum SCALE pinned at
+# 1.0 (the frac fit abused scale=+25% + 30% smearing to fake the full-sim
+# low-side response tail; this forces an honest efficiency+resolution fit).
+# Otherwise identical. Run with --pid-weighting fraction --reco-pt-cut 14.
+#
+# Optuna config for the CMS FULL-SIM fit with the pt-binned charged-hadron
+# tracking efficiency (12 chad eff_logits: 6 pt bins x 2 |eta| sides).
+#
+# Chad bin legend (eta-major, pt-minor; CMS_EFF_REGION_SPECS in learnable.py):
+#   barrel |eta|<=1.5 : [0]=(0.1,1]  [1]=(1,10]  [2]=(10,25]  [3]=(25,50]  [4]=(50,100]  [5]=(100,inf)
+#   endcap 1.5-2.5    : [6]=(0.1,1]  [7]=(1,10]  [8]=(10,25]  [9]=(25,50]  [10]=(50,100] [11]=(100,inf)
+# Bins fully below --reco-pt-cut 14 ([0],[1],[6],[7]) carry no count-term
+# information (only boundary migration into reco pt >= 14) and are pinned at
+# the card default. photon_merge_radius init 0.09 (the r009 best-fit seed).
+#
+# WARNING: do NOT reuse legacy 4-bin --init-config / materialized configs from
+# fits made before the 12-bin chad efficiency -- the eff_logits index semantics
+# differ (old [1] = barrel (1,inf); old [2],[3] were the ENDCAP bins).
+#
+# Run (470-600 GeV jet sample, pt-cut 14):
+#   SLURM_NTASKS=1 python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
+#     --root-file /work/hdd/bhvk/rli35/diffDelphes/samples/test_470.root \
+#     --optuna-config src/parnassus/torch_delphes/param_configs_fullsim/optuna_config_ptbins.yaml \
+#     --n-events 100000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --mode fullsim \
+#     --reco-pt-cut 14
+
+search:
+  n_trials: 40
+  seed: 0
+  global_batch_size: 2048
+  lr:
+    resolution: {low: 1.0e-4, high: 6.0e-3, log: true, init: 4.9e-3}
+    scale:      {low: 3.0e-4, high: 6.0e-3, log: true, init: 1.9e-3}
+    efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 1.5e-2}
+  photon_merge_radius: {low: 0.0, high: 0.15, init: 0.09}
+
+constants: {}
+
+parameters:
+  # Below the 14 GeV reco cut: unconstrained, pinned at card default.
+  ChargedHadronTrackingEfficiency.eff_logits[0]:
+    trainable: false   # barrel (0.1,1]
+  ChargedHadronTrackingEfficiency.eff_logits[1]:
+    trainable: false   # barrel (1,10]
+  ChargedHadronTrackingEfficiency.eff_logits[2]:
+    trainable: true    # barrel (10,25]
+  ChargedHadronTrackingEfficiency.eff_logits[3]:
+    trainable: true    # barrel (25,50]
+  ChargedHadronTrackingEfficiency.eff_logits[4]:
+    trainable: true    # barrel (50,100]
+  ChargedHadronTrackingEfficiency.eff_logits[5]:
+    trainable: true    # barrel (100,inf)
+  ChargedHadronTrackingEfficiency.eff_logits[6]:
+    trainable: false   # endcap (0.1,1]
+  ChargedHadronTrackingEfficiency.eff_logits[7]:
+    trainable: false   # endcap (1,10]
+  ChargedHadronTrackingEfficiency.eff_logits[8]:
+    trainable: true    # endcap (10,25]
+  ChargedHadronTrackingEfficiency.eff_logits[9]:
+    trainable: true    # endcap (25,50]
+  ChargedHadronTrackingEfficiency.eff_logits[10]:
+    trainable: true    # endcap (50,100]
+  ChargedHadronTrackingEfficiency.eff_logits[11]:
+    trainable: true    # endcap (100,inf)
+  ElectronTrackingEfficiency.eff_logits[0]:
+    trainable: true
+  ElectronTrackingEfficiency.eff_logits[1]:
+    trainable: true
+  ElectronTrackingEfficiency.eff_logits[2]:
+    trainable: true
+  ElectronTrackingEfficiency.eff_logits[3]:
+    trainable: true
+  ElectronTrackingEfficiency.eff_logits[4]:
+    trainable: true
+  ElectronTrackingEfficiency.eff_logits[5]:
+    trainable: true
+  MuonTrackingEfficiency.eff_logits[0]:
+    trainable: true
+  MuonTrackingEfficiency.eff_logits[1]:
+    trainable: true
+  MuonTrackingEfficiency.eff_logits[2]:
+    trainable: true
+  MuonTrackingEfficiency.eff_logits[3]:
+    trainable: true
+  MuonTrackingEfficiency.eff_logits[4]:
+    trainable: true
+  MuonTrackingEfficiency.eff_logits[5]:
+    trainable: true
+  # rate_raw pinned at the CMS default on both sides (no gradient path; see learnable.py).
+  MuonTrackingEfficiency.rate_raw[0]:
+    trainable: false
+  MuonTrackingEfficiency.rate_raw[1]:
+    trainable: false
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[0]:
+    trainable: true
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[1]:
+    trainable: true
+  ChargedHadronMomentumSmearing.resolution_module.a_raw[2]:
+    trainable: true
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[0]:
+    trainable: true
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[1]:
+    trainable: true
+  ChargedHadronMomentumSmearing.resolution_module.b_raw[2]:
+    trainable: true
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]:
+    trainable: false  # pinned at 1.0: no scale lever (test A)
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]:
+    trainable: false  # pinned at 1.0: no scale lever (test A)
+  ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]:
+    trainable: false  # pinned at 1.0: no scale lever (test A)
+  ElectronMomentumSmearing.resolution_module.a_raw[0]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.a_raw[1]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.a_raw[2]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.b_raw[0]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.b_raw[1]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.b_raw[2]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.scale_raw[0]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.scale_raw[1]:
+    trainable: true
+  ElectronMomentumSmearing.resolution_module.scale_raw[2]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.a_raw[0]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.a_raw[1]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.a_raw[2]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.b_raw[0]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.b_raw[1]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.b_raw[2]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.scale_raw[0]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.scale_raw[1]:
+    trainable: true
+  MuonMomentumSmearing.resolution_module.scale_raw[2]:
+    trainable: true
+  HadronFractions.chad_logit:
+    trainable: false   # pinned at card default
+  HadronFractions.k0s_logit:
+    trainable: false   # pinned at card default
+  HadronFractions.lambda_logit:
+    trainable: false   # pinned at card default
+  HadronFractions.photon_logit:
+    trainable: false   # pinned at card default
+  HadronFractions.k0l_logit:
+    trainable: false   # pinned at card default
+  ECal.scale_module.scale_raw[0]:
+    trainable: true
+  ECal.scale_module.scale_raw[1]:
+    trainable: true
+  ECal.scale_module.scale_raw[2]:
+    trainable: true
+  ECal.resolution_func.common_c_E:
+    trainable: true
+  ECal.resolution_func.common_c_S:
+    trainable: true
+  ECal.resolution_func.common_c_N:
+    trainable: true
+  ECal.resolution_func.barrel_a:
+    trainable: false
+  ECal.resolution_func.barrel_b:
+    trainable: true
+  ECal.resolution_func.endcap_a:
+    trainable: true
+  ECal.resolution_func.endcap_b:
+    trainable: true
+  ECal.resolution_func.forward_c_E:
+    trainable: true
+  ECal.resolution_func.forward_c_S:
+    trainable: true
+  HCal.scale_module.scale_raw[0]:
+    trainable: true
+  HCal.scale_module.scale_raw[1]:
+    trainable: true
+  HCal.resolution_func.central_c_E:
+    trainable: true
+  HCal.resolution_func.central_c_S:
+    trainable: true
+  HCal.resolution_func.forward_c_E:
+    trainable: true
+  HCal.resolution_func.forward_c_S:
+    trainable: true

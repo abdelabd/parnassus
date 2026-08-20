@@ -119,7 +119,7 @@ def test_learnable_card_parameter_count_matches_inventory():
 
     Breakdown (see docs/review discussion and ``learnable.py``):
 
-    - Tracking efficiency:        18   (4 chad + 6 e + 6 mu + 2 mu-rate)
+    - Tracking efficiency:        26   (12 chad + 6 e + 6 mu + 2 mu-rate)
     - Momentum resolution (a, b): 18   (3 species x (3 + 3))
     - Momentum scale:              9   (3 species x 3 regions)
     - ECal resolution:             9
@@ -128,11 +128,11 @@ def test_learnable_card_parameter_count_matches_inventory():
     - HCal scale:                  2
     - Hadron fractions:            5   (chad, k0s, lambda, photon, k0l)
     ------------------------------------
-    - Total:                      68
+    - Total:                      76
     """
     card = CMSEnergyFlowDefault(debug=False, learnable=True)
     total = sum(p.numel() for p in card.parameters())
-    assert total == 68, f"expected 68 learnable params, got {total}"
+    assert total == 76, f"expected 76 learnable params, got {total}"
 
 
 def test_learnable_parameter_defaults_match_static_formulas():
@@ -319,10 +319,18 @@ def test_charged_hadron_efficiency_defaults():
     efficiency in its soft (deterministic) form.
     """
     eff = CMSChargedHadronLearnableEfficiency(temperature=0.5)
-    pt = torch.tensor([0.5, 2.0, 0.5, 2.0], dtype=torch.float64)
-    eta = torch.tensor([0.0, 0.0, 2.0, 2.0], dtype=torch.float64)
+    # One probe per pt bin (barrel then endcap); every above-1-GeV sub-bin
+    # defaults to its containing legacy bin's value.
+    pt = torch.tensor(
+        [0.5, 2.0, 15.0, 30.0, 70.0, 150.0, 0.5, 2.0, 15.0, 30.0, 70.0, 150.0],
+        dtype=torch.float64,
+    )
+    eta = torch.tensor([0.0] * 6 + [2.0] * 6, dtype=torch.float64)
     got = eff.compute_efficiency(pt, eta)
-    expected = torch.tensor([0.70, 0.95, 0.60, 0.85], dtype=torch.float64)
+    expected = torch.tensor(
+        [0.70, 0.95, 0.95, 0.95, 0.95, 0.95, 0.60, 0.85, 0.85, 0.85, 0.85, 0.85],
+        dtype=torch.float64,
+    )
     assert torch.allclose(got, expected, atol=1e-6)
 
 
@@ -358,7 +366,7 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
     # Per-(pt,eta) region differentiable expected counts (one tensor per track
     # species), shape (n_regions,) -- not an (N, N_FEATURES) object cloud.
     expected_count_shapes = {
-        "ChargedHadronExpectedCounts": 4,
+        "ChargedHadronExpectedCounts": 12,
         "ElectronExpectedCounts": 6,
         "MuonExpectedCounts": 6,
         # Calo object counts: ECal barrel/endcap/forward (3), HCal central/forward (2).
@@ -505,7 +513,7 @@ def test_expected_counts_match_hard_counts_and_labels(seed: int) -> None:
 
     # Labels on the EFlowObject sit in the species' disjoint ranges (or 0); towers 0.
     reg = out["EFlowObject"][:, ColumnMap.EFF_REGION]
-    assert reg.min() >= 0 and reg.max() <= 16
+    assert reg.min() >= 0 and reg.max() <= 24
     assert float(out["Tower"][:, ColumnMap.EFF_REGION].abs().max()) == 0.0
 
 

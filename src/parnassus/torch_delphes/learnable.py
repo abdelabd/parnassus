@@ -24,10 +24,10 @@ Design notes
   drive them negative. Per-region multiplicative scales are stored as raw
   parameters and exposed as ``1 + 0.3 * tanh(raw)``, bounding them to
   [0.7, 1.3] and starting at exactly 1.0.
-- **Geometry stays fixed.** Region boundaries (eta cuts at 0.5/1.5/2.5,
-  pt cuts at 0.1/1/100/1000) are stored as buffers, not parameters. Per
-  the design discussion, geometric quantities like detector dimensions and
-  region edges are not optimized.
+- **Geometry stays fixed.** Region boundaries (eta cuts at 0.5/1.5/2.5, pt
+  cuts at the ``CMS_EFF_REGION_SPECS`` edges) are stored as buffers, not
+  parameters. Per the design discussion, geometric quantities like detector
+  dimensions and region edges are not optimized.
 - **Efficiency uses a hard (detached) Gumbel-sigmoid mask.** The forward pass
   produces a hard 0/1 selection (so downstream physics is unchanged in
   expectation). The mask is **detached**, so NO gradient flows to ``eff_logits``
@@ -38,7 +38,7 @@ Design notes
   *count* term, one per track species (charged hadron, electron, muon): each
   track is tagged with its pre-reco region (:meth:`region_index_1based`), using
   a per-species :class:`EfficiencyRegionSpec` with disjoint global label ranges
-  (chad 1-4, electron 5-10, muon 11-16; 0 = outside all regions), and the loss
+  (chad 1-12, electron 13-18, muon 19-24; 0 = outside all regions), and the loss
   reweights the trainee's per-(species, reco-bin) counts by ``eff`` to match the
   reconstructed data (see ``CMSEnergyFlowDefault._expected_reco_counts`` and
   ``tune_cms_fullsim.loss.per_event_wasserstein_loss``). The muon high-pt
@@ -324,8 +324,8 @@ class EfficiencyRegionSpec:
     label_offset : int
         Offset for the **global** 1-based ``EFF_REGION`` label of this species:
         ``label = label_offset + r + 1`` (``0`` = outside all regions). Offsets
-        are chosen so the per-species label ranges are disjoint (chad 1-4,
-        electron 5-10, muon 11-16), letting one shared column carry all three.
+        are chosen so the per-species label ranges are disjoint (chad 1-12,
+        electron 13-18, muon 19-24), letting one shared column carry all three.
     """
 
     species: str
@@ -377,19 +377,26 @@ class EfficiencyRegionSpec:
         return [em & pm for em in eta_masks for pm in pt_masks]
 
 
-# CMS tracking-efficiency region specs (one per track species). The cuts and
-# region order reproduce the legacy static ``Efficiency`` formulas exactly. The
-# label offsets keep the three species' EFF_REGION labels disjoint so a single
-# feature column can carry all of them (0 = untagged / outside all regions).
+# CMS tracking-efficiency region specs (one per track species). The eta cuts
+# and region order reproduce the legacy static ``Efficiency`` formulas; the
+# charged-hadron pt binning is refined above 1 GeV (legacy: one flat bin) so a
+# CMS full-sim fit can express the pt-falling tracking efficiency it measures.
+# The label offsets keep the three species' EFF_REGION labels disjoint so a
+# single feature column can carry all of them (0 = untagged / outside all
+# regions): chad 1-12, electron 13-18, muon 19-24. Growing one species' region
+# count requires shifting every later offset.
 CMS_EFF_REGION_SPECS: dict[str, EfficiencyRegionSpec] = {
     "charged_hadron": EfficiencyRegionSpec(
-        species="charged_hadron", pt_edges=(0.1, 1.0), abs_eta_edges=(1.5, 2.5), label_offset=0
+        species="charged_hadron",
+        pt_edges=(0.1, 1.0, 10.0, 25.0, 50.0, 100.0),
+        abs_eta_edges=(1.5, 2.5),
+        label_offset=0,
     ),
     "electron": EfficiencyRegionSpec(
-        species="electron", pt_edges=(0.1, 1.0, 1.0e2), abs_eta_edges=(1.5, 2.5), label_offset=4
+        species="electron", pt_edges=(0.1, 1.0, 1.0e2), abs_eta_edges=(1.5, 2.5), label_offset=12
     ),
     "muon": EfficiencyRegionSpec(
-        species="muon", pt_edges=(0.1, 1.0, 1.0e3), abs_eta_edges=(1.5, 2.5), label_offset=10
+        species="muon", pt_edges=(0.1, 1.0, 1.0e3), abs_eta_edges=(1.5, 2.5), label_offset=18
     ),
 }
 
@@ -461,8 +468,8 @@ class _LearnableEfficiencyBase(nn.Module):
 
         Region ``r`` of :attr:`region_spec` maps to label
         ``region_spec.label_offset + r + 1``; ``0`` for particles outside all
-        regions. Offsets keep the species' label ranges disjoint (chad 1-4,
-        electron 5-10, muon 11-16) so one shared column carries every species,
+        regions. Offsets keep the species' label ranges disjoint (chad 1-12,
+        electron 13-18, muon 19-24) so one shared column carries every species,
         and the loss can build the per-(species, reco-bin) <- pre-reco-region
         migration for the differentiable count term (see
         ``CMSEnergyFlowDefault._expected_reco_counts``).
@@ -543,16 +550,24 @@ class _LearnableEfficiencyBase(nn.Module):
 class CMSChargedHadronLearnableEfficiency(_LearnableEfficiencyBase):
     """Learnable CMS charged-hadron tracking efficiency.
 
-    Four piecewise-constant efficiency parameters covering the four
-    (pt, |eta|) regions defined in
-    :meth:`Efficiency._charged_hadron_cms_efficiency`. Each is stored as a
-    logit so the sigmoid keeps it in ``(0, 1)``. Binning + region labels come
-    from ``CMS_EFF_REGION_SPECS["charged_hadron"]``; efficiency evaluation,
-    region tagging, and the detached mask are inherited from the base class.
+    Twelve piecewise-constant efficiency parameters covering the (pt, |eta|)
+    regions of ``CMS_EFF_REGION_SPECS["charged_hadron"]`` -- the legacy 2x2
+    grid of :meth:`Efficiency._charged_hadron_cms_efficiency` with the flat
+    above-1-GeV bin split into (1,10], (10,25], (25,50], (50,100], (100,inf)
+    per |eta| side, so a fit can express a pt-dependent efficiency. Each is
+    stored as a logit so the sigmoid keeps it in ``(0, 1)``; every sub-bin
+    defaults to the legacy value of its containing legacy bin. Efficiency
+    evaluation, region tagging, and the detached mask are inherited from the
+    base class.
     """
 
-    # (lowpt-barrel, highpt-barrel, lowpt-endcap, highpt-endcap)
-    _DEFAULTS: tuple[float, ...] = (0.70, 0.95, 0.60, 0.85)
+    # Eta-major, pt-minor: barrel (0.1,1], (1,10], (10,25], (25,50], (50,100],
+    # (100,inf), then the same six endcap bins. Legacy values 0.70/0.95
+    # (barrel low/high) and 0.60/0.85 (endcap low/high).
+    _DEFAULTS: tuple[float, ...] = (
+        0.70, 0.95, 0.95, 0.95, 0.95, 0.95,
+        0.60, 0.85, 0.85, 0.85, 0.85, 0.85,
+    )
 
     def __init__(self, temperature: float = 0.5) -> None:
         super().__init__(

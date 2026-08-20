@@ -187,7 +187,7 @@ def test_load_pflow_targets_shapes(fixture_root: Path):
     assert tgt["multiplicity"].shape == (15,)
     assert tgt["ht"].shape == (15,)
     # Per-species region-count targets: (n_events, n_regions), non-negative integers.
-    assert tgt["chad_region_counts"].shape == (15, 4)
+    assert tgt["chad_region_counts"].shape == (15, 12)
     assert tgt["electron_region_counts"].shape == (15, 6)
     assert tgt["muon_region_counts"].shape == (15, 6)
     for key in ("chad_region_counts", "electron_region_counts", "muon_region_counts"):
@@ -909,8 +909,8 @@ def test_reco_acceptance_cut_target_loader(fixture_root: Path):
     # Cut never adds objects
     assert float(cut["multiplicity"].sum()) <= float(plain["multiplicity"].sum())
     # Chad (pt, |eta|) region-count targets: rebuilt from the cut set -- every
-    # sub-1-GeV pt region must be empty. Region 0/1 of the chad spec are the
-    # pt <= 1 bins (CMS_EFF_REGION_SPECS: pt edges (0.1, 1.0)).
+    # sub-1-GeV pt region must be empty (the (0.1, 1] bins of the chad spec,
+    # one per |eta| side; probed below so the test tracks the spec).
     from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
     spec = CMS_EFF_REGION_SPECS["charged_hadron"]
     # Identify sub-cut regions by probing the masks with a 0.5 GeV chad at eta 0.
