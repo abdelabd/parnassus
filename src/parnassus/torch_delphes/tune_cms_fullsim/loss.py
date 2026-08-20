@@ -76,7 +76,7 @@ CALO_COUNT_WEIGHT = 1.0
 
 # Weight of the per-event log(HT) sliced-Wasserstein term relative to the per-pid
 # object terms. Overridable per-call via the CLI --event-weight.
-EVENT_WEIGHT = 0.1
+EVENT_WEIGHT = 1.0
 
 # Per-event-RATE floor in the count-term Pearson denominators (replaces the old
 # constant ``+1`` count floor). The count terms are evaluated on per-event RATES
