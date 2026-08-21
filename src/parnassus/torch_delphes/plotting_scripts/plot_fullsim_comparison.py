@@ -96,18 +96,24 @@ JET_OBS = {
 }
 # (n_bins, low, high) per page; None -> pooled 0.5 % / 99.5 % quantile. The log-pT pages start
 # at the floor (set in main) and take their upper edge from the data (it depends on the sample).
+# Ranges end where the data ends and leave the upper-right legend over a tail (eta, jet_log_m,
+# jet_pt_resp), so the 1.4x headroom below never has to grow.
 BINS = {
     "log_pt": (30, None, None),
-    "eta": (20, -2.0, 2.0),
+    "eta": (27, -2.7, 2.7),
     "jet_log_pt": (30, None, None),
     "jet_eta": (25, -2.5, 2.5),
-    "jet_log_m": (30, 0.5, 5.5),
+    "jet_log_m": (30, 1.5, 6.2),
     "jet_nconst": (20, -0.5, 39.5),
-    "jet_pt_resp": (30, -0.4, 0.2),
+    "jet_pt_resp": (35, -0.4, 0.3),
     "jet_m_resp": (30, -1.0, 1.0),
     "jet_eta_resp": (30, -0.06, 0.06),
 }
-# Parnassus output per pT-hat bin (the "<bin>" of a "<split>_<bin>.root" sample stem).
+LEGEND_FONTSIZE = 15.5  # points; between "medium" (14) and "large" (16.8) of the ATLAS style
+# Fixed jet log-pT axis per pT-hat bin (the "<bin>" of a "<split>_<bin>.root" sample stem);
+# bins not listed keep the pooled-quantile range.
+JET_LOG_PT_RANGE = {"1000": (6.5, 7.4)}
+# Parnassus output per pT-hat bin.
 PARNASSUS_DIR = Path("/global/cfs/cdirs/m3246/diff_delphes/parnassua_data")
 PARNASSUS_FILES = {
     "800": PARNASSUS_DIR / "Jet800_fm_pos_cms_pow_v4_glob_npf_J800_1000_49_25_pndm_0.0.root",
@@ -267,9 +273,9 @@ def draw_page(pdf, title, xlabel, samples, ylabel, key, note=None):
     ax.set_ylim(0, max(c.max() for c in counts.values()) * 1.4)
     ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize="large")
-    ax.legend(loc="upper right", fontsize="small")
+    ax.legend(loc="upper right", fontsize=LEGEND_FONTSIZE)
     if note:
-        ax.text(0.97, 0.60, note, transform=ax.transAxes, ha="right", va="top", fontsize="x-small", color="gray")
+        ax.text(0.97, 0.58, note, transform=ax.transAxes, ha="right", va="top", fontsize="x-small", color="gray")
 
     fs = counts["full sim"]
     ok = fs > 0  # empty full-sim bins: no band (an inf corner breaks the fill polygon), no ratio
@@ -312,6 +318,8 @@ def main():
     BINS["log_pt"] = (30, np.log(cut), None)
     start, n = args.entry_start, args.n_events
     pt_bin = args.sample.stem.split("_")[1]
+    if pt_bin in JET_LOG_PT_RANGE:
+        BINS["jet_log_pt"] = (30, *JET_LOG_PT_RANGE[pt_bin])
     delphes = args.delphes or args.sample.with_name(f"delphes_pu6p35_jet{pt_bin}.root")
     parnassus = None if args.no_parnassus else args.parnassus or PARNASSUS_FILES.get(pt_bin)
     if parnassus is None and not args.no_parnassus:
