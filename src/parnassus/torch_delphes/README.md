@@ -87,11 +87,11 @@ Runs the fitted card (best epoch) on held-out entries [100 000, 120 000) and ove
 legs — the same entry range and the same number of jets on every leg (a file that cannot cover
 the range is an error) — under identical cuts (pt ≥ reco floor, |η| ≤ 2.7):
 
-- **full sim** — the sample's `pflow_*` objects,
-- **diff-Delphes** — the fitted card on the same truth (no pileup, untruncated),
-- **C++ Delphes** — `fastsim_tree` of the sibling `delphes_pu6p35_jet<bin>.root`
+- **full sim** (plot label `CMS`) — the sample's `pflow_*` objects,
+- **diff-Delphes** (plot label `Parnassus-P`) — the fitted card on the same truth (no pileup, untruncated),
+- **C++ Delphes** (plot label `Delphes`) — `fastsim_tree` of the sibling `delphes_pu6p35_jet<bin>.root`
   (derived from the sample name; `--delphes` overrides),
-- **Parnassus** — `fastsim_tree` of the generative fast sim, auto-picked by the sample's pT-hat
+- **Parnassus** (plot label `Parnassus-F`) — `fastsim_tree` of the generative fast sim, auto-picked by the sample's pT-hat
   bin from `PARNASSUS_FILES` in the script (`/global/cfs/cdirs/m3246/diff_delphes/parnassua_data/`,
   bins 800 and 1000; other bins skip the leg; `--parnassus` overrides, `--no-parnassus` drops it).
   Parnassus generates only (pt, η, φ) — no charged/neutral class — so it appears on the

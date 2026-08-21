@@ -1,5 +1,8 @@
 r"""Overlay of one fullsim fit: CMS full sim vs diff-Delphes vs C++ Delphes vs Parnassus.
 
+Legend labels: "CMS" = full sim, "Parnassus-P" = the diff-Delphes card, "Delphes" = C++ Delphes,
+"Parnassus-F" = the generative Parnassus fast sim (the prose below uses the long names).
+
 All legs use entries ``[--entry-start, --entry-start + --n-events)`` of ``--sample``
 (disjoint from the fit's training range ``[0, n_events)``): the SAME entry range and the same
 number of jets on every leg (a file too short for the range is an error, never a silent
@@ -119,13 +122,16 @@ PARNASSUS_FILES = {
     "800": PARNASSUS_DIR / "Jet800_fm_pos_cms_pow_v4_glob_npf_J800_1000_49_25_pndm_0.0.root",
     "1000": PARNASSUS_DIR / "Jet1000_fm_pos_cms_pow_v4_glob_npf_J800_1000_49_25_pndm_0.0.root",
 }
+# Legend labels of the legs (also the keys of STYLE / legs / the metrics columns).
+CMS, PARNASSUS_P, DELPHES, PARNASSUS_F = "CMS", "Parnassus-P", "Delphes", "Parnassus-F"
+LEGEND_ORDER = [PARNASSUS_P, PARNASSUS_F, DELPHES, CMS]  # legend rows, top to bottom
 STYLE = {
-    "full sim": dict(color="#5790fc", fill=True, alpha=0.4, zorder=1),
-    "diff-Delphes": dict(color="#e42536", linewidth=3, zorder=2),
-    "C++ Delphes": dict(color="black", linewidth=2, linestyle="--", zorder=3),
-    "Parnassus": dict(color="#f89c20", linewidth=2, zorder=4),
+    CMS: dict(color="#5790fc", fill=True, alpha=0.4, zorder=1),
+    PARNASSUS_P: dict(color="#e42536", linewidth=3, zorder=2),
+    DELPHES: dict(color="black", linewidth=2, linestyle="--", zorder=3),
+    PARNASSUS_F: dict(color="#f89c20", linewidth=2, zorder=4),
 }
-SHORT = {"diff-Delphes": "diff", "C++ Delphes": "C++", "Parnassus": "Parn"}  # metrics columns
+SHORT = {PARNASSUS_P: "ParnP", DELPHES: "Delph", PARNASSUS_F: "ParnF"}  # metrics columns
 
 
 def rows(obs):
@@ -260,7 +266,7 @@ def qwass(a, b, n_q=200):
 
 
 def draw_page(pdf, title, xlabel, samples, ylabel, key, note=None):
-    """Linear-y raw counts + ratio to full sim (band = full-sim sqrt(N)); returns (W1, N / N_fullsim) per leg."""
+    """Linear-y raw counts + ratio to CMS full sim (band = its sqrt(N)); returns (W1, N / N_CMS) per leg."""
     n_bins, lo, hi = BINS[key]
     qlo, qhi = np.quantile(np.concatenate(list(samples.values())), (0.005, 0.995))
     edges = np.linspace(qlo if lo is None else lo, qhi if hi is None else hi, n_bins + 1)
@@ -273,18 +279,20 @@ def draw_page(pdf, title, xlabel, samples, ylabel, key, note=None):
     ax.set_ylim(0, max(c.max() for c in counts.values()) * 1.4)
     ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize="large")
-    ax.legend(loc="upper right", fontsize=LEGEND_FONTSIZE)
+    handles, labels = ax.get_legend_handles_labels()
+    order = sorted(range(len(labels)), key=lambda i: LEGEND_ORDER.index(labels[i]))
+    ax.legend([handles[i] for i in order], [labels[i] for i in order], loc="upper right", fontsize=LEGEND_FONTSIZE)
     if note:
         ax.text(0.97, 0.58, note, transform=ax.transAxes, ha="right", va="top", fontsize="x-small", color="gray")
 
-    fs = counts["full sim"]
+    fs = counts[CMS]
     ok = fs > 0  # empty full-sim bins: no band (an inf corner breaks the fill polygon), no ratio
     rel = np.divide(1, np.sqrt(fs), out=np.zeros_like(fs), where=ok)  # full-sim sqrt(N) on the ratio
-    rax.stairs(1 + rel, edges, baseline=1 - rel, color=STYLE["full sim"]["color"], fill=True, alpha=0.3)
+    rax.stairs(1 + rel, edges, baseline=1 - rel, color=STYLE[CMS]["color"], fill=True, alpha=0.3)
     for n in counts:
-        if n != "full sim":
+        if n != CMS:
             rax.stairs(np.divide(counts[n], fs, out=np.full_like(fs, np.nan), where=ok), edges, **STYLE[n])
-    rax.axhline(1, color=STYLE["full sim"]["color"], linewidth=1)
+    rax.axhline(1, color=STYLE[CMS]["color"], linewidth=1)
     rax.set_ylim(0.5, 1.5)
     rax.set_yticks([0.6, 0.8, 1.0, 1.2, 1.4])
     rax.set_xlim(edges[0], edges[-1])
@@ -293,8 +301,8 @@ def draw_page(pdf, title, xlabel, samples, ylabel, key, note=None):
     rax.set_xlabel(xlabel)
     pdf.savefig(fig)
     plt.close(fig)
-    fs = samples["full sim"]
-    return {n: (qwass(v, fs), len(v) / len(fs)) for n, v in samples.items() if n != "full sim"}
+    fs = samples[CMS]
+    return {n: (qwass(v, fs), len(v) / len(fs)) for n, v in samples.items() if n != CMS}
 
 
 def main():
@@ -344,12 +352,12 @@ def main():
     )
     tj_cpp = truth_jets([p / 1000.0 for p in tr["tr_pt"]], tr["tr_eta"], tr["tr_phi"])
     legs = {
-        "full sim": collect((r for b in loader for r in rows(b)), tj_sample),
-        "diff-Delphes": collect(card_rows(card, best, loader, cut, eta_cut), tj_sample),
-        "C++ Delphes": collect(cpp_rows(delphes, start, n, cut, eta_cut), tj_cpp),
+        CMS: collect((r for b in loader for r in rows(b)), tj_sample),
+        PARNASSUS_P: collect(card_rows(card, best, loader, cut, eta_cut), tj_sample),
+        DELPHES: collect(cpp_rows(delphes, start, n, cut, eta_cut), tj_cpp),
     }
     if parnassus:
-        legs["Parnassus"] = collect(parnassus_rows(parnassus, start, n, cut, eta_cut), parnassus_truth_jets(parnassus, start, n))
+        legs[PARNASSUS_F] = collect(parnassus_rows(parnassus, start, n, cut, eta_cut), parnassus_truth_jets(parnassus, start, n))
     seen = {name: leg["n_events"] for name, leg in legs.items()}
     if any(c != n for c in seen.values()):
         raise RuntimeError(f"legs saw different numbers of jets: {seen} (expected {n} each)")
@@ -357,26 +365,26 @@ def main():
     out = args.workspace / "plots"
     out.mkdir(exist_ok=True)
     tag = f"fullsim_comparison_pt{cut:g}"
-    comp = [name for name in legs if name != "full sim"]
+    comp = [name for name in legs if name != CMS]
     lines = [
         f"{args.workspace.name}: {n} jets/leg from entry {start}, "
         f"pt >= {cut:g} GeV, |eta| <= {eta_cut}, best {run['best_result']['epoch']}. "
-        "C++ Delphes: PU mu=6.35, unfiltered truth; diff-Delphes: no PU, truth pt>=0.25, untruncated.",
+        f"{DELPHES}: PU mu=6.35, unfiltered truth; {PARNASSUS_P}: no PU, truth pt>=0.25, untruncated.",
     ]
     if parnassus:
         lines.append(
-            f"Parnassus: {parnassus.name}; same jets as C++ Delphes: {same_events(parnassus, delphes, start, n)}, "
-            f"as full sim: {same_events(parnassus, args.sample, start, n)}; no class info -> All objects + jet pages only."
+            f"{PARNASSUS_F}: {parnassus.name}; same jets as {DELPHES}: {same_events(parnassus, delphes, start, n)}, "
+            f"as {CMS}: {same_events(parnassus, args.sample, start, n)}; no class info -> All objects + jet pages only."
         )
     lines.append(
         f"{'page':26s}" + "".join(f" {'W1 ' + SHORT[c]:>9s}" for c in comp)
-        + "".join(f" {'N ' + SHORT[c] + '/fs':>10s}" for c in comp)
+        + "".join(f" {'N ' + SHORT[c] + '/CMS':>12s}" for c in comp)
     )
 
     def row(name, m):
         lines.append(
             f"{name:26s}" + "".join(f" {m[c][0]:9.4f}" if c in m else f" {'-':>9s}" for c in comp)
-            + "".join(f" {m[c][1]:10.3f}" if c in m else f" {'-':>10s}" for c in comp)
+            + "".join(f" {m[c][1]:12.3f}" if c in m else f" {'-':>12s}" for c in comp)
         )
 
     with PdfPages(out / f"{tag}.pdf") as pdf:
@@ -386,7 +394,7 @@ def main():
                 samples = {name: f[key] if charged is None else f[key][f["charged"] == charged]
                            for name, f in legs.items() if charged is None or f["charged"] is not None}
                 title = rf"{page}   ($p_\mathrm{{T}} \geq {cut:g}$ GeV)"
-                note = "Parnassus: no class info" if "Parnassus" in legs and "Parnassus" not in samples else None
+                note = f"{PARNASSUS_F}: no class info" if PARNASSUS_F in legs and PARNASSUS_F not in samples else None
                 row(f"{page} {key}", draw_page(pdf, title, xlabel, samples, "Objects", key, note))
         for key, xlabel in JET_OBS.items():
             samples = {name: f[key] for name, f in legs.items()}
