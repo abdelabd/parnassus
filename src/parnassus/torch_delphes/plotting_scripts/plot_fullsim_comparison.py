@@ -81,41 +81,55 @@ from parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results import (
 
 plt.style.use(hep.style.ATLAS)  # after the plot_fit_results import, so this style wins
 
+# ---- text / layout knobs -----------------------------------------------------------------------
+LABEL_SIZE = 30  # pt: x/y axis labels and "Ratio" (ATLAS default 20)
+TICK_SIZE = 20  # pt: tick labels
+LEGEND_SIZE = 24  # pt: legend; a 2-column legend is ~15 x this wide and must fit inside the axes width
+FIG_SIZE = (9.0, 9.5)  # inches; the margins hold the two-line x labels and the legend band
+MARGINS = dict(left=0.19, right=0.96, bottom=0.22, top=0.96)
+HEIGHT_RATIOS = (8, 3)  # top panel : ratio panel (the ratio panel must fit the rotated "Ratio" label)
+HEADROOM = 1.45  # y-limit = HEADROOM x tallest bin; the band above the data holds the 2-row legend
+LEGEND_NCOL = 2  # entries per legend row (4 legs -> 2 rows, read row by row in LEGEND_ORDER)
+plt.rcParams.update({
+    "font.size": LEGEND_SIZE, "axes.labelsize": LABEL_SIZE, "legend.fontsize": LEGEND_SIZE,
+    "xtick.labelsize": TICK_SIZE, "ytick.labelsize": TICK_SIZE, "figure.figsize": FIG_SIZE,
+    "legend.handlelength": 1.5, "legend.columnspacing": 1.0, "legend.handletextpad": 0.5, "legend.borderpad": 0.4,
+    "axes.labelpad": 8,
+})
+
 BATCH_SIZE = 2000
 SEED = 0
 CHARGED_PIDS = (211, 11, 13)  # "has a track" == C++ Delphes fs_class 1
 JET_DEF = fj.JetDefinition(fj.antikt_algorithm, 0.5)
 JET_PT_MIN, JET_N_CONST_MIN, JET_ABS_ETA_MAX = 8.0, 2, 2.5
 PAGES = {"All objects": None} #, "Charged": True, "Neutral": False}
-OBS = {"log_pt": r"$\log(p_\mathrm{T}\,/\,\mathrm{GeV})$", "eta": r"$\eta$"}
+OBS = {"log_pt": "\n" + r"$\log(p_\mathrm{T}\,/\,\mathrm{GeV})$", "eta": r" $\eta$"}  # x label = "<page>" + this
 JET_OBS = {
-    "jet_log_pt": r"$\log(p_\mathrm{T}^{\,\mathrm{jet}}\,/\,\mathrm{GeV})$",
-    "jet_eta": r"$\eta^{\,\mathrm{jet}}$",
-    "jet_log_m": r"$\log(m^{\,\mathrm{jet}}\,/\,\mathrm{GeV})$",
-    "jet_nconst": "Jet constituent multiplicity",
-    "jet_pt_resp": r"$(p_\mathrm{T}^{\,\mathrm{jet}} - p_\mathrm{T}^{\,\mathrm{truth}})\,/\,p_\mathrm{T}^{\,\mathrm{truth}}$",
-    "jet_m_resp": r"$(m^{\,\mathrm{jet}} - m^{\,\mathrm{truth}})\,/\,m^{\,\mathrm{truth}}$",
-    "jet_eta_resp": r"$\eta^{\,\mathrm{jet}} - \eta^{\,\mathrm{truth}}$",
+    "jet_log_pt": "Leading jet\n" + r"$\log(p_\mathrm{T}\,/\,\mathrm{GeV})$",
+    "jet_eta": r"Leading jet $\eta$",
+    "jet_log_m": "Leading jet\n" + r"$\log(m\,/\,\mathrm{GeV})$",
+    "jet_nconst": "Object multiplicity",
+    "jet_pt_resp": "Leading jet\n" + r"$(p_\mathrm{T} - p_\mathrm{T}^{\,\mathrm{truth}})\,/\,p_\mathrm{T}^{\,\mathrm{truth}}$",
+    "jet_m_resp": "Leading jet\n" + r"$(m - m^{\,\mathrm{truth}})\,/\,m^{\,\mathrm{truth}}$",
+    "jet_eta_resp": "Leading jet\n" + r"$\eta - \eta^{\,\mathrm{truth}}$",
 }
 # (n_bins, low, high) per page; None -> pooled 0.5 % / 99.5 % quantile. The log-pT pages start
 # at the floor (set in main) and take their upper edge from the data (it depends on the sample).
-# Ranges end where the data ends and leave the upper-right legend over a tail (eta, jet_log_m,
-# jet_pt_resp), so the 1.4x headroom below never has to grow.
+# Ranges end where the data ends on both sides (the legend lives in its own band above the data).
 BINS = {
     "log_pt": (30, None, None),
-    "eta": (27, -2.7, 2.7),
+    "eta": (20, -2.0, 2.0),
     "jet_log_pt": (30, None, None),
     "jet_eta": (25, -2.5, 2.5),
     "jet_log_m": (30, 1.5, 6.2),
     "jet_nconst": (20, -0.5, 39.5),
-    "jet_pt_resp": (35, -0.4, 0.3),
+    "jet_pt_resp": (26, -0.4, 0.25),
     "jet_m_resp": (30, -1.0, 1.0),
-    "jet_eta_resp": (30, -0.06, 0.06),
+    "jet_eta_resp": (20, -0.04, 0.04),
 }
-LEGEND_FONTSIZE = 15.5  # points; between "medium" (14) and "large" (16.8) of the ATLAS style
 # Fixed jet log-pT axis per pT-hat bin (the "<bin>" of a "<split>_<bin>.root" sample stem);
 # bins not listed keep the pooled-quantile range.
-JET_LOG_PT_RANGE = {"1000": (6.5, 7.4)}
+JET_LOG_PT_RANGE = {"1000": (6.5, 7.3)}
 # Parnassus output per pT-hat bin.
 PARNASSUS_DIR = Path("/global/cfs/cdirs/m3246/diff_delphes/parnassua_data")
 PARNASSUS_FILES = {
@@ -265,25 +279,30 @@ def qwass(a, b, n_q=200):
     return float(np.mean(np.abs(np.quantile(a, q) - np.quantile(b, q))))
 
 
-def draw_page(pdf, title, xlabel, samples, ylabel, key, note=None):
-    """Linear-y raw counts + ratio to CMS full sim (band = its sqrt(N)); returns (W1, N / N_CMS) per leg."""
+def draw_page(pdf, xlabel, samples, ylabel, key, note=None):
+    """Linear-y raw counts + ratio to CMS full sim (band = its sqrt(N)); returns (W1, N / N_CMS) per leg.
+
+    The legend sits in the band above the data (HEADROOM), LEGEND_NCOL entries per row in
+    LEGEND_ORDER; the x label names the page and is centred.
+    """
     n_bins, lo, hi = BINS[key]
     qlo, qhi = np.quantile(np.concatenate(list(samples.values())), (0.005, 0.995))
     edges = np.linspace(qlo if lo is None else lo, qhi if hi is None else hi, n_bins + 1)
     counts = {n: np.histogram(v, edges)[0].astype(float) for n, v in samples.items()}
 
-    fig, (ax, rax) = plt.subplots(2, 1, sharex=True, gridspec_kw={"height_ratios": [3, 1], "hspace": 0.06})
-    fig.subplots_adjust(left=0.16, right=0.95, bottom=0.17, top=0.90)
+    fig, (ax, rax) = plt.subplots(2, 1, sharex=True, gridspec_kw={"height_ratios": HEIGHT_RATIOS, "hspace": 0.06})
+    fig.subplots_adjust(**MARGINS)
     for n, c in counts.items():
         ax.stairs(c, edges, label=n, **STYLE[n])
-    ax.set_ylim(0, max(c.max() for c in counts.values()) * 1.4)
+    ax.set_ylim(0, max(c.max() for c in counts.values()) * HEADROOM)
     ax.set_ylabel(ylabel)
-    ax.set_title(title, loc="left", fontsize="large")
     handles, labels = ax.get_legend_handles_labels()
-    order = sorted(range(len(labels)), key=lambda i: LEGEND_ORDER.index(labels[i]))
-    ax.legend([handles[i] for i in order], [labels[i] for i in order], loc="upper right", fontsize=LEGEND_FONTSIZE)
-    if note:
-        ax.text(0.97, 0.58, note, transform=ax.transAxes, ha="right", va="top", fontsize="x-small", color="gray")
+    order = sorted(range(len(labels)), key=lambda i: LEGEND_ORDER.index(labels[i]))  # row-major intent
+    n_rows = -(-len(order) // LEGEND_NCOL)  # matplotlib fills columns first -> transpose
+    order = [order[r * LEGEND_NCOL + c] for c in range(LEGEND_NCOL) for r in range(n_rows) if r * LEGEND_NCOL + c < len(order)]
+    ax.legend([handles[i] for i in order], [labels[i] for i in order], loc="upper left", ncol=LEGEND_NCOL)
+    if note:  # just under the legend band, above the data cap (1 / HEADROOM)
+        ax.text(0.5, 1 / HEADROOM + 0.02, note, transform=ax.transAxes, ha="center", va="bottom", fontsize=0.8 * LEGEND_SIZE, color="gray")
 
     fs = counts[CMS]
     ok = fs > 0  # empty full-sim bins: no band (an inf corner breaks the fill polygon), no ratio
@@ -294,11 +313,11 @@ def draw_page(pdf, title, xlabel, samples, ylabel, key, note=None):
             rax.stairs(np.divide(counts[n], fs, out=np.full_like(fs, np.nan), where=ok), edges, **STYLE[n])
     rax.axhline(1, color=STYLE[CMS]["color"], linewidth=1)
     rax.set_ylim(0.5, 1.5)
-    rax.set_yticks([0.6, 0.8, 1.0, 1.2, 1.4])
+    rax.set_yticks([0.6, 1.0, 1.4])
     rax.set_xlim(edges[0], edges[-1])
     rax.xaxis.set_major_formatter(FormatStrFormatter("%g"))  # no "x10^-2" offset text under the label
     rax.set_ylabel("Ratio")
-    rax.set_xlabel(xlabel)
+    rax.set_xlabel(xlabel, loc="center")
     pdf.savefig(fig)
     plt.close(fig)
     fs = samples[CMS]
@@ -389,17 +408,15 @@ def main():
 
     with PdfPages(out / f"{tag}.pdf") as pdf:
         for page, charged in PAGES.items():
-            for key, xlabel in OBS.items():
+            for key, obs_label in OBS.items():
                 # A leg without class information (Parnassus) is drawn on the "All objects" page only.
                 samples = {name: f[key] if charged is None else f[key][f["charged"] == charged]
                            for name, f in legs.items() if charged is None or f["charged"] is not None}
-                title = rf"{page}   ($p_\mathrm{{T}} \geq {cut:g}$ GeV)"
                 note = f"{PARNASSUS_F}: no class info" if PARNASSUS_F in legs and PARNASSUS_F not in samples else None
-                row(f"{page} {key}", draw_page(pdf, title, xlabel, samples, "Objects", key, note))
+                row(f"{page} {key}", draw_page(pdf, f"{page}{obs_label}", samples, "Objects", key, note))
         for key, xlabel in JET_OBS.items():
             samples = {name: f[key] for name, f in legs.items()}
-            title = rf"Leading jet, anti-$k_t$ $R=0.5$   (constituent $p_\mathrm{{T}} \geq {cut:g}$ GeV)"
-            row(key, draw_page(pdf, title, xlabel, samples, "Jets", key))
+            row(key, draw_page(pdf, xlabel, samples, "Jets", key))
 
     text = "\n".join(lines)
     (out / f"{tag}_metrics.txt").write_text(text + "\n")
