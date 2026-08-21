@@ -95,8 +95,8 @@ search:
   # every fit starts from the CMS defaults with decay OFF. Re-read the
   # importances after the first study and retune if a bound is being hit.
   lr:
-    resolution: {low: 1.0e-4, high: 6.0e-3, log: true, init: 4.9e-3}
-    scale:      {low: 3.0e-4, high: 6.0e-3, log: true, init: 1.9e-3}
+    resolution: {low: 1.0e-4, high: 6.0e-3, log: true, init: 5.0e-3}
+    scale:      {low: 3.0e-4, high: 6.0e-3, log: true, init: 2.0e-3}
     efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 1.5e-2}
   # PhotonClusterMerger seed-cone radius, sampled continuously. The R -> 0 limit
   # IS the merger off (an isolated photon is a cluster of one and passes through
