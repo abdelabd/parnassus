@@ -732,7 +732,7 @@ def main() -> None:
     parser.add_argument(
         "--pid-weighting",
         type=str,
-        default="sqrt_fraction",
+        default="fraction",
         choices=list(PID_WEIGHTING_CHOICES),
     )
     parser.add_argument("--pid-weight-floor", type=float, default=0.0)

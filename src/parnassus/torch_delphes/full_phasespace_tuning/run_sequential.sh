@@ -16,7 +16,7 @@
 #   N_STEPS         epochs per stage               (default 100; the CLI's global batch is 4096)
 #   N_EVENTS        events per stage               (default -1 = all; small values for a dry run)
 #   NPROC           GPUs; >1 launches torchrun     (default 4; per-rank batch = 4096/NPROC)
-#   PID_WEIGHTING   --pid-weighting of the per-species shape terms (default sqrt_fraction: in every
+#   PID_WEIGHTING   --pid-weighting of the per-species shape terms (default fraction: in every
 #                   stage the fitted species is the abundant one, so this keeps its terms at full
 #                   weight and mutes the stray-species noise/floor; count/pair/log_ht untouched)
 #   EARLY_STOP      early-stopping patience in epochs, 0 = off (default 10: the val loss of every
@@ -38,7 +38,7 @@ OUT_BASE="${OUT_BASE:-$REPO/doc/figure_sequential}"
 N_STEPS="${N_STEPS:-100}"
 N_EVENTS="${N_EVENTS:--1}"
 NPROC="${NPROC:-4}"
-PID_WEIGHTING="${PID_WEIGHTING:-sqrt_fraction}"
+PID_WEIGHTING="${PID_WEIGHTING:-fraction}"
 EARLY_STOP="${EARLY_STOP:-10}"
 PICK="${PICK:-best}"
 PLOT="${PLOT:-1}"

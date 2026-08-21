@@ -42,7 +42,7 @@ the electron gun with the electron block frozen -- is not part of the chain for 
   events by default (`--n-events`), CPU (~20 s per 5k gun events).
 - `run_sequential.sh` -- runs the stages in order (`python -m
   parnassus.torch_delphes.tune_cms_fullsim`, `--loss wasserstein_1d --mode delphes
-  --pid-weighting sqrt_fraction` (`PID_WEIGHTING`; the fitted species is the abundant one in
+  --pid-weighting fraction` (`PID_WEIGHTING`; the fitted species is the abundant one in
   every stage, so this mutes the stray-species shape terms without touching the count / pair /
   log HT levers), early stopping with patience `EARLY_STOP` (default 10; each stage's val loss sits on a floor from the
   frozen species, so late epochs only track noise), no lr decay, the early-stopping checkpoint
