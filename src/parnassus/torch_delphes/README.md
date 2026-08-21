@@ -8,7 +8,7 @@ CMS full-simulation particle-flow candidates. The fitted card is then compared, 
 events, against full sim and against naive C++ Delphes.
 
 Two commands do the work: **fit** (`tune_cms_fullsim.optuna_search`) and **validate**
-(`plotting_scripts.plot_threeway`). Everything below is run from the repo root after
+(`plotting_scripts.plot_fullsim_comparison`). Everything below is run from the repo root after
 `source setup.sh` (uv environment with torch, uproot, fastjet, mplhep).
 
 ---
@@ -75,21 +75,29 @@ Parameter values in `history.json` are physical (efficiencies in (0,1), scales a
 resolutions in GeV units); `plotting_scripts.plot_parameter_regression` and the plot scripts
 read them back with `_set_trainee_from_snapshot`.
 
-## 3. Validate — the three-way comparison
+## 3. Validate — the full-sim comparison
 
 ```bash
-python -m parnassus.torch_delphes.plotting_scripts.plot_threeway \
+python -m parnassus.torch_delphes.plotting_scripts.plot_fullsim_comparison \
     --workspace doc/figure_fullsim/1000_frac_pt5 \
     --sample /global/cfs/cdirs/m3246/diff_delphes/cms_opendata_zenodo/train_1000.root
 ```
 
-Runs the fitted card (best epoch) on held-out entries [100 000, 120 000) and overlays three legs
-under identical cuts (pt ≥ reco floor, |η| ≤ 2.7):
+Runs the fitted card (best epoch) on held-out entries [100 000, 120 000) and overlays up to four
+legs — the same entry range and the same number of jets on every leg (a file that cannot cover
+the range is an error) — under identical cuts (pt ≥ reco floor, |η| ≤ 2.7):
 
 - **full sim** — the sample's `pflow_*` objects,
 - **diff-Delphes** — the fitted card on the same truth (no pileup, untruncated),
 - **C++ Delphes** — `fastsim_tree` of the sibling `delphes_pu6p35_jet<bin>.root`
-  (derived from the sample name; `--delphes` overrides).
+  (derived from the sample name; `--delphes` overrides),
+- **Parnassus** — `fastsim_tree` of the generative fast sim, auto-picked by the sample's pT-hat
+  bin from `PARNASSUS_FILES` in the script (`/global/cfs/cdirs/m3246/diff_delphes/parnassua_data/`,
+  bins 800 and 1000; other bins skip the leg; `--parnassus` overrides, `--no-parnassus` drops it).
+  Parnassus generates only (pt, η, φ) — no charged/neutral class — so it appears on the
+  "All objects" and jet pages only. Its jets are the first 200 000 entries of the Delphes file of
+  the same bin, i.e. the same events as the C++ leg (and as full sim for `test_800`; an
+  independent sample of the same process for `train_1000`); the metrics header states which.
 
 Pages (13): log pT and η of all / charged / neutral objects ("charged" = has a track on every
 leg, since the C++ file only stores charged/neutral); leading jet (anti-kt R = 0.5, pt > 8 GeV,
@@ -98,9 +106,10 @@ response (x − x_truth)/x_truth and η − η_truth relative to the truth jet c
 particles of the event. Linear y, ratio panel to full sim (band = full-sim √N), fixed binning
 per page (`BINS` at the top of the script).
 
-Output in the fit folder: `plots/threeway_pt<floor>.pdf` and `plots/threeway_pt<floor>_metrics.txt`
-(per page: quantile-W1 distance to full sim for each leg and the yield ratio N_leg/N_fullsim).
-`--reco-pt-cut X` evaluates the same fit at another floor (`threeway_ptX.*`), which is how fits
+Output in the fit folder: `plots/fullsim_comparison_pt<floor>.pdf` and `plots/fullsim_comparison_pt<floor>_metrics.txt`
+(per page: quantile-W1 distance to full sim for each leg and the yield ratio N_leg/N_fullsim;
+`-` where a leg is not drawn).
+`--reco-pt-cut X` evaluates the same fit at another floor (`fullsim_comparison_ptX.*`), which is how fits
 trained at different floors are ranked against each other. ~2 minutes on a CPU for 20 000 events
 (`--n-events`); set `OMP_NUM_THREADS` on shared login nodes.
 
