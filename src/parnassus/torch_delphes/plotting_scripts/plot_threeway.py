@@ -3,9 +3,12 @@ r"""Three-way overlay of one fullsim fit: CMS full sim vs diff-Delphes vs C++ De
 All legs use entries ``[--entry-start, --entry-start + --n-events)`` of ``--sample``
 (disjoint from the fit's training range ``[0, n_events)``) and the same acceptance on every
 object: ``pt >= reco_pt_cut`` (the fit's, or ``--reco-pt-cut``) and ``|eta| <= eta_cut``.
-Pages: all / charged / neutral log pT and eta, then the leading jet's log pT, log m and
-constituent multiplicity (anti-kt R=0.5 on massless constituents; jet pt > 8 GeV,
->= 2 constituents, |eta| < 2.5 -- the cppDelphes leading_jet_filter convention). Raw counts
+Pages: all / charged / neutral log pT and eta, then the leading jet's log pT, eta, log m,
+constituent multiplicity, its pT / mass response (x_reco - x_truth) / x_truth and eta_reco - eta_truth
+relative to the event's truth jet (anti-kt R=0.5 on massless constituents; jet pt > 8 GeV, >= 2 constituents,
+|eta| < 2.5 -- the cppDelphes leading_jet_filter convention; the truth jet is clustered the
+same way from ALL truth particles of the event -- the sample's truth_* branches for the full-sim
+and diff-Delphes legs, the Delphes file's own truth_tree for the C++ leg). Raw counts
 on linear y with a ratio-to-full-sim panel (band = full-sim sqrt(N)); fixed binning per page
 (``BINS``); a metrics file lists the quantile-W1 distance to full sim and the yield ratio per page.
 
@@ -40,11 +43,13 @@ import numpy as np
 import torch
 import uproot
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.ticker import FormatStrFormatter
 
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.PhotonClusterMerger import PhotonClusterMerger
 from parnassus.torch_delphes.tune_cms_fullsim.data import (
     apply_reco_acceptance_cut,
+    batch_event_ids,
     load_cms_flow_root,
     load_pflow_targets_from_tensor,
     restore_event_format,
@@ -65,8 +70,12 @@ PAGES = {"All objects": None, "Charged": True, "Neutral": False}
 OBS = {"log_pt": r"$\log(p_\mathrm{T}\,/\,\mathrm{GeV})$", "eta": r"$\eta$"}
 JET_OBS = {
     "jet_log_pt": r"$\log(p_\mathrm{T}^{\,\mathrm{jet}}\,/\,\mathrm{GeV})$",
+    "jet_eta": r"$\eta^{\,\mathrm{jet}}$",
     "jet_log_m": r"$\log(m^{\,\mathrm{jet}}\,/\,\mathrm{GeV})$",
     "jet_nconst": "Jet constituent multiplicity",
+    "jet_pt_resp": r"$(p_\mathrm{T}^{\,\mathrm{jet}} - p_\mathrm{T}^{\,\mathrm{truth}})\,/\,p_\mathrm{T}^{\,\mathrm{truth}}$",
+    "jet_m_resp": r"$(m^{\,\mathrm{jet}} - m^{\,\mathrm{truth}})\,/\,m^{\,\mathrm{truth}}$",
+    "jet_eta_resp": r"$\eta^{\,\mathrm{jet}} - \eta^{\,\mathrm{truth}}$",
 }
 # (n_bins, low, high) per page; None -> pooled 0.5 % / 99.5 % quantile. The log-pT pages start
 # at the floor (set in main) and take their upper edge from the data (it depends on the sample).
@@ -74,8 +83,12 @@ BINS = {
     "log_pt": (30, None, None),
     "eta": (20, -2.0, 2.0),
     "jet_log_pt": (30, None, None),
+    "jet_eta": (25, -2.5, 2.5),
     "jet_log_m": (30, 0.5, 5.5),
     "jet_nconst": (20, -0.5, 39.5),
+    "jet_pt_resp": (30, -0.4, 0.2),
+    "jet_m_resp": (30, -1.0, 1.0),
+    "jet_eta_resp": (30, -0.06, 0.06),
 }
 STYLE = {
     "full sim": dict(color="#5790fc", fill=True, alpha=0.4, zorder=1),
@@ -99,7 +112,7 @@ def card_rows(card, params, loader, cut, eta_cut):
         for batch in loader:
             truth = batch["truth_particles"]
             mask = torch.any(truth != 0, dim=-1)
-            out = restore_event_format(card(truth[mask])["EFlowObject"], mask)
+            out = restore_event_format(card(truth[mask])["EFlowObject"], mask, event_ids=batch_event_ids(truth, mask))
             yield from rows(apply_reco_acceptance_cut(load_pflow_targets_from_tensor(out), cut, eta_cut))
 
 
@@ -113,23 +126,42 @@ def cpp_rows(path, start, n, cut, eta_cut):
         yield pt[m], eta[m], phi[m], cls[m] == 1
 
 
-def collect(events):
-    """Flat per-object log_pt / eta / charged plus leading-jet log_pt / log_m / nconst."""
+def leading_jet(pt, eta, phi):
+    """(pt, eta, m, nconst) of the leading selected anti-kt jet of massless (pt, eta, phi), or None."""
+    px, py, pz, e = pt * np.cos(phi), pt * np.sin(phi), pt * np.sinh(eta), pt * np.cosh(eta)
+    cs = fj.ClusterSequence([fj.PseudoJet(*v) for v in zip(px, py, pz, e)], JET_DEF)
+    jets = [
+        j for j in fj.sorted_by_pt(cs.inclusive_jets(JET_PT_MIN))
+        if len(j.constituents()) >= JET_N_CONST_MIN and abs(j.eta()) < JET_ABS_ETA_MAX
+    ]
+    return (jets[0].pt(), jets[0].eta(), max(jets[0].m(), 1e-3), len(jets[0].constituents())) if jets else None
+
+
+def truth_jets(pt, eta, phi):
+    """Per-event leading truth jet (all truth particles, same clustering/selection as the reco legs)."""
+    return [leading_jet(p, e, f) for p, e, f in zip(pt, eta, phi)]
+
+
+def collect(events, truths):
+    """Flat per-object log_pt / eta / charged plus leading-jet observables and responses to the truth jet."""
     acc = {k: [] for k in ("log_pt", "eta", "charged", *JET_OBS)}
-    for pt, eta, phi, charged in events:
+    for (pt, eta, phi, charged), tj in zip(events, truths):
         acc["log_pt"].append(np.log(pt))
         acc["eta"].append(eta)
         acc["charged"].append(charged)
-        px, py, pz, e = pt * np.cos(phi), pt * np.sin(phi), pt * np.sinh(eta), pt * np.cosh(eta)
-        cs = fj.ClusterSequence([fj.PseudoJet(*v) for v in zip(px, py, pz, e)], JET_DEF)
-        jets = [
-            j for j in fj.sorted_by_pt(cs.inclusive_jets(JET_PT_MIN))
-            if len(j.constituents()) >= JET_N_CONST_MIN and abs(j.eta()) < JET_ABS_ETA_MAX
-        ]
-        if jets:
-            acc["jet_log_pt"].append(np.log(jets[0].pt()))
-            acc["jet_log_m"].append(np.log(max(jets[0].m(), 1e-3)))
-            acc["jet_nconst"].append(len(jets[0].constituents()))
+        jet = leading_jet(pt, eta, phi)
+        if jet is None:
+            continue
+        jpt, jeta, jm, jn = jet
+        acc["jet_log_pt"].append(np.log(jpt))
+        acc["jet_eta"].append(jeta)
+        acc["jet_log_m"].append(np.log(jm))
+        acc["jet_nconst"].append(jn)
+        if tj is None:
+            continue
+        acc["jet_pt_resp"].append(jpt / tj[0] - 1)
+        acc["jet_m_resp"].append(jm / tj[2] - 1)
+        acc["jet_eta_resp"].append(jeta - tj[1])
     return {k: np.concatenate(v) if k in ("log_pt", "eta", "charged") else np.asarray(v, float)
             for k, v in acc.items()}
 
@@ -147,7 +179,7 @@ def draw_page(pdf, title, xlabel, samples, ylabel, key):
     counts = {n: np.histogram(v, edges)[0].astype(float) for n, v in samples.items()}
 
     fig, (ax, rax) = plt.subplots(2, 1, sharex=True, gridspec_kw={"height_ratios": [3, 1], "hspace": 0.06})
-    fig.subplots_adjust(left=0.16, right=0.95, bottom=0.12, top=0.90)
+    fig.subplots_adjust(left=0.16, right=0.95, bottom=0.17, top=0.90)
     for n, c in counts.items():
         ax.stairs(c, edges, label=n, **STYLE[n])
     ax.set_ylim(0, max(c.max() for c in counts.values()) * 1.4)
@@ -165,6 +197,7 @@ def draw_page(pdf, title, xlabel, samples, ylabel, key):
     rax.set_ylim(0.5, 1.5)
     rax.set_yticks([0.6, 0.8, 1.0, 1.2, 1.4])
     rax.set_xlim(edges[0], edges[-1])
+    rax.xaxis.set_major_formatter(FormatStrFormatter("%g"))  # no "x10^-2" offset text under the label
     rax.set_ylabel("Ratio")
     rax.set_xlabel(xlabel)
     pdf.savefig(fig)
@@ -198,10 +231,15 @@ def main():
     card = CMSEnergyFlowDefault(
         debug=False, learnable=True, photon_merger=PhotonClusterMerger(radius) if radius else None
     )
+    tj_sample = truth_jets(arrays["truth_pt"], arrays["truth_eta"], arrays["truth_phi"])
+    tr = uproot.open(delphes)["truth_tree"].arrays(
+        ["tr_pt", "tr_eta", "tr_phi"], entry_start=args.entry_start, entry_stop=args.entry_start + args.n_events, library="np"
+    )
+    tj_cpp = truth_jets([p / 1000.0 for p in tr["tr_pt"]], tr["tr_eta"], tr["tr_phi"])
     legs = {
-        "full sim": collect(r for b in loader for r in rows(b)),
-        "diff-Delphes": collect(card_rows(card, best, loader, cut, eta_cut)),
-        "C++ Delphes": collect(cpp_rows(delphes, args.entry_start, args.n_events, cut, eta_cut)),
+        "full sim": collect((r for b in loader for r in rows(b)), tj_sample),
+        "diff-Delphes": collect(card_rows(card, best, loader, cut, eta_cut), tj_sample),
+        "C++ Delphes": collect(cpp_rows(delphes, args.entry_start, args.n_events, cut, eta_cut), tj_cpp),
     }
 
     out = args.workspace / "plots"
