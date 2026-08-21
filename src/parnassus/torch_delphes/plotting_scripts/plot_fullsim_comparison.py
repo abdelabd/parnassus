@@ -85,8 +85,8 @@ plt.style.use(hep.style.ATLAS)  # after the plot_fit_results import, so this sty
 LABEL_SIZE = 30  # pt: x/y axis labels and "Ratio" (ATLAS default 20)
 TICK_SIZE = 20  # pt: tick labels
 LEGEND_SIZE = 24  # pt: legend; a 2-column legend is ~15 x this wide and must fit inside the axes width
-FIG_SIZE = (9.0, 9.5)  # inches; the margins hold the two-line x labels and the legend band
-MARGINS = dict(left=0.19, right=0.96, bottom=0.22, top=0.96)
+FIG_SIZE = (8.6, 7.8)  # inches; sized so the margins leave ~0.2 in beyond the outermost tick label / "x10^4" offset text
+MARGINS = dict(left=0.16, right=0.96, bottom=0.06, top=0.95)  # axes box = 6.9 x 6.9 in (no x label: it is added in LaTeX)
 HEIGHT_RATIOS = (8, 3)  # top panel : ratio panel (the ratio panel must fit the rotated "Ratio" label)
 HEADROOM = 1.45  # y-limit = HEADROOM x tallest bin; the band above the data holds the 2-row legend
 LEGEND_NCOL = 2  # entries per legend row (4 legs -> 2 rows, read row by row in LEGEND_ORDER)
@@ -317,7 +317,6 @@ def draw_page(pdf, xlabel, samples, ylabel, key, note=None):
     rax.set_xlim(edges[0], edges[-1])
     rax.xaxis.set_major_formatter(FormatStrFormatter("%g"))  # no "x10^-2" offset text under the label
     rax.set_ylabel("Ratio")
-    rax.set_xlabel(xlabel, loc="center")
     pdf.savefig(fig)
     plt.close(fig)
     fs = samples[CMS]
