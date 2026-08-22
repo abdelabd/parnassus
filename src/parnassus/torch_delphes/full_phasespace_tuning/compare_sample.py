@@ -7,7 +7,9 @@ the fitted values of ``--fitted-config`` (e.g. ``<OUT_BASE>/fitted_config.yaml``
 both overlaid on the sample's pflow target -- log pT / log E / eta per species, the
 leading-2 pair-mass response of electrons / muons / charged hadrons, and in addition the
 dilepton masses m_ee / m_mumu (leading 2 same-flavour leptons) and the four-lepton mass
-m_4l (leading 4 e/mu). One PDF page per (species, observable).
+m_4l (leading 4 e/mu). One PDF page per (species, observable); paper layout as in
+plot_distribution (no page title, x label only with its ``X_LABEL`` knob -- both are added
+in LaTeX; the page order is printed).
 
     python -m parnassus.torch_delphes.full_phasespace_tuning.compare_sample \\
         --sample <SAMPLE_DIR>/pseudo_data_100k_param_config_all_HZZ4l.root \\
@@ -30,6 +32,7 @@ from parnassus.torch_delphes.plotting_scripts.plot_distribution import (
     BATCH_SIZE,
     OBSERVABLES,
     PAIR_SPECIES,
+    PAIR_XLABEL,
     SEED,
     SPECIES,
     draw_page,
@@ -47,7 +50,8 @@ from parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results import (
 )
 
 LEPTON_MASS = {11: 0.000511, 13: 0.1056584}
-# Mass pages: (key, title, xlabel); key is also the entry of the per-event mass dict.
+# Mass pages: (key, title, xlabel); key is also the entry of the per-event mass dict. The
+# title is only printed in the page index; xlabel is drawn only with plot_distribution.X_LABEL.
 MASS_PAGES = (
     ("mass_ee", "Electron pair mass (leading 2)", r"$m_{ee}$ [GeV]"),
     ("mass_mumu", "Muon pair mass (leading 2)", r"$m_{\mu\mu}$ [GeV]"),
@@ -180,6 +184,7 @@ def main():
 
     output = args.output or args.fitted_config.parent / f"distributions_{args.sample.stem}.pdf"
     output.parent.mkdir(parents=True, exist_ok=True)
+    page = 0
     with PdfPages(output) as pdf:
         samples = {"target": target, "initial": initial, "tuned": tuned}
         for title, pid in SPECIES.items():
@@ -187,23 +192,24 @@ def main():
                 arrays = {n: values(o, pid, key) for n, o in samples.items()}
                 if not sum(len(v) for v in arrays.values()):
                     continue  # species absent from this sample
-                draw_page(pdf, title, xlabel, arrays)
+                draw_page(pdf, arrays, xlabel=xlabel)
+                page += 1
+                print(f"page {page}: {title} {key}")
         for title, pid in PAIR_SPECIES.items():
             key = f"pair_r:{pid}"
             if not all(key in o for o in samples.values()):
                 continue  # class has no pairs in this sample
-            draw_page(
-                pdf,
-                f"{title} pair-mass response (leading 2)",
-                r"$\ln(m_{\mathrm{pair}}^{\mathrm{reco}}\,/\,m_{\mathrm{pair}}^{\mathrm{truth}})$",
-                {n: o[key].numpy() for n, o in samples.items()},
-            )
+            draw_page(pdf, {n: o[key].numpy() for n, o in samples.items()}, xlabel=PAIR_XLABEL)
+            page += 1
+            print(f"page {page}: {title} pair-mass response (leading 2)")
         masses = {"target": m_target, "initial": m_initial, "tuned": m_tuned}
         for key, title, xlabel in MASS_PAGES:
             arrays = {n: m[key].numpy() for n, m in masses.items() if key in m}
             if len(arrays) < 3 or not all(len(v) for v in arrays.values()):
                 continue  # not enough leptons on some side
-            draw_page(pdf, title, xlabel, arrays, ylabel="Events")
+            draw_page(pdf, arrays, ylabel="Events", xlabel=xlabel)
+            page += 1
+            print(f"page {page}: {title}")
     print(f"Wrote {output}")
 
 
