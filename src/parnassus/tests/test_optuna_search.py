@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -581,6 +582,30 @@ def test_epoch_callback_breaks_loop(fixture_root: Path):
     assert len(history["loss"]) == 2
     assert len(history["val_loss"]) == 2
     assert seen == [0, 1]
+
+
+def test_load_split_datasets_seed(fixture_root: Path):
+    """``seed`` permutes the events before the split.
+
+    Deterministic, different from the contiguous cut, same split sizes, and every
+    seeded event is an (truth, target) event of the full sample -- i.e. the
+    per-event targets were permuted together with the truth.
+    """
+    device = torch.device("cpu")
+
+    def events(ds) -> list[tuple[int, int]]:  # (n truth particles, reco multiplicity) per event
+        n_truth = [t.shape[0] for t in ds.truth_particles]
+        return list(zip(n_truth, ds.multiplicity.tolist(), strict=True))
+
+    def load(**kwargs):
+        return load_split_datasets(fixture_root, n_events=24, device=device, **kwargs)
+
+    plain, s1, s1_again = load(), load(seed=1), load(seed=1)
+    assert (events(s1[0]), events(s1[1])) == (events(s1_again[0]), events(s1_again[1]))
+    assert events(s1[0]) != events(plain[0])
+    assert (len(s1[0]), len(s1[1])) == (len(plain[0]), len(plain[1]))
+    full = load(val_fraction=0.3)  # train + val = all 24 events (the default holds 10% out)
+    assert Counter(events(s1[0]) + events(s1[1])) <= Counter(events(full[0]) + events(full[1]))
 
 
 # ---------------------------------------------------------------------------

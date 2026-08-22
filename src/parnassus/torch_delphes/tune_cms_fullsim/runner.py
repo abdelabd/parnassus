@@ -78,6 +78,7 @@ def load_split_datasets(
     reco_pt_cut: float | None = None,
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
+    seed: int | None = None,
 ) -> tuple[DelphesDataSet, DelphesDataSet]:
     """Load a CMS full-sim ROOT file and build the train/val dataset pair.
 
@@ -107,6 +108,10 @@ def load_split_datasets(
     truncate_chads : bool
         Truncate the target's reco charged hadrons at the per-event
         ``n_truth_chad`` ceiling (see :func:`.data._build_pflow_event_data`).
+    seed : int | None
+        Seed of a random event permutation applied before the split, so the
+        train/val membership changes with the seed. ``None`` (default) keeps
+        the contiguous split (first block train, next block val).
 
     Returns
     -------
@@ -129,6 +134,15 @@ def load_split_datasets(
     # the split so peak RSS stays low.
     del arrays
     gc.collect()
+
+    if seed is not None:  # seeded random event split; None keeps the contiguous cut
+        perm = torch.randperm(len(truth_ragged), generator=torch.Generator().manual_seed(seed))
+        idx = perm.tolist()
+        truth_ragged = [truth_ragged[i] for i in idx]
+        # Per-particle observables are per-event lists, per-event scalars are tensors.
+        target = {
+            k: [v[i] for i in idx] if isinstance(v, list) else v[perm] for k, v in target.items()
+        }
 
     train_truth_tensor, val_truth_tensor, _ = split_truth_objects_jagged(
         truth_ragged, train_fraction=train_fraction, val_fraction=val_fraction

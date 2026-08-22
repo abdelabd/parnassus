@@ -684,7 +684,10 @@ def main() -> None:
         "--seed",
         type=int,
         default=0,
-        help="torch RNG seed (fixed across trials, so trials differ only by hyperparameters).",
+        help=(
+            "torch training seed: random train/val event split, shuffle order and smearing "
+            "noise (fixed across trials, so trials differ only by hyperparameters)."
+        ),
     )
     parser.add_argument(
         "--plot-every",
@@ -933,6 +936,7 @@ def main() -> None:
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
+        seed=args.seed,
     )
     log(
         f"[optuna] loaded {len(train_dataset)} train / {len(val_dataset)} val events "
@@ -1179,6 +1183,7 @@ def main() -> None:
             "trainable_params": sorted(k for k, spec in flat_cfg.items() if spec["trainable"]),
             "trial_number": trial.number,
             "optuna_config": str(args.optuna_config),
+            "seed": args.seed,
             "world_size": world_size,
             "early_stopping_patience": max(0, args.early_stopping_patience),
             "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
