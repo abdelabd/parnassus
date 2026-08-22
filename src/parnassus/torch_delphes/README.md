@@ -94,21 +94,18 @@ the range is an error) — under identical cuts (pt ≥ reco floor, |η| ≤ 2.7
 - **Parnassus** (plot label `Parnassus-F`) — `fastsim_tree` of the generative fast sim, auto-picked by the sample's pT-hat
   bin from `PARNASSUS_FILES` in the script (`/global/cfs/cdirs/m3246/diff_delphes/parnassua_data/`,
   bins 800 and 1000; other bins skip the leg; `--parnassus` overrides, `--no-parnassus` drops it).
-  Parnassus generates only (pt, η, φ) — no charged/neutral class — so it appears on the
-  "All objects" and jet pages only. Its jets are the first 200 000 entries of the Delphes file of
+  Parnassus generates only (pt, η, φ) — no charged/neutral class — which is all the response
+  pages need. Its jets are the first 200 000 entries of the Delphes file of
   the same bin, i.e. the same events as the C++ leg (and as full sim for `test_800`; an
   independent sample of the same process for `train_1000`); the metrics header states which.
 
-Pages (13): log pT and η of all / charged / neutral objects ("charged" = has a track on every
-leg, since the C++ file only stores charged/neutral); leading jet (anti-kt R = 0.5, pt > 8 GeV,
-≥ 2 constituents, |η| < 2.5) log pT, η, log m, constituent multiplicity, and its pT and mass
-response (x − x_truth)/x_truth and η − η_truth relative to the truth jet clustered from all truth
-particles of the event. Linear y, ratio panel to full sim (band = full-sim √N), fixed binning
-per page (`BINS` at the top of the script).
+Pages (4): the leading jet's (anti-kt R = 0.5, pt > 8 GeV, ≥ 2 constituents, |η| < 2.5) pT and
+mass response (x − x_truth)/x_truth, η − η_truth and φ − φ_truth (wrapped to [−π, π)) relative to
+the truth jet clustered from all truth particles of the event. Linear y, ratio panel to full sim
+(band = full-sim √N), fixed binning per page (`BINS` at the top of the script).
 
 Output in the fit folder: `plots/fullsim_comparison_pt<floor>.pdf` and `plots/fullsim_comparison_pt<floor>_metrics.txt`
-(per page: quantile-W1 distance to full sim for each leg and the yield ratio N_leg/N_fullsim;
-`-` where a leg is not drawn).
+(per page: quantile-W1 distance to full sim for each leg and the yield ratio N_leg/N_fullsim).
 `--reco-pt-cut X` evaluates the same fit at another floor (`fullsim_comparison_ptX.*`), which is how fits
 trained at different floors are ranked against each other. ~2 minutes on a CPU for 20 000 events
 (`--n-events`); set `OMP_NUM_THREADS` on shared login nodes.
