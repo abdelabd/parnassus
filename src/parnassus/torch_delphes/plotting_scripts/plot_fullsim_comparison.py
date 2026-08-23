@@ -84,6 +84,8 @@ LEGEND_SIZE = 24  # pt: legend; a 2-column legend is ~15 x this wide and must fi
 FIG_SIZE = (8.6, 7.8)  # inches; sized so the margins leave ~0.2 in beyond the outermost tick label / "x10^4" offset text
 MARGINS = dict(left=0.16, right=0.96, bottom=0.06, top=0.95)  # axes box = 6.9 x 6.9 in (no x label: it is added in LaTeX)
 HEIGHT_RATIOS = (8, 3)  # top panel : ratio panel (the ratio panel must fit the rotated "Ratio" label)
+RATIO_YLIM = (0.0, 2.0)  # ratio panel (was 0.5-1.5; the tails clipped)
+RATIO_YTICKS = (0.0, 0.5, 1.0, 1.5)  # no tick at the top edge: its label would collide with the upper panel's "0"
 HEADROOM = 1.45  # y-limit = HEADROOM x tallest bin; the band above the data holds the 2-row legend
 LEGEND_NCOL = 2  # entries per legend row (4 legs -> 2 rows, read row by row in LEGEND_ORDER)
 plt.rcParams.update({
@@ -293,8 +295,8 @@ def draw_page(pdf, xlabel, samples, ylabel, key):
         if n != CMS:
             rax.stairs(np.divide(counts[n], fs, out=np.full_like(fs, np.nan), where=ok), edges, **STYLE[n])
     rax.axhline(1, color=STYLE[CMS]["color"], linewidth=1)
-    rax.set_ylim(0.5, 1.5)
-    rax.set_yticks([0.6, 1.0, 1.4])
+    rax.set_ylim(*RATIO_YLIM)
+    rax.set_yticks(RATIO_YTICKS)
     rax.set_xlim(edges[0], edges[-1])
     rax.xaxis.set_major_formatter(FormatStrFormatter("%g"))  # no "x10^-2" offset text under the label
     rax.set_ylabel("Ratio")
