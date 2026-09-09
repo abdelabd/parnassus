@@ -16,6 +16,7 @@
 #   N_STEPS         epochs per stage               (default 100; the CLI's global batch is 4096)
 #   N_EVENTS        events per stage               (default -1 = all; small values for a dry run)
 #   NPROC           GPUs; >1 launches torchrun     (default 4; per-rank batch = 4096/NPROC)
+#   OMP_NUM_THREADS CPU threads per rank           (default 8; torchrun would otherwise force 1)
 #   PID_WEIGHTING   --pid-weighting of the per-species shape terms (default sqrt_fraction: in every
 #                   stage the fitted species is the abundant one, so this keeps its terms at full
 #                   weight and mutes the stray-species noise/floor; count/pair/log_ht untouched)
@@ -56,6 +57,7 @@ fi
 # shellcheck disable=SC1091
 source "$REPO/setup.sh"
 MK="python -m parnassus.torch_delphes.full_phasespace_tuning.make_stage_config"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 if (( NPROC > 1 )); then
     LAUNCH="torchrun --standalone --nproc-per-node=$NPROC -m"
 else
