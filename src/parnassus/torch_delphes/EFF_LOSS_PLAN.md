@@ -209,6 +209,16 @@ blow-up or freeze). DONE — 2-step CLI smokes in both modes ran clean.
 
 ### Step 8 — Single-stage closure validation
 
+**RESULT (2026-09-10, muon stage, 1x4 interactive, `doc/figure_stage1_muons_tms/`
+vs the count-term baseline `doc/figure_sequential_dd/stage1_muons/`):** BCE
+recovers the four trained muon efficiency bins as well as or better than counts —
+|fit - truth| (BCE vs counts): eff[0] 0.0021 vs 0.0061, eff[1] 0.0011 vs 0.0020,
+eff[3] 0.0002 vs 0.0101, eff[4] 0.0010 vs 0.0008 (3-50x tighter on two bins,
+comparable on the rest). The frozen > 1 TeV bins stay at card defaults in both, as
+designed. The smearing block (a/b/scale_raw) is statistically identical between
+the two runs — the BCE swap does not disturb the shape/pair-term fits. Val losses
+are not comparable across modes (BCE adds a ~0.65-nat Bernoulli entropy floor).
+
 Interactive 1x4 node (see `torch_delphes/CLAUDE.md`):
 
 - Muon stage: `optuna_search` single trial on the `_v2` muon-gun sample with
