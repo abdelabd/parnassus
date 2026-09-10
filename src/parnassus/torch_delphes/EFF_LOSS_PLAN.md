@@ -227,6 +227,14 @@ Interactive 1x4 node (see `torch_delphes/CLAUDE.md`):
 - Repeat for chads (ksgun). Expect BCE to converge faster/tighter on the efficiency
   block (near-closed-form problem).
 
+**RESULT (2026-09-10, chad stage, sequential stages 1-2 in
+`doc/figure_sequential_truth_matched_survival/` vs baseline
+`doc/figure_sequential_dd/stage2_chads/`):** BCE beats counts on every chad
+efficiency bin — |fit - truth| (BCE vs counts): eff[0] 0.0033 vs 0.0237 (7x),
+eff[1] 0.0021 vs 0.0068 (3x), eff[2] 0.0012 vs 0.0018, eff[3] 0.0008 vs 0.0058
+(7x). Chad smearing block statistically identical between modes. Same convergence
+speed (best epoch 20 vs 19). Both single-stage gates PASSED.
+
 **Gate:** BCE recovers truth efficiencies at least as well as counts on both stages;
 smearing parameters unaffected. If not, stop and diagnose before Step 9.
 
