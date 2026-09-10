@@ -75,6 +75,7 @@ from .config import (
     DEFAULT_PHOTON_MERGE_RADIUS,
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
+    EFF_LOSS_CHOICES,
     MODE_CHOICES,
 )
 
@@ -83,6 +84,8 @@ from .dataloader import DelphesDataLoader
 from .runner import load_split_datasets, resolve_acceptance_cuts, write_history_json
 
 from .loss import (
+    BCE_WEIGHT,
+    BCE_WEIGHTING_CHOICES,
     CALO_COUNT_WEIGHT,
     COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
@@ -209,6 +212,50 @@ def main() -> None:
             "count grew with N. A region with rate << this floor is regularized; a region "
             f"with rate >> it is unchanged. Default {COUNT_RATE_FLOOR}. Re-validate the "
             "count/shape balance with MCGEN_LOSS_DEBUG=1 if you change it."
+        ),
+    )
+    parser.add_argument(
+        "--eff-loss",
+        type=str,
+        default=None,
+        choices=list(EFF_LOSS_CHOICES),
+        help=(
+            "How the tracking-efficiency eff_logits are fitted. 'counts' = the "
+            "reco-space expected-count chi^2 terms (legacy). 'bce' = the per-particle "
+            "survival BCE (EFF_LOSS_PLAN.md): drops the three tracking count terms and "
+            "instead fits the exact Bernoulli likelihood of the truth_survived / "
+            "truth_eff_region labels, which the sample must carry (regenerate with "
+            "generate_pseudodata, or use the *_truth_matched_survival.root samples). "
+            "The calo count terms are unaffected either way. Default: 'bce' in "
+            "--mode delphes, 'counts' in --mode fullsim (no labels until the Phase-2 "
+            "gen-reco matcher)."
+        ),
+    )
+    parser.add_argument(
+        "--bce-weight",
+        type=float,
+        default=BCE_WEIGHT,
+        help=(
+            "Weight on the BCE survival loss (--eff-loss bce), relative to the "
+            "unit-weighted per-pid shape terms. The BCE is a per-particle mean "
+            f"(~O(1) nats, batch-size invariant). Default {BCE_WEIGHT}."
+        ),
+    )
+    parser.add_argument(
+        "--bce-weighting",
+        type=str,
+        default="pooled",
+        choices=list(BCE_WEIGHTING_CHOICES),
+        help=(
+            "How the three per-species BCE means combine (--eff-loss bce). 'pooled' "
+            "(default) weights each species by its labeled-population fraction, making "
+            "the sum EXACTLY the pooled per-particle mean over all labeled particles "
+            "(the joint Bernoulli likelihood / 'existence BCE'; --pid-weighting not "
+            "applied). 'per_species' gives each species' mean a mean-1-normalized "
+            "weight honoring --pid-weighting (count-term-style: with 'equal' every "
+            "species counts the same regardless of abundance, boosting rare species' "
+            "per-particle gradient). Same minimizer either way (the BCE is separable); "
+            "only the relative gradient scale differs."
         ),
     )
     parser.add_argument(
@@ -472,6 +519,17 @@ def main() -> None:
 
     # Resolve --mode + the acceptance-cut args (shared with optuna_search via runner).
     truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
+    # Resolve --eff-loss: default bce on labeled delphes-mode pseudodata, counts in
+    # fullsim mode (no survival labels until the Phase-2 gen-reco matcher).
+    eff_loss = args.eff_loss or ("bce" if args.mode == "delphes" else "counts")
+    log(
+        f"[eff-loss] {eff_loss}"
+        + (
+            f" (weighting={args.bce_weighting}, weight={args.bce_weight})"
+            if eff_loss == "bce"
+            else ""
+        )
+    )
     # Delphes has no supercluster-scale photon merging -> merger OFF regardless of
     # the flag in delphes mode.
     photon_merge_radius = (
@@ -502,6 +560,7 @@ def main() -> None:
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
+        require_bce_labels=(eff_loss == "bce"),
     )
     if truncate_chads:
         n_t = train_dataset.n_truth_chad
@@ -648,6 +707,9 @@ def main() -> None:
         count_weight=args.count_weight,
         calo_count_weight=args.calo_count_weight,
         count_rate_floor=args.count_rate_floor,
+        eff_loss=eff_loss,
+        bce_weight=args.bce_weight,
+        bce_weighting=args.bce_weighting,
         event_weight=args.event_weight,
         loss_name=args.loss,
         pid_weighting=args.pid_weighting,

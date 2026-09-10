@@ -34,7 +34,7 @@ from parnassus.torch_delphes.SimpleCalorimeter import (
 )
 from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
-from .config import PFLOW_BRANCHES, TRUTH_BRANCHES
+from .config import LABEL_BRANCHES, PFLOW_BRANCHES, TRUTH_BRANCHES
 
 # Per-species reconstructed-data count targets for the differentiable count terms.
 # (region-spec key, |pid| selecting that species in the reco data, target dict key).
@@ -93,7 +93,9 @@ def load_cms_flow_root(
         if n_events < 0: # load all events from entry_start to the end of the tree
             n_events = tree.num_entries - entry_start
         available = set(tree.keys())
-        requested = [b for b in (TRUTH_BRANCHES + PFLOW_BRANCHES) if b in available]
+        requested = [
+            b for b in (TRUTH_BRANCHES + PFLOW_BRANCHES + LABEL_BRANCHES) if b in available
+        ]
         arrays = tree.arrays(
             requested,
             library="np",
@@ -566,12 +568,72 @@ def load_pflow_targets(
     }
 
 
+def has_bce_labels(arrays: dict[str, np.ndarray]) -> bool:
+    """Whether the loaded arrays carry the per-truth-particle survival labels
+    (``LABEL_BRANCHES``) needed by ``--eff-loss bce``."""
+    return all(b in arrays for b in LABEL_BRANCHES)
+
+
+# Muon efficiency-region labels excluded from the BCE loss: the > 1 TeV bins use the
+# exponential roll-off eff = sigmoid(logit) * exp(0.5 - rate * pt), so their survival
+# probability is NOT the plain sigmoid of an eff_logit and a logit-indexed BCE would
+# be misspecified there. Those parameters are frozen anyway (no phase-space coverage).
+_BCE_EXCLUDED_LABELS: frozenset[int] = frozenset(
+    CMS_EFF_REGION_SPECS["muon"].label_offset + r + 1
+    for r in range(CMS_EFF_REGION_SPECS["muon"].n_regions)
+    if r % CMS_EFF_REGION_SPECS["muon"].n_pt == CMS_EFF_REGION_SPECS["muon"].n_pt - 1
+)
+
+
+def _build_bce_labels(
+    arrays: dict[str, np.ndarray],
+    n_events: int,
+    truth_pt_cut: float | None = None,
+    truth_abs_eta_cut: float | None = None,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Per-event BCE efficiency-loss label pairs from the ``LABEL_BRANCHES``.
+
+    For each event returns ``bce_region`` (int64: global 1-based efficiency-region
+    label) and ``bce_x`` (float64: survival outcome) restricted to the labeled
+    support — ``truth_eff_region > 0`` (reached the tracker AND fell in a region)
+    minus the muon exponential bins (:data:`_BCE_EXCLUDED_LABELS`). The truth
+    acceptance cuts mirror :func:`_build_truth_rows` so the labeled population is
+    exactly the trainee's input population. Samples without the branches yield
+    empty per-event tensors (the CLI refuses ``--eff-loss bce`` for those).
+    """
+    empty_r = torch.zeros(0, dtype=torch.int64)
+    empty_x = torch.zeros(0, dtype=torch.float64)
+    if not has_bce_labels(arrays):
+        return [empty_r] * n_events, [empty_x] * n_events
+
+    excluded = np.array(sorted(_BCE_EXCLUDED_LABELS), dtype=np.int64)
+    regions: list[torch.Tensor] = []
+    xs: list[torch.Tensor] = []
+    for i in range(n_events):
+        region = np.asarray(arrays["truth_eff_region"][i], dtype=np.int64)
+        x = np.asarray(arrays["truth_survived"][i], dtype=np.float64)
+        if truth_pt_cut is not None or truth_abs_eta_cut is not None:
+            pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
+            eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
+            sel = np.ones(region.shape[0], dtype=bool)
+            if truth_pt_cut is not None:
+                sel &= pt >= truth_pt_cut
+            if truth_abs_eta_cut is not None:
+                sel &= np.abs(eta) <= truth_abs_eta_cut
+            region, x = region[sel], x[sel]
+        keep = (region > 0) & ~np.isin(region, excluded)
+        regions.append(torch.from_numpy(np.ascontiguousarray(region[keep])))
+        xs.append(torch.from_numpy(np.ascontiguousarray(x[keep])))
+    return regions, xs
+
+
 def load_pflow_targets_ragged(
     arrays: dict[str, np.ndarray],
     log_pt_floor: float = 1e-6,
     reco_pt_cut: float | None = None,
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
+    truth_pt_cut: float | None = None,
 ):
     """Ragged counterpart of :func:`load_pflow_targets`.
 
@@ -587,6 +649,12 @@ def load_pflow_targets_ragged(
 
     ``reco_pt_cut`` / ``abs_eta_cut`` / ``truncate_chads``: see
     :func:`_build_pflow_event_data`.
+
+    Additionally carries the BCE efficiency-loss labels ``bce_region`` / ``bce_x``
+    (ragged per-event tensors; empty when the sample has no ``LABEL_BRANCHES`` —
+    see :func:`_build_bce_labels`). ``truth_pt_cut`` (with the shared
+    ``abs_eta_cut``) restricts the labeled population to the trainee's truth
+    acceptance, mirroring :func:`_build_truth_rows`.
     """
     (
         n_events,
@@ -623,6 +691,10 @@ def load_pflow_targets_ragged(
         # agree on dtype (the dense loader's pids_pad is float64 too).
         return [torch.from_numpy(np.ascontiguousarray(a, dtype=np.float64)) for a in arrs]
 
+    bce_region, bce_x = _build_bce_labels(
+        arrays, n_events, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
+    )
+
     return {
         "pt": _to_list(all_pt),
         "eta": _to_list(all_eta),
@@ -634,6 +706,8 @@ def load_pflow_targets_ragged(
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
         "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
+        "bce_region": bce_region,
+        "bce_x": bce_x,
         **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 

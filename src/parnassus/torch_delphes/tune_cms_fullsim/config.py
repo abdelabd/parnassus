@@ -36,6 +36,15 @@ TRUTH_BRANCHES: tuple[str, ...] = (
 )
 PFLOW_BRANCHES: tuple[str, ...] = ("pflow_pt", "pflow_eta", "pflow_phi", "pflow_class")
 
+# Per-truth-particle survival labels for the BCE efficiency loss (--eff-loss bce),
+# written by generate_pseudodata (see EFF_LOSS_PLAN.md): truth_survived = appears in
+# the reco output; truth_in_tracker = reached a tracking-efficiency module;
+# truth_eff_region = global 1-based efficiency-region label (0 = in tracker but
+# outside all regions, -1 = not in tracker). Index-aligned with the truth_* branches.
+# Older samples lack them; the reader skips missing branches and the CLI errors when
+# --eff-loss bce is requested on such a file.
+LABEL_BRANCHES: tuple[str, ...] = ("truth_survived", "truth_in_tracker", "truth_eff_region")
+
 
 # =============================================================================
 # Observables
@@ -58,7 +67,21 @@ OBSERVABLES: list[str] = [
     # apply_chad_truncation. A (n_events,) target-side scalar with no
     # prediction-side counterpart, so plots skip it like the region counts.
     "n_truth_chad",
+    # BCE efficiency-loss labels (per labeled truth particle, ragged; from the
+    # LABEL_BRANCHES above): bce_region = global 1-based efficiency-region label
+    # (padding value 0 = "no label"; the muon exponential > 1 TeV bins are dropped
+    # at load), bce_x = 1.0/0.0 survival outcome. Target-side only, non-plottable,
+    # empty per-event tensors when the sample carries no labels.
+    "bce_region", "bce_x",
 ]
+
+# --eff-loss for the tune entrypoints: how the tracking-efficiency eff_logits are
+# fitted. "counts" = the reco-space expected-count chi^2 terms (legacy);
+# "bce" = the per-particle survival BCE (EFF_LOSS_PLAN.md) -- drops the three
+# tracking count terms and requires the LABEL_BRANCHES in the sample. The calo
+# count terms are unaffected either way. Default: "bce" in --mode delphes (labeled
+# pseudodata), "counts" in --mode fullsim (no labels until the Phase-2 matcher).
+EFF_LOSS_CHOICES: tuple[str, ...] = ("counts", "bce")
 
 
 # =============================================================================

@@ -18,7 +18,11 @@ from .config import OBSERVABLES
 
 # The per-particle (variable-length) observables: padded per batch. Every other
 # key in OBSERVABLES is per-event (fixed shape) and is stacked instead.
-RAGGED_OBSERVABLES: tuple[str, ...] = ("pt", "eta", "phi", "log_E", "log_pt", "pid")
+# bce_region/bce_x pad with 0 = "no label" (regions are 1-based), so the loss's
+# region > 0 selection drops the padding exactly like pid == 0 drops it elsewhere.
+RAGGED_OBSERVABLES: tuple[str, ...] = (
+    "pt", "eta", "phi", "log_E", "log_pt", "pid", "bce_region", "bce_x"
+)
 
 
 def _to_device(value, device):

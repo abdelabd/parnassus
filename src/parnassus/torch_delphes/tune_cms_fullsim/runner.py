@@ -27,6 +27,7 @@ from typing import NamedTuple
 import torch
 
 from .data import (
+    has_bce_labels,
     load_cms_flow_root,
     load_pflow_targets_ragged,
     load_truth_events_ragged,
@@ -78,6 +79,7 @@ def load_split_datasets(
     reco_pt_cut: float | None = None,
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
+    require_bce_labels: bool = False,
 ) -> tuple[DelphesDataSet, DelphesDataSet]:
     """Load a CMS full-sim ROOT file and build the train/val dataset pair.
 
@@ -115,6 +117,16 @@ def load_split_datasets(
         :class:`~.dataloader.DelphesDataLoader`.
     """
     arrays = load_cms_flow_root(root_file, n_events=n_events)
+    if require_bce_labels and not has_bce_labels(arrays):
+        raise SystemExit(
+            f"--eff-loss bce needs the per-truth-particle survival labels "
+            f"(truth_survived / truth_in_tracker / truth_eff_region), but "
+            f"{root_file} does not carry them. Regenerate the sample with "
+            "parnassus.torch_delphes.generate_pseudodata (see "
+            "slurm_scripts/submit_truth_matched_survival_samples.sh and "
+            "EFF_LOSS_PLAN.md), point --root-file at a "
+            "*_truth_matched_survival.root sample, or run with --eff-loss counts."
+        )
     truth_ragged = load_truth_events_ragged(
         arrays, truth_pt_cut=truth_pt_cut, abs_eta_cut=abs_eta_cut
     )
@@ -123,6 +135,7 @@ def load_split_datasets(
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
+        truth_pt_cut=truth_pt_cut,
     )
 
     # The uproot arrays dict is the largest remaining transient; free it before

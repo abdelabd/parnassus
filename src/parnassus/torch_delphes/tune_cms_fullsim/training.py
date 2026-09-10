@@ -32,6 +32,8 @@ from .data import (
 )
 from .distributed import _is_dist, _is_main
 from .loss import (
+    BCE_TERM_KEYS,
+    BCE_WEIGHT,
     CALO_COUNT_WEIGHT,
     COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
@@ -42,6 +44,27 @@ from .loss import (
     compute_pair_masses,
     get_loss_fn,
 )
+
+# The card attribute holding each BCE species' eff_logits parameter (see
+# loss.BCE_TERM_KEYS for the pred-dict key each is injected under).
+_BCE_LOGITS_ATTRS: dict[str, str] = {
+    "chad": "ChargedHadronTrackingEfficiency",
+    "electron": "ElectronTrackingEfficiency",
+    "muon": "MuonTrackingEfficiency",
+}
+
+
+def _inject_bce_logits(
+    pred_observables: dict[str, torch.Tensor],
+    card: "CMSEnergyFlowDefault | DDP",
+) -> None:
+    """Put the card's raw per-species ``eff_logits`` parameter tensors into the
+    pred dict (``bce_logits:{species}``) for the pooled BCE efficiency loss.
+    These are replicated parameters (identical on every DDP rank), not per-shard
+    activations, so no gather is needed — see ``loss._bce_eff_terms``."""
+    core = card.module if isinstance(card, DDP) else card
+    for key, _spec_key, logits_key in BCE_TERM_KEYS:
+        pred_observables[logits_key] = getattr(core, _BCE_LOGITS_ATTRS[key]).eff_logits
 
 # =============================================================================
 # Fit loop
@@ -74,6 +97,9 @@ def fit_card_to_fullsim(
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    eff_loss: str = "counts",
+    bce_weight: float = BCE_WEIGHT,
+    bce_weighting: str = "pooled",
     event_weight: float = EVENT_WEIGHT,
     loss_name: str = "wasserstein",
     pid_weighting: str = "equal",
@@ -255,6 +281,9 @@ def fit_card_to_fullsim(
             count_weight=count_weight,
             calo_count_weight=calo_count_weight,
             count_rate_floor=count_rate_floor,
+            eff_loss=eff_loss,
+            bce_weight=bce_weight,
+            bce_weighting=bce_weighting,
             event_weight=event_weight,
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
@@ -525,6 +554,11 @@ def fit_card_to_fullsim(
             # filters below (they pass non-object keys through untouched).
             for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                 pred_observables[pred_key] = out[out_key]
+            # --eff-loss bce: the loss reads the raw eff_logits directly (the
+            # pooled survival BCE is its own gradient path, out-of-band from the
+            # reco forward; see EFF_LOSS_PLAN.md).
+            if eff_loss == "bce":
+                _inject_bce_logits(pred_observables, card)
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
@@ -585,7 +619,7 @@ def fit_card_to_fullsim(
                 f"(raw=pre-weight, weighted=post-weight; mean over {n_b} batches)"
             )
             grand = 0.0
-            for cat in ("pid_shape", "pair", "event", "count"):
+            for cat in ("pid_shape", "pair", "event", "count", "bce"):
                 keys = sorted(k for k in bd_wtd if k[0] == cat)
                 if not keys:
                     continue
@@ -644,6 +678,8 @@ def fit_card_to_fullsim(
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
                 for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                     pred_observables[pred_key] = out[out_key]
+                if eff_loss == "bce":
+                    _inject_bce_logits(pred_observables, card)
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
                 attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)

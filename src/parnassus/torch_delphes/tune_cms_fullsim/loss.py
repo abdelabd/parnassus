@@ -44,8 +44,11 @@ from typing import Callable, NamedTuple
 import ot
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.distributed.nn.functional import all_gather as diff_all_gather
 from torch.distributed.nn.functional import all_reduce as diff_all_reduce
+
+from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
 from .distributed import _is_dist
@@ -93,6 +96,40 @@ EVENT_WEIGHT = 0.1
 # 0.05/event) and leaves dense charged-hadron / photon bins (rate >> 1) untouched.
 # Overridable per-call via the CLI --count-rate-floor.
 COUNT_RATE_FLOOR = 0.05
+
+# Weight of each per-species BCE efficiency term (--eff-loss bce, EFF_LOSS_PLAN.md):
+# the exact per-particle Bernoulli negative log-likelihood of the survival labels,
+# replacing the three tracking count terms as the eff_logits gradient source. The
+# per-particle mean is O(1) nats and, like the count chi^2 it replaces, batch-size
+# invariant. Default 1.0 (same as COUNT_WEIGHT); calibrated in EFF_LOSS_PLAN.md step 7.
+BCE_WEIGHT = 1.0
+
+# (species key, region-spec key, pred-dict logits key) per BCE term. The pred-side
+# logits are the card's raw eff_logits (replicated parameters, injected by
+# training.py); the target-side labels come in "bce_region"/"bce_x" (see
+# data._build_bce_labels). Region labels are the GLOBAL 1-based EFF_REGION labels,
+# so [label_offset + 1, label_offset + n_regions] selects a species.
+BCE_TERM_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("chad", "charged_hadron", "bce_logits:chad"),
+    ("electron", "electron", "bce_logits:electron"),
+    ("muon", "muon", "bce_logits:muon"),
+)
+
+_BCE_LABELS: dict[str, str] = {
+    "chad": "BceChargedHadron",
+    "electron": "BceElectron",
+    "muon": "BceMuon",
+}
+
+# --bce-weighting: how the three per-species BCE means combine into the loss.
+# "pooled" = population-fraction weights, so the sum is EXACTLY the pooled
+# per-particle mean over all labeled particles — the joint Bernoulli likelihood
+# (an "existence BCE"). "per_species" = mean-1-normalized cross-species weights
+# honoring --pid-weighting (the count-term-style combination: with "equal" every
+# species' mean carries the same weight regardless of abundance). Both have the
+# same minimizer (the BCE is separable: each logit belongs to one species); they
+# differ only in the relative gradient scale of rare vs abundant species.
+BCE_WEIGHTING_CHOICES: tuple[str, ...] = ("pooled", "per_species")
 
 
 class LossComponent(NamedTuple):
@@ -715,6 +752,109 @@ def _group_objects_by_pid(input_tensor: torch.Tensor) -> dict[int, torch.Tensor]
     return groups
 
 
+def _bce_eff_terms(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    *,
+    bce_weight: float,
+    bce_weighting: str = "pooled",
+    pid_weighting: str = "equal",
+    pid_weight_floor: float = 0.0,
+    out_components: list | None = None,
+) -> list[torch.Tensor]:
+    """The BCE survival loss (``--eff-loss bce``): the per-particle Bernoulli
+    negative log-likelihood of the survival labels — the direct gradient source
+    for the tracking-efficiency ``eff_logits`` (EFF_LOSS_PLAN.md).
+
+    Target side: ``target["bce_region"]`` (global 1-based efficiency-region label;
+    0 = padding / no label) and ``target["bce_x"]`` (survival outcome), position-
+    aligned; both detached data. Pred side: ``pred["bce_logits:{species}"]`` — the
+    card's raw ``eff_logits`` parameter tensors, injected by training.py. The term
+    indexes the RAW logits and uses ``binary_cross_entropy_with_logits`` (exact and
+    stable; never sigmoid-then-log). With piecewise-constant efficiencies the MLE
+    is the per-region empirical survival fraction, so this term is near-convex in
+    the logits. The muon exponential (> 1 TeV) bins are dropped at load time
+    (``data._BCE_EXCLUDED_LABELS``); their labels never reach here.
+
+    How the three per-species means combine is set by ``bce_weighting``
+    (:data:`BCE_WEIGHTING_CHOICES`):
+
+    - ``"pooled"`` (default): each species' weight is its labeled-population
+      fraction ``n_s / n_total``, so the SUM of the terms is exactly
+      ``bce_weight *`` the pooled per-particle mean over all labeled particles —
+      the joint Bernoulli likelihood ("existence BCE"). ``--pid-weighting`` is
+      NOT applied (reweighting a likelihood distorts its estimator).
+    - ``"per_species"``: mean-1-normalized cross-species weights honoring
+      ``pid_weighting`` / ``pid_weight_floor`` (the count-term-style
+      combination): with ``"equal"`` every species' mean carries the same weight
+      regardless of abundance, boosting rare species' per-particle gradient.
+
+    Both have the same minimizer — the BCE is separable (every logit belongs to
+    exactly one species) — they differ only in relative gradient scale.
+
+    DDP: the distributed wrappers gather the label arrays (non-differentiable)
+    across ranks and pass the replicated logits through, so every rank computes the
+    identical global term; the resulting full per-rank logits gradient matches the
+    effective scaling of the gathered shape/count terms after DDP's gradient mean.
+
+    A species present in the pred dict but with no labeled particles in the batch
+    contributes a graph-connected zero (keeps DDP grad hooks consistent).
+    """
+    if "bce_region" not in target or "bce_x" not in target:
+        return []
+    region = target["bce_region"].detach().reshape(-1)
+    x_all = target["bce_x"].detach().reshape(-1)
+    labeled = region > 0  # drops per-batch padding (0 = "no label")
+    region = region[labeled].long()
+    x_all = x_all[labeled]
+
+    entries: list[tuple[str, torch.Tensor, float]] = []
+    for key, spec_key, pred_key in BCE_TERM_KEYS:
+        logits = pred.get(pred_key)
+        if logits is None:
+            continue
+        spec = CMS_EFF_REGION_SPECS[spec_key]
+        lo = spec.label_offset + 1
+        hi = spec.label_offset + spec.n_regions
+        m = (region >= lo) & (region <= hi)
+        n = int(m.sum())
+        if n == 0:
+            raw = logits.reshape(-1).sum() * 0.0  # graph-connected zero
+        else:
+            idx = region[m] - lo
+            raw = F.binary_cross_entropy_with_logits(
+                logits.reshape(-1)[idx],
+                x_all[m].to(dtype=logits.dtype, device=logits.device),
+                reduction="mean",
+            )
+        entries.append((key, raw, float(n)))
+
+    if bce_weighting == "pooled":
+        # Population fractions, NOT a tunable weighting: sum(f_s * mean_s) == the
+        # pooled mean over all labeled particles (the exact joint likelihood).
+        n_total = sum(n for _key, _raw, n in entries)
+        species_w = {
+            key: (n / n_total if n_total > 0 else 0.0) for key, _raw, n in entries
+        }
+    elif bce_weighting == "per_species":
+        species_w = _population_weights_from_counts(
+            {key: n for key, _raw, n in entries},
+            mode=pid_weighting,
+            floor=pid_weight_floor,
+        )
+    else:
+        raise ValueError(
+            f"Unknown bce_weighting {bce_weighting!r}. Valid: {BCE_WEIGHTING_CHOICES}."
+        )
+    terms: list[torch.Tensor] = []
+    for key, raw, _n in entries:
+        eff_weight = bce_weight * species_w[key]
+        terms.append(eff_weight * raw)
+        if out_components is not None:
+            out_components.append((_BCE_LABELS[key], raw, eff_weight))
+    return terms
+
+
 def _count_terms(
     pred: dict[str, torch.Tensor],
     target: dict[str, torch.Tensor],
@@ -724,6 +864,7 @@ def _count_terms(
     count_rate_floor: float = COUNT_RATE_FLOOR,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
+    include_tracking: bool = True,
     out_components: list | None = None,
 ) -> list[torch.Tensor]:
     """Differentiable per-species expected-count terms, shared by both training
@@ -798,10 +939,18 @@ def _count_terms(
     (default) makes this a byte-identical no-op.
     """
     calo_pred_keys = {pred_key for _o, pred_key, _t in CALO_COUNT_TERM_KEYS}
+    # ``include_tracking=False`` (--eff-loss bce) drops the three tracking-efficiency
+    # terms — the BCE terms replace them — while the calo terms always stay (there is
+    # no per-particle label for towers; see EFF_LOSS_MOTIV.md section 2).
+    term_keys = (
+        (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS)
+        if include_tracking
+        else CALO_COUNT_TERM_KEYS
+    )
     # First pass: build every present species' raw term + its detached target
     # population (for the cross-species weighting below).
     entries: list[tuple[str, torch.Tensor, float, float]] = []
-    for out_key, pred_key, tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
+    for out_key, pred_key, tgt_key in term_keys:
         pred_counts = pred.get(pred_key)
         if pred_counts is None or tgt_key not in target:
             continue
@@ -946,6 +1095,9 @@ def per_event_wasserstein_loss(
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    eff_loss: str = "counts",
+    bce_weight: float = BCE_WEIGHT,
+    bce_weighting: str = "pooled",
     event_weight: float = EVENT_WEIGHT,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
@@ -1088,7 +1240,24 @@ def per_event_wasserstein_loss(
         count_rate_floor=count_rate_floor,
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
+        include_tracking=(eff_loss != "bce"),
         out_components=count_components,
+    )
+    # --eff-loss bce: the pooled per-particle survival BCE replaces the tracking
+    # count terms as the eff_logits gradient source (calo count terms stay above).
+    bce_components: list | None = [] if return_breakdown else None
+    bce_terms = (
+        _bce_eff_terms(
+            pred,
+            target,
+            bce_weight=bce_weight,
+            bce_weighting=bce_weighting,
+            pid_weighting=pid_weighting,
+            pid_weight_floor=pid_weight_floor,
+            out_components=bce_components,
+        )
+        if eff_loss == "bce"
+        else []
     )
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
@@ -1098,6 +1267,7 @@ def per_event_wasserstein_loss(
         list(object_wasserstein_distance.values())
         + [event_weight * d for d in event_wasserstein_distance.values()]
         + count_terms
+        + bce_terms
     )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
         zero = pred_particles.sum() * 0.0
@@ -1141,6 +1311,11 @@ def per_event_wasserstein_loss(
         weights.append(float(weight))
         raw_tensors.append(raw)
         wtd_tensors.append(wtd)
+    for (label, raw, weight), wtd in zip(bce_components or [], bce_terms):
+        cat_label.append(("bce", label))
+        weights.append(float(weight))
+        raw_tensors.append(raw)
+        wtd_tensors.append(wtd)
     raw_vals = torch.stack(raw_tensors).detach().cpu().tolist()
     wtd_vals = torch.stack(wtd_tensors).detach().cpu().tolist()
     components = [
@@ -1157,6 +1332,9 @@ def per_event_wasserstein_loss_distributed(
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    eff_loss: str = "counts",
+    bce_weight: float = BCE_WEIGHT,
+    bce_weighting: str = "pooled",
     event_weight: float = EVENT_WEIGHT,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
@@ -1184,6 +1362,9 @@ def per_event_wasserstein_loss_distributed(
             count_weight=count_weight,
             calo_count_weight=calo_count_weight,
             count_rate_floor=count_rate_floor,
+            eff_loss=eff_loss,
+            bce_weight=bce_weight,
+            bce_weighting=bce_weighting,
             event_weight=event_weight,
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
@@ -1246,6 +1427,9 @@ def per_event_wasserstein_loss_distributed(
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        eff_loss=eff_loss,
+        bce_weight=bce_weight,
+        bce_weighting=bce_weighting,
         event_weight=event_weight,
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
@@ -1298,6 +1482,9 @@ def _per_pid_obs_loss(
     count_weight: float,
     calo_count_weight: float,
     count_rate_floor: float,
+    eff_loss: str = "counts",
+    bce_weight: float = BCE_WEIGHT,
+    bce_weighting: str = "pooled",
     event_weight: float,
     obj_weights: dict[str, float] | None,
     debug_label: str,
@@ -1476,13 +1663,31 @@ def _per_pid_obs_loss(
         count_rate_floor=count_rate_floor,
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
+        include_tracking=(eff_loss != "bce"),
         out_components=count_components,
+    )
+    # --eff-loss bce: the pooled per-particle survival BCE replaces the tracking
+    # count terms as the eff_logits gradient source (calo count terms stay above).
+    bce_components: list | None = [] if return_breakdown else None
+    bce_terms = (
+        _bce_eff_terms(
+            pred,
+            target,
+            bce_weight=bce_weight,
+            bce_weighting=bce_weighting,
+            pid_weighting=pid_weighting,
+            pid_weight_floor=pid_weight_floor,
+            out_components=bce_components,
+        )
+        if eff_loss == "bce"
+        else []
     )
     terms = (
         list(pid_obs_terms.values())
         + list(pair_terms.values())
         + ([event_term] if event_term is not None else [])
         + count_terms
+        + bce_terms
     )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
         zero = pred_particles.sum() * 0.0
@@ -1530,6 +1735,11 @@ def _per_pid_obs_loss(
         weights.append(float(weight))
         raw_tensors.append(raw)
         wtd_tensors.append(wtd)
+    for (label, raw, weight), wtd in zip(bce_components or [], bce_terms):
+        cat_label.append(("bce", label))
+        weights.append(float(weight))
+        raw_tensors.append(raw)
+        wtd_tensors.append(wtd)
     raw_vals = torch.stack(raw_tensors).detach().cpu().tolist()
     wtd_vals = torch.stack(wtd_tensors).detach().cpu().tolist()
     components = [
@@ -1546,6 +1756,9 @@ def per_pid_soft_hist_loss(
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    eff_loss: str = "counts",
+    bce_weight: float = BCE_WEIGHT,
+    bce_weighting: str = "pooled",
     event_weight: float = EVENT_WEIGHT,
     beta: float = 0.15,
     bin_edges: dict[str, torch.Tensor] | None = None,
@@ -1605,6 +1818,9 @@ def per_pid_soft_hist_loss(
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        eff_loss=eff_loss,
+        bce_weight=bce_weight,
+        bce_weighting=bce_weighting,
         event_weight=event_weight,
         obj_weights=obj_weights,
         debug_label="pid_hist",
@@ -1670,6 +1886,9 @@ def per_pid_wasserstein_1d_loss(
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    eff_loss: str = "counts",
+    bce_weight: float = BCE_WEIGHT,
+    bce_weighting: str = "pooled",
     event_weight: float = EVENT_WEIGHT,
     obj_weights: dict[str, float] | None = None,
     n_quantiles: int = 100,
@@ -1730,6 +1949,9 @@ def per_pid_wasserstein_1d_loss(
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        eff_loss=eff_loss,
+        bce_weight=bce_weight,
+        bce_weighting=bce_weighting,
         event_weight=event_weight,
         obj_weights=obj_weights,
         debug_label="pid_w1d",
@@ -1749,6 +1971,9 @@ def per_pid_wasserstein_1d_loss_distributed(
     count_weight: float = COUNT_WEIGHT,
     calo_count_weight: float = CALO_COUNT_WEIGHT,
     count_rate_floor: float = COUNT_RATE_FLOOR,
+    eff_loss: str = "counts",
+    bce_weight: float = BCE_WEIGHT,
+    bce_weighting: str = "pooled",
     event_weight: float = EVENT_WEIGHT,
     obj_weights: dict[str, float] | None = None,
     n_quantiles: int = 100,
@@ -1780,6 +2005,9 @@ def per_pid_wasserstein_1d_loss_distributed(
             count_weight=count_weight,
             calo_count_weight=calo_count_weight,
             count_rate_floor=count_rate_floor,
+            eff_loss=eff_loss,
+            bce_weight=bce_weight,
+            bce_weighting=bce_weighting,
             event_weight=event_weight,
             obj_weights=obj_weights,
             n_quantiles=n_quantiles,
@@ -1867,12 +2095,37 @@ def per_pid_wasserstein_1d_loss_distributed(
             tv_flat, differentiable=False
         ).reshape(-1, n_regions)
 
+    # ---- BCE efficiency-loss labels + logits (--eff-loss bce) ----------------
+    # The labels are target-side data: gather the labeled entries (region > 0
+    # drops the per-batch padding) non-differentiably; every rank always issues
+    # both collectives (possibly empty), so the collective sequence matches. The
+    # logits are REPLICATED card parameters (identical on every rank), passed
+    # through untouched: the inner _bce_eff_terms then computes the identical
+    # global pooled BCE on every rank, and the full per-rank logits gradient ends
+    # up scaled exactly like the gathered terms' gradients after DDP's mean.
+    if eff_loss == "bce" and "bce_region" in target and "bce_x" in target:
+        r_flat = target["bce_region"].detach().reshape(-1)
+        x_flat = target["bce_x"].detach().reshape(-1)
+        labeled = r_flat > 0
+        target_gathered["bce_region"] = _all_gather_varlen(
+            r_flat[labeled], differentiable=False
+        )
+        target_gathered["bce_x"] = _all_gather_varlen(
+            x_flat[labeled], differentiable=False
+        )
+        for _key, _spec_key, logits_key in BCE_TERM_KEYS:
+            if logits_key in pred:
+                pred_gathered[logits_key] = pred[logits_key]
+
     return per_pid_wasserstein_1d_loss(
         pred_gathered,
         target_gathered,
         count_weight=count_weight,
         calo_count_weight=calo_count_weight,
         count_rate_floor=count_rate_floor,
+        eff_loss=eff_loss,
+        bce_weight=bce_weight,
+        bce_weighting=bce_weighting,
         event_weight=event_weight,
         obj_weights=obj_weights,
         n_quantiles=n_quantiles,

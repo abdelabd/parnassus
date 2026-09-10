@@ -137,11 +137,14 @@ from .config import (
     DEFAULT_MODE,
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
+    EFF_LOSS_CHOICES,
     MODE_CHOICES,
 )
 from .dataloader import DelphesDataLoader
 from .distributed import _cleanup_distributed, _init_distributed
 from .loss import (
+    BCE_WEIGHT,
+    BCE_WEIGHTING_CHOICES,
     CALO_COUNT_WEIGHT,
     COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
@@ -739,6 +742,13 @@ def main() -> None:
     parser.add_argument("--count-weight", type=float, default=COUNT_WEIGHT)
     parser.add_argument("--calo-count-weight", type=float, default=CALO_COUNT_WEIGHT)
     parser.add_argument("--count-rate-floor", type=float, default=COUNT_RATE_FLOOR)
+    # Efficiency-loss selection (see the tune_cms_fullsim CLI help): None resolves
+    # to 'bce' in --mode delphes and 'counts' in --mode fullsim.
+    parser.add_argument("--eff-loss", type=str, default=None, choices=list(EFF_LOSS_CHOICES))
+    parser.add_argument("--bce-weight", type=float, default=BCE_WEIGHT)
+    parser.add_argument(
+        "--bce-weighting", type=str, default="pooled", choices=list(BCE_WEIGHTING_CHOICES)
+    )
     parser.add_argument("--event-weight", type=float, default=EVENT_WEIGHT)
     # Loss-definition switches of the per-pid losses (see tune_cms_fullsim.cli): one
     # study == one setting (guarded via study user_attrs below).
@@ -878,6 +888,9 @@ def main() -> None:
 
     # Resolve --mode + the acceptance-cut args (shared with the tuning CLI via runner).
     truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
+    # Resolve --eff-loss like the tuning CLI: bce on labeled delphes-mode pseudodata,
+    # counts in fullsim mode (no survival labels until the Phase-2 matcher).
+    eff_loss = args.eff_loss or ("bce" if args.mode == "delphes" else "counts")
     # delphes: Delphes has no supercluster-scale photon merging -> merger OFF and
     # the radius is NOT searched (search.photon_merge_radius stays validated by
     # load_search_config but is ignored).
@@ -933,6 +946,7 @@ def main() -> None:
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
+        require_bce_labels=(eff_loss == "bce"),
     )
     log(
         f"[optuna] loaded {len(train_dataset)} train / {len(val_dataset)} val events "
@@ -1060,6 +1074,9 @@ def main() -> None:
             count_weight=args.count_weight,
             calo_count_weight=args.calo_count_weight,
             count_rate_floor=args.count_rate_floor,
+            eff_loss=eff_loss,
+            bce_weight=args.bce_weight,
+            bce_weighting=args.bce_weighting,
             event_weight=args.event_weight,
             loss_name=args.loss,
             pid_weighting=args.pid_weighting,
