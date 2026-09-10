@@ -46,4 +46,10 @@ mkdir -p "$OUT_BASE"
 } > "$OUT_BASE/reproduce.sh"
 
 cd "$REPO"
-bash src/parnassus/torch_delphes/full_phasespace_tuning/run_sequential.sh
+# Optional pipelining: STAGES = space-separated stage YAMLs (default: all four);
+# FROM_HISTORY = a history.json to start the first listed stage from (see
+# run_sequential.sh). Lets stages 1-2 run before the dijet sample exists, with
+# stages 3-4 chained behind the dijet merge via FROM_HISTORY=stage2's history.
+# shellcheck disable=SC2086
+FROM_HISTORY="${FROM_HISTORY:-}" \
+    bash src/parnassus/torch_delphes/full_phasespace_tuning/run_sequential.sh ${STAGES:-}
