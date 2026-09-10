@@ -30,6 +30,13 @@ More GPUs is typically better. **But** changes to the loss function sometimes br
 multi-GPU or multi-node training (or both) — when debugging a loss change, verify at
 1x1 first, then 1x4.
 
+**Pipeline whenever possible**: when a run depends on another job's output
+(generation -> merge -> preprocessing -> training), submit the whole chain up front
+with `sbatch --dependency=afterok:<jid>[:<jid>...]` instead of waiting and
+submitting by hand — queue wait times overlap, nothing sits idle overnight, and a
+failed upstream job cleanly holds its dependents. Example chain: sample-generation
+merges -> `hungarian_match_samples.sbatch` -> `run_sequential_survival.sbatch`.
+
 Allocation tips:
 
 - Add `--no-shell` to `salloc` to allocate without blocking, then drive the job with
