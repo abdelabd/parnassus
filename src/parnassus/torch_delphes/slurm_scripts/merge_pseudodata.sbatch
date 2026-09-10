@@ -87,8 +87,20 @@ if merged_n != src_total:
     )
 print(f"[merge] OK: merged {merged_n} events == sum of parts")
 
+# Keep the generation provenance with the merged file: the seed-1 part's sidecar
+# (written by generate_pseudodata._write_provenance) describes the config/commit
+# shared by every part; only the seed differs.
+import shutil
+
+sidecar = parts[0] + ".provenance.json"
+if os.path.exists(sidecar):
+    shutil.copyfile(sidecar, MERGED + ".provenance.json")
+    print(f"[merge] provenance sidecar -> {MERGED}.provenance.json")
+
 for p in parts:
     os.remove(p)
+    if os.path.exists(p + ".provenance.json"):
+        os.remove(p + ".provenance.json")
 try:
     os.rmdir(PARTS_DIR)
 except OSError:

@@ -106,8 +106,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
+import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -510,6 +514,61 @@ def hepmc_to_truth_class_arrays(
     }
 
 
+class _EffLabelRecorder:
+    """Records, at each tracking-efficiency module, which truth particles arrived
+    and which survived the Bernoulli mask — via standard forward hooks, so neither
+    ``learnable.py`` nor the card forward needs any change.
+
+    For every module call it stores the input rows' UID (the flat truth index
+    written by :func:`truth_arrays_to_pflow`), the global 1-based efficiency-region
+    label (``region_index_1based`` on the SAME pre-mask kinematics the efficiency
+    was evaluated at — identical by construction to the ``EFF_REGION`` tag), and
+    the mask outcome (``output pt > 0``: the mask multiplies the momentum columns
+    of rows whose pre-mask pt is always > 0).
+
+    Only meaningful on a **learnable** card: the legacy path's Efficiency modules
+    drop rows instead of masking them, which would break the input/output row
+    alignment the hook relies on.
+    """
+
+    _MODULE_ATTRS = (
+        "ChargedHadronTrackingEfficiency",
+        "ElectronTrackingEfficiency",
+        "MuonTrackingEfficiency",
+    )
+
+    def __init__(self) -> None:
+        self.uids: list[np.ndarray] = []
+        self.regions: list[np.ndarray] = []
+        self.kept: list[np.ndarray] = []
+        self._handles: list = []
+
+    def attach(self, card: CMSEnergyFlowDefault) -> None:
+        if not getattr(card, "learnable", False):
+            raise ValueError(
+                "_EffLabelRecorder requires a learnable card (mask-based efficiency); "
+                "the legacy Efficiency modules drop rows and break row alignment."
+            )
+        for attr in self._MODULE_ATTRS:
+            self._handles.append(getattr(card, attr).register_forward_hook(self._hook))
+
+    def _hook(self, module, args, output) -> None:
+        pre = args[0]
+        if pre.shape[0] == 0:
+            return
+        region = module.region_index_1based(
+            pre[:, ColumnMap.PT], pre[:, ColumnMap.ETA_OUTER]
+        )
+        self.uids.append(pre[:, ColumnMap.UID].detach().cpu().numpy().astype(np.int64))
+        self.regions.append(region.detach().cpu().numpy().astype(np.int32))
+        self.kept.append((output[:, ColumnMap.PT] > 1e-6).detach().cpu().numpy())
+
+    def detach(self) -> None:
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()
+
+
 def truth_arrays_to_pflow(
     truth_arrays: dict[str, list[np.ndarray]],
     target_card: CMSEnergyFlowDefault,
@@ -548,9 +607,27 @@ def truth_arrays_to_pflow(
     Returns
     -------
     dict
-        ``{"pflow_pt", "pflow_eta", "pflow_phi", "pflow_class"}`` (plus the
-        ``"<ModuleName>.<Var>"`` debug branches when ``debug`` is True) -> list
-        of per-event numpy arrays, index-aligned with ``truth_arrays``.
+        ``{"pflow_pt", "pflow_eta", "pflow_phi", "pflow_class"}`` plus the
+        per-truth-particle survival-label branches (index-aligned with the
+        ``truth_*`` arrays; see ``EFF_LOSS_PLAN.md``):
+
+        - ``truth_in_tracker`` (bool): reached a tracking-efficiency module,
+          i.e. survived ``ParticlePropagator`` as a charged track. False for
+          neutrals and propagation failures.
+        - ``truth_eff_region`` (int32): global 1-based efficiency-region label
+          (chad 1-4, electron 5-10, muon 11-16; 0 = in tracker but outside all
+          regions; -1 = not in tracker), computed at the same pre-mask smeared
+          kinematics the efficiency coin was flipped at.
+        - ``truth_survived`` (bool): present in the EFlowObject output with
+          pt > 0. On the ``truth_in_tracker`` support this equals the
+          efficiency module's Bernoulli mask (enforced by a hard invariant
+          check every generation). Always False for neutrals — calo objects
+          are towers with no per-particle identity; the BCE loss never reads
+          neutral labels.
+
+        (plus the ``"<ModuleName>.<Var>"`` debug branches when ``debug`` is
+        True) -> list of per-event numpy arrays, index-aligned with
+        ``truth_arrays``.
     """
     n_events = len(truth_arrays["truth_pt"])
 
@@ -564,6 +641,22 @@ def truth_arrays_to_pflow(
         for module_name, variables in INTERMEDIATE_BRANCHES:
             for var in variables:
                 branches[debug_branch_name(module_name, var)] = []
+
+    # ----- Per-truth-particle survival labels (see EFF_LOSS_PLAN.md) -----
+    # Every truth particle gets a global 1-based UID (flat index over all events,
+    # in truth-array order); the UID column rides through the card forward
+    # untouched, so the efficiency-module hooks and the EFlowObject output can be
+    # scattered back onto the truth arrays. 0 stays "no UID" (padding, towers).
+    ev_lens = np.array([len(a) for a in truth_arrays["truth_pt"]], dtype=np.int64)
+    ev_offsets = np.concatenate([[0], np.cumsum(ev_lens)])
+    total_particles = int(ev_offsets[-1])
+    # Flat label arrays indexed by UID (entry 0 unused).
+    lbl_in_tracker = np.zeros(total_particles + 1, dtype=bool)
+    lbl_region = np.full(total_particles + 1, -1, dtype=np.int32)
+    lbl_survived = np.zeros(total_particles + 1, dtype=bool)
+
+    recorder = _EffLabelRecorder()
+    recorder.attach(target_card)
 
     for start in tqdm(
         range(0, n_events, batch_size),
@@ -585,9 +678,31 @@ def truth_arrays_to_pflow(
                 branches[key].extend([np.empty(0, dtype=np.float32) for _ in range(n_batch)])
             continue
 
+        # Tag every input row with its global truth UID. The flatten above keeps
+        # event-major, in-event truth-array order, so row k of this batch is truth
+        # particle ev_offsets[start] + k; the count assert guards that alignment
+        # (it would only fire if a real truth row were all-zero).
+        n_batch_particles = int(ev_lens[start:end].sum())
+        if reco_input.shape[0] != n_batch_particles:
+            raise RuntimeError(
+                f"truth-row/UID alignment broken: batch [{start}:{end}) has "
+                f"{n_batch_particles} truth particles but {reco_input.shape[0]} "
+                "non-zero input rows"
+            )
+        uid0 = int(ev_offsets[start])
+        reco_input[:, ColumnMap.UID] = torch.arange(
+            uid0 + 1, uid0 + n_batch_particles + 1, dtype=reco_input.dtype
+        )
+
         with torch.no_grad():
             out = target_card(reco_input.to(device))
         eflow = out["EFlowObject"]
+
+        # UIDs present in the reco output with pt > 0 = "survived reconstruction"
+        # (same keep cut as eflow_to_class_arrays; towers/padding carry UID 0).
+        out_uid = eflow[:, ColumnMap.UID].detach().cpu().numpy().astype(np.int64)
+        out_pt = eflow[:, ColumnMap.PT].detach().cpu().numpy()
+        lbl_survived[out_uid[(out_pt > 1e-6) & (out_uid > 0)]] = True
 
         pflow_pt, pflow_eta, pflow_phi, pflow_class = eflow_to_class_arrays(
             eflow, eflow[:, ColumnMap.EVENT_NUMBER], n_events=n_batch
@@ -618,7 +733,79 @@ def truth_arrays_to_pflow(
                 for var, lists in per_var.items():
                     branches[debug_branch_name(module_name, var)].extend(lists)
 
+    recorder.detach()
+
+    # Scatter the efficiency-stage records onto the flat truth-indexed arrays.
+    if recorder.uids:
+        rec_uid = np.concatenate(recorder.uids)
+        rec_region = np.concatenate(recorder.regions)
+        rec_kept = np.concatenate(recorder.kept)
+        if rec_uid.min() < 1 or rec_uid.max() > total_particles:
+            raise RuntimeError("efficiency-module rows carry UIDs outside the truth range")
+        lbl_in_tracker[rec_uid] = True
+        lbl_region[rec_uid] = rec_region
+        # Delphes-mode invariant (EFF_LOSS_MOTIV.md 3a): a track survives to the
+        # EFlowObject output iff its efficiency mask kept it — downstream stages
+        # rescale track momenta but never delete or resurrect tracks. Enforced
+        # here on every generation so a future downstream change cannot silently
+        # bias the labels.
+        mismatch = int((lbl_survived[rec_uid] != rec_kept).sum())
+        if mismatch:
+            raise RuntimeError(
+                f"survival-label invariant broken: {mismatch}/{rec_uid.size} tracked "
+                "particles have (efficiency mask) != (present in EFlowObject with pt>0)"
+            )
+
+    # Split the flat truth-indexed labels back into per-event jagged arrays,
+    # aligned with the truth_* branches.
+    branches["truth_in_tracker"] = [
+        lbl_in_tracker[1 + ev_offsets[i] : 1 + ev_offsets[i + 1]] for i in range(n_events)
+    ]
+    branches["truth_eff_region"] = [
+        lbl_region[1 + ev_offsets[i] : 1 + ev_offsets[i + 1]] for i in range(n_events)
+    ]
+    branches["truth_survived"] = [
+        lbl_survived[1 + ev_offsets[i] : 1 + ev_offsets[i + 1]] for i in range(n_events)
+    ]
+
     return branches
+
+
+def _write_provenance(
+    output_path: Path,
+    n_events: int,
+    process: str,
+    pt_hat_min: float | None,
+    seed: int,
+    param_config: str | Path,
+) -> None:
+    """Write a ``<output>.provenance.json`` sidecar: the exact generation inputs
+    (command line, seed, process, resolved param-config path AND full text, git
+    commit) so a sample's truth card is reconstructible without the generating
+    checkout (CLAUDE.md reproducibility rule)."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parent,
+            timeout=10,
+        ).stdout.strip()
+    except Exception:
+        commit = ""
+    prov = {
+        "command": " ".join(sys.argv),
+        "generated_at": datetime.datetime.now().astimezone().isoformat(),
+        "n_events": n_events,
+        "process": process,
+        "pt_hat_min": pt_hat_min,
+        "seed": seed,
+        "git_commit": commit or None,
+        "param_config": str(param_config),
+        "param_config_text": Path(param_config).read_text(),
+    }
+    sidecar = output_path.with_name(output_path.name + ".provenance.json")
+    sidecar.write_text(json.dumps(prov, indent=2) + "\n")
 
 
 def generate(
@@ -755,6 +942,8 @@ def generate(
             f["event_tree"] = {k: ak.Array(v) for k, v in all_branches.items()}
         size_mb = output_path.stat().st_size / (1024 * 1024)
         print(f"  wrote {n_read} events ({size_mb:.2f} MB) to {output_path}")
+
+        _write_provenance(output_path, n_read, process, pt_hat_min, seed, param_config)
 
         return n_read
     finally:
