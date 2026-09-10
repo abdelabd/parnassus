@@ -290,6 +290,17 @@ merged, stages 3-4 resumed from stage-2 history after the dijet merge.
    matched labels to the true ones — confusion matrix per species/region = the
    systematic on fullsim efficiencies; quantify the double-counting residual
    (pt-migration near the reco-pt cut).
+
+   **MEASURED (2026-09-10, pseudodata rehearsal): zero label noise.** The
+   deltaR-gated (0.05) Hungarian matcher reproduced the generator labels EXACTLY
+   on all four samples — dijet: 11,674,454 labeled charged hadrons, agreement
+   1.0, fp=0, fn=0; gun samples likewise perfect. Consequence: the
+   `figure_sequential_hungarian_matched_survival` closure equals the
+   `_truth_matched_survival` one to 4 decimals on every efficiency block. Caveat
+   carried to real fullsim: this fidelity relies on delphes-mode smearing
+   preserving track direction (matches at deltaR ~ 0); real data adds angular
+   smearing, fakes and acceptance, so the confusion matrix must be re-measured
+   there — but the machinery is validated end to end.
 5. **Fullsim fit**: `--mode fullsim --eff-loss bce` on the preprocessed
    `train_1000.root` (on `diff_delphes_runze_cmssinglejet` or after merging that
    branch); compare against the count-term fullsim baseline.
