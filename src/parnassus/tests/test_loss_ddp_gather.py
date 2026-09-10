@@ -355,8 +355,108 @@ def _worker_equiv() -> int:
     return 0
 
 
+def _worker_bce() -> int:
+    """--eff-loss bce under DDP: value == single-process on the union, backward
+    completes with an empty rank, and every rank's logits gradient equals the
+    single-process gradient (the logits are replicated parameters; the labels are
+    gathered)."""
+    import torch.distributed as dist
+    from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
+    from parnassus.torch_delphes.tune_cms_fullsim.loss import (
+        BCE_TERM_KEYS,
+        per_pid_wasserstein_1d_loss,
+        per_pid_wasserstein_1d_loss_distributed,
+    )
+
+    dist.init_process_group("gloo")
+    rank, world = dist.get_rank(), dist.get_world_size()
+
+    N = 8
+    truth, pid, pt, eta, phi = _build_mixed_batch(N)
+    one = torch.tensor(1.0, dtype=torch.float64)
+    tgt_scale = torch.tensor(1.09, dtype=torch.float64)
+
+    # Labels: every one on the FIRST half of the events, so rank 1's shard has
+    # ZERO labeled particles (the empty-rank asymmetry the gathers must survive).
+    g = torch.Generator().manual_seed(11)
+    chad = CMS_EFF_REGION_SPECS["charged_hadron"]
+    n_lab = 40
+    full_region = torch.randint(
+        chad.label_offset + 1, chad.label_offset + chad.n_regions + 1, (N // 2, n_lab), generator=g
+    ).long()
+    full_x = (torch.rand((N // 2, n_lab), dtype=torch.float64, generator=g) < 0.8).double()
+    pad_r = torch.zeros((N - N // 2, n_lab), dtype=torch.long)
+    pad_x = torch.zeros((N - N // 2, n_lab), dtype=torch.float64)
+    region_all = torch.cat([full_region, pad_r])  # (N, n_lab); second half unlabeled
+    x_all = torch.cat([full_x, pad_x])
+
+    def _logits() -> dict[str, torch.Tensor]:
+        out = {}
+        for _key, spec_key, logits_key in BCE_TERM_KEYS:
+            t = torch.full(
+                (CMS_EFF_REGION_SPECS[spec_key].n_regions,), 0.3, dtype=torch.float64
+            ).requires_grad_(True)
+            out[logits_key] = t
+        return out
+
+    # Reference: plain loss on ALL events with the same replicated logits.
+    ref_logits = _logits()
+    full_pred = {**_obs_from(pid, pt, eta, phi, one), **ref_logits}
+    full_tgt = {k: v.detach() for k, v in _obs_from(pid, pt, eta, phi, tgt_scale).items()}
+    full_tgt["bce_region"] = region_all
+    full_tgt["bce_x"] = x_all
+    ref = per_pid_wasserstein_1d_loss(full_pred, full_tgt, pair_mass=False, eff_loss="bce")
+    ref.backward()
+    ref_val = float(ref)
+    ref_grad = ref_logits["bce_logits:chad"].grad.clone()
+
+    # This rank's shard through the DDP path.
+    per = N // world
+    sl = slice(rank * per, (rank + 1) * per)
+    ddp_logits = _logits()
+    s_pred = {**_obs_from(pid[sl], pt[sl], eta[sl], phi[sl], one), **ddp_logits}
+    s_tgt = {
+        k: v.detach() for k, v in _obs_from(pid[sl], pt[sl], eta[sl], phi[sl], tgt_scale).items()
+    }
+    s_tgt["bce_region"] = region_all[sl]
+    s_tgt["bce_x"] = x_all[sl]
+    loss = per_pid_wasserstein_1d_loss_distributed(
+        s_pred, s_tgt, pair_mass=False, eff_loss="bce"
+    )
+    loss.backward()  # hangs here if the label gathers are asymmetric across ranks
+
+    rel = abs(float(loss) - ref_val) / max(abs(ref_val), 1e-30)
+    assert rel < 1e-9, f"rank {rank}: DDP bce loss {float(loss)!r} != reference {ref_val!r}"
+    grad = ddp_logits["bce_logits:chad"].grad
+    assert grad is not None and torch.isfinite(grad).all()
+    grad_rel = float((grad - ref_grad).abs().max() / ref_grad.abs().max().clamp_min(1e-30))
+    assert grad_rel < 1e-9, (
+        f"rank {rank}: DDP bce logits grad differs from single-process by {grad_rel:.3e} "
+        "(replicated-parameter gradient must be the full global gradient on every rank)"
+    )
+    # Muon logits got no labels anywhere: zero but graph-connected grad.
+    mu_grad = ddp_logits["bce_logits:muon"].grad
+    assert mu_grad is not None and float(mu_grad.abs().sum()) == 0.0
+    dist.barrier()
+    if rank == 0:
+        print("BCE_DDP_OK", flush=True)
+    dist.destroy_process_group()
+    return 0
+
+
+def test_bce_loss_matches_single_process_with_empty_rank():
+    """--eff-loss bce: DDP value/gradients equal single-process, including when one
+    rank's shard carries no labeled particles at all (empty label gathers)."""
+    try:
+        proc = _run_ranks("bce")
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"DDP bce equivalence check hung for {_TIMEOUT_S}s")
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "BCE_DDP_OK" in proc.stdout, proc.stdout
+
+
 if __name__ == "__main__":
     sys.exit({
         "loss": _worker_loss, "guard": _worker_guard, "equiv": _worker_equiv,
-        "dtype": _worker_dtype_guard,
+        "dtype": _worker_dtype_guard, "bce": _worker_bce,
     }[sys.argv[1]]())
