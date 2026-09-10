@@ -59,9 +59,10 @@ truth-labeled one exactly.
   entropy floor — don't compare values across modes.
 - CLAUDE.md: added "pipeline with sbatch --dependency" doctrine (your ask) and
   the --eff-loss section.
-- HZZ4l closure plot (`compare_sample.py` on the tms fitted card) was launched
-  last: `doc/figure_sequential_truth_matched_survival/distributions_HZZ4l.pdf`
-  (check it exists; it was still rendering at write-up time).
+- HZZ4l independent-sample closure plots (`compare_sample.py`, target vs initial
+  vs tuned) exist for BOTH fitted cards:
+  `doc/figure_sequential_truth_matched_survival/distributions_HZZ4l.pdf` and
+  `doc/figure_sequential_hungarian_matched_survival/distributions_HZZ4l.pdf`.
 
 ## Hiccups (all resolved)
 
