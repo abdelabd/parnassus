@@ -248,6 +248,18 @@ smearing parameters unaffected. If not, stop and diagnose before Step 9.
 **Gate:** full-chain closure ≥ baseline on the efficiency blocks, == baseline
 elsewhere. This closes Phase 1.
 
+**RESULT (2026-09-10, full 4-stage tms closure in
+`doc/figure_sequential_truth_matched_survival/` vs the count-term baseline
+`doc/figure_sequential_dd/`): GATE PASSED.** Median |relative error| vs truth,
+BCE vs counts — chad eff 0.0034 vs 0.0108 (3x better), muon eff 0.0019 vs 0.0049
+(2.5x better), electron eff 0.0060 vs 0.0057 (equal); ECal/HCal recoverable
+parameters (scales, c_N, central/forward c_S) identical to the 3rd decimal (the
+calo loss is unchanged); all large calo residuals are the documented-unrecoverable
+set (c_E's, common_c_S, barrel_b/endcap a/b), where mode differences are
+single-seed scatter. Electron smearing identical (0.166 vs 0.164 — dominated by
+the known-partial b_raw). Ran pipelined: stages 1-2 as soon as their samples
+merged, stages 3-4 resumed from stage-2 history after the dijet merge.
+
 ### Step 10 — Flip the default, then excise (separate commits)
 
 - Commit A: default `--eff-loss bce` for `--mode delphes`; `counts` stays the fullsim
