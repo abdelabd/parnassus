@@ -50,6 +50,18 @@ the electron gun with the electron block frozen -- is not part of the chain for 
   `plot_fit_results`, both against `param_config_all.yaml`), and writes
   `<OUT_BASE>/fitted_config.yaml`.
 
+## Efficiency loss
+
+Since 2026-09 the stages fit the tracking `eff_logits` with the per-particle
+survival BCE by default (`--eff-loss bce`; run_sequential passes `--mode delphes`
+where bce is the default — see `../EFF_LOSS_PLAN.md` / `../EFF_LOSS_MOTIV.md`).
+This REQUIRES samples carrying the survival-label branches
+(`*_truth_matched_survival.root`, regenerated via
+`../slurm_scripts/submit_truth_matched_survival_samples.sh`): point `SAMPLE_PATTERN`
+at them (see `../slurm_scripts/run_sequential_survival.sbatch`). On the old
+unlabeled samples run with `EXTRA_ARGS="--eff-loss counts"` (the legacy
+expected-count terms). The calo count terms are active either way.
+
 ## Run
 
 ```bash

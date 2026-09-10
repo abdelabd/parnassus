@@ -193,8 +193,19 @@ count-term baseline; choose the default so the efficiency block moves at a compa
 rate (the shape/pair terms are untouched, so only this ratio matters). Record the
 number and the measurement in this file.
 
+**MEASURED (2026-09-09, 2048-event muon-gun batch, card at CMS defaults, login CPU):**
+muon `eff_logits` |grad| per populated region — counts: [2.6e-3, 1.7e-2, 2.3e-3,
+5.9e-3]; BCE (pooled, weight 1.0): [8.7e-3, 3.0e-1, 1.1e-2, 7.6e-2] — BCE is 3-17x
+larger. Kept `BCE_WEIGHT = 1.0`: Adam normalizes the step by the gradient RMS, so
+the magnitude difference barely changes step sizes; it raises the efficiency
+block's SNR toward a near-convex optimum, and `eff_logits` receive no other
+gradient to balance against. Loss scale is also comparable (BCE subtotal ~1.8 nats
+at the untrained card vs count subtotal ~0.5; the BCE converges to the Bernoulli
+entropy floor ~0.6-0.7, a constant offset that does not affect argmin/early
+stopping).
+
 **Gate:** default committed; smoke run shows stable early epochs (no efficiency-block
-blow-up or freeze).
+blow-up or freeze). DONE — 2-step CLI smokes in both modes ran clean.
 
 ### Step 8 — Single-stage closure validation
 

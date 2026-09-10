@@ -109,6 +109,18 @@ python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search --root-file /gl
 If you submit runs yourself, you **must** document the exact commands/configs used for
 that run — preferably as a `reproduce.sh` in that run's output directory.
 
+## Efficiency loss (BCE vs counts)
+
+- `--eff-loss {counts,bce}`: how the tracking `eff_logits` are fitted. `bce` (the
+  default in `--mode delphes`) is the per-particle survival BCE
+  (`EFF_LOSS_PLAN.md`); it needs samples with the survival-label branches — the
+  `*_truth_matched_survival.root` set (and the matcher-labeled
+  `*_hungarian_matched_survival.root` set) next to the originals. `counts` is the
+  legacy expected-count chi^2 and the fullsim-mode default. Knobs: `--bce-weight`,
+  `--bce-weighting {pooled,per_species}`.
+- Old samples without labels + `--eff-loss bce` = a hard error telling you to
+  regenerate (`slurm_scripts/submit_truth_matched_survival_samples.sh`).
+
 ## Run outputs
 
 - Outputs land wherever `--output-base` / `--history-path` / `OUT_BASE` point in the
