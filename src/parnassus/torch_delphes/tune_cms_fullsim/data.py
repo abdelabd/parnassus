@@ -490,6 +490,7 @@ def load_pflow_targets(
     reco_pt_cut: float | None = None,
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
+    truth_pt_cut: float | None = None,
 ):
     """
     This task will pick the pflow objects from the input array, then it will
@@ -498,6 +499,11 @@ def load_pflow_targets(
 
     ``reco_pt_cut`` / ``abs_eta_cut`` / ``truncate_chads``: see
     :func:`_build_pflow_event_data`.
+
+    Also carries the BCE efficiency-loss labels ``bce_region`` / ``bce_x`` padded
+    to the max labeled multiplicity (padding 0 = "no label"; empty when the sample
+    has no ``LABEL_BRANCHES``). ``truth_pt_cut`` (with the shared ``abs_eta_cut``)
+    restricts the labeled population, mirroring the ragged loader.
     """
     (
         n_events,
@@ -516,6 +522,16 @@ def load_pflow_targets(
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
     )
+
+    bce_region_list, bce_x_list = _build_bce_labels(
+        arrays, n_events, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
+    )
+    max_n_labels = max((int(r.shape[0]) for r in bce_region_list), default=0)
+    bce_region_pad = torch.zeros((n_events, max_n_labels), dtype=torch.int64)
+    bce_x_pad = torch.zeros((n_events, max_n_labels), dtype=torch.float64)
+    for i, (r, x) in enumerate(zip(bce_region_list, bce_x_list)):
+        bce_region_pad[i, : r.shape[0]] = r
+        bce_x_pad[i, : x.shape[0]] = x
 
     # shape of all_pt, all_eta, all_e is (num_events, num_particles_in_event); num_particles_in_event can vary across events
     # pad to the max num_particles across events and stack into a single tensor of shape (num_events, max_num_particles)
@@ -564,6 +580,8 @@ def load_pflow_targets(
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
         "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
+        "bce_region": bce_region_pad,
+        "bce_x": bce_x_pad,
         **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 
