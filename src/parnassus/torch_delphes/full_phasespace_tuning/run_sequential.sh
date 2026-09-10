@@ -28,6 +28,8 @@
 #   PLOT_N_EVENTS   cap on events used by plot_fit_results (default: full validation split)
 #   TRUTH_CONFIG    truth reference for the plots  (default param_configs/param_config_all.yaml)
 #   FROM_HISTORY    history.json to start the FIRST listed stage from (default: card defaults)
+#   COMET_NAME_PREFIX  prefix for the per-stage Comet experiment name (default none: each
+#                   stage's experiment is named after the stage, e.g. stage1_muons)
 #   EXTRA_ARGS      extra tuning-CLI args appended to every stage
 set -euo pipefail
 
@@ -95,6 +97,7 @@ for stage in "${STAGES[@]}"; do
         --n-events "$N_EVENTS" --n-steps "$N_STEPS" \
         --history-path "$rdir/history.json" \
         --intermediate-plot-dir "$rdir/intermediate_plots" \
+        --comet-name "${COMET_NAME_PREFIX:+${COMET_NAME_PREFIX}_}$name" \
         $extra $EXTRA_ARGS 2>&1 | tee "$outdir/train.log"
 
     [[ -f "$rdir/history.json" ]] || { echo "[seq] $name: no history.json written" >&2; exit 1; }
