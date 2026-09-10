@@ -145,9 +145,12 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
 
 ## Tests
 
-- `pytest src/parnassus/tests/test_tune_cms_fullsim.py` has a known baseline of
-  **23 failed / 24 passed** on a clean tree (stale pseudodata fixture missing the
-  `truth_pdgid` branch). Compare against that baseline; don't treat those as
-  regressions.
-- `test_torch_delphes_learnable.py` and `test_loss_ddp_gather.py` run fully green and
-  are the meaningful gates for card and DDP-gather work.
+- `pytest src/parnassus/tests/test_tune_cms_fullsim.py` is fully green (47/47)
+  since 2026-09-10: the pseudodata fixture was regenerated with `truth_pdgid` and
+  the survival-label branches. Treat any failure there as a real regression.
+- `test_torch_delphes_learnable.py`, `test_loss_ddp_gather.py`,
+  `test_survival_labels.py` and `test_bce_eff_loss.py` run fully green and are the
+  gates for card, DDP-gather, and BCE-efficiency-loss work.
+- Pre-existing failures elsewhere (verified on the unmodified tree, 2026-09-09,
+  unrelated to this work): test_nn (1), test_readers (3), test_optuna_search (5),
+  test_param_config (1), test_parnassus (2).
