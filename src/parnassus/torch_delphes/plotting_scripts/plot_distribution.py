@@ -88,7 +88,9 @@ def draw_page(pdf, title, xlabel, samples, ylabel="Objects"):
         ax.stairs(counts[name], edges, color=COLORS[name], label=name, **STYLE[name])
     ax.set_yscale("log")
     nonzero = np.concatenate([c[c > 0] for c in counts.values()])
-    ax.set_ylim(nonzero.min() / 2, nonzero.max() * 30)  # headroom for the legend
+    if nonzero.size:  # a degenerate page (every bin empty, e.g. a one-entry rare
+        # species whose quantile range collapses) keeps matplotlib's default ylim
+        ax.set_ylim(nonzero.min() / 2, nonzero.max() * 30)  # headroom for the legend
     ax.set_ylabel(ylabel)
     ax.set_title(title, loc="left", fontsize="x-large")
     ax.legend(loc="upper right")

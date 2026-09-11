@@ -14,7 +14,10 @@ m_4l (leading 4 e/mu). One PDF page per (species, observable).
         --fitted-config doc/figure_sequential/fitted_config.yaml
 
 Delphes mode only (no acceptance cuts, no photon merger -- what the sequential fit ran
-with); all events by default; CPU; the same RNG seed before both passes.
+with); all events by default; the same RNG seed before both passes. Device is
+auto-detected (``--device``): prefer CUDA when a GPU is available (CLAUDE.md: any NN
+inference belongs on a GPU when an allocation is free) -- the plotted output is
+identical, only the two card forwards speed up.
 """
 
 import argparse
@@ -26,6 +29,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from parnassus.torch_delphes import param_config as pc
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+from parnassus.torch_delphes.generate_pseudodata import resolve_device
 from parnassus.torch_delphes.plotting_scripts.plot_distribution import (
     BATCH_SIZE,
     OBSERVABLES,
@@ -157,14 +161,29 @@ def main():
     )
     ap.add_argument("--output", type=Path, default=None)
     ap.add_argument("--n-events", type=int, default=-1, help="first N events; <= 0 = all")
+    ap.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help=(
+            "Device for the two card forwards (e.g. 'cuda', 'cuda:0', 'cpu'). "
+            "Default: auto-detect — 'cuda' if a GPU is visible, else 'cpu'. The "
+            "plotting side always collects on CPU, so the output is equivalent "
+            "either way (device RNG streams differ, so reco draws are not "
+            "bit-identical). GPU pays off on DENSE samples (dijet, HZZ4l) on a "
+            "dedicated allocation; sparse gun samples on the SHARED login A100 "
+            "can be slower than CPU (per-batch overhead + contention)."
+        ),
+    )
     args = ap.parse_args()
+    device = resolve_device(args.device)
 
     with uproot.open(str(args.sample)) as f:
         n_total = int(f["event_tree"].num_entries)
     n_events = n_total if args.n_events <= 0 else min(args.n_events, n_total)
     arrays = load_cms_flow_root(args.sample, n_events=n_events)
-    loader = _build_val_dataloader(arrays, BATCH_SIZE, torch.device("cpu"))  # delphes: no cuts
-    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    loader = _build_val_dataloader(arrays, BATCH_SIZE, device)  # delphes: no cuts
+    card = CMSEnergyFlowDefault(debug=False, learnable=True).to(device)
 
     def physical(path):  # {scalar key: physical value} of a (partial) config over the defaults
         flat = (
@@ -173,7 +192,8 @@ def main():
         return {k: s["value"] for k, s in flat.items()}
 
     print(
-        f"{n_events} events of {args.sample}; initial = {args.init_config or 'CMS card defaults'}"
+        f"{n_events} events of {args.sample} on {device}; "
+        f"initial = {args.init_config or 'CMS card defaults'}"
     )
     initial, target, m_initial, m_target = run_card(card, physical(args.init_config), loader)
     tuned, _, m_tuned, _ = run_card(card, physical(args.fitted_config), loader)
@@ -190,7 +210,10 @@ def main():
                 draw_page(pdf, title, xlabel, arrays)
         for title, pid in PAIR_SPECIES.items():
             key = f"pair_r:{pid}"
-            if not all(key in o for o in samples.values()):
+            # Present-but-EMPTY also skips: a rare class (stray chads in a lepton
+            # gun) can have pairs on one side/run and none on another, and
+            # draw_page's range reduction crashes on a zero-size array.
+            if not all(key in o and len(o[key]) for o in samples.values()):
                 continue  # class has no pairs in this sample
             draw_page(
                 pdf,

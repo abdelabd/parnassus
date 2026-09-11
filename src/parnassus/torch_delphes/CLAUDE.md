@@ -30,6 +30,13 @@ More GPUs is typically better. **But** changes to the loss function sometimes br
 multi-GPU or multi-node training (or both) — when debugging a loss change, verify at
 1x1 first, then 1x4.
 
+**NN inference belongs on a GPU**: if salloc resources are available (i.e. the
+user's 2 interactive GPU allocations aren't already in use), run the HZZ4l eval
+(`compare_sample.py --device cuda`, or its auto-detect) — and in general ANY
+neural-network inference — on CUDA/GPU rather than CPU. A 100k-event HZZ4l
+`compare_sample` pass is ~40 min on login CPUs vs ~a minute on an A100; tack such
+evals onto the tail of an existing allocation when one is open.
+
 **Pipeline whenever possible**: when a run depends on another job's output
 (generation -> merge -> preprocessing -> training), submit the whole chain up front
 with `sbatch --dependency=afterok:<jid>[:<jid>...]` instead of waiting and

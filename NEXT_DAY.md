@@ -83,3 +83,13 @@ truth-labeled one exactly.
    `$(cat ~/.comet_api_key)` before this branch is ever pushed.
 
 12 commits on `BCE_eff` (f07929d..), nothing pushed, `diff_delphes` untouched.
+
+## Post-run note (2026-09-10 afternoon)
+
+- You renamed the closure output dirs on disk to
+  `doc/figure_sequential_{truth,hungarian}_matched_survival_w_neutral_counts/` —
+  path references above map accordingly. The counts-baseline HZZ4l comparison
+  also exists now: `doc/figure_sequential_dd/distributions_HZZ4l.pdf`.
+- `compare_sample.py` is now CUDA-capable (`--device`, auto-detect). Empirical
+  note: dense samples on a dedicated GPU benefit; the sparse muon gun on the
+  SHARED login A100 was slower than CPU (260s vs 49s for 5k events).

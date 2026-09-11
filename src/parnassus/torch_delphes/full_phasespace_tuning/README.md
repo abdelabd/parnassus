@@ -39,7 +39,9 @@ the electron gun with the electron block frozen -- is not part of the chain for 
   (species, log pT / log E / eta) for target vs trainee at the CMS card defaults ("initial") vs
   trainee at `fitted_config.yaml` ("tuned"), the leading-2 pair-mass response pages, plus
   m_ee / m_mumu (leading 2 same-flavour leptons) and m_4l (leading 4 e/mu). Delphes mode, all
-  events by default (`--n-events`), CPU (~20 s per 5k gun events).
+  events by default (`--n-events`); `--device` auto-detects (CUDA when a GPU is visible).
+  Use a GPU for dense samples (100k HZZ4l ~ 40 min on login CPUs); sparse gun samples on the
+  shared login A100 can be slower than CPU (~20 s per 5k gun events there).
 - `run_sequential.sh` -- runs the stages in order (`python -m
   parnassus.torch_delphes.tune_cms_fullsim`, `--loss wasserstein_1d --mode delphes
   --pid-weighting sqrt_fraction` (`PID_WEIGHTING`; the fitted species is the abundant one in
