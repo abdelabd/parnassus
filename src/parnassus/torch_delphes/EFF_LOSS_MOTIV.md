@@ -175,8 +175,9 @@ particles per event and defines x = "this truth particle has a reco match":
   still gets `truth_survived` from the matcher. The fit-side BCE term is then
   byte-identical in both modes.
 
-  **UNRESOLVED — expectation over ALL input particles in fullsim (proposed
-  2026-09-09) has a q-support problem.** The trainee's propagator hard-drops charged
+  **RESOLVED 2026-09-10: fullsim uses the `truth_in_tracker` support, uniform with
+  closure (user decision; see EFF_LOSS_PLAN.md Phase 2).** The all-input-particles
+  proposal was dropped for the q-support problem below, kept for the record: The trainee's propagator hard-drops charged
   particles whose helix never reaches the tracker radius
   (`ParticlePropagator.py:143-146,178`) — a deterministic pt threshold well above
   the fullsim `truth_pt_cut=0.25`. For such a particle the model's survival
@@ -343,9 +344,8 @@ Decided (2026-09-09):
 
 Still open:
 
-- **Fullsim BCE support**: proposal was "all input particles"; Section 3b flags the
-  q-support / double-counting problem with that and recommends the
-  `truth_in_tracker` support in both modes. Needs a decision.
+- ~~**Fullsim BCE support**~~ DECIDED 2026-09-10: `truth_in_tracker` in both modes
+  (see Section 3b and EFF_LOSS_PLAN.md Phase 2).
 - **Matcher choice for Phase 2**: survey the state of the art before committing;
   baseline is deltaR-gated Hungarian assignment (Section 3b). Quantify its label
   noise on pseudodata, where true labels exist.

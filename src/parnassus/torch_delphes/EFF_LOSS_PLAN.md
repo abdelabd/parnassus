@@ -47,7 +47,9 @@ Standing decisions (from EFF_LOSS_MOTIV.md): calo count terms stay; two-phase ro
 `truth_survived` / `truth_in_tracker` / `truth_eff_region` on every input particle;
 closure BCE support = `truth_in_tracker`; neutrals never consumed by BCE;
 `rate_raw` / muon `eff_logits[2,5]` stay frozen.
-Open: the fullsim support question (EFF_LOSS_MOTIV.md §3b) — Phase 2 blocks on it.
+Decided 2026-09-10: the fullsim BCE support is ALSO `truth_in_tracker` (uniform
+with closure), and the chad binning + event weight become mode-dependent in the
+`cmssinglejet` merge — see Phase 2 below.
 
 ---
 
@@ -273,35 +275,81 @@ merged, stages 3-4 resumed from stage-2 history after the dijet merge.
 
 ---
 
-## Phase 2 — fullsim (outline; blocks on the support decision, EFF_LOSS_MOTIV.md §3b)
+## Phase 2 — fullsim (plan agreed 2026-09-10)
 
-1. **Decide the fullsim BCE support** (recommended: `truth_in_tracker`, uniform with
-   closure — see the q-support/double-counting argument).
-2. **Matcher survey** (short): confirm deltaR-gated Hungarian
-   (`scipy.optimize.linear_sum_assignment`, class/charge-compatible pairs, cost
-   deltaR^2 + optional relative-pt penalty, max-cost gate) is adequate vs current
-   practice.
-3. **Preprocessing script** (standalone, like `mix_gun_samples.py`): read a fullsim
-   file → run OUR `ParticlePropagator` on gen particles (fills `truth_in_tracker`,
-   `truth_eff_region`) → Hungarian-match survivors to pflow (fills `truth_survived`,
-   + match index/cost branches) → write back. Output schema identical to Step 2's, so
-   Steps 4-6 code runs unchanged.
-4. **Label-noise measurement**: run the matcher on `_v2` pseudodata and compare
-   matched labels to the true ones — confusion matrix per species/region = the
-   systematic on fullsim efficiencies; quantify the double-counting residual
-   (pt-migration near the reco-pt cut).
+**Decisions (user-confirmed):** the fullsim BCE support is **`truth_in_tracker`**
+(uniform with closure; resolves the open question in EFF_LOSS_MOTIV.md §3b — the
+all-input-particles alternative has the q=0 / double-counting problem). The chad
+region binning AND the event weight become **mode-dependent** so none of the
+Phase-1 pseudodata artifacts or results need regenerating.
 
-   **MEASURED (2026-09-10, pseudodata rehearsal): zero label noise.** The
-   deltaR-gated (0.05) Hungarian matcher reproduced the generator labels EXACTLY
-   on all four samples — dijet: 11,674,454 labeled charged hadrons, agreement
-   1.0, fp=0, fn=0; gun samples likewise perfect. Consequence: the
-   `figure_sequential_hungarian_matched_survival` closure equals the
-   `_truth_matched_survival` one to 4 decimals on every efficiency block. Caveat
-   carried to real fullsim: this fidelity relies on delphes-mode smearing
-   preserving track direction (matches at deltaR ~ 0); real data adds angular
-   smearing, fakes and acceptance, so the confusion matrix must be re-measured
-   there — but the machinery is validated end to end.
-5. **Fullsim fit**: `--mode fullsim --eff-loss bce` on the preprocessed
-   `train_1000.root` (on `diff_delphes_runze_cmssinglejet` or after merging that
-   branch); compare against the count-term fullsim baseline.
-6. Then Step-10 Commit B (excision) becomes decidable.
+### Step F1 — Merge `origin/diff_delphes_runze_cmssinglejet`, on a new branch
+
+`git merge-tree` (2026-09-10) shows the merge into `BCE_eff` is textually CLEAN —
+14 incoming commits (incl. `0dbccc1`/`4650b39`, deliberately excluded from
+`diff_delphes` earlier but wanted here: the 12-bin chad structure is the point of
+the fullsim fits), 19 files, zero conflicts; only `loss.py`,
+`plot_distribution.py`, `test_torch_delphes_learnable.py` are touched by both
+sides, in disjoint hunks. Do it on **`BCE_eff_fullsim`** so the validated closure
+state on `BCE_eff` stays frozen.
+
+### Step F2 — Mode-dependent chad binning (the semantic-conflict fix)
+
+The incoming `4650b39` replaces `CMS_EFF_REGION_SPECS["charged_hadron"]` globally
+(4 -> 12 regions, pt edges 0.1/1/10/25/50/100 x 2 |eta| bins), which changes the
+card's eff_logits SHAPE (68 -> 76 scalars) and shifts the electron/muon label
+offsets (4 -> 12, 10 -> 18) — silently invalidating every stored
+`truth_eff_region`. Instead of regenerating, make the spec a toggle:
+
+- Two chad variants, `cms4` (delphes/pseudodata: the Phase-1 binning, unchanged)
+  and `ptbins12` (fullsim: Runze's binning). Everything downstream — e/mu label
+  offsets, `_BCE_EXCLUDED_LABELS`, loader count targets, BCE species ranges,
+  region tagging — already derives from the spec, so it adapts per variant.
+- Card constructor knob (e.g. `chad_binning=`) wired from `--mode` in `cli.py`,
+  `optuna_search.py` and `generate_pseudodata` (delphes -> cms4,
+  fullsim -> ptbins12; overridable).
+- **Provenance guard**: labeled files record which spec wrote their
+  `truth_eff_region` (in the `.provenance.json` AND checked at load), so a file
+  can never be read under the wrong offsets.
+- Variant-aware odds and ends: the "exactly 68 parameters" test becomes 68/76 by
+  variant; `param_configs/` (4-bin indices) pairs with delphes,
+  `param_configs_fullsim/` (12-bin) with fullsim, as they already do in spirit.
+- Consequence: NO regeneration of Phase-1 samples, fixture, or closures.
+
+### Step F3 — Mode-dependent event weight
+
+The incoming branch flips the default `EVENT_WEIGHT` 0.1 -> 1.0 ("increase the
+event weight to 1" for cms fullsim). Keep BOTH: default 0.1 in `--mode delphes`
+(preserves Phase-1 comparability), 1.0 in `--mode fullsim` (Runze's calibration),
+resolved next to `--eff-loss` and overridable by the explicit `--event-weight`.
+
+### Step F4 — Fullsim preprocessing (labels for train_1000.root)
+
+Extend/run the matcher preprocessing on the CMS opendata file: run OUR
+`ParticlePropagator` on the gen particles to fill `truth_in_tracker` and
+`truth_eff_region` (eta at the outer tracker radius; the ptbins12 spec — this is
+§5.3 option (a), unused in Phase 1 where generation stored regions for free),
+then deltaR-gated Hungarian matching to pflow fills `truth_survived`; write the
+branches back in the same schema so the training code runs unchanged. Support =
+`truth_in_tracker` (decided): sub-threshold gen particles our propagator drops
+get no label — they are unfixable by any efficiency value.
+
+### Step F5 — Validation before any real-data fit
+
+- One-off 12-bin closure smoke: generate a small labeled pseudodata sample under
+  the ptbins12 spec, fit, check the closed-form survival fractions — validates
+  the 12-bin code path that Phase-1 closure never exercised.
+- Fullsim-mode pseudodata dry-run (cuts ON, matcher labels, `truth_in_tracker`
+  support) against known truth: measures the REAL label noise (Phase-1's zero
+  relied on delphes smearing preserving track direction; real data adds angular
+  smearing/fakes) and the double-counting residual (pt-migration across the
+  harmonized reco-pt cut).
+
+### Step F6 — Fullsim fit and beyond
+
+`--mode fullsim --eff-loss bce` on the preprocessed `train_1000.root`; compare
+against the count-term fullsim baseline (`--eff-loss counts`, the fullsim
+default until this validates). Interpretation caveat stands: the fitted
+efficiency is the effective P(matched reco | model-propagated gen particle) —
+real losses our propagator doesn't model land in it by construction. Then the
+Step-10 Commit B excision of the tracking-count machinery becomes decidable.
