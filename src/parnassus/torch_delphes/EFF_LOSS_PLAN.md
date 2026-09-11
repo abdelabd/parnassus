@@ -283,6 +283,27 @@ all-input-particles alternative has the q=0 / double-counting problem). The chad
 region binning AND the event weight become **mode-dependent** so none of the
 Phase-1 pseudodata artifacts or results need regenerating.
 
+### Interlude — the count-free variant (user-requested, 2026-09-10)
+
+`doc/figure_sequential_hungarian_matched_survival_wo_neutral_counts/`: the hms
+closure rerun with `--calo-count-weight 0`, i.e. ZERO count terms of any kind
+(bce mode already drops the tracking ones structurally). Verdict:
+
+- **Efficiency blocks: unaffected or better** — median |rel err| chad 0.0011
+  (vs 0.0034 with calo counts), muon 0.0017 (vs 0.0019), electron 0.0066
+  (vs 0.0060). The BCE terms alone fully determine the efficiencies.
+- **Calo block: badly degraded — the calo count terms are load-bearing well
+  beyond the wrong-signed-c_E story.** The RECOVERABLE calo parameters
+  collapse: ECal/HCal energy scales stall near their init (~1.02) instead of
+  fitting the perturbed truth (0.80-1.19), going from ~1-2% error to 14-27%;
+  common_c_N 0.13 vs 0.01; central/forward c_S 0.25-0.32 vs ~0.01. Without the
+  membership gradient, the calo stage effectively fails to fit.
+- HZZ4l closure PDF rendered on-GPU on the same allocation
+  (`distributions_HZZ4l.pdf` in the dir).
+
+Conclusion: the "calo count terms stay" decision is now empirically forced, not
+just argued. A count-free loss is viable for the tracking-efficiency block only.
+
 ### Step F1 — Merge `origin/diff_delphes_runze_cmssinglejet`, on a new branch
 
 `git merge-tree` (2026-09-10) shows the merge into `BCE_eff` is textually CLEAN —
