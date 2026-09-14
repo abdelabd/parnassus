@@ -353,6 +353,10 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
         # Differentiable per-|eta|-region calo object counts (resolution-param count term).
         "EcalPhotonExpectedCounts",
         "HcalNeutralHadronExpectedCounts",
+        # Per-tower exports: soft-count cluster composition + the tower-BCE
+        # survival log-probs (--calo-bce; EFF_LOSS_PLAN.md Phase 2).
+        "EcalCountExport",
+        "HcalCountExport",
     }
     assert set(out.keys()) == expected_keys
     # Per-(pt,eta) region differentiable expected counts (one tensor per track
@@ -368,6 +372,18 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
     for k, v in out.items():
         if k in expected_count_shapes:
             assert v.ndim == 1 and v.shape[0] == expected_count_shapes[k]
+            continue
+        if k in ("EcalCountExport", "HcalCountExport"):
+            # Per-tower export dict; the tower-BCE tensors must be present,
+            # aligned, and the log-probability differentiable and finite.
+            assert isinstance(v, dict) and "bce_logq" in v
+            n = v["bce_logq"].shape[0]
+            for bk in ("bce_region", "bce_event", "bce_eta_lo", "bce_eta_hi",
+                       "bce_phi_lo", "bce_phi_hi"):
+                assert v[bk].shape[0] == n, f"{k}.{bk} misaligned"
+            assert v["bce_logq"].requires_grad or n == 0
+            assert torch.isfinite(v["bce_logq"]).all()
+            assert (v["bce_logq"] <= 0).all(), "log q must be a log-probability"
             continue
         assert v.ndim == 2
         assert v.shape[1] == N_FEATURES, f"{k} has wrong feature count"
