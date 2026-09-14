@@ -303,6 +303,28 @@ merged, stages 3-4 resumed from stage-2 history after the dijet merge.
 (scales stuck at init, 14-27% off) and match the with-counts baseline (scales to
 ~1-2%, c_N / central and forward c_S at baseline level).
 
+**RESULT (2026-09-14, `doc/figure_seq_hung_neutral_BCE/`): GATE FAILED.** The
+efficiency blocks stayed clean (chad 0.0028 / muon 0.0025 / electron 0.011
+median rel err — the charged/neutral separation held), but the calo block came
+out WORSE than the count-free floor on most recoverable parameters: ECal scales
+0.07-0.54 rel err (floor 0.14-0.27, with-counts 0.001-0.011), HCal scales
+0.35-0.45 (floor 0.14-0.20), common_c_N 0.51 (floor 0.13). A few c_S improved
+vs the floor (forward_c_S 0.05, central_c_S 0.14) — the term is not
+information-free, but its VALUE model is wrong enough that the fit actively
+drives the scales away from truth rather than merely failing to move them.
+
+Diagnosis: the decreed per-stage product is the prime suspect — for a tower with
+no track energy, stages 1/3 and 2/4 are duplicate thresholds, so
+q_factorized ~ q_true^2 (systematically low), and the fit compensates by
+mis-moving the scale that controls the Phi arguments; the single-draw track
+conditioning adds Jensen noise on top (BCE_eff_neutral_question.md sections 3-4:
+a mis-specified likelihood buys a pseudo-truth, which is exactly the observed
+signature). Escalation options, in increasing cost: (a) dedupe the correlated
+stages — one Phi at the max effective threshold per tower, exact given the
+conditioning, still loss-only; (b) option (ii)/(iii) track conditioning; (c) the
+per-tower MC calibration of q from BCE_eff_neutral_question.md section 5 to
+attribute the bias before more design. Decision pending.
+
 **Implementation decisions (all blockers resolved, 2026-09-14):**
 
 1. **Calo count terms OFF** in the Phase-2 run (`--calo-count-weight 0`): the
