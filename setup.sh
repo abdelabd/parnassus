@@ -5,36 +5,36 @@
 # The env name is derived from the repo folder, so this script can be copy-pasted
 # into any repo and each repo gets its own isolated env.
 #
-# Where things go is read from <repo>/.config (git-ignored, one per clone):
+# All user-specific paths live in <repo>/.config (git-ignored, one per clone):
 #   ENV_PREFIX="..."     this clone's virtualenv (unique per clone; several GB —
 #                        on NERSC use $SCRATCH or CFS, not $HOME)
 #   UV_CACHE="..."       uv download cache (can be shared by all your clones)
 #   UV_PYTHON_DIR="..."  where uv puts the Python it downloads if none matches on PATH
-# On first use you are prompted for the three paths and the answers are saved.
-# To change them, edit .config, or delete it to be prompted again.
+#   SAMPLE_DIR="..."     where prepare_zenodo_samples.sh puts the paper's samples (4.2 GB)
+# Any key that .config does not define yet is asked for once (Enter = default) and
+# appended. To change a value, edit .config, or delete its line to be asked again.
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="$(basename "$REPO_DIR")"
 CONFIG="$REPO_DIR/.config"
 
-if [ ! -f "$CONFIG" ]; then
-    BASE="${SCRATCH:-$HOME/.local/share}"
-    echo "[setup] No $CONFIG yet — where should uv put things? (Enter = default)"
-    read -r -p "  ENV_PREFIX    (this clone's env)      [$BASE/envs/$ENV_NAME]: " ENV_PREFIX
-    read -r -p "  UV_CACHE      (uv cache, shareable)   [$BASE/uv-cache]: " UV_CACHE
-    read -r -p "  UV_PYTHON_DIR (uv Pythons, shareable) [$BASE/uv-python]: " UV_PYTHON_DIR
-    ENV_PREFIX="${ENV_PREFIX:-$BASE/envs/$ENV_NAME}"
-    UV_CACHE="${UV_CACHE:-$BASE/uv-cache}"
-    UV_PYTHON_DIR="${UV_PYTHON_DIR:-$BASE/uv-python}"
-    # A leading ~ would not expand inside the quotes written below, so spell it out.
-    {
-        echo "# Written by setup.sh. Edit, or delete to be prompted again."
-        printf '%s="%s"\n' ENV_PREFIX "${ENV_PREFIX/#\~/$HOME}" \
-                           UV_CACHE "${UV_CACHE/#\~/$HOME}" \
-                           UV_PYTHON_DIR "${UV_PYTHON_DIR/#\~/$HOME}"
-    } > "$CONFIG"
-    echo "[setup] wrote $CONFIG"
-fi
+# ask KEY DEFAULT DESCRIPTION — prompt for KEY unless .config already defines it.
+ask() {
+    local reply
+    [ -n "${!1:-}" ] && return 0
+    read -r -p "  $1 ($3) [$2]: " reply || true
+    reply="${reply:-$2}"
+    [ -f "$CONFIG" ] || echo "# Paths for this clone (git-ignored), written by setup.sh. Edit, or delete a line to be asked again." > "$CONFIG"
+    printf '%s="%s"\n' "$1" "${reply/#\~/$HOME}" >> "$CONFIG"   # spell out ~: it does not expand inside the quotes
+}
+# shellcheck disable=SC1090
+if [ -f "$CONFIG" ]; then source "$CONFIG"; fi
+BASE="${SCRATCH:-$HOME/.local/share}"
+ask ENV_PREFIX    "$BASE/envs/$ENV_NAME"               "this clone's uv env, several GB"
+ask UV_CACHE      "$BASE/uv-cache"                     "uv cache, shareable"
+ask UV_PYTHON_DIR "$BASE/uv-python"                    "uv Pythons, shareable"
+ask SAMPLE_DIR    "${SCRATCH:-$HOME}/parnassus_samples" "Zenodo samples, 4.2 GB"
+unset -f ask
 # shellcheck disable=SC1090
 source "$CONFIG"
 
