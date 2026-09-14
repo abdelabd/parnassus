@@ -303,6 +303,41 @@ merged, stages 3-4 resumed from stage-2 history after the dijet merge.
 (scales stuck at init, 14-27% off) and match the with-counts baseline (scales to
 ~1-2%, c_N / central and forward c_S at baseline level).
 
+**Implementation decisions (all blockers resolved, 2026-09-14):**
+
+1. **Calo count terms OFF** in the Phase-2 run (`--calo-count-weight 0`): the
+   tower BCE is tested as a REPLACEMENT, against the existing with-counts gate
+   and count-free floor.
+2. **Per-region-fair weighting**, the same schema as the calo count terms it
+   replaces: the per-|eta|-region tower-BCE means combine with EQUAL region
+   weight (not tower-population weight), protecting the forward-region
+   c_E / c_S leverage exactly as CALO_COUNT_WEIGHT's per-region-fair chi^2 did.
+3. **q(theta) conditions on the forward pass's own sampled quantities**
+   (option (i)): the track energy/sigma under the subtraction are the tensors
+   the calo already computed this draw (detached — no gradient into track
+   params, matching the soft-count convention); only the tower's own Gaussian
+   smear is marginalized analytically per stage. NOTHING about the TorchDelphes
+   forward changes — outputs are byte-identical; the loss only reads new
+   exports. Circle-back options, deliberately not chosen now:
+   (ii) plug in the EXPECTED track energy instead of the sampled one;
+   (iii) marginalize the track smears/efficiency coins (1-D numerical integral
+   per tower). Revisit if the closure gate fails or the per-draw q proves too
+   noisy.
+4. **Log-space evaluation everywhere, NO probability floor**: the tracking BCE
+   already evaluates in logit space (binary_cross_entropy_with_logits); the
+   tower BCE uses log Phi (log_ndtr) — same loss values, underflow-proof, tail
+   towers give large-but-finite exact terms. The floor idea (a spurious-object
+   rate epsilon) is shelved unless tail towers destabilize training. Balance
+   between the charged and tower BCE terms: separate weight knobs (existing
+   --bce-weight; new calo analog), disjoint parameter ownership (eff_logits vs
+   calo scales/resolutions, track inputs detached) — calibrated like step 7.
+5. **Support = towers the forward materializes** (i.e. cells with a truth
+   deposit): a never-deposited cell has q identically 0 with no
+   theta-dependence and x = 0 in closure, so its BCE term is exactly zero —
+   skipping it changes no value and no gradient. (The HadronFractions corner
+   case — model-empty-but-data-occupied cell in one calorimeter's grid — is
+   handled gracefully by the log-space evaluation.)
+
 ### The tower-existence BCE (hashed out 2026-09-14; promoted to Phase 2 — see the
 decisions above)
 
