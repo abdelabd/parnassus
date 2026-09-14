@@ -86,6 +86,7 @@ from .runner import load_split_datasets, resolve_acceptance_cuts, write_history_
 from .loss import (
     BCE_WEIGHT,
     BCE_WEIGHTING_CHOICES,
+    CALO_BCE_WEIGHT,
     CALO_COUNT_WEIGHT,
     COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
@@ -256,6 +257,29 @@ def main() -> None:
             "species counts the same regardless of abundance, boosting rare species' "
             "per-particle gradient). Same minimizer either way (the BCE is separable); "
             "only the relative gradient scale differs."
+        ),
+    )
+    parser.add_argument(
+        "--calo-bce",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Add the tower-existence BCE (EFF_LOSS_PLAN.md Phase 2): per materialized "
+            "calo tower, the Bernoulli cross-entropy between the card's analytic "
+            "per-stage survival log-probability and the data's tower-occupancy label, "
+            "replacing the calo count terms as the calo membership gradient (run with "
+            "--calo-count-weight 0). Per-region-fair combination, log-space "
+            "evaluation, no probability floor. Requires a learnable card (always true "
+            "here) and delphes mode (no photon merger). Default off."
+        ),
+    )
+    parser.add_argument(
+        "--calo-bce-weight",
+        type=float,
+        default=CALO_BCE_WEIGHT,
+        help=(
+            "Weight on the tower-existence BCE terms (--calo-bce), kept separate from "
+            f"--bce-weight like --calo-count-weight is. Default {CALO_BCE_WEIGHT}."
         ),
     )
     parser.add_argument(
@@ -529,7 +553,14 @@ def main() -> None:
             if eff_loss == "bce"
             else ""
         )
+        + (f" | tower-bce ON (weight={args.calo_bce_weight})" if args.calo_bce else "")
     )
+    if args.calo_bce and args.mode != "delphes":
+        raise SystemExit(
+            "--calo-bce currently requires --mode delphes: the tower-occupancy "
+            "labels assume cell-exact reco positions and no photon merger "
+            "(fullsim support is EFF_LOSS_PLAN.md Phase 3)."
+        )
     # Delphes has no supercluster-scale photon merging -> merger OFF regardless of
     # the flag in delphes mode.
     photon_merge_radius = (
@@ -710,6 +741,8 @@ def main() -> None:
         eff_loss=eff_loss,
         bce_weight=args.bce_weight,
         bce_weighting=args.bce_weighting,
+        calo_bce=args.calo_bce,
+        calo_bce_weight=args.calo_bce_weight,
         event_weight=args.event_weight,
         loss_name=args.loss,
         pid_weighting=args.pid_weighting,

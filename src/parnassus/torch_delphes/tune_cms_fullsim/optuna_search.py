@@ -145,6 +145,7 @@ from .distributed import _cleanup_distributed, _init_distributed
 from .loss import (
     BCE_WEIGHT,
     BCE_WEIGHTING_CHOICES,
+    CALO_BCE_WEIGHT,
     CALO_COUNT_WEIGHT,
     COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
@@ -749,6 +750,9 @@ def main() -> None:
     parser.add_argument(
         "--bce-weighting", type=str, default="pooled", choices=list(BCE_WEIGHTING_CHOICES)
     )
+    # Tower-existence BCE (delphes mode only; see the tune_cms_fullsim CLI help).
+    parser.add_argument("--calo-bce", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--calo-bce-weight", type=float, default=CALO_BCE_WEIGHT)
     parser.add_argument("--event-weight", type=float, default=EVENT_WEIGHT)
     # Loss-definition switches of the per-pid losses (see tune_cms_fullsim.cli): one
     # study == one setting (guarded via study user_attrs below).
@@ -891,6 +895,11 @@ def main() -> None:
     # Resolve --eff-loss like the tuning CLI: bce on labeled delphes-mode pseudodata,
     # counts in fullsim mode (no survival labels until the Phase-2 matcher).
     eff_loss = args.eff_loss or ("bce" if args.mode == "delphes" else "counts")
+    if args.calo_bce and args.mode != "delphes":
+        raise SystemExit(
+            "--calo-bce currently requires --mode delphes (see the tune_cms_fullsim "
+            "CLI help; fullsim support is EFF_LOSS_PLAN.md Phase 3)."
+        )
     # delphes: Delphes has no supercluster-scale photon merging -> merger OFF and
     # the radius is NOT searched (search.photon_merge_radius stays validated by
     # load_search_config but is ignored).
@@ -1077,6 +1086,8 @@ def main() -> None:
             eff_loss=eff_loss,
             bce_weight=args.bce_weight,
             bce_weighting=args.bce_weighting,
+            calo_bce=args.calo_bce,
+            calo_bce_weight=args.calo_bce_weight,
             event_weight=args.event_weight,
             loss_name=args.loss,
             pid_weighting=args.pid_weighting,

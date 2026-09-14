@@ -121,6 +121,19 @@ _BCE_LABELS: dict[str, str] = {
     "muon": "BceMuon",
 }
 
+# Weight of the tower-existence BCE (--calo-bce; EFF_LOSS_PLAN.md Phase 2): the
+# per-tower analytic survival log-probabilities exported by SimpleCalorimeter
+# against tower-occupancy labels, replacing the calo count terms as the calo
+# membership gradient. Kept separate from BCE_WEIGHT for the same reason
+# CALO_COUNT_WEIGHT is separate from COUNT_WEIGHT.
+CALO_BCE_WEIGHT = 1.0
+
+# (pred/target key suffix, breakdown label) per tower-BCE term.
+TOWER_BCE_KEYS: tuple[tuple[str, str], ...] = (
+    ("ecal", "TowerBceEcal"),
+    ("hcal", "TowerBceHcal"),
+)
+
 # --bce-weighting: how the three per-species BCE means combine into the loss.
 # "pooled" = population-fraction weights, so the sum is EXACTLY the pooled
 # per-particle mean over all labeled particles — the joint Bernoulli likelihood
@@ -855,6 +868,75 @@ def _bce_eff_terms(
     return terms
 
 
+def _log1mexp(log_q: torch.Tensor) -> torch.Tensor:
+    """Numerically stable ``log(1 - exp(log_q))`` for ``log_q < 0`` (the standard
+    two-branch log1mexp): ``log(-expm1(log_q))`` near 0, ``log1p(-exp(log_q))``
+    in the tail. Both branches are computed on safe inputs so neither poisons
+    the other's gradient through torch.where."""
+    # BOTH branches are clamped away from 0: torch.where masks the forward value
+    # but still backprops through the unselected branch, and log1p(-exp(0)) is
+    # -inf there — 0 * inf-grad = NaN (the where-NaN trap documented at the
+    # _count_terms rescale_factor). log_ndtr saturates to exactly -0.0 for
+    # z >~ 38, so log_q == 0 genuinely occurs on fat towers.
+    near_zero = log_q > -0.6931471805599453  # log(2)
+    safe_hi = log_q.clamp(min=-745.0, max=-1e-12)
+    safe_lo = log_q.clamp(min=-745.0, max=-1e-12)  # exp underflow floor in float64
+    return torch.where(
+        near_zero,
+        torch.log(-torch.expm1(safe_hi)),
+        torch.log1p(-torch.exp(safe_lo)),
+    )
+
+
+def _tower_bce_terms(
+    pred: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+    *,
+    calo_bce_weight: float,
+    out_components: list | None = None,
+) -> list[torch.Tensor]:
+    """The tower-existence BCE (``--calo-bce``; EFF_LOSS_PLAN.md Phase 2): per
+    materialized tower, the Bernoulli cross-entropy between the model's analytic
+    survival log-probability ``log q_t(theta)`` (SimpleCalorimeter's ``bce_logq``
+    export — the per-stage factorized cascade marginal, plan decision (2)/(3))
+    and the label ``x_t`` = "the data has a neutral object in this tower cell"
+    (built by training._inject_tower_bce from the batch's pflow objects).
+
+    Pred side: ``tower_logq:{ecal,hcal}`` (flat, differentiable through the calo
+    scale + resolution coefficients) and ``tower_region:{...}`` (int |eta|-region
+    index in the calo count-region layout). Target side: ``tower_x:{...}``.
+
+    Combination (plan decision (2)): PER-REGION-FAIR — the per-region mean tower
+    BCEs average with equal region weight, exactly like the calo count chi^2 it
+    replaces, protecting the sparse forward-region leverage. Everything is
+    evaluated in log space (log_ndtr upstream, _log1mexp here) — no probability
+    floor (plan decision (4)).
+
+    A calo with no towers in the batch contributes a graph-connected zero.
+    """
+    terms: list[torch.Tensor] = []
+    for key, label in TOWER_BCE_KEYS:
+        log_q = pred.get(f"tower_logq:{key}")
+        if log_q is None:
+            continue
+        log_q = log_q.reshape(-1)
+        x = target[f"tower_x:{key}"].detach().reshape(-1).to(log_q.dtype)
+        region = pred[f"tower_region:{key}"].detach().reshape(-1).long()
+        if log_q.numel() == 0:
+            raw = log_q.sum() * 0.0  # graph-connected zero (DDP hook parity)
+        else:
+            per_tower = -(x * log_q + (1.0 - x) * _log1mexp(log_q))
+            region_means = [
+                per_tower[region == r].mean()
+                for r in torch.unique(region).tolist()
+            ]
+            raw = torch.stack(region_means).mean()
+        terms.append(calo_bce_weight * raw)
+        if out_components is not None:
+            out_components.append((label, raw, calo_bce_weight))
+    return terms
+
+
 def _count_terms(
     pred: dict[str, torch.Tensor],
     target: dict[str, torch.Tensor],
@@ -1098,6 +1180,8 @@ def per_event_wasserstein_loss(
     eff_loss: str = "counts",
     bce_weight: float = BCE_WEIGHT,
     bce_weighting: str = "pooled",
+    calo_bce: bool = False,
+    calo_bce_weight: float = CALO_BCE_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
@@ -1259,6 +1343,16 @@ def per_event_wasserstein_loss(
         if eff_loss == "bce"
         else []
     )
+    # --calo-bce: the tower-existence BCE replaces the calo count terms as the
+    # calo membership gradient (run with --calo-count-weight 0; Phase 2).
+    tower_components: list | None = [] if return_breakdown else None
+    tower_terms = (
+        _tower_bce_terms(
+            pred, target, calo_bce_weight=calo_bce_weight, out_components=tower_components
+        )
+        if calo_bce
+        else []
+    )
 
     # Sum every term -> the scalar loss the training loop back-props. The per-event
     # log_ht term is down-weighted by ``event_weight`` relative to the per-pid object
@@ -1268,6 +1362,7 @@ def per_event_wasserstein_loss(
         + [event_weight * d for d in event_wasserstein_distance.values()]
         + count_terms
         + bce_terms
+        + tower_terms
     )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
         zero = pred_particles.sum() * 0.0
@@ -1316,6 +1411,11 @@ def per_event_wasserstein_loss(
         weights.append(float(weight))
         raw_tensors.append(raw)
         wtd_tensors.append(wtd)
+    for (label, raw, weight), wtd in zip(tower_components or [], tower_terms):
+        cat_label.append(("bce", label))
+        weights.append(float(weight))
+        raw_tensors.append(raw)
+        wtd_tensors.append(wtd)
     raw_vals = torch.stack(raw_tensors).detach().cpu().tolist()
     wtd_vals = torch.stack(wtd_tensors).detach().cpu().tolist()
     components = [
@@ -1335,6 +1435,8 @@ def per_event_wasserstein_loss_distributed(
     eff_loss: str = "counts",
     bce_weight: float = BCE_WEIGHT,
     bce_weighting: str = "pooled",
+    calo_bce: bool = False,
+    calo_bce_weight: float = CALO_BCE_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
     pid_weighting: str = "equal",
     pid_weight_floor: float = 0.0,
@@ -1365,6 +1467,8 @@ def per_event_wasserstein_loss_distributed(
             eff_loss=eff_loss,
             bce_weight=bce_weight,
             bce_weighting=bce_weighting,
+            calo_bce=calo_bce,
+            calo_bce_weight=calo_bce_weight,
             event_weight=event_weight,
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
@@ -1430,6 +1534,8 @@ def per_event_wasserstein_loss_distributed(
         eff_loss=eff_loss,
         bce_weight=bce_weight,
         bce_weighting=bce_weighting,
+        calo_bce=calo_bce,
+        calo_bce_weight=calo_bce_weight,
         event_weight=event_weight,
         pid_weighting=pid_weighting,
         pid_weight_floor=pid_weight_floor,
@@ -1485,6 +1591,8 @@ def _per_pid_obs_loss(
     eff_loss: str = "counts",
     bce_weight: float = BCE_WEIGHT,
     bce_weighting: str = "pooled",
+    calo_bce: bool = False,
+    calo_bce_weight: float = CALO_BCE_WEIGHT,
     event_weight: float,
     obj_weights: dict[str, float] | None,
     debug_label: str,
@@ -1682,12 +1790,23 @@ def _per_pid_obs_loss(
         if eff_loss == "bce"
         else []
     )
+    # --calo-bce: the tower-existence BCE replaces the calo count terms as the
+    # calo membership gradient (run with --calo-count-weight 0; Phase 2).
+    tower_components: list | None = [] if return_breakdown else None
+    tower_terms = (
+        _tower_bce_terms(
+            pred, target, calo_bce_weight=calo_bce_weight, out_components=tower_components
+        )
+        if calo_bce
+        else []
+    )
     terms = (
         list(pid_obs_terms.values())
         + list(pair_terms.values())
         + ([event_term] if event_term is not None else [])
         + count_terms
         + bce_terms
+        + tower_terms
     )
     if not terms:  # degenerate empty batch: keep a graph-connected zero
         zero = pred_particles.sum() * 0.0
@@ -1740,6 +1859,11 @@ def _per_pid_obs_loss(
         weights.append(float(weight))
         raw_tensors.append(raw)
         wtd_tensors.append(wtd)
+    for (label, raw, weight), wtd in zip(tower_components or [], tower_terms):
+        cat_label.append(("bce", label))
+        weights.append(float(weight))
+        raw_tensors.append(raw)
+        wtd_tensors.append(wtd)
     raw_vals = torch.stack(raw_tensors).detach().cpu().tolist()
     wtd_vals = torch.stack(wtd_tensors).detach().cpu().tolist()
     components = [
@@ -1759,6 +1883,8 @@ def per_pid_soft_hist_loss(
     eff_loss: str = "counts",
     bce_weight: float = BCE_WEIGHT,
     bce_weighting: str = "pooled",
+    calo_bce: bool = False,
+    calo_bce_weight: float = CALO_BCE_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
     beta: float = 0.15,
     bin_edges: dict[str, torch.Tensor] | None = None,
@@ -1821,6 +1947,8 @@ def per_pid_soft_hist_loss(
         eff_loss=eff_loss,
         bce_weight=bce_weight,
         bce_weighting=bce_weighting,
+        calo_bce=calo_bce,
+        calo_bce_weight=calo_bce_weight,
         event_weight=event_weight,
         obj_weights=obj_weights,
         debug_label="pid_hist",
@@ -1889,6 +2017,8 @@ def per_pid_wasserstein_1d_loss(
     eff_loss: str = "counts",
     bce_weight: float = BCE_WEIGHT,
     bce_weighting: str = "pooled",
+    calo_bce: bool = False,
+    calo_bce_weight: float = CALO_BCE_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
     obj_weights: dict[str, float] | None = None,
     n_quantiles: int = 100,
@@ -1952,6 +2082,8 @@ def per_pid_wasserstein_1d_loss(
         eff_loss=eff_loss,
         bce_weight=bce_weight,
         bce_weighting=bce_weighting,
+        calo_bce=calo_bce,
+        calo_bce_weight=calo_bce_weight,
         event_weight=event_weight,
         obj_weights=obj_weights,
         debug_label="pid_w1d",
@@ -1974,6 +2106,8 @@ def per_pid_wasserstein_1d_loss_distributed(
     eff_loss: str = "counts",
     bce_weight: float = BCE_WEIGHT,
     bce_weighting: str = "pooled",
+    calo_bce: bool = False,
+    calo_bce_weight: float = CALO_BCE_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
     obj_weights: dict[str, float] | None = None,
     n_quantiles: int = 100,
@@ -2008,6 +2142,8 @@ def per_pid_wasserstein_1d_loss_distributed(
             eff_loss=eff_loss,
             bce_weight=bce_weight,
             bce_weighting=bce_weighting,
+            calo_bce=calo_bce,
+            calo_bce_weight=calo_bce_weight,
             event_weight=event_weight,
             obj_weights=obj_weights,
             n_quantiles=n_quantiles,
@@ -2117,6 +2253,28 @@ def per_pid_wasserstein_1d_loss_distributed(
             if logits_key in pred:
                 pred_gathered[logits_key] = pred[logits_key]
 
+    # ---- tower-existence BCE (--calo-bce) -------------------------------------
+    # Per-tower log q is a DIFFERENTIABLE pred-side activation (unlike the
+    # replicated eff_logits above), so it gathers like the pair responses; the
+    # region index and occupancy labels are data. All ranks issue the same
+    # collectives (the keys' presence is flag-driven, identical across ranks),
+    # and an empty rank's logq keeps grad_fn (it is a boolean-mask slice of a
+    # graph tensor in the SimpleCalorimeter export).
+    if calo_bce:
+        for key, _label in TOWER_BCE_KEYS:
+            lq = pred.get(f"tower_logq:{key}")
+            if lq is None:
+                continue
+            pred_gathered[f"tower_logq:{key}"] = _all_gather_varlen(
+                lq.reshape(-1), differentiable=True
+            )
+            pred_gathered[f"tower_region:{key}"] = _all_gather_varlen(
+                pred[f"tower_region:{key}"].reshape(-1), differentiable=False
+            )
+            target_gathered[f"tower_x:{key}"] = _all_gather_varlen(
+                target[f"tower_x:{key}"].detach().reshape(-1), differentiable=False
+            )
+
     return per_pid_wasserstein_1d_loss(
         pred_gathered,
         target_gathered,
@@ -2126,6 +2284,8 @@ def per_pid_wasserstein_1d_loss_distributed(
         eff_loss=eff_loss,
         bce_weight=bce_weight,
         bce_weighting=bce_weighting,
+        calo_bce=calo_bce,
+        calo_bce_weight=calo_bce_weight,
         event_weight=event_weight,
         obj_weights=obj_weights,
         n_quantiles=n_quantiles,

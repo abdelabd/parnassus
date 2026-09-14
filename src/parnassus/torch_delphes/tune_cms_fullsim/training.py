@@ -34,6 +34,7 @@ from .distributed import _is_dist, _is_main
 from .loss import (
     BCE_TERM_KEYS,
     BCE_WEIGHT,
+    CALO_BCE_WEIGHT,
     CALO_COUNT_WEIGHT,
     COUNT_RATE_FLOOR,
     COUNT_WEIGHT,
@@ -52,6 +53,56 @@ _BCE_LOGITS_ATTRS: dict[str, str] = {
     "electron": "ElectronTrackingEfficiency",
     "muon": "MuonTrackingEfficiency",
 }
+
+
+def _inject_tower_bce(
+    pred_observables: dict[str, torch.Tensor],
+    target_observables: dict[str, torch.Tensor],
+    out: dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
+) -> None:
+    """Build the tower-occupancy labels and inject the tower-BCE tensors
+    (--calo-bce; EFF_LOSS_PLAN.md Phase 2).
+
+    For each calo's per-tower export (SimpleCalorimeter's ``bce_*`` keys in the
+    card's ``{Ecal,Hcal}CountExport`` output): label ``x_t`` = the batch TARGET
+    has a neutral object of that calo's class (ECal -> photon 22, HCal -> neutral
+    hadron 111) inside the tower's eta-phi cell BOX — cell-exact matching that is
+    invariant to the uniform within-cell position smearing on either side. The
+    differentiable ``bce_logq`` and the region index go into the pred dict, the
+    labels into the target dict; loss._tower_bce_terms consumes them.
+    """
+    t_eta, t_phi = batch["eta"], batch["phi"]
+    t_pid, t_pt = batch["pid"], batch["pt"]
+    truth = batch["truth_particles"]
+    mask = torch.any(truth != 0, dim=-1)
+    ev_ids = batch_event_ids(truth, mask).long()  # (n_events,) global ids, batch order
+    sorted_ids, perm = torch.sort(ev_ids)
+    for key, out_key, pid_val in (
+        ("ecal", "EcalCountExport", 22.0),
+        ("hcal", "HcalCountExport", 111.0),
+    ):
+        exp = out.get(out_key)
+        if exp is None or "bce_logq" not in exp:
+            raise RuntimeError(
+                f"--calo-bce needs the per-tower {out_key} export (learnable card); "
+                "got none. The card must run in learnable mode."
+            )
+        ev = exp["bce_event"].long()
+        pos = torch.searchsorted(sorted_ids, ev).clamp(max=perm.numel() - 1)
+        row = perm[pos]  # tower -> batch row of its event
+        obj_eta, obj_phi = t_eta[row], t_phi[row]  # (n_towers, max_n)
+        in_box = (
+            (obj_eta >= exp["bce_eta_lo"].unsqueeze(1))
+            & (obj_eta <= exp["bce_eta_hi"].unsqueeze(1))
+            & (obj_phi >= exp["bce_phi_lo"].unsqueeze(1))
+            & (obj_phi <= exp["bce_phi_hi"].unsqueeze(1))
+            & (t_pid[row] == pid_val)
+            & (t_pt[row] != 0)  # padding
+        )
+        pred_observables[f"tower_logq:{key}"] = exp["bce_logq"]
+        pred_observables[f"tower_region:{key}"] = exp["bce_region"]
+        target_observables[f"tower_x:{key}"] = in_box.any(dim=1).to(torch.float64)
 
 
 def _inject_bce_logits(
@@ -100,6 +151,8 @@ def fit_card_to_fullsim(
     eff_loss: str = "counts",
     bce_weight: float = BCE_WEIGHT,
     bce_weighting: str = "pooled",
+    calo_bce: bool = False,
+    calo_bce_weight: float = CALO_BCE_WEIGHT,
     event_weight: float = EVENT_WEIGHT,
     loss_name: str = "wasserstein",
     pid_weighting: str = "equal",
@@ -284,6 +337,8 @@ def fit_card_to_fullsim(
             eff_loss=eff_loss,
             bce_weight=bce_weight,
             bce_weighting=bce_weighting,
+            calo_bce=calo_bce,
+            calo_bce_weight=calo_bce_weight,
             event_weight=event_weight,
             pid_weighting=pid_weighting,
             pid_weight_floor=pid_weight_floor,
@@ -562,6 +617,8 @@ def fit_card_to_fullsim(
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+            if calo_bce:
+                _inject_tower_bce(pred_observables, target_observables, out, batch)
             # Per-event truth leading-2 pair masses (the pair-mass terms compare the
             # response ln(m_reco / m_truth)); one label per event, shared by both sides.
             attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)
@@ -682,6 +739,8 @@ def fit_card_to_fullsim(
                     _inject_bce_logits(pred_observables, card)
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+                if calo_bce:
+                    _inject_tower_bce(pred_observables, target_observables, out, batch)
                 attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)
                 # Same pred-side acceptance cut + chad truncation as the train
                 # loop (the target is cut/truncated statically in the loader);

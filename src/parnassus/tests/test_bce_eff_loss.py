@@ -209,3 +209,46 @@ def test_assembly_bce_drops_tracking_counts_keeps_calo():
     cats2 = {c.category for c in comps2}
     assert "bce" not in cats2
     assert sum(1 for c in comps2 if c.category == "count") == 5
+
+
+def test_tower_bce_terms_region_fair_and_gradients():
+    """--calo-bce term: per-region-fair combination, log-space stability at the
+    q -> 0 and q -> 1 extremes (incl. log_q == -0.0 exactly), gradient flow."""
+    from parnassus.torch_delphes.tune_cms_fullsim.loss import _log1mexp, _tower_bce_terms
+
+    # log1mexp edge cases: exact within float64 across the whole range.
+    lq = torch.log(torch.tensor([0.3, 0.9, 1e-40, 1 - 1e-12], dtype=torch.float64))
+    assert torch.allclose(
+        torch.exp(_log1mexp(lq)),
+        torch.tensor([0.7, 0.1, 1.0, 1e-12], dtype=torch.float64),
+        rtol=1e-6,
+    )
+    # log_q == -0.0 exactly (saturated log_ndtr): finite value, finite gradient.
+    lq0 = torch.zeros(3, dtype=torch.float64, requires_grad=True)
+    out = _log1mexp(lq0 * 1.0)
+    out.sum().backward()
+    assert torch.isfinite(out).all() and torch.isfinite(lq0.grad).all()
+
+    # Region-fair combination: two regions with different tower counts must
+    # weigh equally. Region 0: 3 towers; region 1: 1 tower.
+    base = torch.tensor([-0.5, -1.0, -1.5, -2.0], dtype=torch.float64, requires_grad=True)
+    pred = {
+        "tower_logq:ecal": base,
+        "tower_region:ecal": torch.tensor([0, 0, 0, 1]),
+    }
+    target = {"tower_x:ecal": torch.tensor([1.0, 0.0, 1.0, 1.0], dtype=torch.float64)}
+    (term,) = _tower_bce_terms(pred, target, calo_bce_weight=2.0)
+    per = -(target["tower_x:ecal"] * base.detach() + (1 - target["tower_x:ecal"]) * _log1mexp(base.detach()))
+    expected = 2.0 * 0.5 * (per[:3].mean() + per[3])
+    assert torch.allclose(term, expected, rtol=1e-12)
+    term.backward()
+    assert torch.isfinite(base.grad).all() and base.grad.abs().sum() > 0
+
+    # Empty calo: graph-connected zero.
+    pred_e = {
+        "tower_logq:hcal": base[:0],
+        "tower_region:hcal": torch.zeros(0, dtype=torch.long),
+    }
+    target_e = {"tower_x:hcal": torch.zeros(0, dtype=torch.float64)}
+    (zt,) = _tower_bce_terms(pred_e, target_e, calo_bce_weight=1.0)
+    assert float(zt) == 0.0 and zt.grad_fn is not None

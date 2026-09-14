@@ -870,6 +870,75 @@ class SimpleCalorimeter(nn.Module):
                 "event": tower_event_num.detach(),
                 "anchor": anchor,
             }
+
+            # ===== Per-tower analytic survival log-probability (tower BCE) =====
+            # For the tower-existence BCE (--calo-bce; EFF_LOSS_PLAN.md Phase 2):
+            # log q_t = sum_i log P(survive cascade stage i), one analytic factor
+            # per hard cut of the neutral-object cascade, marginalizing ONLY the
+            # tower's own LogNormal energy smear and CONDITIONING on this draw's
+            # sampled track quantities (decision (3) in the plan: nothing about
+            # the forward changes; these are pure loss-side exports).
+            #
+            # LogNormal(mean mu, std sigma): E_sm = exp(a + b Z) with
+            # b^2 = log(1 + sigma^2/mu^2), a = log(mu) - b^2/2, so for a
+            # threshold c: P(E_sm > c) = Phi((a - log c)/b) — evaluated as
+            # torch.special.log_ndtr for tail-exact log-space stability
+            # (plan decision (4): no probability floor).
+            #
+            # Gradient routing: mu carries the LIVE energy scale over a DETACHED
+            # deposit (HadronFractions stay on the shape terms); b and the
+            # thresholds carry the LIVE resolution coefficients via
+            # resolution_func on detached energies (the sigma_after_c
+            # convention); track energy/sigma are detached. Stages (the four
+            # hard cuts above, product per the user's factorization decree —
+            # correlated through the shared smear draw, accepted):
+            #   1. tower E_min            E_sm > energy_min
+            #   2. tower significance     E_sm > energy_sig_min * sigma_after_c
+            #   3. neutral-excess E_min   E_sm > E_trk + energy_min
+            #   4. neutral significance   E_sm > E_trk + energy_sig_min * denom_c
+            # (+ the count_pt_min acceptance stage when configured, mirroring the
+            # soft-count gate). Stages 2/4 drop under disable_significance_cut.
+            # Support: towers with a positive deposit and an in-range |eta|
+            # region (a zero-deposit tower has q identically 0 with no theta
+            # dependence — plan decision (5)).
+            deposit_d = tower_energy.detach()
+            if self.scale_fn is not None:
+                mu = self.scale_fn(tower_eta_center).to(deposit_d.dtype) * deposit_d
+            else:
+                mu = deposit_d
+            mu_safe = mu.clamp_min(1e-30)
+            sig_b = self.resolution_func(tower_eta_center, mu.detach().clamp_min(1e-30))
+            b2 = torch.log1p((sig_b / mu_safe.detach()) ** 2)
+            b = torch.sqrt(b2.clamp_min(1e-30))
+            a = torch.log(mu_safe) - 0.5 * b2
+            thresholds = [
+                torch.full_like(mu, self.energy_min),
+                track_e_d + self.energy_min,
+            ]
+            if not self.disable_significance_cut:
+                thresholds.append(self.energy_sig_min * sigma_after_c)
+                thresholds.append(track_e_d + self.energy_sig_min * denom_c)
+            if self.count_pt_min is not None:
+                thresholds.append(track_e_d + self.count_pt_min * cosh_eta_d)
+            bce_logq = sum(
+                torch.special.log_ndtr((a - torch.log(c.clamp_min(1e-30))) / b)
+                for c in thresholds
+            )
+            # Disjoint |eta|-region index in the count-region layout (-1 = out of
+            # range, excluded from the support with the zero-deposit towers).
+            region_idx = torch.full_like(tower_event_num, -1)
+            for r, m in enumerate(region_masks):
+                region_idx = torch.where(m, torch.full_like(region_idx, r), region_idx)
+            bce_support = (mu.detach() > 0) & (region_idx >= 0)
+            count_export.update({
+                "bce_logq": bce_logq[bce_support],  # differentiable
+                "bce_region": region_idx[bce_support].detach(),
+                "bce_event": tower_event_num[bce_support].detach(),
+                "bce_eta_lo": tower_eta_lo[bce_support].detach(),
+                "bce_eta_hi": tower_eta_hi[bce_support].detach(),
+                "bce_phi_lo": tower_phi_lo[bce_support].detach(),
+                "bce_phi_hi": tower_phi_hi[bce_support].detach(),
+            })
         else:
             expected_calo_counts = None
             count_export = None

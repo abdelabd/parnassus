@@ -381,8 +381,8 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
 
         # HCal (4th return: per-region expected neutral-hadron count; None unless
         # learnable; per-tower export unused -- the NH stream is not merged)
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons, hcal_calo_counts, _ = self.HCal(
-            particles_propagated, ecal_tracks
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons, hcal_calo_counts, hcal_count_export = (
+            self.HCal(particles_propagated, ecal_tracks)
         )
 
         # CalorimeterMerger
@@ -451,6 +451,11 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             "MuonExpectedCounts": muon_expected_counts,
             "EcalPhotonExpectedCounts": ecal_calo_counts,
             "HcalNeutralHadronExpectedCounts": hcal_calo_counts,
+            # Per-tower exports (learnable mode only, else None): the soft-count
+            # cluster-composition tensors plus the tower-BCE survival log-probs
+            # (bce_* keys; see SimpleCalorimeter and EFF_LOSS_PLAN.md Phase 2).
+            "EcalCountExport": ecal_count_export,
+            "HcalCountExport": hcal_count_export,
         }
 
     @staticmethod
