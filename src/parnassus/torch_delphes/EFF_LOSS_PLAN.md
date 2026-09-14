@@ -366,6 +366,46 @@ get no label — they are unfixable by any efficiency value.
   smearing/fakes) and the double-counting residual (pt-migration across the
   harmonized reco-pt cut).
 
+### Phase 3 sketch — tower-existence BCE for the calo block (hashed out 2026-09-14)
+
+Motivated by the count-free interlude (the calo block NEEDS membership
+information) and the observation that the neutral analog of the tracking BCE
+exists once the coin is placed at the right level. Agreed so far:
+
+- **The unit is the tower, not the particle.** Neutrals in one tower live or die
+  together (one shared threshold event), so a per-particle BCE would count one
+  coin multiple times; per-tower deduplicates it. Labels ARE constructible for
+  neutrals (matching, or tower survival at generation) — the earlier "no labels
+  for neutrals" claim was wrong; what neutrals lack is only an independent
+  per-particle coin.
+- **q(theta) exists**: it is the per-tower survival probability behind the
+  expected-neutral-count export (the soft significance gate) — a function of the
+  calo scales/resolutions rather than of a dedicated parameter, which is fine:
+  BCE only needs a differentiable predicted probability. Caveat: the count
+  machinery's gate is STRAIGHT-THROUGH (forward pinned to the hard 0/1 count) —
+  ideal inside the rate chi^2, fatal inside log(q). A BCE consumer must use the
+  soft sigmoid value (one-draw stochastic, Jensen-biased) or, recommended, the
+  ANALYTIC marginal over the Gaussian smear (a Phi() in the significance
+  variable): closed-form, differentiable, a true probability.
+- **Closure labels need no regeneration**: the tower grid is a deterministic
+  eta-phi binning and the trainee runs on the same truth events as the data, so
+  x_tower = "data has a neutral object in this cell" is computable from the
+  existing pflow branches at load time (ECal grid -> photons, HCal grid -> NH).
+- **Validation gate**: with the calo rate-chi^2 off, the tower BCE must
+  reproduce the with-counts calo recovery (scales to ~1-2%, c_N / central and
+  forward c_S at the with-counts level). The count-free run is the failure
+  baseline it must beat.
+
+Open (NOT yet hashed out — discussion in progress): the exactness of the
+analytic q vs the full hard decision cascade (track subtraction / neutral-excess
+arbitration, E_min + significance); the tower support (which towers enter — tail
+towers give log(q) blowups); region weighting (a pooled tower BCE
+population-weights regions, which may re-drown the forward-region c_E/c_S
+leverage that CALO_COUNT_WEIGHT's per-region-fair form was built to protect);
+the fullsim tower<->object correspondence (off-grid reco, photon merger);
+implementation plumbing (per-tower q/id export, DDP gathers, weight
+calibration).
+
 ### Step F6 — Fullsim fit and beyond
 
 `--mode fullsim --eff-loss bce` on the preprocessed `train_1000.root`; compare
