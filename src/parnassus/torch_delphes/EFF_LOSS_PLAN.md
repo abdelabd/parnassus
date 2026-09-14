@@ -323,6 +323,26 @@ merged, stages 3-4 resumed from stage-2 history after the dijet merge.
    (iii) marginalize the track smears/efficiency coins (1-D numerical integral
    per tower). Revisit if the closure gate fails or the per-draw q proves too
    noisy.
+
+   Note on (ii)/(iii) and the tracking efficiencies (discussed 2026-09-14):
+   both make q_tower an explicit function of the eff_logits — (iii) necessarily
+   (the coin marginal is a sum over survival subsets weighted by
+   sigmoid(eff_logit) products), (ii) under its natural reading
+   (E[E_trk] = sum_i eps_i E[E_i]) — and likewise of the track smearing
+   parameters through the E_trk distribution. This gradient is physically real
+   (a dead track's energy re-emerges as neutral excess: tower occupancy carries
+   chad-efficiency information via the chad -> NH conversion channel), but
+   WHETHER it flows is a routing choice separable from the estimator choice:
+   - (ii)/(iii) with the track factors DETACHED = better-specified q, same
+     clean separation (default if adopted): eff_logits keep their exact
+     tracking-BCE likelihood uncontaminated by the tower model's
+     approximations (factorization bias, calo mis-modeling, label subtleties)
+     — the same reasoning as the count term's deliberate detachment.
+   - (ii)/(iii) with the eps-dependence LIVE = a joint fit through the
+     conversion channel: extra leverage on eff_logits from neutral occupancy,
+     gated on the closure harness showing the efficiency recovery does not
+     degrade (mixing an approximate secondary gradient into an exactly-fitted
+     parameter must earn its keep empirically).
 4. **Log-space evaluation everywhere, NO probability floor**: the tracking BCE
    already evaluates in logit space (binary_cross_entropy_with_logits); the
    tower BCE uses log Phi (log_ndtr) — same loss values, underflow-proof, tail
