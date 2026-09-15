@@ -34,6 +34,7 @@ from parnassus.torch_delphes.learnable import (
     CMSChargedHadronLearnableEfficiency,
     CMSElectronLearnableEfficiency,
     CMSMuonLearnableEfficiency,
+    EFF_BINNING_SPECS,
     LearnableEcalCMSResolution,
     LearnableHadronFractions,
     LearnableHcalCMSResolution,
@@ -116,6 +117,7 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         photon_merger: nn.Module | None = None,
         tower_bce_grads: str = "detach",
         tower_bce: bool = True,
+        eff_binning: str = "cms4",
     ) -> None:
         """Initialize the CMS detector simulation.
 
@@ -183,6 +185,16 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         # calo soft-count exports are unaffected. Default True so a bare
         # learnable card exports everything.
         self.tower_bce = tower_bce
+        # eff_binning: the tracking-efficiency region layout (learnable mode;
+        # CONSOLIDATE_MODES_PLAN.md phase 2). "cms4" = the legacy 2x2 chad grid
+        # (delphes-mode cards/pseudodata; EFF_REGION labels chad 1-4 / e 5-10 /
+        # mu 11-16); "ptbins12" = the fullsim refinement (chad pt bins split
+        # above 1 GeV; labels chad 1-12 / e 13-18 / mu 19-24, ported from
+        # diff_delphes_runze_cmssinglejet). The two label layouts are not
+        # interchangeable — the tune entrypoints map --mode fullsim to ptbins12.
+        if eff_binning not in EFF_BINNING_SPECS:
+            raise ValueError(f"eff_binning: {eff_binning!r}")
+        self.eff_binning = eff_binning
         self.photon_merger = photon_merger
 
         # Attribute-type declarations so mypy accepts the learnable / legacy
@@ -203,12 +215,14 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         # TrackingEfficiency
         if learnable:
             self.ChargedHadronTrackingEfficiency = CMSChargedHadronLearnableEfficiency(
-                temperature=gumbel_temperature
+                temperature=gumbel_temperature, binning=self.eff_binning
             )
             self.ElectronTrackingEfficiency = CMSElectronLearnableEfficiency(
-                temperature=gumbel_temperature
+                temperature=gumbel_temperature, binning=self.eff_binning
             )
-            self.MuonTrackingEfficiency = CMSMuonLearnableEfficiency(temperature=gumbel_temperature)
+            self.MuonTrackingEfficiency = CMSMuonLearnableEfficiency(
+                temperature=gumbel_temperature, binning=self.eff_binning
+            )
         else:
             self.ChargedHadronTrackingEfficiency = Efficiency(
                 efficiency_formula="charged_hadron_cms"

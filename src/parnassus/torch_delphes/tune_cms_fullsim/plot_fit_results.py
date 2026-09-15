@@ -337,6 +337,19 @@ def plot_top_param_drift(
 # ---------------------------------------------------------------------------
 
 
+def _eff_binning_from_snapshot(snapshot: dict[str, float] | None) -> str:
+    """Infer the card's tracking-efficiency region layout from a history
+    snapshot: 12 chad eff_logits keys = the fullsim "ptbins12" refinement,
+    otherwise the legacy "cms4" (CONSOLIDATE_MODES_PLAN.md phase 2). Keeps the
+    replot card's parameter shapes matching the fit without a CLI flag."""
+    if snapshot is None:
+        return "cms4"
+    n = sum(
+        1 for k in snapshot if k.startswith("ChargedHadronTrackingEfficiency.eff_logits[")
+    )
+    return "ptbins12" if n == 12 else "cms4"
+
+
 def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, float]) -> None:
     """Restore a trainee card's learnable parameters from a snapshot.
 
@@ -355,9 +368,21 @@ def _set_trainee_from_snapshot(card: CMSEnergyFlowDefault, snapshot: dict[str, f
             if len(keys) == 1 and not keys[0].endswith("]"):
                 vals = torch.tensor([snapshot[keys[0]]], dtype=p.dtype)
             else:
+                # A partial vector must be a hard error: silently zero-filling
+                # a missing index would set a *physical* value of 0 (e.g. a
+                # dead efficiency bin). Happens when the snapshot was written
+                # by a card with a different eff_binning region layout.
+                indices = [int(k[k.rfind("[") + 1 : k.rfind("]")]) for k in keys]
+                if len(keys) != p.numel() or max(indices) >= p.numel():
+                    raise ValueError(
+                        f"{name}: snapshot has {len(keys)} element(s) "
+                        f"{sorted(indices)} but the card expects {p.numel()} -- "
+                        "the snapshot was made with a different parameter "
+                        "binning (cms4 vs ptbins12 chad efficiency). "
+                        "Replot with the matching eff_binning, or refit."
+                    )
                 vals = torch.zeros(p.numel(), dtype=p.dtype)
-                for k in keys:
-                    i = int(k[k.rfind("[") + 1 : k.rfind("]")])
+                for k, i in zip(keys, indices):
                     vals[i] = snapshot[k]
             # Invert the relevant transform.
             if name.endswith(".scale_raw"):
@@ -1162,7 +1187,8 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     trainee = CMSEnergyFlowDefault(
-        debug=False, learnable=True, photon_merger=_make_merger()
+        debug=False, learnable=True, photon_merger=_make_merger(),
+        eff_binning=_eff_binning_from_snapshot(init_snapshot),
     ).to(device)
     # Set the init trainee to the perturbed STARTING config (the honest before-fit
     # baseline). Without this it would keep the card's constructor defaults.
@@ -1275,7 +1301,8 @@ def main() -> None:
         print("\n  --debug: rendering per-module intermediate-output overlays...")
         torch.manual_seed(args.seed)
         trainee_dbg = CMSEnergyFlowDefault(
-            debug=True, learnable=True, photon_merger=_make_merger()
+            debug=True, learnable=True, photon_merger=_make_merger(),
+            eff_binning=_eff_binning_from_snapshot(init_snapshot),
         ).to(device)
         if init_snapshot is not None:
             _set_trainee_from_snapshot(trainee_dbg, init_snapshot)

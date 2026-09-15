@@ -393,6 +393,36 @@ CMS_EFF_REGION_SPECS: dict[str, EfficiencyRegionSpec] = {
     ),
 }
 
+# Fullsim ("ptbins12") variant, ported verbatim from
+# diff_delphes_runze_cmssinglejet (CONSOLIDATE_MODES_PLAN.md phase 2): the
+# charged-hadron pt binning is refined above 1 GeV (legacy: one flat bin) so a
+# CMS full-sim fit can express the pt-falling tracking efficiency it measures.
+# Every later species' label_offset shifts with the chad region count, so the
+# global EFF_REGION layout becomes chad 1-12, electron 13-18, muon 19-24 —
+# labels from the two layouts are NOT interchangeable, which is why the
+# binning is selected per card (mode-dependent: delphes = cms4 legacy,
+# fullsim = ptbins12) instead of replacing the legacy spec.
+CMS_EFF_REGION_SPECS_PTBINS: dict[str, EfficiencyRegionSpec] = {
+    "charged_hadron": EfficiencyRegionSpec(
+        species="charged_hadron",
+        pt_edges=(0.1, 1.0, 10.0, 25.0, 50.0, 100.0),
+        abs_eta_edges=(1.5, 2.5),
+        label_offset=0,
+    ),
+    "electron": EfficiencyRegionSpec(
+        species="electron", pt_edges=(0.1, 1.0, 1.0e2), abs_eta_edges=(1.5, 2.5), label_offset=12
+    ),
+    "muon": EfficiencyRegionSpec(
+        species="muon", pt_edges=(0.1, 1.0, 1.0e3), abs_eta_edges=(1.5, 2.5), label_offset=18
+    ),
+}
+
+# The binning choices, keyed by the name CMSDefault exposes (eff_binning).
+EFF_BINNING_SPECS: dict[str, dict[str, EfficiencyRegionSpec]] = {
+    "cms4": CMS_EFF_REGION_SPECS,
+    "ptbins12": CMS_EFF_REGION_SPECS_PTBINS,
+}
+
 
 class _LearnableEfficiencyBase(nn.Module):
     """Common base for learnable tracking efficiencies.
@@ -543,21 +573,33 @@ class _LearnableEfficiencyBase(nn.Module):
 class CMSChargedHadronLearnableEfficiency(_LearnableEfficiencyBase):
     """Learnable CMS charged-hadron tracking efficiency.
 
-    Four piecewise-constant efficiency parameters covering the four
-    (pt, |eta|) regions defined in
-    :meth:`Efficiency._charged_hadron_cms_efficiency`. Each is stored as a
-    logit so the sigmoid keeps it in ``(0, 1)``. Binning + region labels come
-    from ``CMS_EFF_REGION_SPECS["charged_hadron"]``; efficiency evaluation,
-    region tagging, and the detached mask are inherited from the base class.
+    Piecewise-constant efficiency parameters over the (pt, |eta|) regions of
+    the selected binning (each stored as a logit so the sigmoid keeps it in
+    ``(0, 1)``): ``binning="cms4"`` (default) is the legacy 2x2 grid of
+    :meth:`Efficiency._charged_hadron_cms_efficiency`; ``"ptbins12"``
+    (fullsim) splits the flat above-1-GeV bin into (1,10], (10,25], (25,50],
+    (50,100], (100,inf) per |eta| side so a fit can express a pt-dependent
+    efficiency, every sub-bin defaulting to the legacy value of its containing
+    legacy bin (ported from diff_delphes_runze_cmssinglejet). Efficiency
+    evaluation, region tagging, and the detached mask are inherited from the
+    base class.
     """
 
-    # (lowpt-barrel, highpt-barrel, lowpt-endcap, highpt-endcap)
+    # cms4: (lowpt-barrel, highpt-barrel, lowpt-endcap, highpt-endcap)
     _DEFAULTS: tuple[float, ...] = (0.70, 0.95, 0.60, 0.85)
+    # ptbins12, eta-major pt-minor: barrel (0.1,1], (1,10], (10,25], (25,50],
+    # (50,100], (100,inf), then the same six endcap bins.
+    _DEFAULTS_PTBINS: tuple[float, ...] = (
+        0.70, 0.95, 0.95, 0.95, 0.95, 0.95,
+        0.60, 0.85, 0.85, 0.85, 0.85, 0.85,
+    )
 
-    def __init__(self, temperature: float = 0.5) -> None:
+    def __init__(self, temperature: float = 0.5, binning: str = "cms4") -> None:
         super().__init__(
-            region_spec=CMS_EFF_REGION_SPECS["charged_hadron"],
-            eff_defaults=self._DEFAULTS,
+            region_spec=EFF_BINNING_SPECS[binning]["charged_hadron"],
+            eff_defaults=(
+                self._DEFAULTS if binning == "cms4" else self._DEFAULTS_PTBINS
+            ),
             pdg_filter_func=pdg_filters.charged_hadron_filter,
             temperature=temperature,
         )
@@ -573,9 +615,11 @@ class CMSElectronLearnableEfficiency(_LearnableEfficiencyBase):
     # (low/mid/high)pt-barrel, then (low/mid/high)pt-endcap
     _DEFAULTS: tuple[float, ...] = (0.73, 0.95, 0.99, 0.50, 0.83, 0.90)
 
-    def __init__(self, temperature: float = 0.5) -> None:
+    def __init__(self, temperature: float = 0.5, binning: str = "cms4") -> None:
+        # Same bins under either binning; only the global label OFFSET moves
+        # with the chad region count (cms4: 5-10, ptbins12: 13-18).
         super().__init__(
-            region_spec=CMS_EFF_REGION_SPECS["electron"],
+            region_spec=EFF_BINNING_SPECS[binning]["electron"],
             eff_defaults=self._DEFAULTS,
             pdg_filter_func=pdg_filters.electron_filter,
             temperature=temperature,
@@ -607,9 +651,11 @@ class CMSMuonLearnableEfficiency(_LearnableEfficiencyBase):
     _DEFAULTS: tuple[float, ...] = (0.75, 0.99, 0.99, 0.70, 0.98, 0.98)
     _RATE_DEFAULTS: tuple[float, ...] = (5.0e-4, 5.0e-4)
 
-    def __init__(self, temperature: float = 0.5) -> None:
+    def __init__(self, temperature: float = 0.5, binning: str = "cms4") -> None:
+        # Same bins under either binning; only the global label OFFSET moves
+        # with the chad region count (cms4: 11-16, ptbins12: 19-24).
         super().__init__(
-            region_spec=CMS_EFF_REGION_SPECS["muon"],
+            region_spec=EFF_BINNING_SPECS[binning]["muon"],
             eff_defaults=self._DEFAULTS,
             pdg_filter_func=pdg_filters.muon_filter,
             temperature=temperature,

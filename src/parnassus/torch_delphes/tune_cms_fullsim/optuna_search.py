@@ -1031,6 +1031,8 @@ def main() -> None:
             ),
             tower_bce_grads=args.calo_bce_grads,
             tower_bce=args.calo_bce,
+            # Mode-dependent tracking-efficiency region layout (plan phase 2).
+            eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
         ).to(device)
         pc.apply_param_config(trainee, cfg)
         # cfg's lr_scale already holds each group's ABSOLUTE lr, so global_lr = 1.

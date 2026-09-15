@@ -713,6 +713,9 @@ def main() -> None:
         # consume them (counts mode).
         tower_bce_grads=args.calo_bce_grads,
         tower_bce=args.calo_bce,
+        # Tracking-efficiency region layout is mode-dependent (phase 2 of
+        # CONSOLIDATE_MODES_PLAN.md): fullsim uses the 12-bin chad refinement.
+        eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
     ).to(device)
 
     # The param config drives everything: ``value`` initializes every learnable
