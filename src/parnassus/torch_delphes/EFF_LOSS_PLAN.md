@@ -320,7 +320,31 @@ vs the floor (forward_c_S 0.05, central_c_S 0.14) — the term is not
 information-free, but its VALUE model is wrong enough that the fit actively
 drives the scales away from truth rather than merely failing to move them.
 
-Diagnosis: the decreed per-stage product is the prime suspect — for a tower with
+**UPDATE (2026-09-14, de-duped q + stage-scoped tower BCE,
+`doc/figure_seq_hung_neutral_BCE/`): GATE LARGELY PASSED, scales still short.**
+Two iterations after the product-form failure below:
+(1) q de-duped to the single max-threshold tail (exact given the conditioning —
+BCE_eff_neutral_question.md sec 6; the product under-counted, q ~ q_true^2 on
+track-free towers); (2) the tower BCE restricted to the stage that TRAINS calo
+params — in stage 4 (calo frozen, electron gun) the term is untrainable noise
+whose value RISES as the electron coins converge (single-track towers make the
+option-(i) model-draw conditioning maximally wrong), and it poisoned the
+PICK=best epoch selection (best=epoch 0) while every real term improved. Fixed
+by rerunning stage 4 from the stage-3 history with --calo-bce off
+(best epoch 31/42, e_eff back to 0.0066).
+Final card vs anchors (median |rel err|): efficiencies chad 0.0014 / e 0.0066 /
+mu 0.0025 (baseline quality); calo RESOLUTIONS mostly at-or-better than the
+count chi^2 (e.g. HCal forward_c_E 0.055 vs 3.56, forward_c_S 0.004, c_N 0.042);
+calo SCALES 0.13-0.17 — clearly better than or equal to the count-free floor
+(0.17-0.22) but ~15x short of the chi^2 baseline (~0.01). Remaining suspect: the
+residual conditioning bias in q's mean (the scale's home) — the (ii)/(iii)
+track-conditioning options are the designated lever. The stage-4 pathology is
+itself empirical evidence for option (iii) (coin marginalization).
+Earlier failed iterations preserved: `..._product/` (factorized q, all stages),
+`..._dedup_allstages/` (de-duped q, tower BCE in every stage).
+
+Original product-form diagnosis (2026-09-14): the decreed per-stage product is
+the prime suspect — for a tower with
 no track energy, stages 1/3 and 2/4 are duplicate thresholds, so
 q_factorized ~ q_true^2 (systematically low), and the fit compensates by
 mis-moving the scale that controls the Phi arguments; the single-draw track
