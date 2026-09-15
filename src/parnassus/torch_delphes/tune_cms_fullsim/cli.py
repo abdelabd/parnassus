@@ -277,6 +277,32 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--calo-bce-conditioning",
+        type=str,
+        default="sampled",
+        choices=["sampled", "expected", "marginal"],
+        help=(
+            "Track conditioning of the tower-BCE q (EFF_LOSS_PLAN.md Phase 2b): "
+            "'sampled' (default, option i) = this draw's masked track energies; "
+            "'expected' (ii) = the coin-expected track energy sum_i eps_i E_i; "
+            "'marginal' (iii) = coin marginalization — exact subset enumeration "
+            "for towers with <= 3 tracks, Gauss-Hermite beyond."
+        ),
+    )
+    parser.add_argument(
+        "--calo-bce-grads",
+        type=str,
+        default="detach",
+        choices=["detach", "live"],
+        help=(
+            "Gradient routing of the eps/E_pre factors in expected/marginal "
+            "conditioning: 'detach' (default) passes no gradients to the "
+            "efficiency/smearing params; 'live' lets the tower BCE push them "
+            "through the conversion channel (Phase 2b (b) arms; requires those "
+            "params trainable, e.g. stage3_calo_joint.yaml)."
+        ),
+    )
+    parser.add_argument(
         "--calo-bce-weight",
         type=float,
         default=CALO_BCE_WEIGHT,
@@ -664,6 +690,9 @@ def main() -> None:
             if photon_merge_radius is not None
             else None
         ),
+        # Tower-BCE track conditioning + gradient routing (Phase 2b).
+        tower_bce_conditioning=args.calo_bce_conditioning,
+        tower_bce_grads=args.calo_bce_grads,
     ).to(device)
 
     # The param config drives everything: ``value`` initializes every learnable

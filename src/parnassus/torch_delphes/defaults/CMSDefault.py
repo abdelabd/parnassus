@@ -114,6 +114,8 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         count_pt_min: float | None = None,
         count_abs_eta_max: float | None = None,
         photon_merger: nn.Module | None = None,
+        tower_bce_conditioning: str = "sampled",
+        tower_bce_grads: str = "detach",
     ) -> None:
         """Initialize the CMS detector simulation.
 
@@ -161,6 +163,29 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         self.learnable = learnable
         self.count_pt_min = count_pt_min
         self.count_abs_eta_max = count_abs_eta_max
+        # Tower-BCE track conditioning (EFF_LOSS_PLAN.md Phase 2b; loss-serving
+        # config only — the reconstructed objects are unaffected):
+        #   "sampled"  (default) = option (i): q conditions on this draw's masked
+        #              track energies, exactly today's behavior;
+        #   "expected" = option (ii): the coin-expected track energy
+        #              sum_i eps_i * E_i^(pre-mask smear) enters q's thresholds;
+        #   "marginal" = option (iii): q marginalizes the coin/smear randomness
+        #              (exact subset enumeration for towers with <= 3 tracks,
+        #              Gauss-Hermite over the moment-matched Normal beyond).
+        # tower_bce_grads: "detach" keeps the eps/E_pre factors OFF the graph (no
+        # gradients to efficiency/smearing params); "live" leaves them on (the
+        # conversion-channel joint fit — (b) arms).
+        if tower_bce_conditioning not in ("sampled", "expected", "marginal"):
+            raise ValueError(f"tower_bce_conditioning: {tower_bce_conditioning!r}")
+        if tower_bce_grads not in ("detach", "live"):
+            raise ValueError(f"tower_bce_grads: {tower_bce_grads!r}")
+        if tower_bce_grads == "live" and tower_bce_conditioning == "sampled":
+            raise ValueError(
+                "tower_bce_grads='live' requires conditioning 'expected' or "
+                "'marginal' (the sampled path carries no eps/E_pre factors)."
+            )
+        self.tower_bce_conditioning = tower_bce_conditioning
+        self.tower_bce_grads = tower_bce_grads
         self.photon_merger = photon_merger
 
         # Attribute-type declarations so mypy accepts the learnable / legacy
@@ -354,11 +379,39 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             muons_smeared,
         ])
 
+        # Tower-BCE track conditioning (Phase 2b, options (ii)/(iii)): per-track
+        # survival probability eps and PRE-mask smeared energy, row-aligned with
+        # merged_tracks (the efficiency mask keeps rows, and this concat order
+        # matches the TrackMerger's). Loss-serving only — nothing downstream of
+        # the reconstruction reads it.
+        track_cond = None
+        if self.learnable and self.tower_bce_conditioning != "sampled":
+            eps_parts, e_pre_parts = [], []
+            for pre, mod in (
+                (charged_hadrons_smeared_pre, self.ChargedHadronTrackingEfficiency),
+                (electrons_smeared_pre, self.ElectronTrackingEfficiency),
+                (muons_smeared_pre, self.MuonTrackingEfficiency),
+            ):
+                eps_parts.append(
+                    mod.compute_efficiency(pre[:, ColumnMap.PT], pre[:, ColumnMap.ETA_OUTER])
+                )
+                e_pre_parts.append(pre[:, ColumnMap.E])
+            eps = torch.cat(eps_parts)
+            e_pre = torch.cat(e_pre_parts)
+            if self.tower_bce_grads == "detach":
+                eps, e_pre = eps.detach(), e_pre.detach()
+            track_cond = {
+                "conditioning": self.tower_bce_conditioning,
+                "grads": self.tower_bce_grads,
+                "eps": eps,
+                "e_pre": e_pre,
+            }
+
         # ECal (4th return: differentiable per-region expected photon count; 5th:
         # per-tower count export for the merged-count composition; None unless
         # learnable)
         ecal_tracks, ecal_towers, eflow_photons, ecal_calo_counts, ecal_count_export = self.ECal(
-            particles_propagated, merged_tracks
+            particles_propagated, merged_tracks, track_cond=track_cond
         )
 
         # PhotonClusterMerger (optional): supercluster-scale merging of the
@@ -381,8 +434,16 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
 
         # HCal (4th return: per-region expected neutral-hadron count; None unless
         # learnable; per-tower export unused -- the NH stream is not merged)
+        # The ECal's track output is a row-subset of its input (track_is_eflow
+        # filter), so the conditioning arrays chain through the subset the ECal
+        # exports alongside its tracks.
+        hcal_track_cond = (
+            ecal_count_export.get("track_cond_out")
+            if (track_cond is not None and ecal_count_export is not None)
+            else None
+        )
         hcal_tracks, hcal_towers, eflow_neutral_hadrons, hcal_calo_counts, hcal_count_export = (
-            self.HCal(particles_propagated, ecal_tracks)
+            self.HCal(particles_propagated, ecal_tracks, track_cond=hcal_track_cond)
         )
 
         # CalorimeterMerger

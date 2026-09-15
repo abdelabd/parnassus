@@ -1,0 +1,47 @@
+# Stage 3 JOINT variant (EFF_LOSS_PLAN.md Phase 2b, the (b) "live gradients"
+# arms): the calo block AND the charged-hadron block (efficiency + smearing)
+# trainable TOGETHER on dijet, starting from stage-2's fitted history. This is a
+# deliberate, controlled violation of the one-block-per-stage rule: it exists so
+# the tower BCE's live eps/E_pre gradients (conversion channel: dead track ->
+# neutral excess) have somewhere to go — in the standard stage3_calo.yaml the
+# chad parameters are frozen and detach-vs-live is a no-op.
+# Pair-mass terms stay ON here (unlike stage3_calo.yaml's --no-pair-mass):
+# with the chad smearing trainable, the pair response is its width lever.
+# Acceptance test for any (b) run: the chad efficiency + smearing recovery must
+# not degrade vs their stage-2 values (see the plan).
+name: stage3_calo_joint
+process: dijet
+trainable:
+  # --- calo block (identical to stage3_calo.yaml) ---
+  - ECal.scale_module.scale_raw[0]
+  - ECal.scale_module.scale_raw[1]
+  - ECal.scale_module.scale_raw[2]
+  - ECal.resolution_func.common_c_E
+  - ECal.resolution_func.common_c_S
+  - ECal.resolution_func.common_c_N
+  - ECal.resolution_func.barrel_b
+  - ECal.resolution_func.endcap_a
+  - ECal.resolution_func.endcap_b
+  - ECal.resolution_func.forward_c_E
+  - ECal.resolution_func.forward_c_S
+  - HCal.scale_module.scale_raw[0]
+  - HCal.scale_module.scale_raw[1]
+  - HCal.resolution_func.central_c_E
+  - HCal.resolution_func.central_c_S
+  - HCal.resolution_func.forward_c_E
+  - HCal.resolution_func.forward_c_S
+  # --- charged-hadron block (identical to stage2_chads.yaml) ---
+  - ChargedHadronTrackingEfficiency.eff_logits[0]
+  - ChargedHadronTrackingEfficiency.eff_logits[1]
+  - ChargedHadronTrackingEfficiency.eff_logits[2]
+  - ChargedHadronTrackingEfficiency.eff_logits[3]
+  - ChargedHadronMomentumSmearing.resolution_module.a_raw[0]
+  - ChargedHadronMomentumSmearing.resolution_module.a_raw[1]
+  - ChargedHadronMomentumSmearing.resolution_module.a_raw[2]
+  - ChargedHadronMomentumSmearing.resolution_module.b_raw[0]
+  - ChargedHadronMomentumSmearing.resolution_module.b_raw[1]
+  - ChargedHadronMomentumSmearing.resolution_module.b_raw[2]
+  - ChargedHadronMomentumSmearing.resolution_module.scale_raw[0]
+  - ChargedHadronMomentumSmearing.resolution_module.scale_raw[1]
+  - ChargedHadronMomentumSmearing.resolution_module.scale_raw[2]
+extra_args: []

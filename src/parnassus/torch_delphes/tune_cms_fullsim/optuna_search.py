@@ -753,6 +753,13 @@ def main() -> None:
     # Tower-existence BCE (delphes mode only; see the tune_cms_fullsim CLI help).
     parser.add_argument("--calo-bce", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--calo-bce-weight", type=float, default=CALO_BCE_WEIGHT)
+    parser.add_argument(
+        "--calo-bce-conditioning", type=str, default="sampled",
+        choices=["sampled", "expected", "marginal"],
+    )
+    parser.add_argument(
+        "--calo-bce-grads", type=str, default="detach", choices=["detach", "live"]
+    )
     parser.add_argument("--event-weight", type=float, default=EVENT_WEIGHT)
     # Loss-definition switches of the per-pid losses (see tune_cms_fullsim.cli): one
     # study == one setting (guarded via study user_attrs below).
@@ -1013,6 +1020,8 @@ def main() -> None:
             photon_merger=(
                 PhotonClusterMerger(merge_radius) if merge_radius is not None else None
             ),
+            tower_bce_conditioning=args.calo_bce_conditioning,
+            tower_bce_grads=args.calo_bce_grads,
         ).to(device)
         pc.apply_param_config(trainee, cfg)
         # cfg's lr_scale already holds each group's ABSOLUTE lr, so global_lr = 1.
