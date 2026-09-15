@@ -482,6 +482,62 @@ closure rerun with `--calo-count-weight 0`, i.e. ZERO count terms of any kind
 Conclusion: the "calo count terms stay" decision is now empirically forced, not
 just argued. A count-free loss is viable for the tracking-efficiency block only.
 
+### Phase 2b — conditioning experiments (user-directed 2026-09-14): the 2x2 matrix
+
+Motivated by the remaining scales gap (0.13-0.17 vs the chi^2's ~0.01) and the
+stage-4 pathology, both of which point at the option-(i) model-draw
+conditioning. Try, IN ORDER: conditioning (ii) then (iii), EACH split into
+(a) detached and (b) live gradient routing — four runs:
+
+| run | conditioning | eff/smearing gradients |
+|-----|--------------|------------------------|
+| ii-a | expected track energy | `.detach()` — none |
+| ii-b | expected track energy | LIVE |
+| iii-a | full marginalization | `.detach()` — none |
+| iii-b | full marginalization | LIVE |
+
+**Definitions (per tower):**
+- (ii) replaces the sampled track energy in q's thresholds with its
+  coin-expectation over THIS draw's smears:
+  `E[E_trk] = sum_i eps_i * E_i^(sampled smear)`, with
+  `eps_i = compute_efficiency(pt_i, eta_outer_i)` of the track's species module
+  (pre-mask smeared kinematics), and correspondingly
+  `sigma_trk^2 -> sum_i eps_i * sigma_i^2`. Coins averaged, smears still
+  conditioned.
+- (iii) additionally marginalizes the track-side randomness: treat E_trk as
+  random with the coin+smear moments
+  `m = sum_i eps_i E_i`, `v = sum_i [eps_i(1-eps_i) E_i^2 + eps_i sigma_i^2]`,
+  and evaluate `q = E_{E_trk ~ N(m, v)}[Phi((a - ln c(E_trk))/b)]` by 1-D
+  Gauss-Hermite quadrature (the "numerical integral per tower").
+- (a)/(b): the eps_i and E_i factors above are detached (a) or left on the
+  graph (b). Under (b), the tower BCE hands eff_logits (and the track smearing
+  params through E_i) the physically-real conversion-channel gradient
+  (dead track -> neutral excess); see the routing note above.
+
+**Design constraint (matters!):** sequential stage 3 freezes ALL efficiency and
+smearing parameters, so (a) vs (b) is a no-op there — requires_grad=False blocks
+gradients regardless of detach. The experiment therefore runs on a JOINT
+stage-3 variant config (`stage3_calo_joint.yaml`: the calo block + the
+charged-hadron efficiency + chad smearing trainable together, starting from
+stage-2's fitted history). BOTH arms of each pair use this joint config so the
+pair differs ONLY in the detach. Stages 1-2 reused from the existing hungarian
+run; stage 4 refit from each variant's stage-3 history (tower BCE auto-scoped
+off there).
+
+**Plumbing:** `--calo-bce-conditioning {sampled,expected,marginal}` (default
+sampled = today's option (i)) and `--calo-bce-grads {detach,live}` (default
+detach); pre-mask smeared track tensors + per-track eps threaded from
+CMSDefault into the calo export.
+
+**Gates per variant:** (1) calo scales — the number to beat is 0.13-0.17
+(current sampled-conditioning result), target the chi^2's ~0.01; (2) calo
+resolutions stay at-or-better than current; (3) for the (b) arms ONLY: the chad
+efficiency and smearing recovery must not degrade vs their stage-2 values
+(the joint fit must not let the tower term contaminate the exactly-fitted
+blocks) — if it does, (b) is falsified and (a) stands.
+
+Output dirs: `doc/figure_seq_hung_nBCE_cond{ii,iii}_{detach,live}`.
+
 ### Step F1 — Merge `origin/diff_delphes_runze_cmssinglejet`, on a new branch
 
 `git merge-tree` (2026-09-10) shows the merge into `BCE_eff` is textually CLEAN —
