@@ -138,3 +138,38 @@ If (c)-with-plug-in already matches the gate, the mixed-tower integral never
 needs solving. If it doesn't, options escalate: a 1-D numerical integral over
 $E^{\mathrm{trk}}_t$ (cheap per tower), or restricting the BCE support to
 isolated-neutral towers where (c) is exact and keeping the chi² for the rest.
+
+## 6. De-duping
+
+"Duplicating" refers to counting the same random event multiple times. Walk through what the cascade actually is:
+
+All four cuts are thresholds on one random variable — the tower's single smeared energy draw $E^{\rm sm}$:
+
+$$
+\text{survive} \iff
+\underbrace{E^{\rm sm} > E_{\min}}_{c_1}
+\;\wedge\;
+\underbrace{E^{\rm sm} > S_{\min}\,\sigma}_{c_2}
+\;\wedge\;
+\underbrace{E^{\rm sm} > E_{\rm trk} + E_{\min}}_{c_3}
+\;\wedge\;
+\underbrace{E^{\rm sm} > E_{\rm trk} + S_{\min}\,\sigma_{\rm tot}}_{c_4}
+$$
+
+Four inequalities, one coin. The events are nested, not independent: if $E^{\rm sm}$ clears the highest bar, it has automatically cleared the other three. So the true (conditional) survival probability is a single tail probability at the maximum threshold:
+
+$$q^{\rm true} ;=; P!\big(E^{\rm sm} > \max_i c_i\big) ;=; \Phi!\left(\frac{a - \ln \max_i c_i}{b}\right),$$
+
+whereas the product form computes
+
+$$q^{\rm prod} ;=; \prod_i P\big(E^{\rm sm} > c_i\big),$$
+
+which treats the four inequalities as if each got its own independent smear draw. Since every factor is ≤ 1 and the true answer is just the smallest factor, the product always underestimates — and the "duplication" is most extreme in the most common case, the track-free tower (most photons): there $E_{\rm trk}=0$, so $c_3 = c_1$ identically and $c_4 = c_2$ identically (the track σ vanishes from $\sigma_{\rm tot}$). Stages 3 and 4 are literally stages 1 and 2 written down a second time, and the product squares them:
+
+$$q^{\rm prod} = p_1^2,p_2^2 \quad\text{vs}\quad q^{\rm true} = \min(p_1, p_2)\text{-ish}.$$
+
+Toy numbers: a photon tower with $p_1 = 0.95$ (comfortably above $E_{\min}$) and $p_2 = 0.8$ (significance is the binding cut). Truth: $q = 0.8$. Product: $0.95^2 \times 0.8^2 = 0.58$. The model claims 58% survival where reality is 80% — for every such tower. The fit can't fix that by any honest means, so it does the dishonest one: it inflates the energy scale (pushing the Φ arguments up) until predicted occupancy matches observed occupancy — landing the scale far from truth. That's exactly the "actively wrong, not merely weak" signature in the gate result.
+
+The dedupe fix is therefore: replace the sum of four log_ndtr terms with one log_ndtr at the element-wise max threshold, $\ln q = \log\Phi\big((a - \ln\max_i c_i)/b\big)$. Given everything we're conditioning on (sampled track energy, sampled σ — unchanged from your option (i) decision), this is exact, not another approximation — because the decision genuinely is "one draw clears the highest of four bars." It's a ~5-line change in the calo export, nothing else moves.
+
+One honesty note: this technically retires the "product over stages" decree rather than repairing it — the lesson from the gate is that these particular stages have no independent randomness to factorize over. A product form would be the right shape for stages with genuinely separate coins (e.g. if position smearing gated something, or the merger rolled its own dice); the four energy cuts just aren't that. Want me to make the change and rerun the gate?

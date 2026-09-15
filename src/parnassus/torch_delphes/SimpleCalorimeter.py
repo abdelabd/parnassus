@@ -920,9 +920,18 @@ class SimpleCalorimeter(nn.Module):
                 thresholds.append(track_e_d + self.energy_sig_min * denom_c)
             if self.count_pt_min is not None:
                 thresholds.append(track_e_d + self.count_pt_min * cosh_eta_d)
-            bce_logq = sum(
-                torch.special.log_ndtr((a - torch.log(c.clamp_min(1e-30))) / b)
-                for c in thresholds
+            # DE-DUPED (2026-09-14, after the factorized form failed the closure
+            # gate — EFF_LOSS_PLAN.md Phase 2 result): the four cuts are nested
+            # thresholds on ONE smear draw, so their joint probability is the
+            # single tail probability at the element-wise MAX threshold — exact
+            # given the conditioning, where the product of per-stage tails
+            # under-counts (q ~ q_true^2 on track-free towers, which drove the
+            # scales to a pseudo-truth). See BCE_eff_neutral_question.md sec 6.
+            c_max = thresholds[0]
+            for c in thresholds[1:]:
+                c_max = torch.maximum(c_max, c)
+            bce_logq = torch.special.log_ndtr(
+                (a - torch.log(c_max.clamp_min(1e-30))) / b
             )
             # Disjoint |eta|-region index in the count-region layout (-1 = out of
             # range, excluded from the support with the zero-deposit towers).

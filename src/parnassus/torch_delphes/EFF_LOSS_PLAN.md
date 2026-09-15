@@ -293,6 +293,13 @@ merged, stages 3-4 resumed from stage-2 history after the dijet merge.
    single-threshold marginal (a mis-specification in the sense of
    BCE_eff_neutral_question.md section 4). Accepted for simplicity; the closure
    gate measures whether the bias matters.
+
+   **AMENDED 2026-09-14 (after the gate FAILED on the product form — result
+   below): the four cuts are nested thresholds on one smear draw, so q is now
+   the single tail probability at the element-wise MAX threshold — exact given
+   the conditioning (BCE_eff_neutral_question.md section 6). The product form
+   remains the right shape only for stages with genuinely independent
+   randomness, of which this cascade has none.**
 3. **The end-to-end test is one sequential closure**: `run_sequential.sh` with
    the tower BCE active, saved to `doc/figure_seq_hung_neutral_BCE` (on the
    hungarian-labeled sample set; the tower labels themselves come from tower
