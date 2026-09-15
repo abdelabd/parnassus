@@ -83,6 +83,52 @@ OBSERVABLES: list[str] = [
 # pseudodata), "counts" in --mode fullsim (no labels until the Phase-2 matcher).
 EFF_LOSS_CHOICES: tuple[str, ...] = ("counts", "bce")
 
+# --existence for the tune entrypoints (CONSOLIDATE_MODES_PLAN.md 1a): the
+# umbrella toggle over the existence-term family. "counts" reproduces the
+# diff_delphes count-term losses; "bce" the BCE_eff champion (survival BCE +
+# tower BCE with the calo count terms off). It only fills DEFAULTS — any of
+# the three underlying knobs passed explicitly wins — and omitting it applies
+# no bundle at all (each knob keeps its own legacy default). Delphes-mode
+# only: "bce" is a hard error in fullsim mode (EFF_LOSS_PLAN.md Phase 3).
+EXISTENCE_CHOICES: tuple[str, ...] = ("counts", "bce")
+
+
+def resolve_existence_bundle(
+    mode: str,
+    existence: str | None,
+    eff_loss: str | None,
+    calo_bce: bool | None,
+    calo_count_weight: float | None,
+    default_calo_count_weight: float,
+) -> tuple[str, bool, float]:
+    """Resolve (eff_loss, calo_bce, calo_count_weight) from the --existence
+    umbrella. Each knob argument is the parsed CLI value with ``None`` meaning
+    "not passed explicitly"; explicit values always win over the bundle.
+    Shared by cli.py and optuna_search.py so the bundles cannot drift apart.
+    """
+    if existence is not None and existence not in EXISTENCE_CHOICES:
+        raise ValueError(f"--existence: {existence!r}")
+    if existence == "bce" and mode != "delphes":
+        raise SystemExit(
+            "--existence bce requires --mode delphes: fullsim has no survival "
+            "labels or tower-occupancy targets yet (EFF_LOSS_PLAN.md Phase 3)."
+        )
+    if existence == "counts":
+        bundle = ("counts", False, default_calo_count_weight)
+    elif existence == "bce":
+        bundle = ("bce", True, 0.0)
+    else:  # no umbrella: the legacy per-knob defaults
+        bundle = (
+            "bce" if mode == "delphes" else "counts",
+            False,
+            default_calo_count_weight,
+        )
+    return (
+        eff_loss if eff_loss is not None else bundle[0],
+        calo_bce if calo_bce is not None else bundle[1],
+        calo_count_weight if calo_count_weight is not None else bundle[2],
+    )
+
 
 # =============================================================================
 # Acceptance-cut defaults

@@ -76,7 +76,9 @@ from .config import (
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
     EFF_LOSS_CHOICES,
+    EXISTENCE_CHOICES,
     MODE_CHOICES,
+    resolve_existence_bundle,
 )
 
 from .dataloader import DelphesDataLoader
@@ -189,13 +191,14 @@ def main() -> None:
     parser.add_argument(
         "--calo-count-weight",
         type=float,
-        default=CALO_COUNT_WEIGHT,
+        default=None,
         help=(
             "Weight on the CALO-resolution expected-count terms (ecal_photon, "
             "hcal_neutral_hadron), kept SEPARATE from --count-weight. These must "
             "out-vote a wrong-signed Wasserstein gradient on the forward resolution "
             "coefficients (forward_c_E/forward_c_S/common_c_E), so they need a larger "
-            f"weight and a per-region-fair normalization. Default {CALO_COUNT_WEIGHT}. "
+            f"weight and a per-region-fair normalization. Default {CALO_COUNT_WEIGHT} "
+            "(0.0 under --existence bce; an explicit value wins over the bundle). "
             "Set 0 to disable the calo-resolution count gradient."
         ),
     )
@@ -213,6 +216,21 @@ def main() -> None:
             "count grew with N. A region with rate << this floor is regularized; a region "
             f"with rate >> it is unchanged. Default {COUNT_RATE_FLOOR}. Re-validate the "
             "count/shape balance with MCGEN_LOSS_DEBUG=1 if you change it."
+        ),
+    )
+    parser.add_argument(
+        "--existence",
+        type=str,
+        default=None,
+        choices=list(EXISTENCE_CHOICES),
+        help=(
+            "Umbrella toggle over the existence-term family "
+            "(CONSOLIDATE_MODES_PLAN.md): 'counts' = the count-term losses "
+            "(--eff-loss counts, tower BCE off, calo count terms on); 'bce' = "
+            "the BCE champion (--eff-loss bce, --calo-bce, "
+            "--calo-count-weight 0). Sets DEFAULTS only — any of those three "
+            "flags passed explicitly wins — and omitting it applies no bundle "
+            "(legacy per-knob defaults). 'bce' requires --mode delphes."
         ),
     )
     parser.add_argument(
@@ -262,7 +280,7 @@ def main() -> None:
     parser.add_argument(
         "--calo-bce",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help=(
             "Add the tower-existence BCE (EFF_LOSS_PLAN.md Phase 2): per materialized "
             "calo tower, the Bernoulli cross-entropy between the card's analytic "
@@ -273,7 +291,8 @@ def main() -> None:
             "here) and delphes mode (no photon merger). AUTO-SCOPED: in a fit with no "
             "trainable calo parameter (sequential stages 1/2/4) the term is disabled "
             "automatically — untrainable value noise there poisons best-epoch "
-            "selection (EFF_LOSS_PLAN.md Phase 2). Default off."
+            "selection (EFF_LOSS_PLAN.md Phase 2). Default off (ON under "
+            "--existence bce; an explicit flag wins over the bundle)."
         ),
     )
     parser.add_argument(
@@ -561,9 +580,19 @@ def main() -> None:
 
     # Resolve --mode + the acceptance-cut args (shared with optuna_search via runner).
     truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
-    # Resolve --eff-loss: default bce on labeled delphes-mode pseudodata, counts in
-    # fullsim mode (no survival labels until the Phase-2 gen-reco matcher).
-    eff_loss = args.eff_loss or ("bce" if args.mode == "delphes" else "counts")
+    # Resolve the --existence umbrella into the three underlying knobs
+    # (CONSOLIDATE_MODES_PLAN.md 1a): explicit flags win over the bundle; no
+    # --existence means the legacy per-knob defaults (eff-loss bce on labeled
+    # delphes-mode pseudodata / counts in fullsim, tower BCE off, calo counts
+    # at their default weight).
+    eff_loss, args.calo_bce, args.calo_count_weight = resolve_existence_bundle(
+        mode=args.mode,
+        existence=args.existence,
+        eff_loss=args.eff_loss,
+        calo_bce=args.calo_bce,
+        calo_count_weight=args.calo_count_weight,
+        default_calo_count_weight=CALO_COUNT_WEIGHT,
+    )
     log(
         f"[eff-loss] {eff_loss}"
         + (
@@ -679,8 +708,11 @@ def main() -> None:
             if photon_merge_radius is not None
             else None
         ),
-        # Tower-BCE gradient routing (conditioning is always marginal).
+        # Tower-BCE gradient routing (conditioning is always marginal); the
+        # track_cond/bce_* exports are skipped entirely when the fit doesn't
+        # consume them (counts mode).
         tower_bce_grads=args.calo_bce_grads,
+        tower_bce=args.calo_bce,
     ).to(device)
 
     # The param config drives everything: ``value`` initializes every learnable

@@ -138,7 +138,9 @@ from .config import (
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
     EFF_LOSS_CHOICES,
+    EXISTENCE_CHOICES,
     MODE_CHOICES,
+    resolve_existence_bundle,
 )
 from .dataloader import DelphesDataLoader
 from .distributed import _cleanup_distributed, _init_distributed
@@ -741,17 +743,21 @@ def main() -> None:
     )
     parser.add_argument("--pid-weight-floor", type=float, default=0.0)
     parser.add_argument("--count-weight", type=float, default=COUNT_WEIGHT)
-    parser.add_argument("--calo-count-weight", type=float, default=CALO_COUNT_WEIGHT)
+    parser.add_argument("--calo-count-weight", type=float, default=None)
     parser.add_argument("--count-rate-floor", type=float, default=COUNT_RATE_FLOOR)
-    # Efficiency-loss selection (see the tune_cms_fullsim CLI help): None resolves
-    # to 'bce' in --mode delphes and 'counts' in --mode fullsim.
+    # The --existence umbrella + its three underlying knobs (see the
+    # tune_cms_fullsim CLI help; resolution shared via config.resolve_existence_bundle):
+    # None defaults mean "not passed explicitly" so the bundle can fill them.
+    parser.add_argument(
+        "--existence", type=str, default=None, choices=list(EXISTENCE_CHOICES)
+    )
     parser.add_argument("--eff-loss", type=str, default=None, choices=list(EFF_LOSS_CHOICES))
     parser.add_argument("--bce-weight", type=float, default=BCE_WEIGHT)
     parser.add_argument(
         "--bce-weighting", type=str, default="pooled", choices=list(BCE_WEIGHTING_CHOICES)
     )
     # Tower-existence BCE (delphes mode only; see the tune_cms_fullsim CLI help).
-    parser.add_argument("--calo-bce", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--calo-bce", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--calo-bce-weight", type=float, default=CALO_BCE_WEIGHT)
     parser.add_argument(
         "--calo-bce-grads", type=str, default="detach", choices=["detach", "live"]
@@ -895,9 +901,16 @@ def main() -> None:
 
     # Resolve --mode + the acceptance-cut args (shared with the tuning CLI via runner).
     truth_pt_cut, reco_pt_cut, abs_eta_cut, truncate_chads = resolve_acceptance_cuts(args)
-    # Resolve --eff-loss like the tuning CLI: bce on labeled delphes-mode pseudodata,
-    # counts in fullsim mode (no survival labels until the Phase-2 matcher).
-    eff_loss = args.eff_loss or ("bce" if args.mode == "delphes" else "counts")
+    # Resolve the --existence umbrella exactly like the tuning CLI (shared helper;
+    # explicit flags win over the bundle, no umbrella = legacy per-knob defaults).
+    eff_loss, args.calo_bce, args.calo_count_weight = resolve_existence_bundle(
+        mode=args.mode,
+        existence=args.existence,
+        eff_loss=args.eff_loss,
+        calo_bce=args.calo_bce,
+        calo_count_weight=args.calo_count_weight,
+        default_calo_count_weight=CALO_COUNT_WEIGHT,
+    )
     if args.calo_bce and args.mode != "delphes":
         raise SystemExit(
             "--calo-bce currently requires --mode delphes (see the tune_cms_fullsim "
@@ -1017,6 +1030,7 @@ def main() -> None:
                 PhotonClusterMerger(merge_radius) if merge_radius is not None else None
             ),
             tower_bce_grads=args.calo_bce_grads,
+            tower_bce=args.calo_bce,
         ).to(device)
         pc.apply_param_config(trainee, cfg)
         # cfg's lr_scale already holds each group's ABSOLUTE lr, so global_lr = 1.

@@ -115,6 +115,7 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         count_abs_eta_max: float | None = None,
         photon_merger: nn.Module | None = None,
         tower_bce_grads: str = "detach",
+        tower_bce: bool = True,
     ) -> None:
         """Initialize the CMS detector simulation.
 
@@ -176,6 +177,12 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         if tower_bce_grads not in ("detach", "live"):
             raise ValueError(f"tower_bce_grads: {tower_bce_grads!r}")
         self.tower_bce_grads = tower_bce_grads
+        # tower_bce: build the track_cond export and the per-tower bce_* export
+        # (loss-serving only). False = a counts-mode fit that consumes neither
+        # skips their compute entirely (CONSOLIDATE_MODES_PLAN.md 1b); the
+        # calo soft-count exports are unaffected. Default True so a bare
+        # learnable card exports everything.
+        self.tower_bce = tower_bce
         self.photon_merger = photon_merger
 
         # Attribute-type declarations so mypy accepts the learnable / legacy
@@ -375,7 +382,7 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         # TrackMerger's). Loss-serving only — nothing downstream of the
         # reconstruction reads it.
         track_cond = None
-        if self.learnable:
+        if self.learnable and self.tower_bce:
             eps_parts, e_pre_parts = [], []
             for pre, mod in (
                 (charged_hadrons_smeared_pre, self.ChargedHadronTrackingEfficiency),
