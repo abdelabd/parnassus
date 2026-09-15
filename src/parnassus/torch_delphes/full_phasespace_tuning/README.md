@@ -62,7 +62,12 @@ This REQUIRES samples carrying the survival-label branches
 `../slurm_scripts/submit_truth_matched_survival_samples.sh`): point `SAMPLE_PATTERN`
 at them (see `../slurm_scripts/run_sequential_survival.sbatch`). On the old
 unlabeled samples run with `EXTRA_ARGS="--eff-loss counts"` (the legacy
-expected-count terms). The calo count terms are active either way.
+expected-count terms). The calo count terms are active either way — unless you
+run the count-free tower-BCE variant: `EXTRA_ARGS="--calo-count-weight 0
+--calo-bce"` is safe to pass GLOBALLY; the tower BCE auto-disables in any stage
+with no trainable calo parameter (stages 1/2/4), where it would otherwise be
+untrainable value noise that poisons best-epoch selection (see
+`../EFF_LOSS_PLAN.md` Phase 2).
 
 ## Run
 

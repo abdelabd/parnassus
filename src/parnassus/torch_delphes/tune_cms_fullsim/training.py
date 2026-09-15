@@ -313,6 +313,28 @@ def fit_card_to_fullsim(
     # All training losses accept the same count_weight / calo_count_weight / event_weight
     # and per-pid pid_weighting / pid_weight_floor knobs, so wrap unconditionally to inject
     # them. The eta-split / pair-mass knobs exist only on the two per-pid losses.
+    # Tower BCE auto-scoping: the term only exists to fit calo parameters. In a
+    # fit where NONE are trainable (sequential stages 1/2/4), it is untrainable
+    # VALUE noise — and its value can drift as other blocks converge (on the
+    # electron gun it rises steeply: single-track towers make the model-draw
+    # conditioning maximally wrong), which poisons the best-epoch selection
+    # (observed: stage 4 best=epoch 0 while every real term improved; see
+    # EFF_LOSS_PLAN.md Phase 2). Disable it here rather than trusting every
+    # caller to stage-scope the flag.
+    if calo_bce:
+        _core = card.module if isinstance(card, DDP) else card
+        _calo_trainable = any(
+            p.requires_grad for m in (_core.ECal, _core.HCal) for p in m.parameters()
+        )
+        if not _calo_trainable:
+            if _is_main(rank):
+                print(
+                    "  [tower-bce] no trainable calo parameters in this fit -> "
+                    "tower BCE disabled (untrainable value noise would poison "
+                    "best-epoch selection; EFF_LOSS_PLAN.md Phase 2)"
+                )
+            calo_bce = False
+
     base_loss_fn = get_loss_fn(loss_name)
     per_pid_kwargs = (
         {"eta_split": eta_split, "pair_mass": pair_mass, "pair_mass_weight": pair_mass_weight}

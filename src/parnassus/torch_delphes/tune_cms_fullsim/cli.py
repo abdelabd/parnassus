@@ -270,7 +270,10 @@ def main() -> None:
             "replacing the calo count terms as the calo membership gradient (run with "
             "--calo-count-weight 0). Per-region-fair combination, log-space "
             "evaluation, no probability floor. Requires a learnable card (always true "
-            "here) and delphes mode (no photon merger). Default off."
+            "here) and delphes mode (no photon merger). AUTO-SCOPED: in a fit with no "
+            "trainable calo parameter (sequential stages 1/2/4) the term is disabled "
+            "automatically — untrainable value noise there poisons best-epoch "
+            "selection (EFF_LOSS_PLAN.md Phase 2). Default off."
         ),
     )
     parser.add_argument(
