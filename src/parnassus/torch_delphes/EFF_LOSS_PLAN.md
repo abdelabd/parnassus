@@ -504,25 +504,42 @@ conditioning. Try, IN ORDER: conditioning (ii) then (iii), EACH split into
   (pre-mask smeared kinematics), and correspondingly
   `sigma_trk^2 -> sum_i eps_i * sigma_i^2`. Coins averaged, smears still
   conditioned.
-- (iii) additionally marginalizes the track-side randomness: treat E_trk as
-  random with the coin+smear moments
-  `m = sum_i eps_i E_i`, `v = sum_i [eps_i(1-eps_i) E_i^2 + eps_i sigma_i^2]`,
-  and evaluate `q = E_{E_trk ~ N(m, v)}[Phi((a - ln c(E_trk))/b)]` by 1-D
-  Gauss-Hermite quadrature (the "numerical integral per tower").
+- (iii) additionally marginalizes the track-side randomness. HYBRID evaluation
+  (user dislikes loss approximations; 2026-09-14): for towers with few tracks
+  (n <= 3, incl. the pathological single-track case) enumerate the coin subsets
+  EXACTLY (2^n <= 8 Phi-terms); only for busier towers moment-match E_trk to
+  N(m, v) with the exact coin+smear moments
+  `m = sum_i eps_i E_i`, `v = sum_i [eps_i(1-eps_i) E_i^2 + eps_i sigma_i^2]`
+  and integrate by 1-D Gauss-Hermite quadrature (~10 nodes; standard tool for
+  Gaussian expectations of Phi; exact for polynomials of degree 2K-1, and CLT
+  makes many-track E_trk near-Gaussian precisely where enumeration is
+  expensive). NOT needed for (ii), which is quadrature-free by construction
+  (a closed-form plug-in of the coin-expected track energy).
 - (a)/(b): the eps_i and E_i factors above are detached (a) or left on the
   graph (b). Under (b), the tower BCE hands eff_logits (and the track smearing
   params through E_i) the physically-real conversion-channel gradient
   (dead track -> neutral excess); see the routing note above.
 
-**Design constraint (matters!):** sequential stage 3 freezes ALL efficiency and
-smearing parameters, so (a) vs (b) is a no-op there — requires_grad=False blocks
-gradients regardless of detach. The experiment therefore runs on a JOINT
-stage-3 variant config (`stage3_calo_joint.yaml`: the calo block + the
-charged-hadron efficiency + chad smearing trainable together, starting from
-stage-2's fitted history). BOTH arms of each pair use this joint config so the
-pair differs ONLY in the detach. Stages 1-2 reused from the existing hungarian
-run; stage 4 refit from each variant's stage-3 history (tower BCE auto-scoped
-off there).
+**Design constraint + config assignment (user ruling 2026-09-14):** sequential
+stage 3 freezes ALL efficiency and smearing parameters, so live gradients need a
+joint config to have anywhere to go. Ruling:
+- (a) DETACHED arms use the standard `stage3_calo.yaml` (calo-only trainable) —
+  i.e. today's champion pipeline with only the conditioning upgraded.
+- (b) LIVE arms use `stage3_calo_joint.yaml` (calo block + chad efficiency +
+  chad smearing trainable, starting from stage-2's fitted history).
+Note the (a)/(b) pairs therefore differ in BOTH the detach and the trainable
+set; if a (b) result ever needs disambiguating ("was it the gradients or just
+the unfrozen chads refitting on dijet shape terms?"), the control is a
+joint-config-with-detach run — not scheduled unless needed.
+Stages 1-2 reused from the existing hungarian run; stage 4 refit from each
+variant's stage-3 history (tower BCE auto-scoped off there).
+
+**Clarification of the (b) gate (it is an ACCEPTANCE TEST, not a design
+choice):** after a (b) run finishes, compare its fitted chad efficiency +
+smearing against truth. If they are worse than stage-2 quality, the live
+gradients did net harm (the imperfect tower term used the chad parameters to
+absorb its own bias) and (b) is rejected; adoption of live gradients requires
+"calo improves AND chads don't degrade".
 
 **Plumbing:** `--calo-bce-conditioning {sampled,expected,marginal}` (default
 sampled = today's option (i)) and `--calo-bce-grads {detach,live}` (default
