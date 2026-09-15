@@ -131,7 +131,6 @@ class SimpleCalorimeter(nn.Module):
         count_tau_rel: float = 0.05,
         count_pt_min: float | None = None,
         count_abs_eta_max: float | None = None,
-        tower_bce_threshold: str = "sampled_sigma",
     ) -> None:
         super().__init__()
 
@@ -163,18 +162,6 @@ class SimpleCalorimeter(nn.Module):
         # towers beyond the data acceptance fall in no region.
         self.count_pt_min = count_pt_min
         self.count_abs_eta_max = count_abs_eta_max
-        # How the tower-BCE evaluates the two sigma-dependent cascade thresholds
-        # (loss-side only; the hard forward is untouched). "sampled_sigma" plugs
-        # in sigma_after evaluated at THIS draw's smeared energy — a fixed
-        # threshold that mis-specifies the self-consistent hard cut
-        # E_sm > S * sigma(E_sm) and over-predicts q near threshold (MC q*
-        # calibration 2026-09-15: +0.06 bias on near-threshold trackless HCal
-        # towers). "self_consistent" solves the fixed point E* = S * sigma(E*)
-        # (unique crossing: E - S*sigma(E) is negative at 0 and increasing for
-        # S*c_E < 1), making the trackless tail exact under the lognormal.
-        if tower_bce_threshold not in ("sampled_sigma", "self_consistent"):
-            raise ValueError(f"tower_bce_threshold: {tower_bce_threshold!r}")
-        self.tower_bce_threshold = tower_bce_threshold
 
         # Optional per-region energy scale (for differentiable tuning).
         # Applied to the tower energy passed into the log-normal smear so
@@ -968,41 +955,39 @@ class SimpleCalorimeter(nn.Module):
                 cosh_r = cosh_eta_d if rows is None else cosh_eta_d[rows]
                 cs = [torch.full_like(e_trk_t, self.energy_min), e_trk_t + self.energy_min]
                 if not self.disable_significance_cut:
-                    if self.tower_bce_threshold == "self_consistent":
-                        # The hard cuts are E_sm > S*sigma(E_sm) and
-                        # E_sm > E_trk + S*sqrt(sig_trk^2 + sigma(E_sm)^2), both
-                        # self-consistent in E_sm with a unique upward crossing,
-                        # so the pass event is E_sm > E* with E* the fixed point.
-                        # Iterate with the energy argument detached each round
-                        # (the sigma_after_c convention: resolution coefficients
-                        # live, energies off the graph); the map contracts —
-                        # derivative at the root is S*sigma'(E*) ~ 1/2 for the
-                        # stochastic term. The result is draw-independent.
-                        eta_r = (
-                            tower_eta_center
-                            if rows is None
-                            else tower_eta_center[rows]
+                    # SELF-CONSISTENT thresholds, hardcoded (decision
+                    # 2026-09-15 after the closure gate passed; the retired
+                    # "sampled_sigma" plug-in — sigma at this draw's sampled
+                    # smeared energy — over-predicted q near threshold and
+                    # created the HCal-scale pseudo-truth; last version with
+                    # the option: EFF_LOSS_PLAN.md "HCal-scale debug").
+                    # The hard cuts are E_sm > S*sigma(E_sm) and
+                    # E_sm > E_trk + S*sqrt(sig_trk^2 + sigma(E_sm)^2), both
+                    # self-consistent in E_sm with a unique upward crossing,
+                    # so the pass event is E_sm > E* with E* the fixed point.
+                    # Iterate with the energy argument detached each round
+                    # (the sigma_after_c convention: resolution coefficients
+                    # live, energies off the graph); the map contracts —
+                    # derivative at the root is S*sigma'(E*) ~ 1/2 for the
+                    # stochastic term. The result is draw-independent.
+                    eta_r = (
+                        tower_eta_center
+                        if rows is None
+                        else tower_eta_center[rows]
+                    )
+                    smin = self.energy_sig_min
+                    e2 = smin * sig_c
+                    e4 = e_trk_t + smin * torch.sqrt(sig_trk2_t + sig_c * sig_c)
+                    for _ in range(25):
+                        e2 = smin * self.resolution_func(
+                            eta_r, e2.detach().clamp_min(1e-30)
                         )
-                        smin = self.energy_sig_min
-                        e2 = smin * sig_c
-                        e4 = e_trk_t + smin * torch.sqrt(sig_trk2_t + sig_c * sig_c)
-                        for _ in range(25):
-                            e2 = smin * self.resolution_func(
-                                eta_r, e2.detach().clamp_min(1e-30)
-                            )
-                            s4 = self.resolution_func(
-                                eta_r, e4.detach().clamp_min(1e-30)
-                            )
-                            e4 = e_trk_t + smin * torch.sqrt(sig_trk2_t + s4 * s4)
-                        cs.append(e2)
-                        cs.append(e4)
-                    else:
-                        cs.append(self.energy_sig_min * sig_c)
-                        cs.append(
-                            e_trk_t
-                            + self.energy_sig_min
-                            * torch.sqrt(sig_trk2_t + sig_c * sig_c)
+                        s4 = self.resolution_func(
+                            eta_r, e4.detach().clamp_min(1e-30)
                         )
+                        e4 = e_trk_t + smin * torch.sqrt(sig_trk2_t + s4 * s4)
+                    cs.append(e2)
+                    cs.append(e4)
                 if self.count_pt_min is not None:
                     cs.append(e_trk_t + self.count_pt_min * cosh_r)
                 cm = cs[0]

@@ -672,8 +672,13 @@ enumeration+Gauss-Hermite path is the only tower-BCE conditioning code path
 `sampled`/`expected` implementations (and the reproduce.sh files / debug
 scripts that reference the flag) live at commit `2ae7c2a` and earlier.
 `--calo-bce-grads {detach,live}` is kept (detach default; live remains
-rejected by the acceptance test). The `--calo-bce-threshold` default is still
-`sampled_sigma` (flip not yet decided).
+rejected by the acceptance test).
+
+**DECISION (user, 2026-09-15, after the full 1->4 closures):** the
+self-consistent thresholds are HARDCODED — `--calo-bce-threshold` (and the
+`tower_bce_threshold` kwarg) removed; the fixed-point evaluation is the only
+implementation. Last version with the sampled_sigma option: the commit before
+this one.
 
 **Gotcha discovered on the way (pre-existing, affects analysis scripts only):**
 `card(input)` MUTATES its input tensor in place (10 columns). Training is safe

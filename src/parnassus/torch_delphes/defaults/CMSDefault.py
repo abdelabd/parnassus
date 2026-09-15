@@ -115,7 +115,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         count_abs_eta_max: float | None = None,
         photon_merger: nn.Module | None = None,
         tower_bce_grads: str = "detach",
-        tower_bce_threshold: str = "sampled_sigma",
     ) -> None:
         """Initialize the CMS detector simulation.
 
@@ -177,13 +176,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         if tower_bce_grads not in ("detach", "live"):
             raise ValueError(f"tower_bce_grads: {tower_bce_grads!r}")
         self.tower_bce_grads = tower_bce_grads
-        # tower_bce_threshold: how the tower BCE's two sigma-dependent cascade
-        # thresholds are evaluated (see SimpleCalorimeter): "sampled_sigma"
-        # (legacy, biased near threshold) vs "self_consistent" (fixed-point
-        # E* = S*sigma(E*); exact trackless tail).
-        if tower_bce_threshold not in ("sampled_sigma", "self_consistent"):
-            raise ValueError(f"tower_bce_threshold: {tower_bce_threshold!r}")
-        self.tower_bce_threshold = tower_bce_threshold
         self.photon_merger = photon_merger
 
         # Attribute-type declarations so mypy accepts the learnable / legacy
@@ -722,7 +714,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             compute_soft_count=self.learnable,
             count_pt_min=self.count_pt_min,
             count_abs_eta_max=self.count_abs_eta_max,
-            tower_bce_threshold=self.tower_bce_threshold,
         )
 
     def _setup_HCal(self):
@@ -878,5 +869,4 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             compute_soft_count=self.learnable,
             count_pt_min=self.count_pt_min,
             count_abs_eta_max=self.count_abs_eta_max,
-            tower_bce_threshold=self.tower_bce_threshold,
         )

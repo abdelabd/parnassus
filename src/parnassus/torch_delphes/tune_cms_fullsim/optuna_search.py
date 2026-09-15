@@ -756,10 +756,6 @@ def main() -> None:
     parser.add_argument(
         "--calo-bce-grads", type=str, default="detach", choices=["detach", "live"]
     )
-    parser.add_argument(
-        "--calo-bce-threshold", type=str, default="sampled_sigma",
-        choices=["sampled_sigma", "self_consistent"],
-    )
     parser.add_argument("--event-weight", type=float, default=EVENT_WEIGHT)
     # Loss-definition switches of the per-pid losses (see tune_cms_fullsim.cli): one
     # study == one setting (guarded via study user_attrs below).
@@ -1021,7 +1017,6 @@ def main() -> None:
                 PhotonClusterMerger(merge_radius) if merge_radius is not None else None
             ),
             tower_bce_grads=args.calo_bce_grads,
-            tower_bce_threshold=args.calo_bce_threshold,
         ).to(device)
         pc.apply_param_config(trainee, cfg)
         # cfg's lr_scale already holds each group's ABSOLUTE lr, so global_lr = 1.

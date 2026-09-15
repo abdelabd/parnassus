@@ -292,19 +292,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--calo-bce-threshold",
-        type=str,
-        default="sampled_sigma",
-        choices=["sampled_sigma", "self_consistent"],
-        help=(
-            "How the tower-BCE evaluates the two sigma-dependent cascade "
-            "thresholds: 'sampled_sigma' (legacy) plugs in sigma at this "
-            "draw's sampled smeared energy — biased near threshold; "
-            "'self_consistent' solves the fixed point E* = S*sigma(E*), the "
-            "exact tail of the hard cut E_sm > S*sigma(E_sm)."
-        ),
-    )
-    parser.add_argument(
         "--calo-bce-weight",
         type=float,
         default=CALO_BCE_WEIGHT,
@@ -694,7 +681,6 @@ def main() -> None:
         ),
         # Tower-BCE gradient routing (conditioning is always marginal).
         tower_bce_grads=args.calo_bce_grads,
-        tower_bce_threshold=args.calo_bce_threshold,
     ).to(device)
 
     # The param config drives everything: ``value`` initializes every learnable

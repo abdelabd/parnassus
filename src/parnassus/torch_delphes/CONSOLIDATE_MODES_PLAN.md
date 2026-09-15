@@ -58,14 +58,17 @@ existing knobs' DEFAULTS; every underlying knob stays overridable:
 |---|---|---|
 | `--eff-loss` | `counts` | `bce` |
 | `--calo-bce` | off | ON (marginal conditioning — the only code path) |
-| `--calo-bce-threshold` | n/a | `self_consistent` (the validated champion) |
 | `--calo-count-weight` | default (1.0) | 0.0 |
 | tracking count terms | on | off (structurally, as today) |
 
-**Decision needed (user):** `--existence bce` bundles the CHAMPION settings
-(self-consistent thresholds + calo count terms off), i.e. the closure-passing
-configuration — not BCE_eff's literal flag defaults (`sampled_sigma`,
-calo-counts on). Explicit per-knob flags override the bundle. Confirm.
+(The tower-BCE thresholds are self-consistent UNCONDITIONALLY — the
+`--calo-bce-threshold` option was removed and the fixed-point evaluation
+hardcoded before phase 1 started, per the user's 2026-09-15 ruling; own
+commit. The bundle therefore only sets the three knobs above.)
+
+**Decision (user, 2026-09-15): confirmed** — `--existence bce` bundles the
+champion settings; explicit per-knob flags override the bundle. Also
+confirmed: gate the tower-BCE export off in counts mode (§1b).
 
 Precedence rule (simple + testable): argparse defaults < `--existence` bundle
 < explicitly passed flags. Implemented by resolving the bundle only for args
