@@ -555,6 +555,101 @@ blocks) — if it does, (b) is falsified and (a) stands.
 
 Output dirs: `doc/figure_seq_hung_nBCE_cond{ii,iii}_{detach,live}`.
 
+### Phase 2b — RESULTS (all four arms + the joint-detach control + pass-2s; 2026-09-15)
+
+Median |rel err| vs truth per block (fitted_config.yaml vs param_config_all):
+
+| block | ii-a | iii-a | ii-b | iii-b | CONTROL (joint+detach) | chi^2 ref |
+|---|---|---|---|---|---|---|
+| chad eff | 0.0014 | ~ii-a | 0.0077 | (worse) | 0.0033 | — |
+| chad smear | 0.0538 | ~ii-a | 0.0325 | 0.071 | 0.0568 | — |
+| ECal scales | 0.0113 | ~ii-a | 0.0106 | ~ | 0.0174 | 0.0092 |
+| HCal scales | 0.1374 | 0.13-0.17 | 0.1420 | 0.13-0.17 | 0.1174 | 0.014 |
+
+Verdicts:
+1. **(iii) ~ (ii)**: marginal conditioning bought nothing over expected under
+   the (then-current) thresholds — the extra machinery is not the lever.
+2. **(b) live gradients REJECTED by the acceptance test**: chad eff degrades
+   (0.0014 -> 0.0077) and the control run pins it on the gradients, not the
+   joint config (control keeps 0.0033 with the same trainable set but detached);
+   chad smear results are inconsistent between ii-b (0.033) and iii-b (0.071).
+3. **HCal scales fail in EVERY arm** (~0.75/0.75 fitted vs truth 0.849/0.893,
+   near-identical across runs) — conditioning-independent, so the defect had to
+   be in the tower-smear marginal itself. See the HCal debug below.
+4. Pass-2 sweeps (stages 2->4 rerun from ii-a's fitted card): full-LR pass 2
+   improves ECal scales 0.0113 -> 0.0071 (beats the chi^2 ref) and chad smear
+   0.054 -> 0.031, but degrades chad eff to 0.0088 and leaves HCal untouched
+   (0.144). The lr/10 variant (archived `..._pass2_lr01`) got ECal 0.0087 but
+   chad smear 0.139. Pass 2 is not the HCal fix.
+
+### HCal-scale debug (overnight 2026-09-14/15) — root cause found + fix
+
+Question: why do HCal scales converge with counts info but not BCE info, and
+why don't they move right when everything else is converged?
+
+**Exonerated:** the optimizer and the plumbing. Gradient fingerprint at the
+fitted point: distinct, finite-difference-consistent per-region gradients
+([+0.0057, +0.0049] on scale_raw) — no broadcast/tying bug.
+
+**Convicted (value-level pseudo-truth):** frozen-truth scans (everything at
+truth, sweep one HCal scale): the count chi^2 minimizes exactly at truth
+(0.849 / 0.893) while TowerBceHcal is MONOTONE toward low scale in region 0
+(no interior minimum) and has a shallow biased-low minimum ~0.83 in region 1.
+The fitted 0.75 is the equilibrium of this wrong pull against the shape terms.
+
+**Root cause:** the tower BCE evaluated the two sigma-dependent cascade
+thresholds at sigma_after(THIS DRAW's sampled smeared energy) — a fixed
+threshold plugged into the tail probability. But the hard cut is
+`E_sm > S * sigma(E_sm)`, SELF-CONSISTENT in E_sm: the true pass event is
+`E_sm > E*` where E* is the unique fixed point of `E = S * sigma(E)`
+(unique because E - S*sigma(E) rises from negative through one crossing when
+S*c_E < 1). Same for the neutral-significance cut with
+`E = E_trk + S*sqrt(sig_trk^2 + sigma(E)^2)`. The sampled-sigma plug-in is
+biased near threshold AND adds draw-dependent variance.
+
+**MC q* recalibration** (`doc/hcal_bce_debug/hcal_mc_qstar_v2.py`; 150
+replicas x 256 dijet events at truth; a v1 of this MC was CORRUPTED — see the
+gotcha below): bias (q_cand - q*) with the legacy sampled-sigma thresholds vs
+the self-consistent fix, HCal support towers:
+
+| trackfrac bin | n | biasA (sampled_sigma) | biasB (self_consistent) |
+|---|---|---|---|
+| trackless | 71730 | +0.0296 | **+0.0000** |
+| (0, 0.3] | 9977 | +0.0756 | -0.0248 |
+| (0.3, 0.6] | 4921 | +0.0465 | -0.0352 |
+| near-threshold trackless | 16937 | +0.0713 | **-0.0013** |
+
+Near-threshold RMS |q - q*| halves (0.131 -> 0.054). The trackless tail is
+EXACT under the fix (as theory says: lognormal marginal + exact threshold);
+the residual negative bias sits only on track-carrying towers = the (ii)
+expected-conditioning residual, now unmasked.
+
+**Frozen-truth scan under the fix** (`doc/hcal_bce_debug/hcal_scan_v2.py`):
+region 1 (forward, trackless): minimum moves from ~0.83 to 0.90 — AT truth
+(0.893). Region 0 (central, track-rich): monotone -> interior minimum at
+~0.90-0.95, residual high-side shift consistent with the tracked-tower
+conditioning bias. Both logs in `doc/hcal_bce_debug/`.
+
+**Code:** `tower_bce_threshold {sampled_sigma,self_consistent}` on
+SimpleCalorimeter/CMSDefault, CLI `--calo-bce-threshold`; self_consistent
+solves the fixed points by 25 contraction iterations (energy argument detached
+per iteration — the sigma_after_c gradient convention; resolution coefficients
+stay live). Default stays sampled_sigma until the closure gate passes.
+
+**Closure validation (running overnight):** stage-3-only refits from ii-a's
+stage-2 history: `doc/figure_seq_hung_nBCE_condii_selfcon` (expected cond.)
+and `doc/figure_seq_hung_nBCE_condiii_selfcon` (marginal cond. — tests whether
+(iii) now matters, since the MC says the remaining bias is conditioning-side).
+Gate: HCal scales beat 0.13; target the chi^2's ~0.01.
+
+**Gotcha discovered on the way (pre-existing, affects analysis scripts only):**
+`card(input)` MUTATES its input tensor in place (10 columns). Training is safe
+(`tp[mask]` advanced indexing copies), but any script looping
+`card(flat)` over replicas feeds each replica the previous one's mutated
+input — this corrupted MC-v1 and explains its "tower set changed across
+replicas" assert. Always pass `flat.clone()`. With that, the forward is
+exactly deterministic per seed (tower set byte-stable across replicas).
+
 ### Step F1 — Merge `origin/diff_delphes_runze_cmssinglejet`, on a new branch
 
 `git merge-tree` (2026-09-10) shows the merge into `BCE_eff` is textually CLEAN —

@@ -1,0 +1,24 @@
+rep 0: 86628 towers
+rep 25: 86628 towers
+rep 50: 86628 towers
+rep 75: 86628 towers
+rep 100: 86628 towers
+rep 125: 86628 towers
+
+86628 stable towers (of 86628 keys), 150 replicas, device=cuda
+
+== all stable towers ==
+   trackfrac bin       n     <q*>  biasA(sampled)  biasB(selfcon)
+[-0.01, 0.00]   71730   0.1177         +0.0296         +0.0000
+[ 0.00, 0.30]    9977   0.0980         +0.0756         -0.0248
+[ 0.30, 0.60]    4921   0.1081         +0.0465         -0.0352
+             ALL   86628   0.1149         +0.0359         -0.0048
+
+== near-threshold (0.05 < q* < 0.95) ==
+   trackfrac bin       n     <q*>  biasA(sampled)  biasB(selfcon)
+[-0.01, 0.00]   16937   0.3407         +0.0713         -0.0013
+[ 0.00, 0.30]    5064   0.1682         +0.0584         -0.0511
+[ 0.30, 0.60]    2723   0.1724         +0.0177         -0.0642
+             ALL   24724   0.2868         +0.0627         -0.0184
+near-threshold RMS |q-q*| A sampled_sigma: 0.1309
+near-threshold RMS |q-q*| B self_consistent: 0.0542
