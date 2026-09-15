@@ -636,11 +636,33 @@ solves the fixed points by 25 contraction iterations (energy argument detached
 per iteration — the sigma_after_c gradient convention; resolution coefficients
 stay live). Default stays sampled_sigma until the closure gate passes.
 
-**Closure validation (running overnight):** stage-3-only refits from ii-a's
-stage-2 history: `doc/figure_seq_hung_nBCE_condii_selfcon` (expected cond.)
-and `doc/figure_seq_hung_nBCE_condiii_selfcon` (marginal cond. — tests whether
-(iii) now matters, since the MC says the remaining bias is conditioning-side).
-Gate: HCal scales beat 0.13; target the chi^2's ~0.01.
+**Closure validation — GATE PASSED (2026-09-15, ~02:45):** stage-3-only refits
+from ii-a's stage-2 history (same flags as ii-a + `--calo-bce-threshold
+self_consistent`; exact commands in each dir's reproduce.sh; HZZ4l PDFs
+rendered on-GPU in both dirs). Median |rel err| vs truth:
+
+| block | chi^2 (dd) | ii-a (sampled_sigma) | ii+selfcon | iii+selfcon |
+|---|---|---|---|---|
+| ECal scales | 0.0092 | 0.0113 | 0.0018 | **0.0022** |
+| ECal res | 0.1293 | 0.0812 | 0.0881 | **0.0823** |
+| HCal scales | 0.0136 | 0.1374 | 0.0506 | **0.0168** |
+| HCal res | 1.3940 | 0.3665 | 0.8099 | 0.9398 |
+
+- **iii+selfcon fitted HCal scales 0.8650 / 0.9063 vs truth 0.8487 / 0.8934 —
+  both ~1%, matching the chi^2 quality (0.014).** ii+selfcon gets region 1
+  exactly (0.9049) but keeps a high-side region-0 residual (0.9237 vs 0.8487)
+  — precisely the tracked-tower conditioning bias the MC table predicts, and
+  marginal conditioning (iii) removes it. So (iii) DOES matter once the
+  thresholds are right (reversing the earlier "(iii) ~ (ii)" verdict, which
+  was measured under the broken thresholds).
+- ECal scales improve ~6x over ii-a and ~4x over the chi^2 reference.
+- HCal res looks worse than ii-a (0.94 vs 0.37) but BOTH beat the chi^2
+  reference's 1.39 — that block is poorly determined in every pipeline (its
+  apparent quality anticorrelates with how wrong the scales are; ii-a's "good"
+  0.37 was the res absorbing the mis-fitted scales).
+- Default (`sampled_sigma`) deliberately NOT flipped yet — recommend
+  `--calo-bce-threshold self_consistent` + `--calo-bce-conditioning marginal`
+  becomes the new champion setting; morning decision.
 
 **Gotcha discovered on the way (pre-existing, affects analysis scripts only):**
 `card(input)` MUTATES its input tensor in place (10 columns). Training is safe
