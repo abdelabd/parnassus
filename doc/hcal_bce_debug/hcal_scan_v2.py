@@ -1,5 +1,9 @@
 """Frozen-truth HCal scale scan v2 — A/B of the tower-BCE threshold modes.
 
+HISTORICAL (pinned to commit 2ae7c2a): this script passes
+tower_bce_conditioning="expected", an option removed when marginal became the
+only code path (2026-09-15). To rerun it, check out 2ae7c2a.
+
 Everything at truth except one HCal physical scale; sweep it and record the
 TowerBceHcal value under threshold mode A (sampled_sigma, legacy) and
 B (self_consistent), plus the count chi^2 for reference. v1 (mode A only,

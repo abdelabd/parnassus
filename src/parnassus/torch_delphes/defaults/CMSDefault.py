@@ -114,7 +114,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         count_pt_min: float | None = None,
         count_abs_eta_max: float | None = None,
         photon_merger: nn.Module | None = None,
-        tower_bce_conditioning: str = "sampled",
         tower_bce_grads: str = "detach",
         tower_bce_threshold: str = "sampled_sigma",
     ) -> None:
@@ -164,28 +163,19 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         self.learnable = learnable
         self.count_pt_min = count_pt_min
         self.count_abs_eta_max = count_abs_eta_max
-        # Tower-BCE track conditioning (EFF_LOSS_PLAN.md Phase 2b; loss-serving
-        # config only — the reconstructed objects are unaffected):
-        #   "sampled"  (default) = option (i): q conditions on this draw's masked
-        #              track energies, exactly today's behavior;
-        #   "expected" = option (ii): the coin-expected track energy
-        #              sum_i eps_i * E_i^(pre-mask smear) enters q's thresholds;
-        #   "marginal" = option (iii): q marginalizes the coin/smear randomness
-        #              (exact subset enumeration for towers with <= 3 tracks,
-        #              Gauss-Hermite over the moment-matched Normal beyond).
+        # Tower-BCE track conditioning is MARGINAL, unconditionally (decision
+        # 2026-09-15 after the Phase-2b closures; loss-serving config only —
+        # the reconstructed objects are unaffected): q marginalizes the coin
+        # randomness of the contributing tracks (exact subset enumeration for
+        # towers with <= 3 tracks, Gauss-Hermite over the moment-matched
+        # Normal beyond). The retired "sampled"/"expected" options lived until
+        # commit 2ae7c2a.
         # tower_bce_grads: "detach" keeps the eps/E_pre factors OFF the graph (no
         # gradients to efficiency/smearing params); "live" leaves them on (the
-        # conversion-channel joint fit — (b) arms).
-        if tower_bce_conditioning not in ("sampled", "expected", "marginal"):
-            raise ValueError(f"tower_bce_conditioning: {tower_bce_conditioning!r}")
+        # conversion-channel joint fit — rejected by the Phase-2b acceptance
+        # test but kept as an option).
         if tower_bce_grads not in ("detach", "live"):
             raise ValueError(f"tower_bce_grads: {tower_bce_grads!r}")
-        if tower_bce_grads == "live" and tower_bce_conditioning == "sampled":
-            raise ValueError(
-                "tower_bce_grads='live' requires conditioning 'expected' or "
-                "'marginal' (the sampled path carries no eps/E_pre factors)."
-            )
-        self.tower_bce_conditioning = tower_bce_conditioning
         self.tower_bce_grads = tower_bce_grads
         # tower_bce_threshold: how the tower BCE's two sigma-dependent cascade
         # thresholds are evaluated (see SimpleCalorimeter): "sampled_sigma"
@@ -387,13 +377,13 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             muons_smeared,
         ])
 
-        # Tower-BCE track conditioning (Phase 2b, options (ii)/(iii)): per-track
-        # survival probability eps and PRE-mask smeared energy, row-aligned with
-        # merged_tracks (the efficiency mask keeps rows, and this concat order
-        # matches the TrackMerger's). Loss-serving only — nothing downstream of
-        # the reconstruction reads it.
+        # Tower-BCE marginal track conditioning: per-track survival probability
+        # eps and PRE-mask smeared energy, row-aligned with merged_tracks (the
+        # efficiency mask keeps rows, and this concat order matches the
+        # TrackMerger's). Loss-serving only — nothing downstream of the
+        # reconstruction reads it.
         track_cond = None
-        if self.learnable and self.tower_bce_conditioning != "sampled":
+        if self.learnable:
             eps_parts, e_pre_parts = [], []
             for pre, mod in (
                 (charged_hadrons_smeared_pre, self.ChargedHadronTrackingEfficiency),
@@ -409,7 +399,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             if self.tower_bce_grads == "detach":
                 eps, e_pre = eps.detach(), e_pre.detach()
             track_cond = {
-                "conditioning": self.tower_bce_conditioning,
                 "grads": self.tower_bce_grads,
                 "eps": eps,
                 "e_pre": e_pre,

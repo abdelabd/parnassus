@@ -754,10 +754,6 @@ def main() -> None:
     parser.add_argument("--calo-bce", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--calo-bce-weight", type=float, default=CALO_BCE_WEIGHT)
     parser.add_argument(
-        "--calo-bce-conditioning", type=str, default="sampled",
-        choices=["sampled", "expected", "marginal"],
-    )
-    parser.add_argument(
         "--calo-bce-grads", type=str, default="detach", choices=["detach", "live"]
     )
     parser.add_argument(
@@ -1024,7 +1020,6 @@ def main() -> None:
             photon_merger=(
                 PhotonClusterMerger(merge_radius) if merge_radius is not None else None
             ),
-            tower_bce_conditioning=args.calo_bce_conditioning,
             tower_bce_grads=args.calo_bce_grads,
             tower_bce_threshold=args.calo_bce_threshold,
         ).to(device)

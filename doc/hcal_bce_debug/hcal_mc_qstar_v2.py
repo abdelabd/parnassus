@@ -1,5 +1,9 @@
 """MC q* calibration v2 — A/B of the tower-BCE threshold modes.
 
+HISTORICAL (pinned to commit 2ae7c2a): this script passes
+tower_bce_conditioning="expected", an option removed when marginal became the
+only code path (2026-09-15). To rerun it, check out 2ae7c2a.
+
 Fixes the v1 corruption: card(flat) MUTATES its input in place (10 columns),
 so v1's replicas each saw the previous replica's mutated input. Here every
 forward gets flat.clone(); with that, the forward is deterministic per seed.

@@ -911,11 +911,11 @@ class SimpleCalorimeter(nn.Module):
 
             # ===== Per-tower analytic survival log-probability (tower BCE) =====
             # For the tower-existence BCE (--calo-bce; EFF_LOSS_PLAN.md Phase 2):
-            # log q_t = sum_i log P(survive cascade stage i), one analytic factor
-            # per hard cut of the neutral-object cascade, marginalizing ONLY the
-            # tower's own LogNormal energy smear and CONDITIONING on this draw's
-            # sampled track quantities (decision (3) in the plan: nothing about
-            # the forward changes; these are pure loss-side exports).
+            # the survival probability of the neutral-object cascade,
+            # marginalizing the tower's own LogNormal energy smear AND the
+            # track-side coin randomness (the marginal conditioning below —
+            # the only code path since 2026-09-15; nothing about the forward
+            # changes, these are pure loss-side exports).
             #
             # LogNormal(mean mu, std sigma): E_sm = exp(a + b Z) with
             # b^2 = log(1 + sigma^2/mu^2), a = log(mu) - b^2/2, so for a
@@ -1010,110 +1010,113 @@ class SimpleCalorimeter(nn.Module):
                     cm = torch.maximum(cm, c)
                 return torch.special.log_ndtr((a_r - torch.log(cm.clamp_min(1e-30))) / b_r)
 
-            # ---- track conditioning (EFF_LOSS_PLAN.md Phase 2b) --------------
-            # (i) "sampled": this draw's masked track energy/sigma (default).
-            # (ii) "expected": coin-expected track energy sum_i eps_i w_i and
-            #      sigma^2 sum_i eps_i s2_i, w_i = fraction_i * E_i^(pre-mask).
-            # (iii) "marginal": marginalize the coins — EXACT subset enumeration
-            #      for towers with <= 3 contributing tracks (covers the
-            #      pathological single-track case), Gauss-Hermite over the
-            #      moment-matched Normal for busier towers.
-            cond = track_cond["conditioning"] if track_cond is not None else "sampled"
-            if cond == "sampled":
-                bce_logq = _bce_logq_at(track_e_d, track_sigma_d * track_sigma_d)
-            else:
-                live = track_cond.get("grads") == "live"
-                # The track pipeline is float32 downstream of the propagator
-                # (f64 buffers promote it back at multiplication sites); this
-                # block works against f64 tower quantities, so cast explicitly
-                # (a dtype cast keeps the autograd graph).
-                eps_t = track_cond["eps"].to(torch.float64)
-                e_pre_t = track_cond["e_pre"].to(torch.float64)
-                res_t = (
-                    track_momentum_resolution
-                    if live
-                    else track_momentum_resolution.detach()
-                ).to(torch.float64)
-                w_pre = e_pre_t * (
-                    track_energy_fractions if live else track_energy_fractions.detach()
-                ).to(torch.float64)
-                # Pre-mask energy guess, mirroring the sampled-path arbitration
-                # (resolution coefficients live via resolution_func, energy
-                # argument detached — the sigma_after_c convention).
-                calo_sig_pre = torch.zeros_like(e_pre_t)
-                m_c = track_sigma_valid
-                calo_sig_pre[m_c] = self.resolution_func(
-                    track_tower_eta_center[m_c].to(torch.float64),
-                    e_pre_t[m_c].detach().clamp_min(1e-30),
-                ).to(torch.float64)
-                guess_pre = torch.where(
-                    calo_sig_pre < res_t * e_pre_t, w_pre, e_pre_t
+            # ---- track conditioning: MARGINAL, the only code path (decision
+            # 2026-09-15 after the Phase-2b closures; EFF_LOSS_PLAN.md). The
+            # coin randomness of the contributing tracks is marginalized —
+            # EXACT subset enumeration for towers with <= 3 contributing
+            # tracks (covers the pathological single-track case),
+            # Gauss-Hermite over the moment-matched Normal for busier towers.
+            # The retired alternatives ("sampled" = this draw's masked track
+            # energy, "expected" = the coin-expected plug-in) both left a
+            # tracked-tower bias in the MC q* calibration and a biased HCal
+            # scale in closure; last version with them: commit 2ae7c2a.
+            if track_cond is None:
+                raise ValueError(
+                    "compute_soft_count needs the track_cond export (built by "
+                    "CMSDefault in learnable mode): the marginal track "
+                    "conditioning is the only tower-BCE code path."
                 )
-                s2_pre = (res_t * guess_pre) ** 2
-                idx_c = track_compact_idx[m_c]
-                zero_t = torch.zeros(
-                    n_towers, dtype=e_pre_t.dtype, device=e_pre_t.device
+            live = track_cond.get("grads") == "live"
+            # The track pipeline is float32 downstream of the propagator
+            # (f64 buffers promote it back at multiplication sites); this
+            # block works against f64 tower quantities, so cast explicitly
+            # (a dtype cast keeps the autograd graph).
+            eps_t = track_cond["eps"].to(torch.float64)
+            e_pre_t = track_cond["e_pre"].to(torch.float64)
+            res_t = (
+                track_momentum_resolution
+                if live
+                else track_momentum_resolution.detach()
+            ).to(torch.float64)
+            w_pre = e_pre_t * (
+                track_energy_fractions if live else track_energy_fractions.detach()
+            ).to(torch.float64)
+            # Pre-mask energy guess, mirroring the hard path's arbitration
+            # (resolution coefficients live via resolution_func, energy
+            # argument detached — the sigma_after_c convention).
+            calo_sig_pre = torch.zeros_like(e_pre_t)
+            m_c = track_sigma_valid
+            calo_sig_pre[m_c] = self.resolution_func(
+                track_tower_eta_center[m_c].to(torch.float64),
+                e_pre_t[m_c].detach().clamp_min(1e-30),
+            ).to(torch.float64)
+            guess_pre = torch.where(
+                calo_sig_pre < res_t * e_pre_t, w_pre, e_pre_t
+            )
+            s2_pre = (res_t * guess_pre) ** 2
+            idx_c = track_compact_idx[m_c]
+            zero_t = torch.zeros(
+                n_towers, dtype=e_pre_t.dtype, device=e_pre_t.device
+            )
+            e_exp = zero_t.clone().scatter_add(0, idx_c, (eps_t * w_pre)[m_c])
+            s2_exp = zero_t.clone().scatter_add(0, idx_c, (eps_t * s2_pre)[m_c])
+            n_contrib = torch.zeros(
+                n_towers, dtype=torch.long, device=e_pre_t.device
+            ).scatter_add(0, idx_c, torch.ones_like(idx_c))
+            bce_logq = _bce_logq_at(zero_t, zero_t)  # exact for 0 tracks
+            # Exact coin enumeration for towers with 1..3 contributing
+            # tracks: sort contributors by tower, group by count, and
+            # logsumexp the 2^k outcome mixture.
+            order = torch.argsort(idx_c, stable=True)
+            s_idx = idx_c[order]
+            s_eps = eps_t[m_c][order]
+            s_w = w_pre[m_c][order]
+            s_s2 = s2_pre[m_c][order]
+            starts = torch.cumsum(n_contrib, 0) - n_contrib
+            for k in (1, 2, 3):
+                tw = torch.nonzero(n_contrib == k, as_tuple=True)[0]
+                if tw.numel() == 0:
+                    continue
+                cols = starts[tw].unsqueeze(1) + torch.arange(
+                    k, device=tw.device
+                ).unsqueeze(0)  # (m, k) contributor slots
+                pk, wk, sk = s_eps[cols], s_w[cols], s_s2[cols]
+                outs = []
+                for bits in range(2**k):
+                    sel = torch.tensor(
+                        [(bits >> j) & 1 for j in range(k)],
+                        dtype=pk.dtype, device=pk.device,
+                    )
+                    logp = (
+                        torch.log(pk.clamp(1e-12, 1 - 1e-12)) * sel
+                        + torch.log((1 - pk).clamp(1e-12, 1 - 1e-12)) * (1 - sel)
+                    ).sum(dim=1)
+                    lq = _bce_logq_at((wk * sel).sum(1), (sk * sel).sum(1), rows=tw)
+                    outs.append(logp + lq)
+                # The mixture sum_i p_i q_i <= 1 exactly; clamp the ulp-level
+                # positive float error out of the log-probability.
+                bce_logq = bce_logq.index_put(
+                    (tw,), torch.logsumexp(torch.stack(outs), dim=0).clamp_max(0.0)
                 )
-                e_exp = zero_t.clone().scatter_add(0, idx_c, (eps_t * w_pre)[m_c])
-                s2_exp = zero_t.clone().scatter_add(0, idx_c, (eps_t * s2_pre)[m_c])
-                if cond == "expected":
-                    bce_logq = _bce_logq_at(e_exp, s2_exp)
-                else:  # "marginal"
-                    n_contrib = torch.zeros(
-                        n_towers, dtype=torch.long, device=e_pre_t.device
-                    ).scatter_add(0, idx_c, torch.ones_like(idx_c))
-                    bce_logq = _bce_logq_at(zero_t, zero_t)  # exact for 0 tracks
-                    # Exact coin enumeration for towers with 1..3 contributing
-                    # tracks: sort contributors by tower, group by count, and
-                    # logsumexp the 2^k outcome mixture.
-                    order = torch.argsort(idx_c, stable=True)
-                    s_idx = idx_c[order]
-                    s_eps = eps_t[m_c][order]
-                    s_w = w_pre[m_c][order]
-                    s_s2 = s2_pre[m_c][order]
-                    starts = torch.cumsum(n_contrib, 0) - n_contrib
-                    for k in (1, 2, 3):
-                        tw = torch.nonzero(n_contrib == k, as_tuple=True)[0]
-                        if tw.numel() == 0:
-                            continue
-                        cols = starts[tw].unsqueeze(1) + torch.arange(
-                            k, device=tw.device
-                        ).unsqueeze(0)  # (m, k) contributor slots
-                        pk, wk, sk = s_eps[cols], s_w[cols], s_s2[cols]
-                        outs = []
-                        for bits in range(2**k):
-                            sel = torch.tensor(
-                                [(bits >> j) & 1 for j in range(k)],
-                                dtype=pk.dtype, device=pk.device,
-                            )
-                            logp = (
-                                torch.log(pk.clamp(1e-12, 1 - 1e-12)) * sel
-                                + torch.log((1 - pk).clamp(1e-12, 1 - 1e-12)) * (1 - sel)
-                            ).sum(dim=1)
-                            lq = _bce_logq_at((wk * sel).sum(1), (sk * sel).sum(1), rows=tw)
-                            outs.append(logp + lq)
-                        bce_logq = bce_logq.index_put(
-                            (tw,), torch.logsumexp(torch.stack(outs), dim=0)
-                        )
-                    # Gauss-Hermite over the moment-matched Normal for > 3 tracks
-                    # (CLT regime; exact coin+smear moments).
-                    tw = torch.nonzero(n_contrib > 3, as_tuple=True)[0]
-                    if tw.numel():
-                        var_terms = eps_t * (1 - eps_t) * w_pre**2 + eps_t * s2_pre
-                        v_exp = zero_t.clone().scatter_add(0, idx_c, var_terms[m_c])
-                        gh_x, gh_w = _gauss_hermite_nodes(
-                            10, e_pre_t.dtype, e_pre_t.device
-                        )
-                        outs = []
-                        for xk, lwk in zip(gh_x, gh_w):
-                            t_k = (
-                                e_exp[tw]
-                                + torch.sqrt(2.0 * v_exp[tw].clamp_min(1e-30)) * xk
-                            ).clamp_min(0.0)
-                            outs.append(lwk + _bce_logq_at(t_k, s2_exp[tw], rows=tw))
-                        bce_logq = bce_logq.index_put(
-                            (tw,), torch.logsumexp(torch.stack(outs), dim=0)
-                        )
+            # Gauss-Hermite over the moment-matched Normal for > 3 tracks
+            # (CLT regime; exact coin+smear moments).
+            tw = torch.nonzero(n_contrib > 3, as_tuple=True)[0]
+            if tw.numel():
+                var_terms = eps_t * (1 - eps_t) * w_pre**2 + eps_t * s2_pre
+                v_exp = zero_t.clone().scatter_add(0, idx_c, var_terms[m_c])
+                gh_x, gh_w = _gauss_hermite_nodes(
+                    10, e_pre_t.dtype, e_pre_t.device
+                )
+                outs = []
+                for xk, lwk in zip(gh_x, gh_w):
+                    t_k = (
+                        e_exp[tw]
+                        + torch.sqrt(2.0 * v_exp[tw].clamp_min(1e-30)) * xk
+                    ).clamp_min(0.0)
+                    outs.append(lwk + _bce_logq_at(t_k, s2_exp[tw], rows=tw))
+                bce_logq = bce_logq.index_put(
+                    (tw,), torch.logsumexp(torch.stack(outs), dim=0).clamp_max(0.0)
+                )
             # Disjoint |eta|-region index in the count-region layout (-1 = out of
             # range, excluded from the support with the zero-deposit towers).
             region_idx = torch.full_like(tower_event_num, -1)
@@ -1268,7 +1271,6 @@ class SimpleCalorimeter(nn.Module):
         # conditioning arrays with the same mask (consumed by CMSDefault).
         if count_export is not None and track_cond is not None:
             count_export["track_cond_out"] = {
-                "conditioning": track_cond["conditioning"],
                 "grads": track_cond.get("grads", "detach"),
                 "eps": track_cond["eps"][track_is_eflow],
                 "e_pre": track_cond["e_pre"][track_is_eflow],

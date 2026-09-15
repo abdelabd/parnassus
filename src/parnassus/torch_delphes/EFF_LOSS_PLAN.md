@@ -664,6 +664,17 @@ rendered on-GPU in both dirs). Median |rel err| vs truth:
   `--calo-bce-threshold self_consistent` + `--calo-bce-conditioning marginal`
   becomes the new champion setting; morning decision.
 
+**DECISION (user, 2026-09-15 morning): conditioning is MARGINAL, full stop.**
+The `--calo-bce-conditioning` option is REMOVED — no user option, the marginal
+enumeration+Gauss-Hermite path is the only tower-BCE conditioning code path
+(`SimpleCalorimeter` raises if the `track_cond` export is missing;
+`CMSDefault` now always builds it in learnable mode). The retired
+`sampled`/`expected` implementations (and the reproduce.sh files / debug
+scripts that reference the flag) live at commit `2ae7c2a` and earlier.
+`--calo-bce-grads {detach,live}` is kept (detach default; live remains
+rejected by the acceptance test). The `--calo-bce-threshold` default is still
+`sampled_sigma` (flip not yet decided).
+
 **Gotcha discovered on the way (pre-existing, affects analysis scripts only):**
 `card(input)` MUTATES its input tensor in place (10 columns). Training is safe
 (`tp[mask]` advanced indexing copies), but any script looping
