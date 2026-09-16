@@ -121,7 +121,56 @@ terms automatically (`--existence bce` is delphes-only for now). The legacy
 python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search --root-file /global/cfs/cdirs/m3246/diff_delphes/cms_opendata_zenodo/train_1000.root --optuna-config src/parnassus/torch_delphes/param_configs_fullsim/optuna_config_ptbins.yaml --n-events 100000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --output-base doc/figure_fullsim/1000_frac_pt5 --history-path doc/figure_fullsim/1000_frac_pt5/all_optuna.json --mode fullsim --reco-pt-cut 5 --pid-weighting fraction
 ```
 
-## 5. Reproducibility
+## 5. Baseline runs (regenerate per code release)
+
+When a new code baseline is established ("release"), the user regenerates the
+four reference baselines THEMSELVES with exactly these commands (each on an
+interactive GPU node, from the repo root; see §1 for the salloc). Convention:
+output dirs as named below; add a `reproduce.sh` copy of the command in each.
+
+```bash
+D=src/parnassus/torch_delphes/full_phasespace_tuning
+
+# (a) BCE, calo-joint + live gradients -> doc/pseudo_seq_bce_live
+OUT_BASE=doc/pseudo_seq_bce_live \
+SAMPLE_PATTERN=pseudo_data_200k_param_config_all_%s_hungarian_matched_survival.root \
+COMET_NAME_PREFIX=pseudo_bce_live \
+EXTRA_ARGS="--existence bce --calo-bce-grads live" \
+bash $D/run_sequential.sh $D/stage1_muons.yaml $D/stage2_chads.yaml $D/stage3_calo_joint.yaml $D/stage4_electrons.yaml
+
+# (b) BCE, calo + detach (the champion) -> doc/pseudo_seq_bce_det
+OUT_BASE=doc/pseudo_seq_bce_det \
+SAMPLE_PATTERN=pseudo_data_200k_param_config_all_%s_hungarian_matched_survival.root \
+COMET_NAME_PREFIX=pseudo_bce_det \
+EXTRA_ARGS="--existence bce" \
+bash $D/run_sequential.sh
+
+# (c) counts -> doc/pseudo_seq_counts (unlabeled samples = default pattern)
+OUT_BASE=doc/pseudo_seq_counts \
+COMET_NAME_PREFIX=pseudo_counts \
+EXTRA_ARGS="--existence counts" \
+bash $D/run_sequential.sh
+
+# (d) fullsim -> doc/fullsim_counts
+python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
+  --root-file /global/cfs/cdirs/m3246/diff_delphes/cms_opendata_zenodo/train_1000.root \
+  --optuna-config src/parnassus/torch_delphes/param_configs_fullsim/optuna_config_ptbins.yaml \
+  --n-events 100000 --n-steps 100 --n-trials 1 --loss wasserstein_1d \
+  --output-base doc/fullsim_counts --history-path doc/fullsim_counts/all_optuna.json \
+  --mode fullsim --reco-pt-cut 5 --pid-weighting fraction
+```
+
+For the delphes closures (a)-(c), the HZZ4l closure PDF is the optional tail
+step (on the same allocation):
+
+```bash
+python -m parnassus.torch_delphes.full_phasespace_tuning.compare_sample \
+  --sample /global/cfs/cdirs/m3246/diff_delphes/allsamples/pseudo_data_100k_param_config_all_HZZ4l_truth_matched_survival.root \
+  --fitted-config <OUT_BASE>/fitted_config.yaml \
+  --output <OUT_BASE>/distributions_HZZ4l.pdf --device cuda
+```
+
+## 6. Reproducibility
 
 If you submit runs yourself, you **must** document the exact commands/configs used for
 that run — preferably as a `reproduce.sh` in that run's output directory.
