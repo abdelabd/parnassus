@@ -111,8 +111,11 @@ python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search --root-file /gl
 
 ## 4. Full "fullsim" training
 
-Training on real full-simulation data. **Requires switching to the
-`diff_delphes_runze_cmssinglejet` branch.**
+Training on real full-simulation data. Since the `consolidate_modes` branch
+this no longer needs a branch switch: `--mode fullsim` selects the 12-bin
+chad-efficiency layout (`eff_binning=ptbins12`) and counts-based existence
+terms automatically (`--existence bce` is delphes-only for now). The legacy
+`diff_delphes_runze_cmssinglejet` branch remains as the historical reference.
 
 ```bash
 python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search --root-file /global/cfs/cdirs/m3246/diff_delphes/cms_opendata_zenodo/train_1000.root --optuna-config src/parnassus/torch_delphes/param_configs_fullsim/optuna_config_ptbins.yaml --n-events 100000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --output-base doc/figure_fullsim/1000_frac_pt5 --history-path doc/figure_fullsim/1000_frac_pt5/all_optuna.json --mode fullsim --reco-pt-cut 5 --pid-weighting fraction
@@ -125,6 +128,12 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
 
 ## Efficiency loss (BCE vs counts)
 
+- `--existence {counts,bce}` (delphes mode): the umbrella toggle over the
+  existence-term family (CONSOLIDATE_MODES_PLAN.md). `counts` = the legacy
+  count-term losses (diff_delphes behavior); `bce` = the validated BCE champion
+  (`--eff-loss bce --calo-bce --calo-count-weight 0`; marginal conditioning and
+  self-consistent thresholds are hardcoded). It fills defaults only — explicit
+  knobs win — and omitting it keeps the legacy per-knob defaults.
 - `--eff-loss {counts,bce}`: how the tracking `eff_logits` are fitted. `bce` (the
   default in `--mode delphes`) is the per-particle survival BCE
   (`EFF_LOSS_PLAN.md`); it needs samples with the survival-label branches — the

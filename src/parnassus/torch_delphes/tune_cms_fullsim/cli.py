@@ -639,6 +639,7 @@ def main() -> None:
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
         require_bce_labels=(eff_loss == "bce"),
+        eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
     )
     if truncate_chads:
         n_t = train_dataset.n_truth_chad

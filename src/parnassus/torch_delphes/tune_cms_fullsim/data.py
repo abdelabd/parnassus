@@ -27,7 +27,7 @@ from parnassus.data.particle_io import (
     get_charge_from_pdg_id,
     get_mass_from_pdg_id,
 )
-from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
+from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS, EFF_BINNING_SPECS
 from parnassus.torch_delphes.SimpleCalorimeter import (
     calo_count_eta_edges,
     calo_count_region_masks,
@@ -322,6 +322,7 @@ def _build_pflow_event_data(
     reco_pt_cut: float | None = None,
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
+    eff_binning: str = "cms4",
 ):
     """Build the per-event pflow target arrays shared by the dense and ragged loaders.
 
@@ -374,9 +375,12 @@ def _build_pflow_event_data(
     # the trainee builds a differentiable expected count in these SAME reco bins from
     # its own reco-bin <- pre-reco-region migration (see
     # CMSEnergyFlowDefault._expected_reco_counts) and matches it here. Binning comes
-    # from the shared CMS_EFF_REGION_SPECS so the three call sites cannot drift.
+    # from the shared spec set selected by ``eff_binning`` (mode-dependent:
+    # delphes = cms4, fullsim = ptbins12) so the call sites cannot drift from
+    # the card's layout.
+    specs = EFF_BINNING_SPECS[eff_binning]
     per_event_region_counts: dict[str, np.ndarray] = {
-        key: np.zeros((n_events, CMS_EFF_REGION_SPECS[spec_key].n_regions), dtype=np.float64)
+        key: np.zeros((n_events, specs[spec_key].n_regions), dtype=np.float64)
         for spec_key, _pid, key in _COUNT_TERM_SPECIES
     }
     # Calorimeter object-count targets share the same dict, so they spread into the
@@ -457,7 +461,7 @@ def _build_pflow_event_data(
         # via the shared spec; binning is duck-typed so it runs on these numpy arrays).
         abs_eta = np.abs(eta)
         for spec_key, pid_sel, key in _COUNT_TERM_SPECIES:
-            spec = CMS_EFF_REGION_SPECS[spec_key]
+            spec = specs[spec_key]
             is_species = abs_pid == pid_sel
             for b, region_mask in enumerate(spec.region_masks(pt, abs_eta)):
                 per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
@@ -491,6 +495,7 @@ def load_pflow_targets(
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
     truth_pt_cut: float | None = None,
+    eff_binning: str = "cms4",
 ):
     """
     This task will pick the pflow objects from the input array, then it will
@@ -521,6 +526,7 @@ def load_pflow_targets(
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
+        eff_binning=eff_binning,
     )
 
     bce_region_list, bce_x_list = _build_bce_labels(
@@ -652,6 +658,7 @@ def load_pflow_targets_ragged(
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
     truth_pt_cut: float | None = None,
+    eff_binning: str = "cms4",
 ):
     """Ragged counterpart of :func:`load_pflow_targets`.
 
@@ -690,6 +697,7 @@ def load_pflow_targets_ragged(
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
+        eff_binning=eff_binning,
     )
 
     # Per-event log(pt) / log(E) on the real particles only -- no padded slots to

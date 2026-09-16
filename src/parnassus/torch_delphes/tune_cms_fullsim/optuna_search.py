@@ -279,7 +279,7 @@ def _parse_sampled(name: str, spec: dict) -> tuple[float, float, bool, float]:
     return low, high, log, init
 
 
-def load_search_config(path: str | Path) -> tuple[dict, dict]:
+def load_search_config(path: str | Path, eff_binning: str = "cms4") -> tuple[dict, dict]:
     """Load and validate an ``optuna_config.yaml``.
 
     Fails fast (raising before the expensive data load) if the file is malformed,
@@ -314,7 +314,9 @@ def load_search_config(path: str | Path) -> tuple[dict, dict]:
         )
     search = raw["search"] or {}
     constants = raw["constants"] or {}
-    probe = CMSEnergyFlowDefault(debug=False, learnable=True)
+    # The probe enumerates valid parameter keys, so its region layout must
+    # match the run's mode (a ptbins12 config names eff_logits[4..11]).
+    probe = CMSEnergyFlowDefault(debug=False, learnable=True, eff_binning=eff_binning)
     defaults = pc.card_default_config(probe)
     frozen = _parse_trainable_mask(path, raw.get("parameters") or {}, constants, set(defaults))
     constants = {**{k: {"value": defaults[k]["value"]} for k in frozen}, **constants}
@@ -870,7 +872,8 @@ def main() -> None:
             "ROOT file (cms-flow schema)."
         )
 
-    search, constants = load_search_config(args.optuna_config)
+    eff_binning = "ptbins12" if args.mode == "fullsim" else "cms4"
+    search, constants = load_search_config(args.optuna_config, eff_binning=eff_binning)
     n_trials = args.n_trials if args.n_trials is not None else int(search.get("n_trials", 40))
     sampler_seed = int(search.get("seed", 0))
 
@@ -888,7 +891,9 @@ def main() -> None:
 
     # Start values of the FITTED scalars: card constructor defaults, optionally
     # overridden from --init-config. Built once and reused by every trial.
-    defaults = pc.card_default_config(CMSEnergyFlowDefault(debug=False, learnable=True))
+    defaults = pc.card_default_config(
+        CMSEnergyFlowDefault(debug=False, learnable=True, eff_binning=eff_binning)
+    )
     if args.init_config is not None:
         if not args.init_config.exists():
             raise SystemExit(f"--init-config {args.init_config} does not exist.")
@@ -972,6 +977,7 @@ def main() -> None:
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
         require_bce_labels=(eff_loss == "bce"),
+        eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
     )
     log(
         f"[optuna] loaded {len(train_dataset)} train / {len(val_dataset)} val events "

@@ -118,6 +118,15 @@ investigate ANY drift before waving it through).
    unlabeled sample set (`SAMPLE_PATTERN=pseudo_data_200k_param_config_all_%s.root`).
    This is the real test: ~20 commits of shared-file history must wash out.
 
+**RESULTS (2026-09-15) — both pairs PASS with max |rel dev| = 0.0 EXACTLY**
+(bitwise-identical train/val losses and every parameter at every epoch, all
+four stages, both pairs; drivers + logs + outputs in
+`doc/consolidate_tests/parity_{bce,counts}.{sh,log}` and
+`{bce,counts}_{ref,new}/`). So: (a) the `--existence` resolver is a pure
+re-plumbing of the champion/legacy flag bundles; (b) the entire BCE-era
+history including the new tower-BCE export gating is byte-neutral for
+counts-mode training.
+
 ## 2. Phase 2 — consolidate fullsim (counts only)
 
 ### 2a. Mode-dependent chad binning (the one semantic conflict)
@@ -171,6 +180,15 @@ Compare `all_optuna.json` loss/parameter trajectories as in 1c.
 that `cmssinglejet` lacks. Run the parity at world_size=1 (single GPU) so the
 DDP fixes cannot bite; if trajectories still differ, bisect whether the delta
 is exactly one of the known fixes (acceptable, document it) or new drift (fix).
+
+**RESULT (2026-09-15) — PASS: max |rel dev| 6e-15 (losses) / 2e-14 (all 76
+parameters, 10 epochs), identical best val loss.** Driver + log + outputs in
+`doc/consolidate_tests/parity_fullsim.{sh,log}`, `fullsim_{ref,new}/`.
+Two consolidation bugs were caught and fixed by this gate (both "the card is
+ptbins12 but a second code path still assumed the module-level cms4 layout"):
+the optuna-config validation probe card, and the DATA-side per-species count
+targets (`_build_pflow_event_data`) — `eff_binning` is now threaded through
+`load_search_config`, `load_split_datasets`, and both pflow target loaders.
 
 ## 3. Execution order
 
