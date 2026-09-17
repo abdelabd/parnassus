@@ -192,6 +192,11 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
   `--bce-weighting {pooled,per_species}`.
 - Old samples without labels + `--eff-loss bce` = a hard error telling you to
   regenerate (`slurm_scripts/submit_truth_matched_survival_samples.sh`).
+- One efficiency function: the BCE evaluates each tracking module's
+  `efficiency_in_region(region, pt)` -- the same function the card forward
+  samples from -- on the labeled truth particles (`bce_region`/`bce_x`/`bce_pt`).
+  The muon > 1 TeV roll-off bins are therefore fitted exactly (no label exclusion);
+  `rate_raw` gets a gradient there and is pinned only by the cards.
 
 ## Run outputs
 

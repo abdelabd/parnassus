@@ -428,13 +428,13 @@ class _LearnableEfficiencyBase(nn.Module):
     """Common base for learnable tracking efficiencies.
 
     The base class owns the per-region ``eff_logits`` parameter, the generic
-    piecewise-constant :meth:`compute_efficiency` driven by the module's
+    piecewise-constant :meth:`efficiency_in_region` driven by the module's
     :class:`EfficiencyRegionSpec`, the pre-reco region tagging
-    (:meth:`region_index_1based`), and the Gumbel-sigmoid straight-through mask
-    applied (detached) to the momentum columns. Subclasses just supply their
-    region spec and per-region efficiency defaults; a subclass with non-constant
-    behavior (e.g. the muon high-pt exponential roll-off) overrides
-    :meth:`compute_efficiency`.
+    (:meth:`region_index` / :meth:`region_index_1based`), and the Gumbel-sigmoid
+    straight-through mask applied (detached) to the momentum columns. Subclasses
+    just supply their region spec and per-region efficiency defaults; a subclass
+    with non-constant behavior (e.g. the muon high-pt exponential roll-off)
+    overrides :meth:`efficiency_in_region`.
 
     Parameters
     ----------
@@ -473,15 +473,27 @@ class _LearnableEfficiencyBase(nn.Module):
         ``(n_regions,)``, carrying gradient to ``eff_logits``."""
         return torch.sigmoid(self.eff_logits)
 
-    def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        """Per-particle efficiency: piecewise-constant ``effs[r]`` over the
-        regions of :attr:`region_spec`; 0 outside all regions.
-        """
-        effs = self.get_efficiencies()
-        eff = torch.zeros_like(pt)
+    def region_index(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
+        """Per-particle 0-based region index into :attr:`region_spec` (long);
+        ``-1`` outside all regions."""
+        idx = torch.full_like(pt, -1, dtype=torch.long)
         for r, m in enumerate(self.region_spec.region_masks(pt, eta_outer.abs())):
-            eff = torch.where(m, effs[r].to(pt.dtype), eff)
-        return eff
+            idx = torch.where(m, r, idx)
+        return idx
+
+    def efficiency_in_region(self, region: torch.Tensor, pt: torch.Tensor) -> torch.Tensor:
+        """THE efficiency function: per-particle efficiency given the 0-based
+        region index (``-1`` = outside all regions -> 0) and ``pt``. The card
+        forward evaluates it on the tagged pre-reco kinematics
+        (:meth:`compute_efficiency`) and the BCE survival loss on the labeled
+        truth particles (``loss._bce_eff_terms``), so both see one model.
+        Piecewise-constant ``effs[r]`` here; subclasses may add pt dependence.
+        """
+        return F.pad(self.get_efficiencies(), (0, 1))[region].to(pt.dtype)
+
+    def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
+        """Per-particle efficiency from the ``(pt, eta_outer)`` kinematics."""
+        return self.efficiency_in_region(self.region_index(pt, eta_outer), pt)
 
     def region_index_1based(
         self, pt: torch.Tensor, eta_outer: torch.Tensor
@@ -503,11 +515,8 @@ class _LearnableEfficiencyBase(nn.Module):
             Shape ``(N,)``, float, integer-valued in ``[0, label_offset +
             n_regions]`` with the mapping above.
         """
-        offset = self.region_spec.label_offset
-        idx = torch.zeros_like(pt)
-        for r, m in enumerate(self.region_spec.region_masks(pt, eta_outer.abs())):
-            idx = torch.where(m, torch.full_like(pt, float(offset + r + 1)), idx)
-        return idx
+        idx = self.region_index(pt, eta_outer)
+        return torch.where(idx >= 0, idx + self.region_spec.label_offset + 1, 0).to(pt.dtype)
 
     # ----- Gumbel-sigmoid sampling -----
     def _gumbel_sigmoid_st(self, eff: torch.Tensor) -> torch.Tensor:
@@ -635,16 +644,9 @@ class CMSMuonLearnableEfficiency(_LearnableEfficiencyBase):
     :meth:`Efficiency._muon_cms_efficiency`. Binning + region labels come from
     ``CMS_EFF_REGION_SPECS["muon"]``.
 
-    Count-term note. The differentiable count term reweights each region's
-    survivors by ``eff_r / eff_r.detach()``. For the 6 ``eff_logits`` this is
-    exact even in the exponential bins (the coefficient enters ``eff``
-    multiplicatively, so ``dE[N]/d coeff = E[N]/coeff``). The ``rate_raw``
-    constants, however, enter ``eff`` *non*-multiplicatively (inside the
-    exponent), so the per-region scalar reweight carries NO gradient to them --
-    ``rate_raw`` is intentionally left frozen. Fitting it would require a
-    per-particle reweight ``eff_i(pt_i) / eff_i(pt_i).detach()`` (valid because
-    muon reco pt == pre-reco pt -- muons get no PF rescale) AND a sample with
-    ``pt > 1 TeV`` muons, which the QCD-dijet pseudodata does not provide.
+    ``rate_raw`` gets a gradient only through the per-particle BCE survival
+    loss (``--eff-loss bce``; the count term's per-region scalar reweight
+    carries none). The cards pin it at the CMS default.
     """
 
     # (low/mid/high-coeff)-barrel, then (low/mid/high-coeff)-endcap
@@ -663,31 +665,28 @@ class CMSMuonLearnableEfficiency(_LearnableEfficiencyBase):
         rates = torch.tensor(self._RATE_DEFAULTS, dtype=torch.float64)
         # softplus reparameterization to keep rate > 0
         self.rate_raw = nn.Parameter(_softplus_inv(rates))
+        # Per-region roll-off ``exp(shift_r - rate_r * pt)``: the high-pt bins have
+        # shift 0.5 and rate index = eta bin; every other region (and the
+        # outside-all-regions slot ``-1``) has shift 0 and points at a padded zero
+        # rate, i.e. no roll-off.
+        spec = self.region_spec
+        r = torch.arange(spec.n_regions + 1)
+        high = (r % spec.n_pt == spec.n_pt - 1) & (r < spec.n_regions)
+        self.register_buffer("_shift", 0.5 * high.to(torch.float64), persistent=False)
+        self.register_buffer(
+            "_rate_idx", torch.where(high, r // spec.n_pt, spec.n_eta), persistent=False
+        )
 
     def get_rates(self) -> torch.Tensor:
         return F.softplus(self.rate_raw)
 
-    def compute_efficiency(self, pt: torch.Tensor, eta_outer: torch.Tensor) -> torch.Tensor:
-        """Piecewise-constant ``effs[r]`` over the muon regions, except the
-        high-pt bins (``pt_bin == n_pt - 1``) use the exponential roll-off
-        ``effs[r] * exp(0.5 - rate * pt)``; clamped to ``[0, 1]``.
-        """
-        effs = self.get_efficiencies()
-        rates = self.get_rates()
-        n_pt = self.region_spec.n_pt
-        eff = torch.zeros_like(pt)
-        for r, m in enumerate(self.region_spec.region_masks(pt, eta_outer.abs())):
-            eta_bin, pt_bin = divmod(r, n_pt)
-            if pt_bin == n_pt - 1:
-                # High-pt exponential roll-off; rate index = eta bin.
-                val = effs[r].to(pt.dtype) * torch.exp(0.5 - rates[eta_bin].to(pt.dtype) * pt)
-            else:
-                val = effs[r].to(pt.dtype)
-            eff = torch.where(m, val, eff)
-        # Clamp because exp() can exceed 1 at the boundary pt = 1000 GeV
-        # (where 0.5 - 5e-4 * 1000 = 0 ⇒ coeff * 1.0 = coeff, fine), but for
-        # smaller rate values from the optimizer it could exceed 1.
-        return eff.clamp(0.0, 1.0)
+    def efficiency_in_region(self, region: torch.Tensor, pt: torch.Tensor) -> torch.Tensor:
+        """Piecewise-constant ``effs[r]``, times ``exp(0.5 - rate * pt)`` in the
+        high-pt bins; clamped to ``[0, 1]`` (exp() exceeds 1 below the boundary
+        ``pt = 1000`` GeV for rates the optimizer may reach)."""
+        rate = F.pad(self.get_rates(), (0, 1))[self._rate_idx[region]].to(pt.dtype)
+        rolloff = torch.exp(self._shift[region].to(pt.dtype) - rate * pt)
+        return (super().efficiency_in_region(region, pt) * rolloff).clamp(0.0, 1.0)
 
 
 # =============================================================================

@@ -46,9 +46,9 @@ from .loss import (
     get_loss_fn,
 )
 
-# The card attribute holding each BCE species' eff_logits parameter (see
+# The card attribute holding each BCE species' tracking-efficiency module (see
 # loss.BCE_TERM_KEYS for the pred-dict key each is injected under).
-_BCE_LOGITS_ATTRS: dict[str, str] = {
+_BCE_EFF_ATTRS: dict[str, str] = {
     "chad": "ChargedHadronTrackingEfficiency",
     "electron": "ElectronTrackingEfficiency",
     "muon": "MuonTrackingEfficiency",
@@ -105,17 +105,18 @@ def _inject_tower_bce(
         target_observables[f"tower_x:{key}"] = in_box.any(dim=1).to(torch.float64)
 
 
-def _inject_bce_logits(
+def _inject_bce_modules(
     pred_observables: dict[str, torch.Tensor],
     card: "CMSEnergyFlowDefault | DDP",
 ) -> None:
-    """Put the card's raw per-species ``eff_logits`` parameter tensors into the
-    pred dict (``bce_logits:{species}``) for the pooled BCE efficiency loss.
-    These are replicated parameters (identical on every DDP rank), not per-shard
+    """Put the card's per-species tracking-efficiency modules into the pred dict
+    (``bce_eff:{species}``) for the pooled BCE efficiency loss, which evaluates
+    their ``efficiency_in_region`` on the labeled truth particles. Their
+    parameters are replicated (identical on every DDP rank), not per-shard
     activations, so no gather is needed — see ``loss._bce_eff_terms``."""
     core = card.module if isinstance(card, DDP) else card
-    for key, _spec_key, logits_key in BCE_TERM_KEYS:
-        pred_observables[logits_key] = getattr(core, _BCE_LOGITS_ATTRS[key]).eff_logits
+    for key, pred_key in BCE_TERM_KEYS:
+        pred_observables[pred_key] = getattr(core, _BCE_EFF_ATTRS[key])
 
 # =============================================================================
 # Fit loop
@@ -631,11 +632,11 @@ def fit_card_to_fullsim(
             # filters below (they pass non-object keys through untouched).
             for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                 pred_observables[pred_key] = out[out_key]
-            # --eff-loss bce: the loss reads the raw eff_logits directly (the
-            # pooled survival BCE is its own gradient path, out-of-band from the
-            # reco forward; see EFF_LOSS_PLAN.md).
+            # --eff-loss bce: the loss evaluates the card's efficiency modules on
+            # the labeled truth particles (the pooled survival BCE is its own
+            # gradient path, out-of-band from the reco forward; EFF_LOSS_PLAN.md).
             if eff_loss == "bce":
-                _inject_bce_logits(pred_observables, card)
+                _inject_bce_modules(pred_observables, card)
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
@@ -758,7 +759,7 @@ def fit_card_to_fullsim(
                 for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                     pred_observables[pred_key] = out[out_key]
                 if eff_loss == "bce":
-                    _inject_bce_logits(pred_observables, card)
+                    _inject_bce_modules(pred_observables, card)
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
                 if calo_bce:

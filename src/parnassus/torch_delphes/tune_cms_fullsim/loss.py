@@ -48,7 +48,6 @@ import torch.nn.functional as F
 from torch.distributed.nn.functional import all_gather as diff_all_gather
 from torch.distributed.nn.functional import all_reduce as diff_all_reduce
 
-from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
 
 from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
 from .distributed import _is_dist
@@ -104,15 +103,15 @@ COUNT_RATE_FLOOR = 0.05
 # invariant. Default 1.0 (same as COUNT_WEIGHT); calibrated in EFF_LOSS_PLAN.md step 7.
 BCE_WEIGHT = 1.0
 
-# (species key, region-spec key, pred-dict logits key) per BCE term. The pred-side
-# logits are the card's raw eff_logits (replicated parameters, injected by
-# training.py); the target-side labels come in "bce_region"/"bce_x" (see
+# (species key, pred-dict key) per BCE term. The pred-side value is the card's
+# tracking-efficiency MODULE (replicated parameters, injected by training.py); the
+# target-side labels come in "bce_region"/"bce_x"/"bce_pt" (see
 # data._build_bce_labels). Region labels are the GLOBAL 1-based EFF_REGION labels,
 # so [label_offset + 1, label_offset + n_regions] selects a species.
-BCE_TERM_KEYS: tuple[tuple[str, str, str], ...] = (
-    ("chad", "charged_hadron", "bce_logits:chad"),
-    ("electron", "electron", "bce_logits:electron"),
-    ("muon", "muon", "bce_logits:muon"),
+BCE_TERM_KEYS: tuple[tuple[str, str], ...] = (
+    ("chad", "bce_eff:chad"),
+    ("electron", "bce_eff:electron"),
+    ("muon", "bce_eff:muon"),
 )
 
 _BCE_LABELS: dict[str, str] = {
@@ -780,14 +779,15 @@ def _bce_eff_terms(
     for the tracking-efficiency ``eff_logits`` (EFF_LOSS_PLAN.md).
 
     Target side: ``target["bce_region"]`` (global 1-based efficiency-region label;
-    0 = padding / no label) and ``target["bce_x"]`` (survival outcome), position-
-    aligned; both detached data. Pred side: ``pred["bce_logits:{species}"]`` — the
-    card's raw ``eff_logits`` parameter tensors, injected by training.py. The term
-    indexes the RAW logits and uses ``binary_cross_entropy_with_logits`` (exact and
-    stable; never sigmoid-then-log). With piecewise-constant efficiencies the MLE
-    is the per-region empirical survival fraction, so this term is near-convex in
-    the logits. The muon exponential (> 1 TeV) bins are dropped at load time
-    (``data._BCE_EXCLUDED_LABELS``); their labels never reach here.
+    0 = padding / no label), ``target["bce_x"]`` (survival outcome) and
+    ``target["bce_pt"]`` (truth pt == the pt the efficiency was evaluated at),
+    position-aligned; all detached data. Pred side: ``pred["bce_eff:{species}"]``
+    — the card's tracking-efficiency modules, injected by training.py. The
+    per-particle survival probability is the module's own
+    ``efficiency_in_region(region, pt)`` — the SAME function the card forward
+    samples from — so pt-dependent bins (the muon > 1 TeV roll-off) are modeled
+    exactly, and their parameters (``eff_logits`` and, unless pinned by the card,
+    ``rate_raw``) get the exact Bernoulli gradient.
 
     How the three per-species means combine is set by ``bce_weighting``
     (:data:`BCE_WEIGHTING_CHOICES`):
@@ -816,30 +816,22 @@ def _bce_eff_terms(
     if "bce_region" not in target or "bce_x" not in target:
         return []
     region = target["bce_region"].detach().reshape(-1)
-    x_all = target["bce_x"].detach().reshape(-1)
     labeled = region > 0  # drops per-batch padding (0 = "no label")
     region = region[labeled].long()
-    x_all = x_all[labeled]
+    x_all = target["bce_x"].detach().reshape(-1)[labeled]
+    pt_all = target["bce_pt"].detach().reshape(-1)[labeled]
 
     entries: list[tuple[str, torch.Tensor, float]] = []
-    for key, spec_key, pred_key in BCE_TERM_KEYS:
-        logits = pred.get(pred_key)
-        if logits is None:
+    for key, pred_key in BCE_TERM_KEYS:
+        module = pred.get(pred_key)
+        if module is None:
             continue
-        spec = CMS_EFF_REGION_SPECS[spec_key]
-        lo = spec.label_offset + 1
-        hi = spec.label_offset + spec.n_regions
-        m = (region >= lo) & (region <= hi)
+        local = region - module.region_spec.label_offset - 1
+        m = (local >= 0) & (local < module.region_spec.n_regions)
         n = int(m.sum())
-        if n == 0:
-            raw = logits.reshape(-1).sum() * 0.0  # graph-connected zero
-        else:
-            idx = region[m] - lo
-            raw = F.binary_cross_entropy_with_logits(
-                logits.reshape(-1)[idx],
-                x_all[m].to(dtype=logits.dtype, device=logits.device),
-                reduction="mean",
-            )
+        eff = module.efficiency_in_region(local[m], pt_all[m])
+        # sum / n == mean; on an empty species it is a graph-connected zero.
+        raw = F.binary_cross_entropy(eff, x_all[m].to(eff), reduction="sum") / max(n, 1)
         entries.append((key, raw, float(n)))
 
     if bce_weighting == "pooled":
@@ -2236,22 +2228,19 @@ def per_pid_wasserstein_1d_loss_distributed(
     # drops the per-batch padding) non-differentiably; every rank always issues
     # both collectives (possibly empty), so the collective sequence matches. The
     # logits are REPLICATED card parameters (identical on every rank), passed
-    # through untouched: the inner _bce_eff_terms then computes the identical
-    # global pooled BCE on every rank, and the full per-rank logits gradient ends
-    # up scaled exactly like the gathered terms' gradients after DDP's mean.
+    # through untouched (the efficiency modules): the inner _bce_eff_terms then
+    # computes the identical global pooled BCE on every rank, and the full
+    # per-rank parameter gradient ends up scaled exactly like the gathered terms'
+    # gradients after DDP's mean.
     if eff_loss == "bce" and "bce_region" in target and "bce_x" in target:
-        r_flat = target["bce_region"].detach().reshape(-1)
-        x_flat = target["bce_x"].detach().reshape(-1)
-        labeled = r_flat > 0
-        target_gathered["bce_region"] = _all_gather_varlen(
-            r_flat[labeled], differentiable=False
-        )
-        target_gathered["bce_x"] = _all_gather_varlen(
-            x_flat[labeled], differentiable=False
-        )
-        for _key, _spec_key, logits_key in BCE_TERM_KEYS:
-            if logits_key in pred:
-                pred_gathered[logits_key] = pred[logits_key]
+        labeled = target["bce_region"].detach().reshape(-1) > 0
+        for key in ("bce_region", "bce_x", "bce_pt"):
+            target_gathered[key] = _all_gather_varlen(
+                target[key].detach().reshape(-1)[labeled], differentiable=False
+            )
+        for _key, pred_key in BCE_TERM_KEYS:
+            if pred_key in pred:
+                pred_gathered[pred_key] = pred[pred_key]
 
     # ---- tower-existence BCE (--calo-bce) -------------------------------------
     # Per-tower log q is a DIFFERENTIABLE pred-side activation (unlike the

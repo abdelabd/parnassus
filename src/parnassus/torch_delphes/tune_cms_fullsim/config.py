@@ -69,10 +69,10 @@ OBSERVABLES: list[str] = [
     "n_truth_chad",
     # BCE efficiency-loss labels (per labeled truth particle, ragged; from the
     # LABEL_BRANCHES above): bce_region = global 1-based efficiency-region label
-    # (padding value 0 = "no label"; the muon exponential > 1 TeV bins are dropped
-    # at load), bce_x = 1.0/0.0 survival outcome. Target-side only, non-plottable,
+    # (padding value 0 = "no label"), bce_x = 1.0/0.0 survival outcome, bce_pt =
+    # truth pt (the efficiency's pt argument). Target-side only, non-plottable,
     # empty per-event tensors when the sample carries no labels.
-    "bce_region", "bce_x",
+    "bce_region", "bce_x", "bce_pt",
 ]
 
 # --eff-loss for the tune entrypoints: how the tracking-efficiency eff_logits are

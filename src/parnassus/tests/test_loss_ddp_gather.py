@@ -357,13 +357,17 @@ def _worker_equiv() -> int:
 
 def _worker_bce() -> int:
     """--eff-loss bce under DDP: value == single-process on the union, backward
-    completes with an empty rank, and every rank's logits gradient equals the
-    single-process gradient (the logits are replicated parameters; the labels are
-    gathered)."""
+    completes with an empty rank, and every rank's eff_logits gradient equals the
+    single-process gradient (the efficiency modules are replicated parameters; the
+    labels are gathered)."""
     import torch.distributed as dist
-    from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
+    from parnassus.torch_delphes.learnable import (
+        CMS_EFF_REGION_SPECS,
+        CMSChargedHadronLearnableEfficiency,
+        CMSElectronLearnableEfficiency,
+        CMSMuonLearnableEfficiency,
+    )
     from parnassus.torch_delphes.tune_cms_fullsim.loss import (
-        BCE_TERM_KEYS,
         per_pid_wasserstein_1d_loss,
         per_pid_wasserstein_1d_loss_distributed,
     )
@@ -389,37 +393,43 @@ def _worker_bce() -> int:
     pad_x = torch.zeros((N - N // 2, n_lab), dtype=torch.float64)
     region_all = torch.cat([full_region, pad_r])  # (N, n_lab); second half unlabeled
     x_all = torch.cat([full_x, pad_x])
+    pt_all = torch.full_like(x_all, 5.0)
 
-    def _logits() -> dict[str, torch.Tensor]:
+    def _modules() -> dict[str, torch.nn.Module]:
         out = {}
-        for _key, spec_key, logits_key in BCE_TERM_KEYS:
-            t = torch.full(
-                (CMS_EFF_REGION_SPECS[spec_key].n_regions,), 0.3, dtype=torch.float64
-            ).requires_grad_(True)
-            out[logits_key] = t
+        for pred_key, cls in (
+            ("bce_eff:chad", CMSChargedHadronLearnableEfficiency),
+            ("bce_eff:electron", CMSElectronLearnableEfficiency),
+            ("bce_eff:muon", CMSMuonLearnableEfficiency),
+        ):
+            out[pred_key] = cls()
+            with torch.no_grad():
+                out[pred_key].eff_logits.fill_(0.3)
         return out
 
-    # Reference: plain loss on ALL events with the same replicated logits.
-    ref_logits = _logits()
-    full_pred = {**_obs_from(pid, pt, eta, phi, one), **ref_logits}
+    # Reference: plain loss on ALL events with the same replicated modules.
+    ref_mods = _modules()
+    full_pred = {**_obs_from(pid, pt, eta, phi, one), **ref_mods}
     full_tgt = {k: v.detach() for k, v in _obs_from(pid, pt, eta, phi, tgt_scale).items()}
     full_tgt["bce_region"] = region_all
     full_tgt["bce_x"] = x_all
+    full_tgt["bce_pt"] = pt_all
     ref = per_pid_wasserstein_1d_loss(full_pred, full_tgt, pair_mass=False, eff_loss="bce")
     ref.backward()
     ref_val = float(ref)
-    ref_grad = ref_logits["bce_logits:chad"].grad.clone()
+    ref_grad = ref_mods["bce_eff:chad"].eff_logits.grad.clone()
 
     # This rank's shard through the DDP path.
     per = N // world
     sl = slice(rank * per, (rank + 1) * per)
-    ddp_logits = _logits()
-    s_pred = {**_obs_from(pid[sl], pt[sl], eta[sl], phi[sl], one), **ddp_logits}
+    ddp_mods = _modules()
+    s_pred = {**_obs_from(pid[sl], pt[sl], eta[sl], phi[sl], one), **ddp_mods}
     s_tgt = {
         k: v.detach() for k, v in _obs_from(pid[sl], pt[sl], eta[sl], phi[sl], tgt_scale).items()
     }
     s_tgt["bce_region"] = region_all[sl]
     s_tgt["bce_x"] = x_all[sl]
+    s_tgt["bce_pt"] = pt_all[sl]
     loss = per_pid_wasserstein_1d_loss_distributed(
         s_pred, s_tgt, pair_mass=False, eff_loss="bce"
     )
@@ -427,7 +437,7 @@ def _worker_bce() -> int:
 
     rel = abs(float(loss) - ref_val) / max(abs(ref_val), 1e-30)
     assert rel < 1e-9, f"rank {rank}: DDP bce loss {float(loss)!r} != reference {ref_val!r}"
-    grad = ddp_logits["bce_logits:chad"].grad
+    grad = ddp_mods["bce_eff:chad"].eff_logits.grad
     assert grad is not None and torch.isfinite(grad).all()
     grad_rel = float((grad - ref_grad).abs().max() / ref_grad.abs().max().clamp_min(1e-30))
     assert grad_rel < 1e-9, (
@@ -435,7 +445,7 @@ def _worker_bce() -> int:
         "(replicated-parameter gradient must be the full global gradient on every rank)"
     )
     # Muon logits got no labels anywhere: zero but graph-connected grad.
-    mu_grad = ddp_logits["bce_logits:muon"].grad
+    mu_grad = ddp_mods["bce_eff:muon"].eff_logits.grad
     assert mu_grad is not None and float(mu_grad.abs().sum()) == 0.0
     dist.barrier()
     if rank == 0:
