@@ -93,6 +93,6 @@ src/parnassus/torch_delphes/validation/logs/
 .DS_Store
 
 *.png
-doc/figures/*
 doc/fit_results/*
 notebooks/per_param_closure
+runs/
