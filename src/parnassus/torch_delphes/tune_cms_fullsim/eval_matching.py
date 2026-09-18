@@ -1,0 +1,176 @@
+"""Diagnostics for the truth<->reco survival matcher behind ``--eff-loss bce``.
+
+Runs :func:`data.match_event` on a plain sample exactly as training does (both
+lists cut BEFORE matching, same rule and gate) and reports, per charged species:
+
+1. the fraction of reco objects with no truth match (fakes / unmodeled sources);
+2. the matched survival fraction vs truth pt in fine bins;
+3. deltaR from each truth particle to its nearest same-class reco object, split by
+   pt band, with the gate marked (is the gate cutting a real tail?);
+4. the matched survival fraction per tracking-efficiency region -- the number the
+   BCE converges to in each bin.
+
+Usage:
+    python -m parnassus.torch_delphes.tune_cms_fullsim.eval_matching \\
+        --root-file /global/cfs/cdirs/m3246/diff_delphes/cms_opendata_zenodo/train_1000.root \\
+        --n-events 20000 --matching hungarian --max-dr 0.05 --reco-pt-cut 5 \\
+        --output-dir doc/matching_diagnostics
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import matplotlib
+import numpy as np
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
+
+from parnassus.torch_delphes.learnable import EFF_BINNING_SPECS  # noqa: E402
+
+from .config import (  # noqa: E402
+    DEFAULT_ABS_ETA_CUT,
+    DEFAULT_RECO_PT_CUT,
+    DEFAULT_TRUTH_PT_CUT,
+    MATCHING_CHOICES,
+)
+from .data import (  # noqa: E402
+    MATCH_CLASSES,
+    MATCH_MAX_DR,
+    _delta_phi,
+    _in_acceptance,
+    load_cms_flow_root,
+    match_event,
+)
+
+SPECIES = {0: "charged_hadron", 1: "electron", 2: "muon"}
+PT_BANDS = ((0.0, 1.0), (1.0, 5.0), (5.0, 20.0), (20.0, np.inf))
+
+
+def collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching, max_dr):
+    """Flat per-particle arrays over all events, after the training-time cuts:
+    truth (pt, eta, class, survived, dr_nearest) and reco (class, matched)."""
+    t_pt, t_eta, t_cls, t_surv, t_dr, r_cls, r_match = ([] for _ in range(7))
+    for i in range(len(arrays["truth_pt"])):
+        t = {k: np.asarray(arrays[f"truth_{k}"][i], dtype=np.float64) for k in ("pt", "eta", "phi", "class")}
+        r = {k: np.asarray(arrays[f"pflow_{k}"][i], dtype=np.float64) for k in ("pt", "eta", "phi", "class")}
+        tk = _in_acceptance(t["pt"], t["eta"], truth_pt_cut, abs_eta_cut)
+        rk = _in_acceptance(r["pt"], r["eta"], reco_pt_cut, abs_eta_cut)
+        t = {k: v[tk] for k, v in t.items()}
+        r = {k: v[rk] for k, v in r.items()}
+        tc, rc = t["class"].astype(np.int64), r["class"].astype(np.int64)
+        surv, match = match_event(t["eta"], t["phi"], tc, r["eta"], r["phi"], rc, max_dr, matching)
+        # deltaR to the nearest SAME-class reco object (inf when the class has none)
+        dr = np.full(tc.shape[0], np.inf)
+        for cls in MATCH_CLASSES:
+            ti, ri = np.flatnonzero(tc == cls), np.flatnonzero(rc == cls)
+            if ti.size and ri.size:
+                deta = t["eta"][ti][:, None] - r["eta"][ri][None, :]
+                dphi = _delta_phi(t["phi"][ti], r["phi"][ri])
+                dr[ti] = np.sqrt(deta**2 + dphi**2).min(axis=1)
+        t_pt.append(t["pt"]); t_eta.append(t["eta"]); t_cls.append(tc)
+        t_surv.append(surv); t_dr.append(dr); r_cls.append(rc); r_match.append(match)
+    cat = np.concatenate
+    return dict(t_pt=cat(t_pt), t_eta=cat(t_eta), t_cls=cat(t_cls), t_surv=cat(t_surv),
+                t_dr=cat(t_dr), r_cls=cat(r_cls), r_match=cat(r_match))
+
+
+def _frac(x: np.ndarray) -> float:
+    return float(x.mean()) if x.size else float("nan")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--root-file", type=Path, required=True)
+    parser.add_argument("--n-events", type=int, default=20000)
+    parser.add_argument("--matching", type=str, default="hungarian", choices=list(MATCHING_CHOICES))
+    parser.add_argument("--max-dr", type=float, default=MATCH_MAX_DR, help="deltaR gate")
+    parser.add_argument("--truth-pt-cut", type=float, default=DEFAULT_TRUTH_PT_CUT, help="<= 0 disables")
+    parser.add_argument("--reco-pt-cut", type=float, default=DEFAULT_RECO_PT_CUT, help="<= 0 disables")
+    parser.add_argument("--eta-cut", type=float, default=DEFAULT_ABS_ETA_CUT, help="<= 0 disables")
+    parser.add_argument("--eff-binning", type=str, default="ptbins12", choices=list(EFF_BINNING_SPECS))
+    parser.add_argument("--output-dir", type=Path, default=Path("doc/matching_diagnostics"))
+    args = parser.parse_args()
+    cut = lambda v: v if v > 0 else None
+    truth_pt_cut, reco_pt_cut, abs_eta_cut = cut(args.truth_pt_cut), cut(args.reco_pt_cut), cut(args.eta_cut)
+
+    arrays = load_cms_flow_root(args.root_file, n_events=args.n_events)
+    d = collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, args.matching, args.max_dr)
+    print(f"[eval_matching] {args.root_file.name}: {len(arrays['truth_pt'])} events, matching={args.matching}, "
+          f"max_dr={args.max_dr}, cuts: truth pt>={truth_pt_cut}, reco pt>={reco_pt_cut}, |eta|<={abs_eta_cut}")
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    summary: dict = {"matching": args.matching, "max_dr": args.max_dr, "per_species": {}}
+    pt_edges = np.geomspace(max(truth_pt_cut or 0.1, 0.1), 1000.0, 31)
+    dr_edges = np.geomspace(1e-4, 1.0, 41)
+    with PdfPages(args.output_dir / "matching_diagnostics.pdf") as pdf:
+        fig_s, ax_s = plt.subplots(1, 3, figsize=(15, 4))
+        fig_d, ax_d = plt.subplots(1, 3, figsize=(15, 4))
+        fig_r, ax_r = plt.subplots(1, 3, figsize=(15, 4))
+        for col, (cls, name) in enumerate(SPECIES.items()):
+            t = d["t_cls"] == cls
+            r = d["r_cls"] == cls
+            pt, surv, dr = d["t_pt"][t], d["t_surv"][t], d["t_dr"][t]
+            s = {
+                "n_truth": int(t.sum()), "n_reco": int(r.sum()),
+                "truth_survival_fraction": _frac(surv),
+                "reco_unmatched_fraction": _frac(~d["r_match"][r]),
+                "beyond_gate_fraction_by_pt_band": {
+                    f"[{lo},{hi})": _frac(dr[(pt >= lo) & (pt < hi)] > args.max_dr) for lo, hi in PT_BANDS
+                },
+            }
+            # 2. survival vs pt
+            idx = np.digitize(pt, pt_edges) - 1
+            frac = np.array([_frac(surv[idx == b]) for b in range(len(pt_edges) - 1)])
+            n_b = np.array([(idx == b).sum() for b in range(len(pt_edges) - 1)])
+            err = np.sqrt(np.clip(frac * (1 - frac), 0, None) / np.maximum(n_b, 1))
+            ctr = np.sqrt(pt_edges[1:] * pt_edges[:-1])
+            ax_s[col].errorbar(ctr, frac, yerr=err, fmt="o-", ms=3, lw=1)
+            ax_s[col].set(xscale="log", ylim=(-0.02, 1.02), xlabel="truth pt [GeV]",
+                          ylabel="matched survival fraction", title=f"{name} (n={t.sum()})")
+            ax_s[col].grid(alpha=0.3)
+            # 3. deltaR to the nearest same-class reco object, by pt band
+            for lo, hi in PT_BANDS:
+                sel = (pt >= lo) & (pt < hi) & np.isfinite(dr)
+                ax_d[col].hist(np.clip(dr[sel], dr_edges[0], dr_edges[-1]), bins=dr_edges, histtype="step",
+                               lw=1.5, label=f"pt in [{lo:g}, {hi:g}) n={sel.sum()}")
+            ax_d[col].axvline(args.max_dr, color="k", ls="--", lw=1, label=f"gate {args.max_dr}")
+            ax_d[col].set(xscale="log", yscale="log", xlabel="deltaR to nearest same-class reco",
+                          title=f"{name}: unmatched reco {s['reco_unmatched_fraction']:.3f}")
+            ax_d[col].legend(fontsize=7)
+            # 4. survival per efficiency region
+            spec = EFF_BINNING_SPECS[args.eff_binning][name]
+            masks = spec.region_masks(pt, np.abs(d["t_eta"][t]))
+            reg = [(_frac(surv[m]), int(m.sum())) for m in masks]
+            s["survival_by_region"] = [f for f, _n in reg]
+            s["n_by_region"] = [n for _f, n in reg]
+            ax_r[col].bar(range(len(reg)), [f for f, _n in reg], color="C0")
+            for k, (f, n) in enumerate(reg):
+                ax_r[col].text(k, f + 0.01, f"n={n}", ha="center", fontsize=6)
+            labels = [f"e{k // spec.n_pt}p{k % spec.n_pt}" for k in range(len(reg))]  # e<eta bin>p<pt bin>
+            ax_r[col].set(xticks=range(len(reg)), ylim=(0, 1.1), ylabel="matched survival fraction",
+                          xlabel="region (e = |eta| bin, p = pt bin; eta-major order)",
+                          title=f"{name}: per efficiency region ({args.eff_binning})")
+            ax_r[col].set_xticklabels(labels, fontsize=7)
+            summary["per_species"][name] = s
+            print(f"  {name:15s} truth n={s['n_truth']:7d} matched={s['truth_survival_fraction']:.4f} | "
+                  f"reco n={s['n_reco']:7d} matched={(1-s['reco_unmatched_fraction']):.4f} | "
+                  f"beyond gate by pt band: " + ", ".join(f"{k}: {v:.3f}" for k, v in s["beyond_gate_fraction_by_pt_band"].items()))
+        for fig, slug, title in ((fig_s, "survival_vs_pt", "matched survival fraction vs truth pt"),
+                                 (fig_d, "deltaR_nearest_reco", "deltaR to the nearest same-class reco object"),
+                                 (fig_r, "survival_per_region", "matched survival fraction per efficiency region")):
+            fig.suptitle(f"{title}  [{args.matching}, gate {args.max_dr}, reco pt >= {reco_pt_cut}]")
+            fig.tight_layout()
+            pdf.savefig(fig)
+            fig.savefig(args.output_dir / f"{slug}.png", dpi=110)
+            plt.close(fig)
+    (args.output_dir / "matching_diagnostics.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"[eval_matching] wrote {args.output_dir / 'matching_diagnostics.pdf'} (+ per-page PNGs) and .json")
+
+
+if __name__ == "__main__":
+    main()
