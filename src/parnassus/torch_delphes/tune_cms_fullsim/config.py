@@ -73,6 +73,11 @@ OBSERVABLES: list[str] = [
 # delphes, "counts" in --mode fullsim.
 EFF_LOSS_CHOICES: tuple[str, ...] = ("counts", "bce")
 
+# --matching: the truth<->reco assignment rule behind the BCE survival labels
+# (data.match_event). "hungarian" = one-to-one assignment per class; "nn" = every
+# reco object claims its nearest truth particle (diff_delphes_luigi's rule).
+MATCHING_CHOICES: tuple[str, ...] = ("hungarian", "nn")
+
 # --existence for the tune entrypoints (CONSOLIDATE_MODES_PLAN.md 1a): the
 # umbrella toggle over the existence-term family. "counts" reproduces the
 # diff_delphes count-term losses; "bce" the BCE_eff champion (survival BCE +

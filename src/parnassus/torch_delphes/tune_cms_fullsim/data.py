@@ -36,7 +36,7 @@ from parnassus.torch_delphes.SimpleCalorimeter import (
 )
 from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
-from .config import PFLOW_BRANCHES, TRUTH_BRANCHES
+from .config import MATCHING_CHOICES, PFLOW_BRANCHES, TRUTH_BRANCHES
 
 # Per-species reconstructed-data count targets for the differentiable count terms.
 # (region-spec key, |pid| selecting that species in the reco data, target dict key).
@@ -498,6 +498,7 @@ def load_pflow_targets(
     truncate_chads: bool = False,
     truth_pt_cut: float | None = None,
     eff_binning: str = "cms4",
+    matching: str = "hungarian",
 ):
     """
     This task will pick the pflow objects from the input array, then it will
@@ -530,7 +531,7 @@ def load_pflow_targets(
     )
 
     bce_x_list = _build_survival_labels(
-        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
+        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut, matching=matching
     )
     max_n_labels = max((int(x.shape[0]) for x in bce_x_list), default=0)
     bce_x_pad = torch.zeros((n_events, max_n_labels), dtype=torch.float64)
@@ -591,13 +592,16 @@ def load_pflow_targets(
 
 # --- Hungarian truth<->reco survival matching (the BCE efficiency-loss labels) ---
 # Per event and per charged class (pid_to_class: 0 = charged hadron, 1 = electron,
-# 2 = muon), truth particles and reco (pflow) objects of the same class are assigned
-# one-to-one by the Hungarian algorithm on a deltaR^2 cost with a max-deltaR gate; a
-# truth particle survived iff it received a within-gate match. Unmatched reco
-# objects are fakes for this purpose and are ignored; neutrals are never matched (no
-# per-particle correspondence exists -- EFF_LOSS_MOTIV.md section 2). Gate 0.05:
-# diff-Delphes momentum smearing preserves the track direction, so genuine matches
-# sit at deltaR ~ 0 and the gate mainly rejects cross-particle coincidences.
+# 2 = muon), truth particles and reco (pflow) objects of the same class are paired
+# on a deltaR^2 cost with a max-deltaR gate; a truth particle survived iff it
+# received a within-gate match. The assignment rule is --matching
+# (config.MATCHING_CHOICES): "hungarian" = one-to-one optimal assignment;
+# "nn" = each reco object claims its nearest truth particle (no one-to-one
+# constraint; diff_delphes_luigi's rule). Unmatched reco objects are fakes for this
+# purpose and are ignored; neutrals are never matched (no per-particle
+# correspondence exists -- EFF_LOSS_MOTIV.md section 2). Gate 0.05: diff-Delphes
+# momentum smearing preserves the track direction, so genuine matches sit at
+# deltaR ~ 0 and the gate mainly rejects cross-particle coincidences.
 MATCH_CLASSES: tuple[int, ...] = (0, 1, 2)
 MATCH_MAX_DR: float = 0.05
 _UNMATCHED_COST = 1.0e9  # any pair beyond the gate; an assignment at this cost = unmatched
@@ -616,9 +620,12 @@ def match_event(
     r_phi: np.ndarray,
     r_cls: np.ndarray,
     max_dr: float = MATCH_MAX_DR,
+    matching: str = "hungarian",
 ) -> np.ndarray:
     """Per-event survival labels: True where a truth particle got a same-class
-    reco match within ``max_dr`` under the per-class Hungarian assignment."""
+    reco match within ``max_dr`` under the per-class assignment rule
+    ``matching`` (see :data:`MATCHING_CHOICES`)."""
+    assert matching in MATCHING_CHOICES, matching
     survived = np.zeros(t_eta.shape[0], dtype=bool)
     max_dr2 = max_dr * max_dr
     for cls in MATCH_CLASSES:
@@ -630,7 +637,10 @@ def match_event(
         dphi = _delta_phi(t_phi[ti], r_phi[ri])
         cost = deta * deta + dphi * dphi
         cost = np.where(cost <= max_dr2, cost, _UNMATCHED_COST)
-        rows, cols = linear_sum_assignment(cost)
+        if matching == "hungarian":
+            rows, cols = linear_sum_assignment(cost)
+        else:  # nn: reco object j claims truth particle argmin_i cost[i, j]
+            rows, cols = cost.argmin(axis=0), np.arange(ri.size)
         ok = cost[rows, cols] < _UNMATCHED_COST
         survived[ti[rows[ok]]] = True
     return survived
@@ -640,11 +650,12 @@ def _build_survival_labels(
     arrays: dict[str, np.ndarray],
     truth_pt_cut: float | None = None,
     truth_abs_eta_cut: float | None = None,
+    matching: str = "hungarian",
 ) -> list[torch.Tensor]:
     """Per-event BCE efficiency-loss survival labels (float64 1.0/0.0), one per
     truth row of :func:`_build_truth_rows` (same acceptance cuts, same order):
     1.0 iff the truth particle received a same-class reco match under the
-    per-event Hungarian assignment (:func:`match_event`). Computed here from the
+    per-event assignment rule ``matching`` (:func:`match_event`). Computed here from the
     plain ``truth_*`` / ``pflow_*`` branches right before training; the wall time
     is printed.
     """
@@ -661,6 +672,7 @@ def _build_survival_labels(
             np.asarray(arrays["pflow_eta"][i], dtype=np.float64),
             np.asarray(arrays["pflow_phi"][i], dtype=np.float64),
             np.asarray(arrays["pflow_class"][i], dtype=np.int64),
+            matching=matching,
         )
         keep = np.ones(pt.shape[0], dtype=bool)
         if truth_pt_cut is not None:
@@ -669,7 +681,7 @@ def _build_survival_labels(
             keep &= np.abs(eta) <= truth_abs_eta_cut
         labels.append(torch.from_numpy(survived[keep].astype(np.float64)))
     print(
-        f"[hungarian] truth<->reco survival matching: {n_events} events in "
+        f"[{matching}] truth<->reco survival matching: {n_events} events in "
         f"{time.perf_counter() - t0:.1f}s"
     )
     return labels
@@ -683,6 +695,7 @@ def load_pflow_targets_ragged(
     truncate_chads: bool = False,
     truth_pt_cut: float | None = None,
     eff_binning: str = "cms4",
+    matching: str = "hungarian",
 ):
     """Ragged counterpart of :func:`load_pflow_targets`.
 
@@ -742,7 +755,7 @@ def load_pflow_targets_ragged(
         return [torch.from_numpy(np.ascontiguousarray(a, dtype=np.float64)) for a in arrs]
 
     bce_x = _build_survival_labels(
-        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
+        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut, matching=matching
     )
 
     return {

@@ -227,6 +227,13 @@ def test_match_event_same_class_within_gate():
         np.array([0.0]), np.array([0.0]), np.array([0]), max_dr=0.05,
     )
     assert int(got.sum()) == 1
+    # Two truth chads A (0,0), B (0.05,0); two reco chads r1 at 0.01 and r2 at 0.02
+    # from A (0.03 from B, inside the gate). Hungarian assigns r2 to B (both
+    # survive); nn lets both reco objects claim A (B does not survive).
+    args = (np.array([0.0, 0.05]), np.zeros(2), np.zeros(2, dtype=int),
+            np.array([0.01, 0.02]), np.zeros(2), np.zeros(2, dtype=int))
+    assert match_event(*args, matching="hungarian").tolist() == [True, True]
+    assert match_event(*args, matching="nn").tolist() == [True, False]
 
 
 def _toy_arrays(n_events: int = 6, seed: int = 0) -> dict[str, np.ndarray]:

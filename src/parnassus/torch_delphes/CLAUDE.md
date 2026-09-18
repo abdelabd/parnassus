@@ -190,11 +190,12 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
   (`data._build_survival_labels`, deltaR gate 0.05; ~1 min per 200k dijet events,
   wall time printed as `[hungarian] ...`). No preprocessed sample set is needed.
   `counts` is the legacy expected-count chi^2 and the fullsim-mode default. Knobs:
-  `--bce-weight`, `--bce-weighting {pooled,per_species}`.
-- One efficiency function: the learnable card decides track survival on the
-  UNSMEARED (propagated) kinematics, as C++ Delphes does, and applies the mask
-  after smearing (so the E recomputation cannot resurrect killed tracks). The
-  forward exports, per track, that same survival probability (the
+  `--bce-weight`, `--bce-weighting {pooled,per_species}`, `--matching
+  {hungarian,nn}` (the assignment rule behind the labels: one-to-one Hungarian,
+  default, or diff_delphes_luigi's reco-claims-nearest-truth; both per charged
+  class within the 0.05 gate; pass via `EXTRA_ARGS` in run_sequential.sh).
+- One efficiency function: the card forward exports, per track, the survival
+  probability it evaluated on the smeared pre-mask kinematics (the
   `TrackSurvivalExport`, keyed by input row); the BCE is taken between that and
   the matched label of the same truth row. The bin is a function of the truth
   row alone, so there is no bin migration vs the labels (the 2b8fcb7 bias, see
