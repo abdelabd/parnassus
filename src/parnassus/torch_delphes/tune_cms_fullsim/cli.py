@@ -230,7 +230,8 @@ def main() -> None:
             "the BCE champion (--eff-loss bce, --calo-bce, "
             "--calo-count-weight 0). Sets DEFAULTS only — any of those three "
             "flags passed explicitly wins — and omitting it applies no bundle "
-            "(legacy per-knob defaults). 'bce' requires --mode delphes."
+            "(legacy per-knob defaults). In --mode fullsim 'bce' keeps the tower "
+            "BCE off and the calo count terms on (the tower BCE is delphes-only)."
         ),
     )
     parser.add_argument(

@@ -78,8 +78,10 @@ EFF_LOSS_CHOICES: tuple[str, ...] = ("counts", "bce")
 # diff_delphes count-term losses; "bce" the BCE_eff champion (survival BCE +
 # tower BCE with the calo count terms off). It only fills DEFAULTS — any of
 # the three underlying knobs passed explicitly wins — and omitting it applies
-# no bundle at all (each knob keeps its own legacy default). Delphes-mode
-# only: "bce" is a hard error in fullsim mode (EFF_LOSS_PLAN.md Phase 3).
+# no bundle at all (each knob keeps its own legacy default). In fullsim mode
+# "bce" is the track survival BCE with the calo count terms kept on: the tower
+# BCE is delphes-only (its occupancy labels assume cell-exact reco positions and
+# no photon merger).
 EXISTENCE_CHOICES: tuple[str, ...] = ("counts", "bce")
 
 
@@ -98,15 +100,11 @@ def resolve_existence_bundle(
     """
     if existence is not None and existence not in EXISTENCE_CHOICES:
         raise ValueError(f"--existence: {existence!r}")
-    if existence == "bce" and mode != "delphes":
-        raise SystemExit(
-            "--existence bce requires --mode delphes: fullsim has no survival "
-            "labels or tower-occupancy targets yet (EFF_LOSS_PLAN.md Phase 3)."
-        )
+    tower_bce = mode == "delphes"
     if existence == "counts":
         bundle = ("counts", False, default_calo_count_weight)
     elif existence == "bce":
-        bundle = ("bce", True, 0.0)
+        bundle = ("bce", tower_bce, 0.0 if tower_bce else default_calo_count_weight)
     else:  # no umbrella: the legacy per-knob defaults
         bundle = (
             "bce" if mode == "delphes" else "counts",

@@ -42,9 +42,9 @@ def test_explicit_flags_win_over_bundle():
     )
 
 
-def test_bce_requires_delphes_mode():
-    with pytest.raises(SystemExit):
-        _resolve(mode="fullsim", existence="bce")
+def test_fullsim_bundles():
+    # bce in fullsim: track survival BCE, tower BCE off (delphes-only), calo counts on.
+    assert _resolve(mode="fullsim", existence="bce") == ("bce", False, CALO_COUNT_WEIGHT)
     # counts is fine in fullsim (it IS fullsim behavior)
     assert _resolve(mode="fullsim", existence="counts") == (
         "counts", False, CALO_COUNT_WEIGHT,

@@ -114,7 +114,9 @@ python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search --root-file /gl
 Training on real full-simulation data. Since the `consolidate_modes` branch
 this no longer needs a branch switch: `--mode fullsim` selects the 12-bin
 chad-efficiency layout (`eff_binning=ptbins12`) and counts-based existence
-terms automatically (`--existence bce` is delphes-only for now). The legacy
+terms automatically; add `--existence bce` for the track survival BCE (Hungarian
+labels built at load time; the tower BCE stays delphes-only, so the calo count
+terms stay on). The legacy
 `diff_delphes_runze_cmssinglejet` branch remains as the historical reference.
 
 ```bash
