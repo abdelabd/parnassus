@@ -262,18 +262,19 @@ def test_survival_labels_align_with_truth_rows_under_cuts():
     arrays = _toy_arrays()
     for cuts in ({}, {"truth_pt_cut": 1.0, "abs_eta_cut": 2.5}):
         rows = _build_truth_rows(arrays, **cuts)
-        labels = _build_survival_labels(
-            arrays, truth_pt_cut=cuts.get("truth_pt_cut"), truth_abs_eta_cut=cuts.get("abs_eta_cut")
-        )
+        labels = _build_survival_labels(arrays, **cuts)
         assert [r.shape[0] for r in rows] == [x.shape[0] for x in labels]
     # No cuts: a matched truth track is exactly one that has a same-class reco object at
-    # its position (the toy reco is a subset of the truth tracks + one fake).
-    labels = _build_survival_labels(arrays)
-    for i, x in enumerate(labels):
-        cls = arrays["truth_class"][i]
-        charged = cls < 3
-        in_reco = np.isin(arrays["truth_eta"][i], arrays["pflow_eta"][i])
-        assert np.array_equal(x.numpy().astype(bool), charged & in_reco)
+    # its position (the toy reco is a subset of the truth tracks + one fake). With a
+    # reco cut, the reco list is cut BEFORE matching: a track reconstructed below the
+    # cut does not count as survived (the toy reco pt equals the truth pt).
+    for reco_pt_cut in (None, 10.0):
+        labels = _build_survival_labels(arrays, reco_pt_cut=reco_pt_cut)
+        for i, x in enumerate(labels):
+            charged = arrays["truth_class"][i] < 3
+            in_reco = np.isin(arrays["truth_eta"][i], arrays["pflow_eta"][i])
+            above = arrays["truth_pt"][i] >= (reco_pt_cut or 0.0)
+            assert np.array_equal(x.numpy().astype(bool), charged & in_reco & above)
 
 
 def test_track_survival_export_is_row_keyed_and_differentiable():
