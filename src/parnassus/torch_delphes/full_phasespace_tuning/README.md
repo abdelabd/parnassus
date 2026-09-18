@@ -57,17 +57,15 @@ the electron gun with the electron block frozen -- is not part of the chain for 
 Since 2026-09 the stages fit the tracking `eff_logits` with the per-particle
 survival BCE by default (`--eff-loss bce`; run_sequential passes `--mode delphes`
 where bce is the default — see `../EFF_LOSS_PLAN.md` / `../EFF_LOSS_MOTIV.md`).
-This REQUIRES samples carrying the survival-label branches
-(`*_truth_matched_survival.root`, regenerated via
-`../slurm_scripts/submit_truth_matched_survival_samples.sh`): point `SAMPLE_PATTERN`
-at them (see `../slurm_scripts/run_sequential_survival.sbatch`). On the old
-unlabeled samples run with `EXTRA_ARGS="--eff-loss counts"` (the legacy
-expected-count terms). The calo count terms are active either way — unless you
+It runs on the plain samples: the per-truth-particle survival labels are built in
+memory by Hungarian truth<->reco matching right before training (the wall time is
+printed). `EXTRA_ARGS="--eff-loss counts"` selects the legacy expected-count terms
+instead. The calo count terms are active either way — unless you
 run the count-free tower-BCE variant: `EXTRA_ARGS="--calo-count-weight 0
 --calo-bce"` is safe to pass GLOBALLY; the tower BCE auto-disables in any stage
 with no trainable calo parameter (stages 1/2/4), where it would otherwise be
 untrainable value noise that poisons best-epoch selection (see
-`../EFF_LOSS_PLAN.md` Phase 2).
+`../EFF_LOSS_PLAN.md` Phase 2). To automatically set `--eff-loss bce --calo-count-weight 0 --calo-bce`, just pass instead `--existence bce`
 
 ## Run
 

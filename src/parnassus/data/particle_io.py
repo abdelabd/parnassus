@@ -54,13 +54,11 @@ class ColumnMap(IntEnum):
     # loss can build the reco-bin <- pre-reco-region migration for the differentiable
     # charged-hadron count term. Default 0 everywhere else.
     EFF_REGION = 20
-    # Per-particle identity tag (1-based; 0 = "no UID": padding rows, calo towers).
-    # Assigned by generate_pseudodata to the flat truth index before the target-card
-    # forward and, like EFF_REGION, only transported downstream (no module interprets
-    # it; masking/rescaling touch momentum columns only), so a truth particle can be
-    # re-identified in the EFlowObject output. Used to write the per-truth-particle
-    # survival labels (truth_survived / truth_in_tracker / truth_eff_region) for the
-    # BCE efficiency loss. Default 0 everywhere else.
+    # Per-particle identity tag: the card forward sets it to the input-row index
+    # and, like EFF_REGION, only transports it downstream (no module interprets it;
+    # masking/rescaling touch momentum columns only), so the per-track survival
+    # probabilities (TrackSurvivalExport) can be paired with per-input-row labels
+    # for the BCE efficiency loss. 0 on padding rows and calo towers.
     UID = 21
 
 

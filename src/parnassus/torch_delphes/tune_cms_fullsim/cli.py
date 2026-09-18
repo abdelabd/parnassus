@@ -242,12 +242,10 @@ def main() -> None:
             "How the tracking-efficiency eff_logits are fitted. 'counts' = the "
             "reco-space expected-count chi^2 terms (legacy). 'bce' = the per-particle "
             "survival BCE (EFF_LOSS_PLAN.md): drops the three tracking count terms and "
-            "instead fits the exact Bernoulli likelihood of the truth_survived / "
-            "truth_eff_region labels, which the sample must carry (regenerate with "
-            "generate_pseudodata, or use the *_truth_matched_survival.root samples). "
-            "The calo count terms are unaffected either way. Default: 'bce' in "
-            "--mode delphes, 'counts' in --mode fullsim (no labels until the Phase-2 "
-            "gen-reco matcher)."
+            "instead fits the exact Bernoulli likelihood of per-truth-particle "
+            "survival labels, built at load time by Hungarian truth<->reco matching "
+            "on the plain sample. The calo count terms are unaffected either way. "
+            "Default: 'bce' in --mode delphes, 'counts' in --mode fullsim."
         ),
     )
     parser.add_argument(
@@ -638,7 +636,6 @@ def main() -> None:
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
-        require_bce_labels=(eff_loss == "bce"),
         eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
     )
     if truncate_chads:

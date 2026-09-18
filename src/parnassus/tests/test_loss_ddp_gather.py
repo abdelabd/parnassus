@@ -357,17 +357,14 @@ def _worker_equiv() -> int:
 
 def _worker_bce() -> int:
     """--eff-loss bce under DDP: value == single-process on the union, backward
-    completes with an empty rank, and every rank's eff_logits gradient equals the
-    single-process gradient (the efficiency modules are replicated parameters; the
-    labels are gathered)."""
+    completes with an empty rank, and every rank's eps gradient equals world_size
+    x its slice of the single-process gradient (eps is a per-shard activation
+    gathered differentiably -- the reduce-scatter backward sums the identical
+    global term over ranks, which DDP's parameter-gradient mean then undoes; the
+    labels are gathered as data)."""
     import torch.distributed as dist
-    from parnassus.torch_delphes.learnable import (
-        CMS_EFF_REGION_SPECS,
-        CMSChargedHadronLearnableEfficiency,
-        CMSElectronLearnableEfficiency,
-        CMSMuonLearnableEfficiency,
-    )
     from parnassus.torch_delphes.tune_cms_fullsim.loss import (
+        BCE_SPECIES,
         per_pid_wasserstein_1d_loss,
         per_pid_wasserstein_1d_loss_distributed,
     )
@@ -380,73 +377,59 @@ def _worker_bce() -> int:
     one = torch.tensor(1.0, dtype=torch.float64)
     tgt_scale = torch.tensor(1.09, dtype=torch.float64)
 
-    # Labels: every one on the FIRST half of the events, so rank 1's shard has
-    # ZERO labeled particles (the empty-rank asymmetry the gathers must survive).
+    # Tracks: only chads, and ALL of them on rank 0, so rank 1's shard has ZERO
+    # tracks in every species (the empty-rank asymmetry the gathers must survive).
     g = torch.Generator().manual_seed(11)
-    chad = CMS_EFF_REGION_SPECS["charged_hadron"]
     n_lab = 40
-    full_region = torch.randint(
-        chad.label_offset + 1, chad.label_offset + chad.n_regions + 1, (N // 2, n_lab), generator=g
-    ).long()
-    full_x = (torch.rand((N // 2, n_lab), dtype=torch.float64, generator=g) < 0.8).double()
-    pad_r = torch.zeros((N - N // 2, n_lab), dtype=torch.long)
-    pad_x = torch.zeros((N - N // 2, n_lab), dtype=torch.float64)
-    region_all = torch.cat([full_region, pad_r])  # (N, n_lab); second half unlabeled
-    x_all = torch.cat([full_x, pad_x])
-    pt_all = torch.full_like(x_all, 5.0)
+    eps_full = (0.2 + 0.6 * torch.rand(n_lab, dtype=torch.float64, generator=g)).requires_grad_(True)
+    x_full = (torch.rand(n_lab, dtype=torch.float64, generator=g) < 0.8).double()
+    empty = lambda: torch.zeros(0, dtype=torch.float64, requires_grad=True)
 
-    def _modules() -> dict[str, torch.nn.Module]:
-        out = {}
-        for pred_key, cls in (
-            ("bce_eff:chad", CMSChargedHadronLearnableEfficiency),
-            ("bce_eff:electron", CMSElectronLearnableEfficiency),
-            ("bce_eff:muon", CMSMuonLearnableEfficiency),
-        ):
-            out[pred_key] = cls()
-            with torch.no_grad():
-                out[pred_key].eff_logits.fill_(0.3)
-        return out
+    def _bce(eps_chad):
+        pred = {f"bce_eps:{k}": empty() for k in BCE_SPECIES}
+        tgt = {f"bce_x:{k}": torch.zeros(0, dtype=torch.float64) for k in BCE_SPECIES}
+        pred["bce_eps:chad"] = eps_chad
+        tgt["bce_x:chad"] = x_full[: eps_chad.numel()]
+        return pred, tgt
 
-    # Reference: plain loss on ALL events with the same replicated modules.
-    ref_mods = _modules()
-    full_pred = {**_obs_from(pid, pt, eta, phi, one), **ref_mods}
-    full_tgt = {k: v.detach() for k, v in _obs_from(pid, pt, eta, phi, tgt_scale).items()}
-    full_tgt["bce_region"] = region_all
-    full_tgt["bce_x"] = x_all
-    full_tgt["bce_pt"] = pt_all
+    # Reference: plain loss on ALL events with all tracks.
+    ref_p, ref_t = _bce(eps_full)
+    full_pred = {**_obs_from(pid, pt, eta, phi, one), **ref_p}
+    full_tgt = {**{k: v.detach() for k, v in _obs_from(pid, pt, eta, phi, tgt_scale).items()}, **ref_t}
     ref = per_pid_wasserstein_1d_loss(full_pred, full_tgt, pair_mass=False, eff_loss="bce")
     ref.backward()
     ref_val = float(ref)
-    ref_grad = ref_mods["bce_eff:chad"].eff_logits.grad.clone()
+    ref_grad = eps_full.grad.clone()
 
     # This rank's shard through the DDP path.
     per = N // world
     sl = slice(rank * per, (rank + 1) * per)
-    ddp_mods = _modules()
-    s_pred = {**_obs_from(pid[sl], pt[sl], eta[sl], phi[sl], one), **ddp_mods}
+    lab = slice(0, n_lab) if rank == 0 else slice(0, 0)
+    eps_shard = eps_full.detach()[lab].clone().requires_grad_(True)
+    s_p, s_t = _bce(eps_shard)
+    s_pred = {**_obs_from(pid[sl], pt[sl], eta[sl], phi[sl], one), **s_p}
     s_tgt = {
-        k: v.detach() for k, v in _obs_from(pid[sl], pt[sl], eta[sl], phi[sl], tgt_scale).items()
+        **{k: v.detach() for k, v in _obs_from(pid[sl], pt[sl], eta[sl], phi[sl], tgt_scale).items()},
+        **s_t,
     }
-    s_tgt["bce_region"] = region_all[sl]
-    s_tgt["bce_x"] = x_all[sl]
-    s_tgt["bce_pt"] = pt_all[sl]
     loss = per_pid_wasserstein_1d_loss_distributed(
         s_pred, s_tgt, pair_mass=False, eff_loss="bce"
     )
-    loss.backward()  # hangs here if the label gathers are asymmetric across ranks
+    loss.backward()  # hangs here if the gathers are asymmetric across ranks
 
     rel = abs(float(loss) - ref_val) / max(abs(ref_val), 1e-30)
     assert rel < 1e-9, f"rank {rank}: DDP bce loss {float(loss)!r} != reference {ref_val!r}"
-    grad = ddp_mods["bce_eff:chad"].eff_logits.grad
+    grad = eps_shard.grad
     assert grad is not None and torch.isfinite(grad).all()
-    grad_rel = float((grad - ref_grad).abs().max() / ref_grad.abs().max().clamp_min(1e-30))
-    assert grad_rel < 1e-9, (
-        f"rank {rank}: DDP bce logits grad differs from single-process by {grad_rel:.3e} "
-        "(replicated-parameter gradient must be the full global gradient on every rank)"
-    )
-    # Muon logits got no labels anywhere: zero but graph-connected grad.
-    mu_grad = ddp_mods["bce_eff:muon"].eff_logits.grad
-    assert mu_grad is not None and float(mu_grad.abs().sum()) == 0.0
+    if rank == 0:
+        expected = world * ref_grad
+        grad_rel = float((grad - expected).abs().max() / expected.abs().max().clamp_min(1e-30))
+        assert grad_rel < 1e-9, (
+            f"rank {rank}: DDP bce eps grad differs from world_size x single-process by {grad_rel:.3e}"
+        )
+    # Empty species: zero but graph-connected grad.
+    mu_grad = s_p["bce_eps:muon"].grad
+    assert mu_grad is not None and mu_grad.numel() == 0
     dist.barrier()
     if rank == 0:
         print("BCE_DDP_OK", flush=True)

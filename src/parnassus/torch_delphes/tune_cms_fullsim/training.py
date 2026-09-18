@@ -32,7 +32,7 @@ from .data import (
 )
 from .distributed import _is_dist, _is_main
 from .loss import (
-    BCE_TERM_KEYS,
+    BCE_SPECIES,
     BCE_WEIGHT,
     CALO_BCE_WEIGHT,
     CALO_COUNT_WEIGHT,
@@ -45,15 +45,6 @@ from .loss import (
     compute_pair_masses,
     get_loss_fn,
 )
-
-# The card attribute holding each BCE species' tracking-efficiency module (see
-# loss.BCE_TERM_KEYS for the pred-dict key each is injected under).
-_BCE_EFF_ATTRS: dict[str, str] = {
-    "chad": "ChargedHadronTrackingEfficiency",
-    "electron": "ElectronTrackingEfficiency",
-    "muon": "MuonTrackingEfficiency",
-}
-
 
 def _inject_tower_bce(
     pred_observables: dict[str, torch.Tensor],
@@ -105,18 +96,25 @@ def _inject_tower_bce(
         target_observables[f"tower_x:{key}"] = in_box.any(dim=1).to(torch.float64)
 
 
-def _inject_bce_modules(
+def _inject_track_bce(
     pred_observables: dict[str, torch.Tensor],
-    card: "CMSEnergyFlowDefault | DDP",
+    target_observables: dict[str, torch.Tensor],
+    out: dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
+    mask: torch.Tensor,
 ) -> None:
-    """Put the card's per-species tracking-efficiency modules into the pred dict
-    (``bce_eff:{species}``) for the pooled BCE efficiency loss, which evaluates
-    their ``efficiency_in_region`` on the labeled truth particles. Their
-    parameters are replicated (identical on every DDP rank), not per-shard
-    activations, so no gather is needed — see ``loss._bce_eff_terms``."""
-    core = card.module if isinstance(card, DDP) else card
-    for key, pred_key in BCE_TERM_KEYS:
-        pred_observables[pred_key] = getattr(core, _BCE_EFF_ATTRS[key])
+    """--eff-loss bce: pair the card's per-track survival probabilities (its
+    ``TrackSurvivalExport``: per species, ``eps`` on the smeared pre-mask
+    kinematics + each track's input-row UID) with the Hungarian survival labels of
+    the same truth rows (``batch["bce_x"]``, row-aligned with ``truth_particles``
+    and flattened by the same padding ``mask`` as the card input). The pred dict
+    gets ``bce_eps:{species}`` (differentiable), the target dict the matching
+    ``bce_x:{species}``; loss._bce_eff_terms consumes them."""
+    exp = out["TrackSurvivalExport"]
+    x = batch["bce_x"][mask]
+    for key in BCE_SPECIES:
+        pred_observables[f"bce_eps:{key}"] = exp[f"eps:{key}"]
+        target_observables[f"bce_x:{key}"] = x[exp[f"uid:{key}"].long()]
 
 # =============================================================================
 # Fit loop
@@ -632,14 +630,14 @@ def fit_card_to_fullsim(
             # filters below (they pass non-object keys through untouched).
             for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                 pred_observables[pred_key] = out[out_key]
-            # --eff-loss bce: the loss evaluates the card's efficiency modules on
-            # the labeled truth particles (the pooled survival BCE is its own
-            # gradient path, out-of-band from the reco forward; EFF_LOSS_PLAN.md).
-            if eff_loss == "bce":
-                _inject_bce_modules(pred_observables, card)
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+            # --eff-loss bce: the pooled survival BCE on the card's own per-track
+            # survival probabilities (its own gradient path, out-of-band from the
+            # reco-space shape terms; EFF_LOSS_PLAN.md).
+            if eff_loss == "bce":
+                _inject_track_bce(pred_observables, target_observables, out, batch, mask)
             if calo_bce:
                 _inject_tower_bce(pred_observables, target_observables, out, batch)
             # Per-event truth leading-2 pair masses (the pair-mass terms compare the
@@ -758,10 +756,10 @@ def fit_card_to_fullsim(
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
                 for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
                     pred_observables[pred_key] = out[out_key]
-                if eff_loss == "bce":
-                    _inject_bce_modules(pred_observables, card)
 
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
+                if eff_loss == "bce":
+                    _inject_track_bce(pred_observables, target_observables, out, batch, mask)
                 if calo_bce:
                     _inject_tower_bce(pred_observables, target_observables, out, batch)
                 attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)

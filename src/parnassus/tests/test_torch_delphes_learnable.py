@@ -357,6 +357,8 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
         # survival log-probs (--calo-bce; EFF_LOSS_PLAN.md Phase 2).
         "EcalCountExport",
         "HcalCountExport",
+        # Per-track survival probabilities + input-row UIDs (--eff-loss bce).
+        "TrackSurvivalExport",
     }
     assert set(out.keys()) == expected_keys
     # Per-(pt,eta) region differentiable expected counts (one tensor per track
@@ -384,6 +386,16 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
             assert v["bce_logq"].requires_grad or n == 0
             assert torch.isfinite(v["bce_logq"]).all()
             assert (v["bce_logq"] <= 0).all(), "log q must be a log-probability"
+            continue
+        if k == "TrackSurvivalExport":
+            # Per-track survival probabilities keyed by species + input-row UID,
+            # aligned per species, in [0, 1], differentiable (--eff-loss bce).
+            assert isinstance(v, dict)
+            for key in ("chad", "electron", "muon"):
+                eps, uid = v[f"eps:{key}"], v[f"uid:{key}"]
+                assert eps.shape == uid.shape and eps.ndim == 1
+                assert ((eps >= 0) & (eps <= 1)).all()
+                assert eps.requires_grad or eps.numel() == 0
             continue
         assert v.ndim == 2
         assert v.shape[1] == N_FEATURES, f"{k} has wrong feature count"

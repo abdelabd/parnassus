@@ -16,28 +16,27 @@ after `source parnassus_env/bin/activate`. For Comet logging, additionally set y
 
 ## 1. Generate pseudodata
 
-All seven survival-labeled sample sets (SLURM arrays + dependent merges, from a
-login node):
+Plain samples (truth + pflow branches only; SLURM array + dependent merge, from a
+login node), e.g. the four sequential-closure samples of the `param_config_all`
+truth card (guns 2x100k, dijet 20x10k):
 
 ```bash
-bash src/parnassus/torch_delphes/slurm_scripts/submit_truth_matched_survival_samples.sh
+CFG=src/parnassus/torch_delphes/param_configs/param_config_all.yaml
+for p in muongun electrongun ksgun; do
+  OUTBASE=$DD/allsamples bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
+      --config $CFG --process $p --n_events 200000 --n_tasks 2
+done
+OUTBASE=$DD/allsamples bash src/parnassus/torch_delphes/slurm_scripts/submit_pseudodata.sh \
+    --config $CFG --process dijet --n_events 200000 --n_tasks 20
 ```
 
-Then the Hungarian-matched labels (after the four sequential merges finish):
-
-```bash
-sbatch src/parnassus/torch_delphes/slurm_scripts/hungarian_match_samples.sbatch
-```
-
-Outputs land in `$DD/allsamples/` as
-`*_truth_matched_survival.root` / `*_hungarian_matched_survival.root`, each with
-a `.provenance.json` sidecar.
+The BCE efficiency loss needs no labeled sample set: the truth<->reco survival
+labels are built in memory by Hungarian matching right before training.
 
 ## 2. Sequential closure — BCE, chad parameters only receive chad gradients in stage 2
 ```bash
 D=src/parnassus/torch_delphes/full_phasespace_tuning
 OUT_BASE=doc/pseudo_seq_bce_det \
-SAMPLE_PATTERN=pseudo_data_200k_param_config_all_%s_hungarian_matched_survival.root \
 COMET_NAME_PREFIX=pseudo_bce_det \
 EXTRA_ARGS="--existence bce" \
 bash $D/run_sequential.sh
@@ -48,7 +47,6 @@ bash $D/run_sequential.sh
 ```bash
 D=src/parnassus/torch_delphes/full_phasespace_tuning
 OUT_BASE=doc/pseudo_seq_bce_live \
-SAMPLE_PATTERN=pseudo_data_200k_param_config_all_%s_hungarian_matched_survival.root \
 COMET_NAME_PREFIX=pseudo_bce_live \
 EXTRA_ARGS="--existence bce --calo-bce-grads live" \
 bash $D/run_sequential.sh $D/stage1_muons.yaml $D/stage2_chads.yaml $D/stage3_calo_joint.yaml $D/stage4_electrons.yaml

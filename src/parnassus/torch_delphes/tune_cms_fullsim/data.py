@@ -15,11 +15,13 @@ This module turns a cms-flow-format ROOT file into the things the fit loop needs
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import uproot
+from scipy.optimize import linear_sum_assignment
 
 from parnassus.data.particle_io import (
     N_FEATURES,
@@ -34,7 +36,7 @@ from parnassus.torch_delphes.SimpleCalorimeter import (
 )
 from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
-from .config import LABEL_BRANCHES, PFLOW_BRANCHES, TRUTH_BRANCHES
+from .config import PFLOW_BRANCHES, TRUTH_BRANCHES
 
 # Per-species reconstructed-data count targets for the differentiable count terms.
 # (region-spec key, |pid| selecting that species in the reco data, target dict key).
@@ -94,7 +96,7 @@ def load_cms_flow_root(
             n_events = tree.num_entries - entry_start
         available = set(tree.keys())
         requested = [
-            b for b in (TRUTH_BRANCHES + PFLOW_BRANCHES + LABEL_BRANCHES) if b in available
+            b for b in (TRUTH_BRANCHES + PFLOW_BRANCHES) if b in available
         ]
         arrays = tree.arrays(
             requested,
@@ -505,10 +507,8 @@ def load_pflow_targets(
     ``reco_pt_cut`` / ``abs_eta_cut`` / ``truncate_chads``: see
     :func:`_build_pflow_event_data`.
 
-    Also carries the BCE efficiency-loss labels ``bce_region`` / ``bce_x`` padded
-    to the max labeled multiplicity (padding 0 = "no label"; empty when the sample
-    has no ``LABEL_BRANCHES``). ``truth_pt_cut`` (with the shared ``abs_eta_cut``)
-    restricts the labeled population, mirroring the ragged loader.
+    Also carries the BCE efficiency-loss survival labels ``bce_x`` (one per truth
+    row, see :func:`_build_survival_labels`) padded to the max truth multiplicity.
     """
     (
         n_events,
@@ -529,17 +529,13 @@ def load_pflow_targets(
         eff_binning=eff_binning,
     )
 
-    bce_region_list, bce_x_list, bce_pt_list = _build_bce_labels(
-        arrays, n_events, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
+    bce_x_list = _build_survival_labels(
+        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
     )
-    max_n_labels = max((int(r.shape[0]) for r in bce_region_list), default=0)
-    bce_region_pad = torch.zeros((n_events, max_n_labels), dtype=torch.int64)
+    max_n_labels = max((int(x.shape[0]) for x in bce_x_list), default=0)
     bce_x_pad = torch.zeros((n_events, max_n_labels), dtype=torch.float64)
-    bce_pt_pad = torch.zeros((n_events, max_n_labels), dtype=torch.float64)
-    for i, (r, x, pt) in enumerate(zip(bce_region_list, bce_x_list, bce_pt_list)):
-        bce_region_pad[i, : r.shape[0]] = r
+    for i, x in enumerate(bce_x_list):
         bce_x_pad[i, : x.shape[0]] = x
-        bce_pt_pad[i, : pt.shape[0]] = pt
 
     # shape of all_pt, all_eta, all_e is (num_events, num_particles_in_event); num_particles_in_event can vary across events
     # pad to the max num_particles across events and stack into a single tensor of shape (num_events, max_num_particles)
@@ -588,58 +584,95 @@ def load_pflow_targets(
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
         "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
-        "bce_region": bce_region_pad,
         "bce_x": bce_x_pad,
-        "bce_pt": bce_pt_pad,
         **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 
 
-def has_bce_labels(arrays: dict[str, np.ndarray]) -> bool:
-    """Whether the loaded arrays carry the per-truth-particle survival labels
-    (``LABEL_BRANCHES``) needed by ``--eff-loss bce``."""
-    return all(b in arrays for b in LABEL_BRANCHES)
+# --- Hungarian truth<->reco survival matching (the BCE efficiency-loss labels) ---
+# Per event and per charged class (pid_to_class: 0 = charged hadron, 1 = electron,
+# 2 = muon), truth particles and reco (pflow) objects of the same class are assigned
+# one-to-one by the Hungarian algorithm on a deltaR^2 cost with a max-deltaR gate; a
+# truth particle survived iff it received a within-gate match. Unmatched reco
+# objects are fakes for this purpose and are ignored; neutrals are never matched (no
+# per-particle correspondence exists -- EFF_LOSS_MOTIV.md section 2). Gate 0.05:
+# diff-Delphes momentum smearing preserves the track direction, so genuine matches
+# sit at deltaR ~ 0 and the gate mainly rejects cross-particle coincidences.
+MATCH_CLASSES: tuple[int, ...] = (0, 1, 2)
+MATCH_MAX_DR: float = 0.05
+_UNMATCHED_COST = 1.0e9  # any pair beyond the gate; an assignment at this cost = unmatched
 
 
-def _build_bce_labels(
+def _delta_phi(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    d = a[:, None] - b[None, :]
+    return (d + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def match_event(
+    t_eta: np.ndarray,
+    t_phi: np.ndarray,
+    t_cls: np.ndarray,
+    r_eta: np.ndarray,
+    r_phi: np.ndarray,
+    r_cls: np.ndarray,
+    max_dr: float = MATCH_MAX_DR,
+) -> np.ndarray:
+    """Per-event survival labels: True where a truth particle got a same-class
+    reco match within ``max_dr`` under the per-class Hungarian assignment."""
+    survived = np.zeros(t_eta.shape[0], dtype=bool)
+    max_dr2 = max_dr * max_dr
+    for cls in MATCH_CLASSES:
+        ti = np.flatnonzero(t_cls == cls)
+        ri = np.flatnonzero(r_cls == cls)
+        if ti.size == 0 or ri.size == 0:
+            continue
+        deta = t_eta[ti][:, None] - r_eta[ri][None, :]
+        dphi = _delta_phi(t_phi[ti], r_phi[ri])
+        cost = deta * deta + dphi * dphi
+        cost = np.where(cost <= max_dr2, cost, _UNMATCHED_COST)
+        rows, cols = linear_sum_assignment(cost)
+        ok = cost[rows, cols] < _UNMATCHED_COST
+        survived[ti[rows[ok]]] = True
+    return survived
+
+
+def _build_survival_labels(
     arrays: dict[str, np.ndarray],
-    n_events: int,
     truth_pt_cut: float | None = None,
     truth_abs_eta_cut: float | None = None,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-    """Per-event BCE efficiency-loss labels from the ``LABEL_BRANCHES``.
-
-    For each event returns ``bce_region`` (int64: global 1-based efficiency-region
-    label), ``bce_x`` (float64: survival outcome) and ``bce_pt`` (float64: truth
-    pt, which is the pt the efficiency was evaluated at -- propagation leaves pt
-    untouched) restricted to the labeled support -- ``truth_eff_region > 0``
-    (reached the tracker AND fell in a region). The truth acceptance cuts mirror
-    :func:`_build_truth_rows` so the labeled population is exactly the trainee's
-    input population. Samples without the branches yield empty per-event tensors
-    (the CLI refuses ``--eff-loss bce`` for those).
+) -> list[torch.Tensor]:
+    """Per-event BCE efficiency-loss survival labels (float64 1.0/0.0), one per
+    truth row of :func:`_build_truth_rows` (same acceptance cuts, same order):
+    1.0 iff the truth particle received a same-class reco match under the
+    per-event Hungarian assignment (:func:`match_event`). Computed here from the
+    plain ``truth_*`` / ``pflow_*`` branches right before training; the wall time
+    is printed.
     """
-    empty_r = torch.zeros(0, dtype=torch.int64)
-    empty_x = torch.zeros(0, dtype=torch.float64)
-    if not has_bce_labels(arrays):
-        return [empty_r] * n_events, [empty_x] * n_events, [empty_x] * n_events
-
-    regions: list[torch.Tensor] = []
-    xs: list[torch.Tensor] = []
-    pts: list[torch.Tensor] = []
+    t0 = time.perf_counter()
+    n_events = len(arrays["truth_pt"])
+    labels: list[torch.Tensor] = []
     for i in range(n_events):
-        region = np.asarray(arrays["truth_eff_region"][i], dtype=np.int64)
-        x = np.asarray(arrays["truth_survived"][i], dtype=np.float64)
         pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
-        keep = region > 0
+        survived = match_event(
+            eta,
+            np.asarray(arrays["truth_phi"][i], dtype=np.float64),
+            np.asarray(arrays["truth_class"][i], dtype=np.int64),
+            np.asarray(arrays["pflow_eta"][i], dtype=np.float64),
+            np.asarray(arrays["pflow_phi"][i], dtype=np.float64),
+            np.asarray(arrays["pflow_class"][i], dtype=np.int64),
+        )
+        keep = np.ones(pt.shape[0], dtype=bool)
         if truth_pt_cut is not None:
             keep &= pt >= truth_pt_cut
         if truth_abs_eta_cut is not None:
             keep &= np.abs(eta) <= truth_abs_eta_cut
-        regions.append(torch.from_numpy(np.ascontiguousarray(region[keep])))
-        xs.append(torch.from_numpy(np.ascontiguousarray(x[keep])))
-        pts.append(torch.from_numpy(np.ascontiguousarray(pt[keep])))
-    return regions, xs, pts
+        labels.append(torch.from_numpy(survived[keep].astype(np.float64)))
+    print(
+        f"[hungarian] truth<->reco survival matching: {n_events} events in "
+        f"{time.perf_counter() - t0:.1f}s"
+    )
+    return labels
 
 
 def load_pflow_targets_ragged(
@@ -666,9 +699,9 @@ def load_pflow_targets_ragged(
     ``reco_pt_cut`` / ``abs_eta_cut`` / ``truncate_chads``: see
     :func:`_build_pflow_event_data`.
 
-    Additionally carries the BCE efficiency-loss labels ``bce_region`` / ``bce_x``
-    (ragged per-event tensors; empty when the sample has no ``LABEL_BRANCHES`` —
-    see :func:`_build_bce_labels`). ``truth_pt_cut`` (with the shared
+    Additionally carries the BCE efficiency-loss survival labels ``bce_x`` (ragged
+    per-event tensors, one entry per truth row — see
+    :func:`_build_survival_labels`). ``truth_pt_cut`` (with the shared
     ``abs_eta_cut``) restricts the labeled population to the trainee's truth
     acceptance, mirroring :func:`_build_truth_rows`.
     """
@@ -708,8 +741,8 @@ def load_pflow_targets_ragged(
         # agree on dtype (the dense loader's pids_pad is float64 too).
         return [torch.from_numpy(np.ascontiguousarray(a, dtype=np.float64)) for a in arrs]
 
-    bce_region, bce_x, bce_pt = _build_bce_labels(
-        arrays, n_events, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
+    bce_x = _build_survival_labels(
+        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut
     )
 
     return {
@@ -723,9 +756,7 @@ def load_pflow_targets_ragged(
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
         "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
-        "bce_region": bce_region,
         "bce_x": bce_x,
-        "bce_pt": bce_pt,
         **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 

@@ -482,12 +482,11 @@ class _LearnableEfficiencyBase(nn.Module):
         return idx
 
     def efficiency_in_region(self, region: torch.Tensor, pt: torch.Tensor) -> torch.Tensor:
-        """THE efficiency function: per-particle efficiency given the 0-based
-        region index (``-1`` = outside all regions -> 0) and ``pt``. The card
-        forward evaluates it on the tagged pre-reco kinematics
-        (:meth:`compute_efficiency`) and the BCE survival loss on the labeled
-        truth particles (``loss._bce_eff_terms``), so both see one model.
-        Piecewise-constant ``effs[r]`` here; subclasses may add pt dependence.
+        """Per-particle efficiency given the 0-based region index (``-1`` =
+        outside all regions -> 0) and ``pt``. Piecewise-constant ``effs[r]``
+        here; subclasses may add pt dependence. The card forward evaluates it
+        (via :meth:`compute_efficiency`) both to sample the survival mask and to
+        export the per-track survival probability the BCE loss fits.
         """
         return F.pad(self.get_efficiencies(), (0, 1))[region].to(pt.dtype)
 

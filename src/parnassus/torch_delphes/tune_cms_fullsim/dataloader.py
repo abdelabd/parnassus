@@ -18,10 +18,10 @@ from .config import OBSERVABLES
 
 # The per-particle (variable-length) observables: padded per batch. Every other
 # key in OBSERVABLES is per-event (fixed shape) and is stacked instead.
-# bce_region/bce_x/bce_pt pad with 0 = "no label" (regions are 1-based), so the
-# loss's region > 0 selection drops the padding exactly like pid == 0 does elsewhere.
+# bce_x has one entry per truth row, so it pads to the same width as
+# truth_particles and the training loop flattens it with the same padding mask.
 RAGGED_OBSERVABLES: tuple[str, ...] = (
-    "pt", "eta", "phi", "log_E", "log_pt", "pid", "bce_region", "bce_x", "bce_pt"
+    "pt", "eta", "phi", "log_E", "log_pt", "pid", "bce_x"
 )
 
 

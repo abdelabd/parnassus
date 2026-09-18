@@ -42,7 +42,7 @@ evals onto the tail of an existing allocation when one is open.
 with `sbatch --dependency=afterok:<jid>[:<jid>...]` instead of waiting and
 submitting by hand — queue wait times overlap, nothing sits idle overnight, and a
 failed upstream job cleanly holds its dependents. Example chain: sample-generation
-merges -> `hungarian_match_samples.sbatch` -> `run_sequential_survival.sbatch`.
+merges -> the sequential closure (`run_sequential.sh`).
 
 Allocation tips:
 
@@ -133,19 +133,17 @@ D=src/parnassus/torch_delphes/full_phasespace_tuning
 
 # (a) BCE, calo-joint + live gradients -> doc/pseudo_seq_bce_live
 OUT_BASE=doc/pseudo_seq_bce_live \
-SAMPLE_PATTERN=pseudo_data_200k_param_config_all_%s_hungarian_matched_survival.root \
 COMET_NAME_PREFIX=pseudo_bce_live \
 EXTRA_ARGS="--existence bce --calo-bce-grads live" \
 bash $D/run_sequential.sh $D/stage1_muons.yaml $D/stage2_chads.yaml $D/stage3_calo_joint.yaml $D/stage4_electrons.yaml
 
 # (b) BCE, calo + detach (the champion) -> doc/pseudo_seq_bce_det
 OUT_BASE=doc/pseudo_seq_bce_det \
-SAMPLE_PATTERN=pseudo_data_200k_param_config_all_%s_hungarian_matched_survival.root \
 COMET_NAME_PREFIX=pseudo_bce_det \
 EXTRA_ARGS="--existence bce" \
 bash $D/run_sequential.sh
 
-# (c) counts -> doc/pseudo_seq_counts (unlabeled samples = default pattern)
+# (c) counts -> doc/pseudo_seq_counts
 OUT_BASE=doc/pseudo_seq_counts \
 COMET_NAME_PREFIX=pseudo_counts \
 EXTRA_ARGS="--existence counts" \
@@ -185,18 +183,18 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
   knobs win — and omitting it keeps the legacy per-knob defaults.
 - `--eff-loss {counts,bce}`: how the tracking `eff_logits` are fitted. `bce` (the
   default in `--mode delphes`) is the per-particle survival BCE
-  (`EFF_LOSS_PLAN.md`); it needs samples with the survival-label branches — the
-  `*_truth_matched_survival.root` set (and the matcher-labeled
-  `*_hungarian_matched_survival.root` set) next to the originals. `counts` is the
-  legacy expected-count chi^2 and the fullsim-mode default. Knobs: `--bce-weight`,
-  `--bce-weighting {pooled,per_species}`.
-- Old samples without labels + `--eff-loss bce` = a hard error telling you to
-  regenerate (`slurm_scripts/submit_truth_matched_survival_samples.sh`).
-- One efficiency function: the BCE evaluates each tracking module's
-  `efficiency_in_region(region, pt)` -- the same function the card forward
-  samples from -- on the labeled truth particles (`bce_region`/`bce_x`/`bce_pt`).
-  The muon > 1 TeV roll-off bins are therefore fitted exactly (no label exclusion);
-  `rate_raw` gets a gradient there and is pinned only by the cards.
+  (`EFF_LOSS_PLAN.md`) on the PLAIN samples: the survival labels are built in
+  memory right before training by Hungarian truth<->reco matching
+  (`data._build_survival_labels`, deltaR gate 0.05; ~1 min per 200k dijet events,
+  wall time printed as `[hungarian] ...`). No preprocessed sample set is needed.
+  `counts` is the legacy expected-count chi^2 and the fullsim-mode default. Knobs:
+  `--bce-weight`, `--bce-weighting {pooled,per_species}`.
+- One efficiency function: the card forward exports, per track, the survival
+  probability it evaluated on the smeared pre-mask kinematics (the
+  `TrackSurvivalExport`, keyed by input row); the BCE is taken between that and
+  the matched label of the same truth row. Loss and forward cannot disagree, the
+  muon > 1 TeV roll-off is fitted exactly, and `rate_raw` gets a gradient there
+  (pinned only by the cards).
 
 ## Run outputs
 
@@ -218,9 +216,9 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
 - `pytest src/parnassus/tests/test_tune_cms_fullsim.py` is fully green (47/47)
   since 2026-09-10: the pseudodata fixture was regenerated with `truth_pdgid` and
   the survival-label branches. Treat any failure there as a real regression.
-- `test_torch_delphes_learnable.py`, `test_loss_ddp_gather.py`,
-  `test_survival_labels.py` and `test_bce_eff_loss.py` run fully green and are the
-  gates for card, DDP-gather, and BCE-efficiency-loss work.
+- `test_torch_delphes_learnable.py`, `test_loss_ddp_gather.py` and
+  `test_bce_eff_loss.py` run fully green and are the gates for card, DDP-gather,
+  and BCE-efficiency-loss (incl. Hungarian matching) work.
 - Pre-existing failures elsewhere (verified on the unmodified tree, 2026-09-09,
   unrelated to this work): test_nn (1), test_readers (3), test_optuna_search (5),
   test_param_config (1), test_parnassus (2).

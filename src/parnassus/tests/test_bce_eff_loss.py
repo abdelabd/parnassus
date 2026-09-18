@@ -3,15 +3,20 @@
 Covers, without any ROOT I/O:
 
 1. **Closed form**: minimizing the BCE terms alone recovers the per-region
-   empirical survival fraction (the Bernoulli MLE) for every constant region, and
-   the coefficient of the muon > 1 TeV exponential roll-off bins.
+   empirical survival fraction (the Bernoulli MLE) when eps is a per-region
+   sigmoid.
 2. **Pooled vs per_species weighting**: same minimizer, different scale; the
-   pooled sum equals the flat per-particle BCE over all labeled particles.
-3. **Gradient routing**: BCE gradients land on the efficiency modules and nothing
-   else.
+   pooled sum equals the flat per-particle BCE over all tracks.
+3. **Gradient routing**: BCE gradients land on eps and nothing else; an empty
+   species is a graph-connected zero.
 4. **Loss assembly**: with eff_loss="bce" the wasserstein_1d loss drops the three
    tracking count terms, keeps the calo count terms, and adds the bce components;
    with eff_loss="counts" it is bit-identical to the pre-change behavior.
+5. **Labels and export**: the Hungarian matcher's per-event labels; the label
+   builder is row-aligned with the truth rows under the acceptance cuts; the
+   learnable card's ``TrackSurvivalExport`` is keyed by input row, carries
+   gradient to the efficiency parameters, and ``_inject_track_bce`` pairs it with
+   the row-aligned labels.
 """
 
 from __future__ import annotations
@@ -21,121 +26,86 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from parnassus.torch_delphes.learnable import (
-    CMS_EFF_REGION_SPECS,
-    CMSChargedHadronLearnableEfficiency,
-    CMSElectronLearnableEfficiency,
-    CMSMuonLearnableEfficiency,
+from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
+from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
+from parnassus.torch_delphes.tune_cms_fullsim.data import (
+    _build_survival_labels,
+    _build_truth_rows,
+    match_event,
 )
-from parnassus.torch_delphes.tune_cms_fullsim.loss import (
-    BCE_TERM_KEYS,
-    _bce_eff_terms,
-)
+from parnassus.torch_delphes.tune_cms_fullsim.loss import BCE_SPECIES, _bce_eff_terms
+from parnassus.torch_delphes.tune_cms_fullsim.training import _inject_track_bce
 
 RNG = np.random.default_rng(7)
-
-_MODULE_CLASSES = {
-    "chad": CMSChargedHadronLearnableEfficiency,
-    "electron": CMSElectronLearnableEfficiency,
-    "muon": CMSMuonLearnableEfficiency,
-}
-_MUON = CMS_EFF_REGION_SPECS["muon"]
-_MUON_EXP_LABELS = {
-    _MUON.label_offset + r + 1
-    for r in range(_MUON.n_regions)
-    if r % _MUON.n_pt == _MUON.n_pt - 1
-}
-_RATE = 5.0e-4  # the pinned CMS default
+_SPEC_OF = {"chad": "charged_hadron", "electron": "electron", "muon": "muon"}
 
 
-def _make_labels(n: int = 20000) -> tuple[dict[str, torch.Tensor], dict]:
-    """Random labels over every region of the three species with known per-region
-    survival parameters: a constant probability, or for the muon > 1 TeV bins the
-    coefficient of ``coeff * exp(0.5 - rate * pt)`` with pt ~ U(1, 2) TeV.
-    Returns (target dict with bce_region/bce_x/bce_pt, truth_param_by_label)."""
-    labels = []
-    probs = {}
-    for spec in CMS_EFF_REGION_SPECS.values():
-        for r in range(spec.n_regions):
-            label = spec.label_offset + r + 1
-            labels.append(label)
-            probs[label] = RNG.uniform(0.2, 0.95)
-    region = torch.from_numpy(RNG.choice(labels, size=n)).long()
-    is_exp = torch.tensor([int(l) in _MUON_EXP_LABELS for l in region])
-    pt = torch.where(is_exp, 1000.0 + 1000.0 * torch.rand(n, dtype=torch.float64), 5.0)
-    p = torch.tensor([probs[int(l)] for l in region], dtype=torch.float64)
-    p = torch.where(is_exp, p * torch.exp(0.5 - _RATE * pt), p)
-    x = (torch.rand(n, dtype=torch.float64) < p).double()
-    return {"bce_region": region, "bce_x": x, "bce_pt": pt}, probs
+def _make_tracks(n: int = 20000) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict]:
+    """Random per-species (region, survived) tracks with known per-region survival
+    probabilities. Returns (region_by_species, x_by_species, prob_by_species)."""
+    regions, xs, probs = {}, {}, {}
+    for key in BCE_SPECIES:
+        n_r = CMS_EFF_REGION_SPECS[_SPEC_OF[key]].n_regions
+        probs[key] = torch.from_numpy(RNG.uniform(0.2, 0.95, size=n_r))
+        regions[key] = torch.from_numpy(RNG.integers(0, n_r, size=n // 3)).long()
+        xs[key] = (torch.rand(n // 3, dtype=torch.float64) < probs[key][regions[key]]).double()
+    return regions, xs, probs
 
 
-def _fresh_modules() -> dict[str, torch.nn.Module]:
-    """The three efficiency modules at logit 0 (eff 0.5); rate_raw pinned as in
-    the cards."""
-    pred = {}
-    for key, pred_key in BCE_TERM_KEYS:
-        mod = _MODULE_CLASSES[key]()
-        with torch.no_grad():
-            mod.eff_logits.zero_()
-        if hasattr(mod, "rate_raw"):
-            mod.rate_raw.requires_grad_(False)
-        pred[pred_key] = mod
-    return pred
+def _fresh_logits() -> dict[str, torch.Tensor]:
+    return {
+        key: torch.zeros(
+            CMS_EFF_REGION_SPECS[_SPEC_OF[key]].n_regions, dtype=torch.float64, requires_grad=True
+        )
+        for key in BCE_SPECIES
+    }
 
 
-def _logits(pred: dict) -> list[torch.Tensor]:
-    return [m.eff_logits for m in pred.values() if hasattr(m, "eff_logits")]
+def _dicts(logits, regions, xs) -> tuple[dict, dict]:
+    """pred["bce_eps:k"] = sigmoid(logits_k)[region], target["bce_x:k"] = x."""
+    pred = {f"bce_eps:{k}": torch.sigmoid(logits[k])[regions[k]] for k in BCE_SPECIES}
+    target = {f"bce_x:{k}": xs[k] for k in BCE_SPECIES}
+    return pred, target
 
 
 def test_bce_recovers_empirical_survival_fractions():
-    target, probs = _make_labels(40000)
-    region, x = target["bce_region"], target["bce_x"]
-    pred = _fresh_modules()
-    opt = torch.optim.Adam(_logits(pred), lr=0.2)
+    regions, xs, _ = _make_tracks()
+    logits = _fresh_logits()
+    opt = torch.optim.Adam(list(logits.values()), lr=0.2)
     for _ in range(400):
         opt.zero_grad()
+        pred, target = _dicts(logits, regions, xs)
         loss = torch.stack(_bce_eff_terms(pred, target, bce_weight=1.0)).sum()
         loss.backward()
         opt.step()
-
-    for mod in pred.values():
-        spec = mod.region_spec
-        eff = mod.get_efficiencies().detach().numpy()
-        for r in range(spec.n_regions):
-            label = spec.label_offset + r + 1
-            sel = region == label
-            if label in _MUON_EXP_LABELS:
-                # pt-dependent bin: the fitted coefficient, not the survival fraction
-                assert abs(eff[r] - probs[label]) < 0.04, (
-                    f"{spec.species} region {r}: fitted coeff {eff[r]:.4f} vs "
-                    f"truth {probs[label]:.4f}"
-                )
+    for key in BCE_SPECIES:
+        eff = torch.sigmoid(logits[key]).detach()
+        for r in range(eff.numel()):
+            sel = regions[key] == r
+            if not sel.any():
                 continue
-            frac = float(x[sel].mean())
-            assert abs(eff[r] - frac) < 0.01, (
-                f"{spec.species} region {r}: fitted {eff[r]:.4f} vs empirical {frac:.4f}"
+            frac = float(xs[key][sel].mean())
+            assert abs(float(eff[r]) - frac) < 0.01, (
+                f"{key} region {r}: fitted {float(eff[r]):.4f} vs empirical {frac:.4f}"
             )
 
 
 def test_pooled_sum_equals_flat_bce_and_per_species_differs():
-    target, _ = _make_labels(5000)
-    region, x, pt = target["bce_region"], target["bce_x"], target["bce_pt"]
-    pred = _fresh_modules()
-    for t in _logits(pred):
+    regions, xs, _ = _make_tracks(5000)
+    logits = _fresh_logits()
+    for t in logits.values():
         with torch.no_grad():
             t.normal_(0.3, 0.5)
+    pred, target = _dicts(logits, regions, xs)
 
     pooled = torch.stack(
         _bce_eff_terms(pred, target, bce_weight=1.0, bce_weighting="pooled")
     ).sum()
-
-    # Flat reference: per-particle BCE over all labeled particles at once.
-    eff_per_particle = torch.zeros_like(x)
-    for mod in pred.values():
-        local = region - mod.region_spec.label_offset - 1
-        m = (local >= 0) & (local < mod.region_spec.n_regions)
-        eff_per_particle[m] = mod.efficiency_in_region(local[m], pt[m])
-    flat = F.binary_cross_entropy(eff_per_particle, x, reduction="mean")
+    flat = F.binary_cross_entropy(
+        torch.cat([pred[f"bce_eps:{k}"] for k in BCE_SPECIES]),
+        torch.cat([target[f"bce_x:{k}"] for k in BCE_SPECIES]),
+        reduction="mean",
+    )
     assert torch.allclose(pooled, flat, rtol=1e-12)
 
     per_species = torch.stack(
@@ -147,25 +117,24 @@ def test_pooled_sum_equals_flat_bce_and_per_species_differs():
         _bce_eff_terms(pred, target, bce_weight=1.0, bce_weighting="nope")
 
 
-def test_gradients_only_on_logits_and_empty_species_is_graph_connected():
-    target, _ = _make_labels(2000)
-    region = target["bce_region"]
-    # Keep only chad labels: electron/muon species get the graph-connected zero.
-    chad = CMS_EFF_REGION_SPECS["charged_hadron"]
-    m = (region >= chad.label_offset + 1) & (region <= chad.label_offset + chad.n_regions)
-    target = {k: v[m] for k, v in target.items()}
-    pred = _fresh_modules()
+def test_gradients_only_on_eps_and_empty_species_is_graph_connected():
+    regions, xs, _ = _make_tracks(2000)
+    # Only chads carry tracks: electron/muon get the graph-connected zero.
+    for key in ("electron", "muon"):
+        regions[key], xs[key] = regions[key][:0], xs[key][:0]
+    logits = _fresh_logits()
+    pred, target = _dicts(logits, regions, xs)
     other = torch.randn(5, dtype=torch.float64, requires_grad=True)
     pred["not_bce"] = other
 
     loss = torch.stack(_bce_eff_terms(pred, target, bce_weight=1.0)).sum()
     loss.backward()
-    assert pred["bce_eff:chad"].eff_logits.grad is not None
-    assert pred["bce_eff:chad"].eff_logits.grad.abs().sum() > 0
+    assert logits["chad"].grad is not None and logits["chad"].grad.abs().sum() > 0
     # Empty species: zero grad but graph-connected (grad tensor exists).
-    assert pred["bce_eff:muon"].eff_logits.grad is not None
-    assert float(pred["bce_eff:muon"].eff_logits.grad.abs().sum()) == 0.0
+    assert logits["muon"].grad is not None
+    assert float(logits["muon"].grad.abs().sum()) == 0.0
     assert other.grad is None
+
 
 def _toy_loss_dicts(eff_loss_labels: bool):
     """Minimal pred/target dicts accepted by per_pid_wasserstein_1d_loss."""
@@ -208,9 +177,10 @@ def _toy_loss_dicts(eff_loss_labels: bool):
         pred[pred_key] = (mk()[0, :n_r]).clone().requires_grad_(True)
         target[tgt_key] = mk()[:, :n_r]
     if eff_loss_labels:
-        labels, _ = _make_labels(500)
-        target.update(labels)
-        pred.update(_fresh_modules())
+        regions, xs, _ = _make_tracks(500)
+        p, t = _dicts(_fresh_logits(), regions, xs)
+        pred.update(p)
+        target.update(t)
     return pred, target
 
 
@@ -237,6 +207,100 @@ def test_assembly_bce_drops_tracking_counts_keeps_calo():
     cats2 = {c.category for c in comps2}
     assert "bce" not in cats2
     assert sum(1 for c in comps2 if c.category == "count") == 5
+
+
+# ---------------------------------------------------------------------------
+# 5. Hungarian labels + the card's per-track survival export
+# ---------------------------------------------------------------------------
+
+
+def test_match_event_same_class_within_gate():
+    # truth: chad at (0,0), chad at (1,1), muon at (2,2); reco: chad near (0,0), chad far,
+    # chad near (2,2) [wrong class for the muon].
+    t_eta = np.array([0.0, 1.0, 2.0]); t_phi = np.array([0.0, 1.0, 2.0]); t_cls = np.array([0, 0, 2])
+    r_eta = np.array([0.01, 1.5, 2.0]); r_phi = np.array([0.0, 1.0, 2.0]); r_cls = np.array([0, 0, 0])
+    got = match_event(t_eta, t_phi, t_cls, r_eta, r_phi, r_cls, max_dr=0.05)
+    assert got.tolist() == [True, False, False]
+    # One-to-one: two truth chads at the same spot, one reco -> exactly one survives.
+    got = match_event(
+        np.array([0.0, 0.0]), np.array([0.0, 0.0]), np.array([0, 0]),
+        np.array([0.0]), np.array([0.0]), np.array([0]), max_dr=0.05,
+    )
+    assert int(got.sum()) == 1
+
+
+def _toy_arrays(n_events: int = 6, seed: int = 0) -> dict[str, np.ndarray]:
+    """Per-event ragged truth/pflow arrays in the uproot ``library="np"`` layout:
+    charged hadrons, electrons, muons and photons; reco = a subset of the truth
+    tracks at their truth direction (plus one fake)."""
+    rng = np.random.default_rng(seed)
+    cols = {k: [] for k in ("truth_pt", "truth_eta", "truth_phi", "truth_class", "truth_pdgid",
+                            "pflow_pt", "pflow_eta", "pflow_phi", "pflow_class")}
+    pdg_of = {0: 211, 1: 11, 2: 13, 3: 22}
+    for _ in range(n_events):
+        n = int(rng.integers(3, 12))
+        cls = rng.integers(0, 4, size=n)
+        pt = rng.uniform(0.2, 50.0, size=n); eta = rng.uniform(-2.8, 2.8, size=n)
+        phi = rng.uniform(-np.pi, np.pi, size=n)
+        keep = rng.random(n) < 0.7
+        for k, v in (("truth_pt", pt), ("truth_eta", eta), ("truth_phi", phi), ("truth_class", cls),
+                     ("truth_pdgid", np.array([pdg_of[int(c)] for c in cls])),
+                     ("pflow_pt", np.append(pt[keep], 3.0)), ("pflow_eta", np.append(eta[keep], 0.3)),
+                     ("pflow_phi", np.append(phi[keep], 0.3)), ("pflow_class", np.append(cls[keep], 0))):
+            cols[k].append(np.asarray(v))
+    return {k: np.array(v, dtype=object) for k, v in cols.items()}
+
+
+def test_survival_labels_align_with_truth_rows_under_cuts():
+    arrays = _toy_arrays()
+    for cuts in ({}, {"truth_pt_cut": 1.0, "abs_eta_cut": 2.5}):
+        rows = _build_truth_rows(arrays, **cuts)
+        labels = _build_survival_labels(
+            arrays, truth_pt_cut=cuts.get("truth_pt_cut"), truth_abs_eta_cut=cuts.get("abs_eta_cut")
+        )
+        assert [r.shape[0] for r in rows] == [x.shape[0] for x in labels]
+    # No cuts: a matched truth track is exactly one that has a same-class reco object at
+    # its position (the toy reco is a subset of the truth tracks + one fake).
+    labels = _build_survival_labels(arrays)
+    for i, x in enumerate(labels):
+        cls = arrays["truth_class"][i]
+        charged = cls < 3
+        in_reco = np.isin(arrays["truth_eta"][i], arrays["pflow_eta"][i])
+        assert np.array_equal(x.numpy().astype(bool), charged & in_reco)
+
+
+def test_track_survival_export_is_row_keyed_and_differentiable():
+    """The card's TrackSurvivalExport: one eps per charged track that reached the
+    tracker, keyed by its input-row UID; eps in [0, 1] with gradient to the
+    efficiency parameters (including the muon roll-off rate); _inject_track_bce
+    pairs it with the row-aligned survival labels."""
+    torch.manual_seed(0)
+    arrays = _toy_arrays(n_events=20, seed=1)
+    rows = torch.cat([torch.from_numpy(r) for r in _build_truth_rows(arrays)])
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    out = card(rows)
+    exp = out["TrackSurvivalExport"]
+    uids = torch.cat([exp[f"uid:{k}"] for k in BCE_SPECIES]).long()
+    assert uids.unique().numel() == uids.numel()  # one export per input row at most
+    assert uids.min() >= 0 and uids.max() < rows.shape[0]
+    pids = rows[uids, 0].abs()  # ColumnMap.PID == 0
+    assert set(pids.long().tolist()) <= {211, 11, 13}  # only charged tracks
+    for key, pid in (("chad", 211), ("electron", 11), ("muon", 13)):
+        assert torch.all(rows[exp[f"uid:{key}"].long(), 0].abs() == pid)
+        eps = exp[f"eps:{key}"]
+        assert torch.all((eps >= 0) & (eps <= 1))
+    torch.cat([exp[f"eps:{k}"] for k in BCE_SPECIES]).sum().backward()
+    assert card.ChargedHadronTrackingEfficiency.eff_logits.grad.abs().sum() > 0
+    assert card.MuonTrackingEfficiency.eff_logits.grad.abs().sum() > 0
+
+    # Pairing: labels are per input row; the injector gathers them by UID.
+    batch = {"bce_x": torch.arange(rows.shape[0], dtype=torch.float64).unsqueeze(0)}
+    mask = torch.ones((1, rows.shape[0]), dtype=torch.bool)
+    pred, target = {}, {}
+    _inject_track_bce(pred, target, out, batch, mask)
+    for key in BCE_SPECIES:
+        assert torch.equal(target[f"bce_x:{key}"], exp[f"uid:{key}"].to(torch.float64))
+        assert pred[f"bce_eps:{key}"] is exp[f"eps:{key}"]
 
 
 def test_tower_bce_terms_region_fair_and_gradients():

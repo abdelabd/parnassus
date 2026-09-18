@@ -976,7 +976,6 @@ def main() -> None:
         reco_pt_cut=reco_pt_cut,
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
-        require_bce_labels=(eff_loss == "bce"),
         eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
     )
     log(

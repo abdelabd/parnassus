@@ -319,6 +319,11 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
 
         # ParticlePropagator
         particles = stable_particles.reshape(-1, n_dim)
+        # Input-row identity: the UID column rides through the chain untouched, so
+        # the TrackSurvivalExport below can be paired with per-row labels.
+        particles[:, ColumnMap.UID] = torch.arange(
+            particles.shape[0], dtype=particles.dtype, device=particles.device
+        )
         particles_before_prop = particles.clone() if self.debug else torch.empty(0)
 
         (
@@ -390,25 +395,30 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             muons_smeared,
         ])
 
-        # Tower-BCE marginal track conditioning: per-track survival probability
-        # eps and PRE-mask smeared energy, row-aligned with merged_tracks (the
-        # efficiency mask keeps rows, and this concat order matches the
-        # TrackMerger's). Loss-serving only — nothing downstream of the
-        # reconstruction reads it.
+        # Per-track survival probability eps = the efficiency evaluated on the
+        # PRE-mask smeared kinematics -- the very function the Gumbel mask samples
+        # from -- keyed by species with each track's input-row UID
+        # (TrackSurvivalExport). Loss-serving only: --eff-loss bce pairs it with the
+        # per-row Hungarian survival labels; --calo-bce conditions the towers on
+        # it (row-aligned with merged_tracks: the mask keeps rows and this concat
+        # order matches the TrackMerger's).
+        track_survival = None
         track_cond = None
-        if self.learnable and self.tower_bce:
-            eps_parts, e_pre_parts = [], []
-            for pre, mod in (
-                (charged_hadrons_smeared_pre, self.ChargedHadronTrackingEfficiency),
-                (electrons_smeared_pre, self.ElectronTrackingEfficiency),
-                (muons_smeared_pre, self.MuonTrackingEfficiency),
-            ):
-                eps_parts.append(
-                    mod.compute_efficiency(pre[:, ColumnMap.PT], pre[:, ColumnMap.ETA_OUTER])
+        if self.learnable:
+            species = (
+                ("chad", charged_hadrons_smeared_pre, self.ChargedHadronTrackingEfficiency),
+                ("electron", electrons_smeared_pre, self.ElectronTrackingEfficiency),
+                ("muon", muons_smeared_pre, self.MuonTrackingEfficiency),
+            )
+            track_survival = {}
+            for key, pre, mod in species:
+                track_survival[f"eps:{key}"] = mod.compute_efficiency(
+                    pre[:, ColumnMap.PT], pre[:, ColumnMap.ETA_OUTER]
                 )
-                e_pre_parts.append(pre[:, ColumnMap.E])
-            eps = torch.cat(eps_parts)
-            e_pre = torch.cat(e_pre_parts)
+                track_survival[f"uid:{key}"] = pre[:, ColumnMap.UID]
+        if self.learnable and self.tower_bce:
+            eps = torch.cat([track_survival[f"eps:{key}"] for key, _pre, _mod in species])
+            e_pre = torch.cat([pre[:, ColumnMap.E] for _key, pre, _mod in species])
             if self.tower_bce_grads == "detach":
                 eps, e_pre = eps.detach(), e_pre.detach()
             track_cond = {
@@ -509,6 +519,7 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
                 "MuonExpectedCounts": muon_expected_counts,
                 "EcalPhotonExpectedCounts": ecal_calo_counts,
                 "HcalNeutralHadronExpectedCounts": hcal_calo_counts,
+                "TrackSurvivalExport": track_survival,
             }
         return {
             "Track": merged_tracks,
@@ -527,6 +538,9 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             # (bce_* keys; see SimpleCalorimeter and EFF_LOSS_PLAN.md Phase 2).
             "EcalCountExport": ecal_count_export,
             "HcalCountExport": hcal_count_export,
+            # Per-track survival probabilities + input-row UIDs per species
+            # (learnable mode only, else None); see the comment at its construction.
+            "TrackSurvivalExport": track_survival,
         }
 
     @staticmethod

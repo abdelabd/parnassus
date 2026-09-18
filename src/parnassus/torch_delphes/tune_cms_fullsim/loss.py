@@ -103,16 +103,11 @@ COUNT_RATE_FLOOR = 0.05
 # invariant. Default 1.0 (same as COUNT_WEIGHT); calibrated in EFF_LOSS_PLAN.md step 7.
 BCE_WEIGHT = 1.0
 
-# (species key, pred-dict key) per BCE term. The pred-side value is the card's
-# tracking-efficiency MODULE (replicated parameters, injected by training.py); the
-# target-side labels come in "bce_region"/"bce_x"/"bce_pt" (see
-# data._build_bce_labels). Region labels are the GLOBAL 1-based EFF_REGION labels,
-# so [label_offset + 1, label_offset + n_regions] selects a species.
-BCE_TERM_KEYS: tuple[tuple[str, str], ...] = (
-    ("chad", "bce_eff:chad"),
-    ("electron", "bce_eff:electron"),
-    ("muon", "bce_eff:muon"),
-)
+# One BCE term per track species: pred["bce_eps:{species}"] = the card's per-track
+# survival probabilities (its TrackSurvivalExport, differentiable), target
+# ["bce_x:{species}"] = the position-aligned Hungarian survival labels; both
+# injected by training._inject_track_bce.
+BCE_SPECIES: tuple[str, ...] = ("chad", "electron", "muon")
 
 _BCE_LABELS: dict[str, str] = {
     "chad": "BceChargedHadron",
@@ -340,7 +335,9 @@ def _all_gather_varlen(
     if max_size == 0:
         # Nothing anywhere: every rank returns here, so no gather -- and hence no
         # backward node -- is created on any rank. Consistent, so no parity check.
-        return torch.zeros(0, dtype=tensor_1d.dtype, device=tensor_1d.device)
+        # The local (empty) tensor is returned as is, so a graph-connected empty
+        # input stays graph-connected (its consumers see a zero, not a detached one).
+        return tensor_1d
 
     # ---- autograd-graph parity ---------------------------------------------
     # diff_all_gather registers its backward (REDUCE_SCATTER) node ONLY when the
@@ -778,16 +775,14 @@ def _bce_eff_terms(
     negative log-likelihood of the survival labels — the direct gradient source
     for the tracking-efficiency ``eff_logits`` (EFF_LOSS_PLAN.md).
 
-    Target side: ``target["bce_region"]`` (global 1-based efficiency-region label;
-    0 = padding / no label), ``target["bce_x"]`` (survival outcome) and
-    ``target["bce_pt"]`` (truth pt == the pt the efficiency was evaluated at),
-    position-aligned; all detached data. Pred side: ``pred["bce_eff:{species}"]``
-    — the card's tracking-efficiency modules, injected by training.py. The
-    per-particle survival probability is the module's own
-    ``efficiency_in_region(region, pt)`` — the SAME function the card forward
-    samples from — so pt-dependent bins (the muon > 1 TeV roll-off) are modeled
-    exactly, and their parameters (``eff_logits`` and, unless pinned by the card,
-    ``rate_raw``) get the exact Bernoulli gradient.
+    Pred side: ``pred["bce_eps:{species}"]`` — the card's per-track survival
+    probabilities, i.e. the efficiency evaluated inside the forward on the same
+    smeared pre-mask kinematics the Gumbel mask samples from (so pt-dependent
+    bins such as the muon > 1 TeV roll-off are modeled exactly, and every
+    parameter of the efficiency gets the exact Bernoulli gradient). Target side:
+    ``target["bce_x:{species}"]`` — the position-aligned Hungarian truth<->reco
+    survival labels (detached data). Both are injected by
+    ``training._inject_track_bce``.
 
     How the three per-species means combine is set by ``bce_weighting``
     (:data:`BCE_WEIGHTING_CHOICES`):
@@ -805,34 +800,24 @@ def _bce_eff_terms(
     Both have the same minimizer — the BCE is separable (every logit belongs to
     exactly one species) — they differ only in relative gradient scale.
 
-    DDP: the distributed wrappers gather the label arrays (non-differentiable)
-    across ranks and pass the replicated logits through, so every rank computes the
-    identical global term; the resulting full per-rank logits gradient matches the
-    effective scaling of the gathered shape/count terms after DDP's gradient mean.
+    DDP: the distributed wrappers gather eps (differentiable) and the labels across
+    ranks, so every rank computes the identical global term.
 
-    A species present in the pred dict but with no labeled particles in the batch
-    contributes a graph-connected zero (keeps DDP grad hooks consistent).
+    A species present in the pred dict but with no tracks in the batch contributes
+    a graph-connected zero (keeps DDP grad hooks consistent).
     """
-    if "bce_region" not in target or "bce_x" not in target:
-        return []
-    region = target["bce_region"].detach().reshape(-1)
-    labeled = region > 0  # drops per-batch padding (0 = "no label")
-    region = region[labeled].long()
-    x_all = target["bce_x"].detach().reshape(-1)[labeled]
-    pt_all = target["bce_pt"].detach().reshape(-1)[labeled]
-
     entries: list[tuple[str, torch.Tensor, float]] = []
-    for key, pred_key in BCE_TERM_KEYS:
-        module = pred.get(pred_key)
-        if module is None:
+    for key in BCE_SPECIES:
+        eps = pred.get(f"bce_eps:{key}")
+        if eps is None:
             continue
-        local = region - module.region_spec.label_offset - 1
-        m = (local >= 0) & (local < module.region_spec.n_regions)
-        n = int(m.sum())
-        eff = module.efficiency_in_region(local[m], pt_all[m])
+        x = target[f"bce_x:{key}"].detach().reshape(-1)
+        n = x.numel()
         # sum / n == mean; on an empty species it is a graph-connected zero.
-        raw = F.binary_cross_entropy(eff, x_all[m].to(eff), reduction="sum") / max(n, 1)
+        raw = F.binary_cross_entropy(eps.reshape(-1).double(), x.double(), reduction="sum") / max(n, 1)
         entries.append((key, raw, float(n)))
+    if not entries:
+        return []
 
     if bce_weighting == "pooled":
         # Population fractions, NOT a tunable weighting: sum(f_s * mean_s) == the
@@ -2223,24 +2208,18 @@ def per_pid_wasserstein_1d_loss_distributed(
             tv_flat, differentiable=False
         ).reshape(-1, n_regions)
 
-    # ---- BCE efficiency-loss labels + logits (--eff-loss bce) ----------------
-    # The labels are target-side data: gather the labeled entries (region > 0
-    # drops the per-batch padding) non-differentiably; every rank always issues
-    # both collectives (possibly empty), so the collective sequence matches. The
-    # logits are REPLICATED card parameters (identical on every rank), passed
-    # through untouched (the efficiency modules): the inner _bce_eff_terms then
-    # computes the identical global pooled BCE on every rank, and the full
-    # per-rank parameter gradient ends up scaled exactly like the gathered terms'
-    # gradients after DDP's mean.
-    if eff_loss == "bce" and "bce_region" in target and "bce_x" in target:
-        labeled = target["bce_region"].detach().reshape(-1) > 0
-        for key in ("bce_region", "bce_x", "bce_pt"):
-            target_gathered[key] = _all_gather_varlen(
-                target[key].detach().reshape(-1)[labeled], differentiable=False
+    # ---- track survival BCE (--eff-loss bce) ----------------------------------
+    # Per-track eps is a DIFFERENTIABLE pred-side activation, gathered like the
+    # pair responses; the survival labels are data. Every rank issues the same
+    # collectives (possibly empty), so the collective sequence matches.
+    if eff_loss == "bce":
+        for key in BCE_SPECIES:
+            pred_gathered[f"bce_eps:{key}"] = _all_gather_varlen(
+                pred[f"bce_eps:{key}"].reshape(-1), differentiable=True
             )
-        for _key, pred_key in BCE_TERM_KEYS:
-            if pred_key in pred:
-                pred_gathered[pred_key] = pred[pred_key]
+            target_gathered[f"bce_x:{key}"] = _all_gather_varlen(
+                target[f"bce_x:{key}"].detach().reshape(-1), differentiable=False
+            )
 
     # ---- tower-existence BCE (--calo-bce) -------------------------------------
     # Per-tower log q is a DIFFERENTIABLE pred-side activation (unlike the
