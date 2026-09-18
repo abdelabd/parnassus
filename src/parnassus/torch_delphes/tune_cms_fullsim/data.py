@@ -621,12 +621,14 @@ def match_event(
     r_cls: np.ndarray,
     max_dr: float = MATCH_MAX_DR,
     matching: str = "hungarian",
-) -> np.ndarray:
-    """Per-event survival labels: True where a truth particle got a same-class
-    reco match within ``max_dr`` under the per-class assignment rule
-    ``matching`` (see :data:`MATCHING_CHOICES`)."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-event match flags ``(truth_survived, reco_matched)``: a truth particle
+    survived iff it got a same-class reco match within ``max_dr`` under the
+    per-class assignment rule ``matching`` (see :data:`MATCHING_CHOICES`); a reco
+    object is matched iff it was that match (the rest are fakes)."""
     assert matching in MATCHING_CHOICES, matching
     survived = np.zeros(t_eta.shape[0], dtype=bool)
+    matched = np.zeros(r_eta.shape[0], dtype=bool)
     max_dr2 = max_dr * max_dr
     for cls in MATCH_CLASSES:
         ti = np.flatnonzero(t_cls == cls)
@@ -643,7 +645,8 @@ def match_event(
             rows, cols = cost.argmin(axis=0), np.arange(ri.size)
         ok = cost[rows, cols] < _UNMATCHED_COST
         survived[ti[rows[ok]]] = True
-    return survived
+        matched[ri[cols[ok]]] = True
+    return survived, matched
 
 
 def _in_acceptance(pt: np.ndarray, eta: np.ndarray, pt_cut, abs_eta_cut) -> np.ndarray:
@@ -676,7 +679,7 @@ def _build_survival_labels(
         r = {k: np.asarray(arrays[f"pflow_{k}"][i], dtype=np.float64) for k in ("pt", "eta", "phi", "class")}
         tk = _in_acceptance(t["pt"], t["eta"], truth_pt_cut, abs_eta_cut)
         rk = _in_acceptance(r["pt"], r["eta"], reco_pt_cut, abs_eta_cut)
-        survived = match_event(
+        survived, _ = match_event(
             t["eta"][tk], t["phi"][tk], t["class"][tk].astype(np.int64),
             r["eta"][rk], r["phi"][rk], r["class"][rk].astype(np.int64),
             matching=matching,

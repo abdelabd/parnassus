@@ -219,10 +219,11 @@ def test_match_event_same_class_within_gate():
     # chad near (2,2) [wrong class for the muon].
     t_eta = np.array([0.0, 1.0, 2.0]); t_phi = np.array([0.0, 1.0, 2.0]); t_cls = np.array([0, 0, 2])
     r_eta = np.array([0.01, 1.5, 2.0]); r_phi = np.array([0.0, 1.0, 2.0]); r_cls = np.array([0, 0, 0])
-    got = match_event(t_eta, t_phi, t_cls, r_eta, r_phi, r_cls, max_dr=0.05)
+    got, reco = match_event(t_eta, t_phi, t_cls, r_eta, r_phi, r_cls, max_dr=0.05)
     assert got.tolist() == [True, False, False]
+    assert reco.tolist() == [True, False, False]  # the other two reco chads are fakes
     # One-to-one: two truth chads at the same spot, one reco -> exactly one survives.
-    got = match_event(
+    got, _ = match_event(
         np.array([0.0, 0.0]), np.array([0.0, 0.0]), np.array([0, 0]),
         np.array([0.0]), np.array([0.0]), np.array([0]), max_dr=0.05,
     )
@@ -232,8 +233,8 @@ def test_match_event_same_class_within_gate():
     # survive); nn lets both reco objects claim A (B does not survive).
     args = (np.array([0.0, 0.05]), np.zeros(2), np.zeros(2, dtype=int),
             np.array([0.01, 0.02]), np.zeros(2), np.zeros(2, dtype=int))
-    assert match_event(*args, matching="hungarian").tolist() == [True, True]
-    assert match_event(*args, matching="nn").tolist() == [True, False]
+    assert match_event(*args, matching="hungarian")[0].tolist() == [True, True]
+    assert match_event(*args, matching="nn")[0].tolist() == [True, False]
 
 
 def _toy_arrays(n_events: int = 6, seed: int = 0) -> dict[str, np.ndarray]:

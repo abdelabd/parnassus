@@ -191,7 +191,10 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
   wall time printed as `[hungarian] ...`). Both lists are cut BEFORE matching
   (truth to `--truth-pt-cut`, reco to `--reco-pt-cut`, both to `--eta-cut`), so a
   track reconstructed below the reco cut counts as lost. No preprocessed sample
-  set is needed.
+  set is needed. Matcher diagnostics (unmatched-reco fraction, survival vs pt,
+  deltaR to the nearest same-class reco, survival per efficiency region), with the
+  same cut/matching/gate flags: `python -m
+  parnassus.torch_delphes.tune_cms_fullsim.eval_matching --root-file <sample>`.
   `counts` is the legacy expected-count chi^2 and the fullsim-mode default. Knobs:
   `--bce-weight`, `--bce-weighting {pooled,per_species}`, `--matching
   {hungarian,nn}` (the assignment rule behind the labels: one-to-one Hungarian,
