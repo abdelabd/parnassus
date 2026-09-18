@@ -528,7 +528,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
                 "MuonExpectedCounts": muon_expected_counts,
                 "EcalPhotonExpectedCounts": ecal_calo_counts,
                 "HcalNeutralHadronExpectedCounts": hcal_calo_counts,
-                "TrackSurvivalExport": track_survival,
             }
         return {
             "Track": merged_tracks,
