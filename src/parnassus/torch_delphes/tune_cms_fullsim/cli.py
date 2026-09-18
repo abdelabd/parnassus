@@ -76,6 +76,7 @@ from .config import (
     DEFAULT_RECO_PT_CUT,
     DEFAULT_TRUTH_PT_CUT,
     EFF_LOSS_CHOICES,
+    MATCHING_CHOICES,
     EXISTENCE_CHOICES,
     MODE_CHOICES,
     resolve_existence_bundle,
@@ -232,6 +233,18 @@ def main() -> None:
             "flags passed explicitly wins — and omitting it applies no bundle "
             "(legacy per-knob defaults). In --mode fullsim 'bce' keeps the tower "
             "BCE off and the calo count terms on (the tower BCE is delphes-only)."
+        ),
+    )
+    parser.add_argument(
+        "--matching",
+        type=str,
+        default="hungarian",
+        choices=list(MATCHING_CHOICES),
+        help=(
+            "Truth<->reco assignment rule behind the --eff-loss bce survival labels "
+            "(per event and charged class, deltaR gate 0.05): 'hungarian' = "
+            "one-to-one optimal assignment (default); 'nn' = each reco object claims "
+            "its nearest truth particle (diff_delphes_luigi's rule)."
         ),
     )
     parser.add_argument(
@@ -638,6 +651,7 @@ def main() -> None:
         abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
         eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
+        matching=args.matching,
     )
     if truncate_chads:
         n_t = train_dataset.n_truth_chad

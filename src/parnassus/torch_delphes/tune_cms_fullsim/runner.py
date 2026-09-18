@@ -79,6 +79,7 @@ def load_split_datasets(
     abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
     eff_binning: str = "cms4",
+    matching: str = "hungarian",
 ) -> tuple[DelphesDataSet, DelphesDataSet]:
     """Load a CMS full-sim ROOT file and build the train/val dataset pair.
 
@@ -128,6 +129,7 @@ def load_split_datasets(
         # Region layout of the per-species count targets — must match the
         # card's eff_binning (mode-dependent: fullsim = ptbins12).
         eff_binning=eff_binning,
+        matching=matching,
     )
 
     # The uproot arrays dict is the largest remaining transient; free it before
