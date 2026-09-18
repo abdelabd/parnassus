@@ -531,7 +531,7 @@ def load_pflow_targets(
     )
 
     bce_x_list = _build_survival_labels(
-        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut, matching=matching
+        arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching=matching
     )
     max_n_labels = max((int(x.shape[0]) for x in bce_x_list), default=0)
     bce_x_pad = torch.zeros((n_events, max_n_labels), dtype=torch.float64)
@@ -646,40 +646,42 @@ def match_event(
     return survived
 
 
+def _in_acceptance(pt: np.ndarray, eta: np.ndarray, pt_cut, abs_eta_cut) -> np.ndarray:
+    """``pt >= pt_cut & |eta| <= abs_eta_cut``; ``None`` disables a part."""
+    return (pt >= (pt_cut or 0.0)) & (np.abs(eta) <= (abs_eta_cut or np.inf))
+
+
 def _build_survival_labels(
     arrays: dict[str, np.ndarray],
     truth_pt_cut: float | None = None,
-    truth_abs_eta_cut: float | None = None,
+    reco_pt_cut: float | None = None,
+    abs_eta_cut: float | None = None,
     matching: str = "hungarian",
 ) -> list[torch.Tensor]:
     """Per-event BCE efficiency-loss survival labels (float64 1.0/0.0), one per
     truth row of :func:`_build_truth_rows` (same acceptance cuts, same order):
     1.0 iff the truth particle received a same-class reco match under the
-    per-event assignment rule ``matching`` (:func:`match_event`). Computed here from the
-    plain ``truth_*`` / ``pflow_*`` branches right before training; the wall time
-    is printed.
+    per-event assignment rule ``matching`` (:func:`match_event`). Both lists are
+    cut BEFORE matching -- truth to the trainee-input acceptance, reco to the same
+    reco selection the target and trainee output get -- so "survived" means
+    "reconstructed as an object the rest of the loss can see". Computed here from
+    the plain ``truth_*`` / ``pflow_*`` branches right before training; the wall
+    time is printed.
     """
     t0 = time.perf_counter()
     n_events = len(arrays["truth_pt"])
     labels: list[torch.Tensor] = []
     for i in range(n_events):
-        pt = np.asarray(arrays["truth_pt"][i], dtype=np.float64)
-        eta = np.asarray(arrays["truth_eta"][i], dtype=np.float64)
+        t = {k: np.asarray(arrays[f"truth_{k}"][i], dtype=np.float64) for k in ("pt", "eta", "phi", "class")}
+        r = {k: np.asarray(arrays[f"pflow_{k}"][i], dtype=np.float64) for k in ("pt", "eta", "phi", "class")}
+        tk = _in_acceptance(t["pt"], t["eta"], truth_pt_cut, abs_eta_cut)
+        rk = _in_acceptance(r["pt"], r["eta"], reco_pt_cut, abs_eta_cut)
         survived = match_event(
-            eta,
-            np.asarray(arrays["truth_phi"][i], dtype=np.float64),
-            np.asarray(arrays["truth_class"][i], dtype=np.int64),
-            np.asarray(arrays["pflow_eta"][i], dtype=np.float64),
-            np.asarray(arrays["pflow_phi"][i], dtype=np.float64),
-            np.asarray(arrays["pflow_class"][i], dtype=np.int64),
+            t["eta"][tk], t["phi"][tk], t["class"][tk].astype(np.int64),
+            r["eta"][rk], r["phi"][rk], r["class"][rk].astype(np.int64),
             matching=matching,
         )
-        keep = np.ones(pt.shape[0], dtype=bool)
-        if truth_pt_cut is not None:
-            keep &= pt >= truth_pt_cut
-        if truth_abs_eta_cut is not None:
-            keep &= np.abs(eta) <= truth_abs_eta_cut
-        labels.append(torch.from_numpy(survived[keep].astype(np.float64)))
+        labels.append(torch.from_numpy(survived.astype(np.float64)))
     print(
         f"[{matching}] truth<->reco survival matching: {n_events} events in "
         f"{time.perf_counter() - t0:.1f}s"
@@ -755,7 +757,7 @@ def load_pflow_targets_ragged(
         return [torch.from_numpy(np.ascontiguousarray(a, dtype=np.float64)) for a in arrs]
 
     bce_x = _build_survival_labels(
-        arrays, truth_pt_cut=truth_pt_cut, truth_abs_eta_cut=abs_eta_cut, matching=matching
+        arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching=matching
     )
 
     return {

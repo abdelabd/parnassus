@@ -188,7 +188,10 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
   (`EFF_LOSS_PLAN.md`) on the PLAIN samples: the survival labels are built in
   memory right before training by Hungarian truth<->reco matching
   (`data._build_survival_labels`, deltaR gate 0.05; ~1 min per 200k dijet events,
-  wall time printed as `[hungarian] ...`). No preprocessed sample set is needed.
+  wall time printed as `[hungarian] ...`). Both lists are cut BEFORE matching
+  (truth to `--truth-pt-cut`, reco to `--reco-pt-cut`, both to `--eta-cut`), so a
+  track reconstructed below the reco cut counts as lost. No preprocessed sample
+  set is needed.
   `counts` is the legacy expected-count chi^2 and the fullsim-mode default. Knobs:
   `--bce-weight`, `--bce-weighting {pooled,per_species}`, `--matching
   {hungarian,nn}` (the assignment rule behind the labels: one-to-one Hungarian,
