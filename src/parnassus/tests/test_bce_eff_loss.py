@@ -214,14 +214,18 @@ def test_assembly_bce_drops_tracking_counts_keeps_calo():
 # ---------------------------------------------------------------------------
 
 
-def test_match_event_same_class_within_gate():
+def test_match_event_within_gate_and_species_toggle():
     # truth: chad at (0,0), chad at (1,1), muon at (2,2); reco: chad near (0,0), chad far,
-    # chad near (2,2) [wrong class for the muon].
+    # chad near (2,2) [wrong species for the muon].
     t_eta = np.array([0.0, 1.0, 2.0]); t_phi = np.array([0.0, 1.0, 2.0]); t_cls = np.array([0, 0, 2])
     r_eta = np.array([0.01, 1.5, 2.0]); r_phi = np.array([0.0, 1.0, 2.0]); r_cls = np.array([0, 0, 0])
-    got, reco = match_event(t_eta, t_phi, t_cls, r_eta, r_phi, r_cls, max_dr=0.05)
-    assert got.tolist() == [True, False, False]
-    assert reco.tolist() == [True, False, False]  # the other two reco chads are fakes
+    for matching in ("hungarian", "nn"):
+        # default: across species -> the muon is matched to the reco chad on top of it
+        got, reco = match_event(t_eta, t_phi, t_cls, r_eta, r_phi, r_cls, 0.05, matching)
+        assert got.tolist() == [True, False, True] and reco.tolist() == [True, False, True]
+        # within species: the muon has no reco muon -> lost; that reco chad is a fake
+        got, reco = match_event(t_eta, t_phi, t_cls, r_eta, r_phi, r_cls, 0.05, matching, True)
+        assert got.tolist() == [True, False, False] and reco.tolist() == [True, False, False]
     # One-to-one: two truth chads at the same spot, one reco -> exactly one survives.
     got, _ = match_event(
         np.array([0.0, 0.0]), np.array([0.0, 0.0]), np.array([0, 0]),
@@ -235,11 +239,6 @@ def test_match_event_same_class_within_gate():
             np.array([0.01, 0.02]), np.zeros(2), np.zeros(2, dtype=int))
     assert match_event(*args, matching="hungarian")[0].tolist() == [True, True]
     assert match_event(*args, matching="nn")[0].tolist() == [True, False]
-    # nn is class-agnostic (diff_delphes_luigi): a truth electron reconstructed as a
-    # charged hadron survives under nn, not under the per-class hungarian.
-    args = (np.zeros(1), np.zeros(1), np.array([1]), np.array([0.01]), np.zeros(1), np.array([0]))
-    assert match_event(*args, matching="hungarian")[0].tolist() == [False]
-    assert match_event(*args, matching="nn")[0].tolist() == [True]
 
 
 def _toy_arrays(n_events: int = 6, seed: int = 0) -> dict[str, np.ndarray]:

@@ -758,6 +758,7 @@ def main() -> None:
     parser.add_argument(
         "--matching", type=str, default="hungarian", choices=list(MATCHING_CHOICES)
     )
+    parser.add_argument("--match-within-species", action="store_true")
     parser.add_argument("--bce-weight", type=float, default=BCE_WEIGHT)
     parser.add_argument(
         "--bce-weighting", type=str, default="pooled", choices=list(BCE_WEIGHTING_CHOICES)
@@ -982,6 +983,7 @@ def main() -> None:
         truncate_chads=truncate_chads,
         eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
         matching=args.matching,
+        within_species=args.match_within_species,
     )
     log(
         f"[optuna] loaded {len(train_dataset)} train / {len(val_dataset)} val events "
