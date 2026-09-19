@@ -235,6 +235,11 @@ def test_match_event_same_class_within_gate():
             np.array([0.01, 0.02]), np.zeros(2), np.zeros(2, dtype=int))
     assert match_event(*args, matching="hungarian")[0].tolist() == [True, True]
     assert match_event(*args, matching="nn")[0].tolist() == [True, False]
+    # nn is class-agnostic (diff_delphes_luigi): a truth electron reconstructed as a
+    # charged hadron survives under nn, not under the per-class hungarian.
+    args = (np.zeros(1), np.zeros(1), np.array([1]), np.array([0.01]), np.zeros(1), np.array([0]))
+    assert match_event(*args, matching="hungarian")[0].tolist() == [False]
+    assert match_event(*args, matching="nn")[0].tolist() == [True]
 
 
 def _toy_arrays(n_events: int = 6, seed: int = 0) -> dict[str, np.ndarray]:

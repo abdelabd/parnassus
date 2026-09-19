@@ -74,8 +74,9 @@ OBSERVABLES: list[str] = [
 EFF_LOSS_CHOICES: tuple[str, ...] = ("counts", "bce")
 
 # --matching: the truth<->reco assignment rule behind the BCE survival labels
-# (data.match_event). "hungarian" = one-to-one assignment per class; "nn" = every
-# reco object claims its nearest truth particle (diff_delphes_luigi's rule).
+# (data.match_event). "hungarian" = one-to-one assignment within each charged
+# class; "nn" = diff_delphes_luigi's rule: every reco object claims its nearest
+# charged truth particle of any class.
 MATCHING_CHOICES: tuple[str, ...] = ("hungarian", "nn")
 
 # --existence for the tune entrypoints (CONSOLIDATE_MODES_PLAN.md 1a): the
