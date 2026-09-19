@@ -243,9 +243,18 @@ def main() -> None:
         help=(
             "Truth<->reco assignment rule behind the --eff-loss bce survival labels "
             "(per event, deltaR gate 0.05): 'hungarian' = one-to-one optimal "
-            "assignment within each charged class (default); 'nn' = "
-            "diff_delphes_luigi's rule, each reco object claims its nearest charged "
-            "truth particle of any class."
+            "assignment (default); 'nn' = diff_delphes_luigi's rule, each reco object "
+            "claims its nearest truth particle. See --match-within-species."
+        ),
+    )
+    parser.add_argument(
+        "--match-within-species",
+        action="store_true",
+        help=(
+            "Restrict the --matching pairing to same-species truth/reco pairs "
+            "(charged hadron, electron, muon separately). Default: pair across all "
+            "charged species, so a truth electron reconstructed as a PF charged hadron "
+            "counts as found."
         ),
     )
     parser.add_argument(
@@ -653,6 +662,7 @@ def main() -> None:
         truncate_chads=truncate_chads,
         eff_binning=("ptbins12" if args.mode == "fullsim" else "cms4"),
         matching=args.matching,
+        within_species=args.match_within_species,
     )
     if truncate_chads:
         n_t = train_dataset.n_truth_chad

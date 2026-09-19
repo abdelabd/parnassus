@@ -5,9 +5,9 @@ lists cut BEFORE matching, same rule and gate) and reports, per charged species:
 
 1. the fraction of reco objects with no truth match (fakes / unmodeled sources);
 2. the matched survival fraction vs truth pt in fine bins;
-3. deltaR from each truth particle to its nearest matchable reco object (same class
-   for hungarian, any charged class for nn), split by pt band, with the gate marked
-   (is the gate cutting a real tail?);
+3. deltaR from each truth particle to its nearest matchable reco object (any
+   charged class, or the same class with --match-within-species), split by pt
+   band, with the gate marked (is the gate cutting a real tail?);
 4. the matched survival fraction per tracking-efficiency region -- the number the
    BCE converges to in each bin;
 5. ``scans/``: heatmaps of the matched fraction over a (truth-pt cut, reco-pt cut)
@@ -74,7 +74,7 @@ def _cut(t, r, truth_pt_cut, reco_pt_cut, abs_eta_cut):
     return {k: v[tk] for k, v in t.items()}, {k: v[rk] for k, v in r.items()}
 
 
-def scan(events, truth_cuts, reco_cuts, max_dr, abs_eta_cut, matching):
+def scan(events, truth_cuts, reco_cuts, max_dr, abs_eta_cut, matching, within_species):
     """Matched fractions over the (truth cut, reco cut) grid at one gate:
     ``(truth_frac, reco_frac)``, each ``(n_species, n_truth_cuts, n_reco_cuts)``."""
     n_t = np.zeros((len(SPECIES), len(truth_cuts), len(reco_cuts), 2))  # [..., (matched, total)]
@@ -84,7 +84,7 @@ def scan(events, truth_cuts, reco_cuts, max_dr, abs_eta_cut, matching):
             for b, rc in enumerate(reco_cuts):
                 t, r = _cut(t0, r0, tc or None, rc or None, abs_eta_cut)
                 tcls, rcls = t["class"].astype(np.int64), r["class"].astype(np.int64)
-                surv, match = match_event(t["eta"], t["phi"], tcls, r["eta"], r["phi"], rcls, max_dr, matching)
+                surv, match = match_event(t["eta"], t["phi"], tcls, r["eta"], r["phi"], rcls, max_dr, matching, within_species)
                 for c, cls in enumerate(SPECIES):
                     n_t[c, a, b] += (surv[tcls == cls].sum(), (tcls == cls).sum())
                     n_r[c, a, b] += (match[rcls == cls].sum(), (rcls == cls).sum())
@@ -112,7 +112,7 @@ def _heatmap(frac, truth_cuts, reco_cuts, title, path):
     plt.close(fig)
 
 
-def collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching, max_dr):
+def collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching, max_dr, within_species):
     """Flat per-particle arrays over all events, after the training-time cuts:
     truth (pt, eta, class, survived, dr_nearest) and reco (class, matched)."""
     t_pt, t_eta, t_cls, t_surv, t_dr, r_cls, r_match = ([] for _ in range(7))
@@ -124,10 +124,10 @@ def collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching, max_dr):
         t = {k: v[tk] for k, v in t.items()}
         r = {k: v[rk] for k, v in r.items()}
         tc, rc = t["class"].astype(np.int64), r["class"].astype(np.int64)
-        surv, match = match_event(t["eta"], t["phi"], tc, r["eta"], r["phi"], rc, max_dr, matching)
+        surv, match = match_event(t["eta"], t["phi"], tc, r["eta"], r["phi"], rc, max_dr, matching, within_species)
         # deltaR to the nearest reco object the rule may pair with (inf when none)
         dr = np.full(tc.shape[0], np.inf)
-        for group in match_groups(matching):
+        for group in match_groups(within_species):
             ti, ri = np.flatnonzero(np.isin(tc, group)), np.flatnonzero(np.isin(rc, group))
             if ti.size and ri.size:
                 deta = t["eta"][ti][:, None] - r["eta"][ri][None, :]
@@ -150,6 +150,8 @@ def main() -> None:
     parser.add_argument("--n-events", type=int, default=20000)
     parser.add_argument("--matching", type=str, default="hungarian", choices=list(MATCHING_CHOICES))
     parser.add_argument("--max-dr", type=float, default=MATCH_MAX_DR, help="deltaR gate")
+    parser.add_argument("--match-within-species", action="store_true",
+                        help="pair only same-species truth/reco (default: across all charged species)")
     parser.add_argument("--truth-pt-cut", type=float, default=DEFAULT_TRUTH_PT_CUT, help="<= 0 disables")
     parser.add_argument("--reco-pt-cut", type=float, default=DEFAULT_RECO_PT_CUT, help="<= 0 disables")
     parser.add_argument("--eta-cut", type=float, default=DEFAULT_ABS_ETA_CUT, help="<= 0 disables")
@@ -164,12 +166,14 @@ def main() -> None:
     truth_pt_cut, reco_pt_cut, abs_eta_cut = cut(args.truth_pt_cut), cut(args.reco_pt_cut), cut(args.eta_cut)
 
     arrays = load_cms_flow_root(args.root_file, n_events=args.n_events)
-    d = collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, args.matching, args.max_dr)
-    print(f"[eval_matching] {args.root_file.name}: {len(arrays['truth_pt'])} events, matching={args.matching}, "
+    d = collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, args.matching, args.max_dr, args.match_within_species)
+    rule = f"{args.matching}, {'within' if args.match_within_species else 'across'} species"
+    print(f"[eval_matching] {args.root_file.name}: {len(arrays['truth_pt'])} events, matching={rule}, "
           f"max_dr={args.max_dr}, cuts: truth pt>={truth_pt_cut}, reco pt>={reco_pt_cut}, |eta|<={abs_eta_cut}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    summary: dict = {"matching": args.matching, "max_dr": args.max_dr, "per_species": {}}
+    summary: dict = {"matching": args.matching, "within_species": args.match_within_species,
+                     "max_dr": args.max_dr, "per_species": {}}
     pt_edges = np.geomspace(max(truth_pt_cut or 0.1, 0.1), 1000.0, 31)
     dr_edges = np.geomspace(1e-4, 1.0, 41)
     with PdfPages(args.output_dir / "matching_diagnostics.pdf") as pdf:
@@ -228,7 +232,7 @@ def main() -> None:
         for fig, slug, title in ((fig_s, "survival_vs_pt", "matched survival fraction vs truth pt"),
                                  (fig_d, "deltaR_nearest_reco", "deltaR to the nearest matchable reco object"),
                                  (fig_r, "survival_per_region", "matched survival fraction per efficiency region")):
-            fig.suptitle(f"{title}  [{args.matching}, dR <= {args.max_dr}, reco pt >= {reco_pt_cut}]")
+            fig.suptitle(f"{title}  [{rule}, dR <= {args.max_dr}, reco pt >= {reco_pt_cut}]")
             fig.tight_layout()
             pdf.savefig(fig)
             fig.savefig(args.output_dir / f"{slug}.png", dpi=110)
@@ -240,13 +244,13 @@ def main() -> None:
     events = _events(arrays)
     cuts = args.scan_pt_cuts
     for max_dr in args.scan_max_dr:
-        truth_frac, reco_frac = scan(events, cuts, cuts, max_dr, abs_eta_cut, args.matching)
+        truth_frac, reco_frac = scan(events, cuts, cuts, max_dr, abs_eta_cut, args.matching, args.match_within_species)
         name = f"dR_{max_dr:g}.png".replace(".", "p").replace("ppng", ".png")
         for sub_dir, frac, what in (("truth_survival", truth_frac, "fraction of truth particles matched"),
                                     ("reco_survival", reco_frac, "fraction of reco objects matched")):
             d = args.output_dir / "scans" / sub_dir
             d.mkdir(parents=True, exist_ok=True)
-            _heatmap(frac, cuts, cuts, f"{what}  [{args.matching}, dR <= {max_dr:g}, |eta| <= {abs_eta_cut}]", d / name)
+            _heatmap(frac, cuts, cuts, f"{what}  [{rule}, dR <= {max_dr:g}, |eta| <= {abs_eta_cut}]", d / name)
         print(f"[eval_matching] scans at dR <= {max_dr:g} -> {args.output_dir / 'scans'}/*/{name}")
 
 

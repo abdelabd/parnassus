@@ -499,6 +499,7 @@ def load_pflow_targets(
     truth_pt_cut: float | None = None,
     eff_binning: str = "cms4",
     matching: str = "hungarian",
+    within_species: bool = False,
 ):
     """
     This task will pick the pflow objects from the input array, then it will
@@ -531,7 +532,7 @@ def load_pflow_targets(
     )
 
     bce_x_list = _build_survival_labels(
-        arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching=matching
+        arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching, within_species
     )
     max_n_labels = max((int(x.shape[0]) for x in bce_x_list), default=0)
     bce_x_pad = torch.zeros((n_events, max_n_labels), dtype=torch.float64)
@@ -595,10 +596,11 @@ def load_pflow_targets(
 # (pid_to_class: 0 = charged hadron, 1 = electron, 2 = muon) are paired on a
 # deltaR^2 cost with a max-deltaR gate; a truth particle survived iff it received a
 # within-gate match. The rule is --matching (config.MATCHING_CHOICES):
-# "hungarian" = one-to-one optimal assignment WITHIN each class;
-# "nn" = diff_delphes_luigi's rule: every reco object claims its nearest truth
-# particle of ANY charged class (no one-to-one constraint, no class requirement).
-# Unmatched reco objects are fakes for this purpose and are ignored; neutrals are
+# "hungarian" = one-to-one optimal assignment; "nn" = diff_delphes_luigi's rule:
+# every reco object claims its nearest truth particle (no one-to-one constraint).
+# Either rule pairs across the charged species by default; --match-within-species
+# restricts it to same-species pairs. Unmatched reco objects are fakes for this
+# purpose and are ignored; neutrals are
 # never matched (no per-particle correspondence exists -- EFF_LOSS_MOTIV.md
 # section 2). Gate 0.05: diff-Delphes momentum smearing preserves the track
 # direction, so genuine matches sit at deltaR ~ 0 and the gate mainly rejects
@@ -608,11 +610,10 @@ MATCH_MAX_DR: float = 0.05
 _UNMATCHED_COST = 1.0e9  # any pair beyond the gate; an assignment at this cost = unmatched
 
 
-def match_groups(matching: str) -> tuple:
-    """The class groups matched among themselves: one per charged class for
-    ``hungarian``, all charged classes pooled for ``nn``."""
-    assert matching in MATCHING_CHOICES, matching
-    return MATCH_CLASSES if matching == "hungarian" else (MATCH_CLASSES,)
+def match_groups(within_species: bool) -> tuple:
+    """The class groups matched among themselves: one per charged class, or all
+    charged classes pooled."""
+    return MATCH_CLASSES if within_species else (MATCH_CLASSES,)
 
 
 def _delta_phi(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -629,15 +630,18 @@ def match_event(
     r_cls: np.ndarray,
     max_dr: float = MATCH_MAX_DR,
     matching: str = "hungarian",
+    within_species: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-event match flags ``(truth_survived, reco_matched)``: a truth particle
     survived iff it got a reco match within ``max_dr`` under the rule ``matching``
-    (see :data:`MATCHING_CHOICES` / :func:`match_groups`); a reco object is matched
-    iff it was that match (the rest are fakes)."""
+    (see :data:`MATCHING_CHOICES`), across the charged species or, with
+    ``within_species``, only within its own; a reco object is matched iff it was
+    that match (the rest are fakes)."""
+    assert matching in MATCHING_CHOICES, matching
     survived = np.zeros(t_eta.shape[0], dtype=bool)
     matched = np.zeros(r_eta.shape[0], dtype=bool)
     max_dr2 = max_dr * max_dr
-    for group in match_groups(matching):
+    for group in match_groups(within_species):
         ti = np.flatnonzero(np.isin(t_cls, group))
         ri = np.flatnonzero(np.isin(r_cls, group))
         if ti.size == 0 or ri.size == 0:
@@ -667,6 +671,7 @@ def _build_survival_labels(
     reco_pt_cut: float | None = None,
     abs_eta_cut: float | None = None,
     matching: str = "hungarian",
+    within_species: bool = False,
 ) -> list[torch.Tensor]:
     """Per-event BCE efficiency-loss survival labels (float64 1.0/0.0), one per
     truth row of :func:`_build_truth_rows` (same acceptance cuts, same order):
@@ -689,7 +694,7 @@ def _build_survival_labels(
         survived, _ = match_event(
             t["eta"][tk], t["phi"][tk], t["class"][tk].astype(np.int64),
             r["eta"][rk], r["phi"][rk], r["class"][rk].astype(np.int64),
-            matching=matching,
+            matching=matching, within_species=within_species,
         )
         labels.append(torch.from_numpy(survived.astype(np.float64)))
     print(
@@ -708,6 +713,7 @@ def load_pflow_targets_ragged(
     truth_pt_cut: float | None = None,
     eff_binning: str = "cms4",
     matching: str = "hungarian",
+    within_species: bool = False,
 ):
     """Ragged counterpart of :func:`load_pflow_targets`.
 
@@ -767,7 +773,7 @@ def load_pflow_targets_ragged(
         return [torch.from_numpy(np.ascontiguousarray(a, dtype=np.float64)) for a in arrs]
 
     bce_x = _build_survival_labels(
-        arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching=matching
+        arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching, within_species
     )
 
     return {
