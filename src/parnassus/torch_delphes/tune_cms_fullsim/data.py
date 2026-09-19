@@ -591,20 +591,28 @@ def load_pflow_targets(
 
 
 # --- Hungarian truth<->reco survival matching (the BCE efficiency-loss labels) ---
-# Per event and per charged class (pid_to_class: 0 = charged hadron, 1 = electron,
-# 2 = muon), truth particles and reco (pflow) objects of the same class are paired
-# on a deltaR^2 cost with a max-deltaR gate; a truth particle survived iff it
-# received a within-gate match. The assignment rule is --matching
-# (config.MATCHING_CHOICES): "hungarian" = one-to-one optimal assignment;
-# "nn" = each reco object claims its nearest truth particle (no one-to-one
-# constraint; diff_delphes_luigi's rule). Unmatched reco objects are fakes for this
-# purpose and are ignored; neutrals are never matched (no per-particle
-# correspondence exists -- EFF_LOSS_MOTIV.md section 2). Gate 0.05: diff-Delphes
-# momentum smearing preserves the track direction, so genuine matches sit at
-# deltaR ~ 0 and the gate mainly rejects cross-particle coincidences.
+# Per event, charged truth particles and charged reco (pflow) objects
+# (pid_to_class: 0 = charged hadron, 1 = electron, 2 = muon) are paired on a
+# deltaR^2 cost with a max-deltaR gate; a truth particle survived iff it received a
+# within-gate match. The rule is --matching (config.MATCHING_CHOICES):
+# "hungarian" = one-to-one optimal assignment WITHIN each class;
+# "nn" = diff_delphes_luigi's rule: every reco object claims its nearest truth
+# particle of ANY charged class (no one-to-one constraint, no class requirement).
+# Unmatched reco objects are fakes for this purpose and are ignored; neutrals are
+# never matched (no per-particle correspondence exists -- EFF_LOSS_MOTIV.md
+# section 2). Gate 0.05: diff-Delphes momentum smearing preserves the track
+# direction, so genuine matches sit at deltaR ~ 0 and the gate mainly rejects
+# cross-particle coincidences.
 MATCH_CLASSES: tuple[int, ...] = (0, 1, 2)
 MATCH_MAX_DR: float = 0.05
 _UNMATCHED_COST = 1.0e9  # any pair beyond the gate; an assignment at this cost = unmatched
+
+
+def match_groups(matching: str) -> tuple:
+    """The class groups matched among themselves: one per charged class for
+    ``hungarian``, all charged classes pooled for ``nn``."""
+    assert matching in MATCHING_CHOICES, matching
+    return MATCH_CLASSES if matching == "hungarian" else (MATCH_CLASSES,)
 
 
 def _delta_phi(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -623,16 +631,15 @@ def match_event(
     matching: str = "hungarian",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-event match flags ``(truth_survived, reco_matched)``: a truth particle
-    survived iff it got a same-class reco match within ``max_dr`` under the
-    per-class assignment rule ``matching`` (see :data:`MATCHING_CHOICES`); a reco
-    object is matched iff it was that match (the rest are fakes)."""
-    assert matching in MATCHING_CHOICES, matching
+    survived iff it got a reco match within ``max_dr`` under the rule ``matching``
+    (see :data:`MATCHING_CHOICES` / :func:`match_groups`); a reco object is matched
+    iff it was that match (the rest are fakes)."""
     survived = np.zeros(t_eta.shape[0], dtype=bool)
     matched = np.zeros(r_eta.shape[0], dtype=bool)
     max_dr2 = max_dr * max_dr
-    for cls in MATCH_CLASSES:
-        ti = np.flatnonzero(t_cls == cls)
-        ri = np.flatnonzero(r_cls == cls)
+    for group in match_groups(matching):
+        ti = np.flatnonzero(np.isin(t_cls, group))
+        ri = np.flatnonzero(np.isin(r_cls, group))
         if ti.size == 0 or ri.size == 0:
             continue
         deta = t_eta[ti][:, None] - r_eta[ri][None, :]

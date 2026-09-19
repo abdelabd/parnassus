@@ -242,9 +242,10 @@ def main() -> None:
         choices=list(MATCHING_CHOICES),
         help=(
             "Truth<->reco assignment rule behind the --eff-loss bce survival labels "
-            "(per event and charged class, deltaR gate 0.05): 'hungarian' = "
-            "one-to-one optimal assignment (default); 'nn' = each reco object claims "
-            "its nearest truth particle (diff_delphes_luigi's rule)."
+            "(per event, deltaR gate 0.05): 'hungarian' = one-to-one optimal "
+            "assignment within each charged class (default); 'nn' = "
+            "diff_delphes_luigi's rule, each reco object claims its nearest charged "
+            "truth particle of any class."
         ),
     )
     parser.add_argument(

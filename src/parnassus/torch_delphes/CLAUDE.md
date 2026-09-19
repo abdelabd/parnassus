@@ -201,9 +201,10 @@ that run — preferably as a `reproduce.sh` in that run's output directory.
   same-class matching measures PF lepton ID, not tracking.
   `counts` is the legacy expected-count chi^2 and the fullsim-mode default. Knobs:
   `--bce-weight`, `--bce-weighting {pooled,per_species}`, `--matching
-  {hungarian,nn}` (the assignment rule behind the labels: one-to-one Hungarian,
-  default, or diff_delphes_luigi's reco-claims-nearest-truth; both per charged
-  class within the 0.05 gate; pass via `EXTRA_ARGS` in run_sequential.sh).
+  {hungarian,nn}` (the assignment rule behind the labels: one-to-one Hungarian
+  within each charged class, default, or diff_delphes_luigi's class-agnostic
+  reco-claims-nearest-charged-truth; both within the 0.05 gate; pass via
+  `EXTRA_ARGS` in run_sequential.sh).
 - One efficiency function: the card forward exports, per track, the survival
   probability it evaluated on the smeared pre-mask kinematics (the
   `TrackSurvivalExport`, keyed by input row); the BCE is taken between that and

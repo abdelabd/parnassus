@@ -5,8 +5,9 @@ lists cut BEFORE matching, same rule and gate) and reports, per charged species:
 
 1. the fraction of reco objects with no truth match (fakes / unmodeled sources);
 2. the matched survival fraction vs truth pt in fine bins;
-3. deltaR from each truth particle to its nearest same-class reco object, split by
-   pt band, with the gate marked (is the gate cutting a real tail?);
+3. deltaR from each truth particle to its nearest matchable reco object (same class
+   for hungarian, any charged class for nn), split by pt band, with the gate marked
+   (is the gate cutting a real tail?);
 4. the matched survival fraction per tracking-efficiency region -- the number the
    BCE converges to in each bin;
 5. ``scans/``: heatmaps of the matched fraction over a (truth-pt cut, reco-pt cut)
@@ -43,12 +44,12 @@ from .config import (  # noqa: E402
     MATCHING_CHOICES,
 )
 from .data import (  # noqa: E402
-    MATCH_CLASSES,
     MATCH_MAX_DR,
     _delta_phi,
     _in_acceptance,
     load_cms_flow_root,
     match_event,
+    match_groups,
 )
 
 SPECIES = {0: "charged_hadron", 1: "electron", 2: "muon"}
@@ -124,10 +125,10 @@ def collect(arrays, truth_pt_cut, reco_pt_cut, abs_eta_cut, matching, max_dr):
         r = {k: v[rk] for k, v in r.items()}
         tc, rc = t["class"].astype(np.int64), r["class"].astype(np.int64)
         surv, match = match_event(t["eta"], t["phi"], tc, r["eta"], r["phi"], rc, max_dr, matching)
-        # deltaR to the nearest SAME-class reco object (inf when the class has none)
+        # deltaR to the nearest reco object the rule may pair with (inf when none)
         dr = np.full(tc.shape[0], np.inf)
-        for cls in MATCH_CLASSES:
-            ti, ri = np.flatnonzero(tc == cls), np.flatnonzero(rc == cls)
+        for group in match_groups(matching):
+            ti, ri = np.flatnonzero(np.isin(tc, group)), np.flatnonzero(np.isin(rc, group))
             if ti.size and ri.size:
                 deta = t["eta"][ti][:, None] - r["eta"][ri][None, :]
                 dphi = _delta_phi(t["phi"][ti], r["phi"][ri])
@@ -203,7 +204,7 @@ def main() -> None:
                 ax_d[col].hist(np.clip(dr[sel], dr_edges[0], dr_edges[-1]), bins=dr_edges, histtype="step",
                                lw=1.5, label=f"pt in [{lo:g}, {hi:g}) n={sel.sum()}")
             ax_d[col].axvline(args.max_dr, color="k", ls="--", lw=1, label=f"gate {args.max_dr}")
-            ax_d[col].set(xscale="log", yscale="log", xlabel="deltaR to nearest same-class reco",
+            ax_d[col].set(xscale="log", yscale="log", xlabel="deltaR to nearest matchable reco",
                           title=f"{name}: unmatched reco {s['reco_unmatched_fraction']:.3f}")
             ax_d[col].legend(fontsize=7)
             # 4. survival per efficiency region
@@ -225,7 +226,7 @@ def main() -> None:
                   f"reco n={s['n_reco']:7d} matched={(1-s['reco_unmatched_fraction']):.4f} | "
                   f"beyond gate by pt band: " + ", ".join(f"{k}: {v:.3f}" for k, v in s["beyond_gate_fraction_by_pt_band"].items()))
         for fig, slug, title in ((fig_s, "survival_vs_pt", "matched survival fraction vs truth pt"),
-                                 (fig_d, "deltaR_nearest_reco", "deltaR to the nearest same-class reco object"),
+                                 (fig_d, "deltaR_nearest_reco", "deltaR to the nearest matchable reco object"),
                                  (fig_r, "survival_per_region", "matched survival fraction per efficiency region")):
             fig.suptitle(f"{title}  [{args.matching}, dR <= {args.max_dr}, reco pt >= {reco_pt_cut}]")
             fig.tight_layout()
