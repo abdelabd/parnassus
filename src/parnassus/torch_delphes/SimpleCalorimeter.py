@@ -22,12 +22,15 @@ See EFlowMerger.md for details.
 from collections.abc import Callable
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from parnassus.data.particle_io import ColumnMap
 
 N_FEATURES = len(ColumnMap)
+
+# Ablation switch (critic_loss_plan.md, step 6): False detaches the calorimeter
+# threshold gate from the neutral objects' LOG_OBJ_WEIGHT (coins still flow).
+_CALO_GATE_LOGW: bool = True
 
 # Canonical |eta| upper edges of the soft-count regions (final region is "> last
 # edge"). Shared with tune_cms_fullsim.data, which builds the matching TARGET
@@ -777,62 +780,41 @@ class SimpleCalorimeter(nn.Module):
             torch.ones_like(tower_track_energy),
         )
 
-        # ===== Differentiable per-region expected object count =====
-        # Supplies the missing d(membership)/d(theta) gradient for the resolution
-        # params. Both hard significance cuts (the tower cut and the neutral-object
-        # cut) are folded into one soft per-tower survival probability ``gate``;
-        # its per-|eta|-region sum is the expected surviving-object count. A hard
-        # straight-through pins the forward value to today's exact hard count
-        # (``significant_neutral``) while routing the soft gradient backward. None
-        # unless explicitly enabled (learnable tuning).
+        # ===== One-sided straight-through threshold gate (critic_loss_plan.md 2b) =====
+        # Supplies the d(membership)/d(theta) gradient that the four hard cuts drop.
+        # Each cut ``x > thr`` becomes a ramp ``clamp((x - thr) / (tau thr), 0, 1)`` that
+        # rises from 0 to 1 entirely ABOVE its threshold, so the emitted towers just
+        # above threshold carry the WHOLE boundary term of the object count (appearance
+        # direction included); a tower below threshold is done. All inputs are LIVE, so
+        # ``d(x - thr)/dtheta`` covers scale, resolution, fractions and track energies
+        # (only the tower position, a parameter-free draw, is detached). ``gate_st`` has
+        # the hard selection as value and ``d gate/d theta`` as gradient: its per-region
+        # sum is the expected object count (count term, kept until the count terms are
+        # deleted) and its log (exactly 0) is added to the emitted neutral rows'
+        # LOG_OBJ_WEIGHT below. None unless explicitly enabled (learnable tuning).
         if self.compute_soft_count:
             tau = self.count_tau_rel
-            # Confine this term's gradient to the calo RESOLUTION COEFFICIENTS only
-            # (like _expected_reco_counts gradients only eff). DETACH every upstream
-            # energy/track input so the count cannot leak a (biased) gradient into the
-            # track-resolution / scale / hadron-fraction params -- those are constrained
-            # by the sliced-Wasserstein term, and the track path rides an unsoftened hard
-            # selection (use_weighted_energy) that would feed a wrong-signed gradient.
-            # The resolution coefficients stay live through ``sigma_after_c``, recomputed
-            # on a DETACHED energy so only the explicit c_E/c_S/... coefficients (not the
-            # energy argument) carry gradient.
-            e_smeared_d = tower_energy_smeared.detach()
-            track_e_d = tower_track_energy.detach()
-            track_sigma_d = tower_track_sigma.detach()
-            sigma_after_c = self.resolution_func(tower_eta_center, e_smeared_d)
-            # Soft tower cut (carries the resolution coefficients via sigma_after_c). The
-            # sharpness widths are relative to each threshold so the gate is equally sharp
-            # across the ~100x barrel<->forward sigma range; sigma_after_c cancels in the
-            # significance ratio, so a zero-energy tower maps to sigmoid(-1/tau) with no
-            # division blow-up.
-            gate_tower = torch.sigmoid(
-                (e_smeared_d - self.energy_min) / (tau * self.energy_min)
-            ) * torch.sigmoid(
-                (e_smeared_d - self.energy_sig_min * sigma_after_c)
-                / (tau * self.energy_sig_min * sigma_after_c)
+
+            def ramp(x: torch.Tensor, thr) -> torch.Tensor:
+                return torch.clamp((x - thr) / (tau * thr), 0.0, 1.0)
+
+            # Widths are relative to each threshold (equally sharp across the ~100x
+            # barrel<->forward sigma range); sigma_after >= sqrt(eps) > 0, so no division
+            # blow-up on empty towers. The four cuts use the same LIVE quantities the
+            # hard selection used (tower_energy_smeared, neutral_energy, neutral_sigma).
+            gate_tower = ramp(tower_energy_smeared, self.energy_min) * ramp(
+                tower_energy_smeared, self.energy_sig_min * sigma_after
             )
-            neutral_energy_soft = torch.clamp(
-                gate_tower * e_smeared_d - track_e_d, min=0.0
+            gate_nopt = (
+                gate_tower
+                * ramp(neutral_energy, self.energy_min)
+                * ramp(neutral_sigma, self.energy_sig_min)
             )
-            # Count-specific denominator: track sigma detached, sigma_after_c live.
-            # sigma_after_c >= sqrt(eps) > 0, so this is always positive (no safe guard).
-            denom_c = torch.sqrt(track_sigma_d * track_sigma_d + sigma_after_c * sigma_after_c)
-            neutral_sigma_soft = neutral_energy_soft / denom_c
-            # Soft neutral-object cut (neutral_sigma is already dimensionless E/sigma).
-            # The sigmoid arguments are named so the per-tower export below can also
-            # provide a saturation-safe log of the same product (softplus form) for
-            # the merged-count cluster composition; `gate` itself is arithmetically
-            # unchanged.
-            arg_neutral_e = (neutral_energy_soft - self.energy_min) / (tau * self.energy_min)
-            arg_neutral_sig = (neutral_sigma_soft - self.energy_sig_min) / (
-                tau * self.energy_sig_min
-            )
-            gate_nopt = torch.sigmoid(arg_neutral_e) * torch.sigmoid(arg_neutral_sig)
             gate = gate_nopt
-            # Soft pt (used by the count_pt_min gate and by the merged-count cluster
-            # pt gate). Live only through gate_tower inside neutral_energy_soft.
+            # pt of the would-be object (count_pt_min gate and the merged-count cluster
+            # pt gate); live through neutral_energy.
             cosh_eta_d = torch.cosh(tower_eta.detach())
-            pt_soft = neutral_energy_soft / cosh_eta_d
+            pt_soft = neutral_energy / cosh_eta_d
             # Acceptance harmonization: soft pt >= count_pt_min gate so the expected
             # count matches the reco-side acceptance cut (data targets carry pt >= 1
             # from preprocessing; the loss cuts the trainee objects the same way).
@@ -842,12 +824,8 @@ class SimpleCalorimeter(nn.Module):
             # Uses tower_eta (the emitted object's eta) for pt, like the eflow
             # output; region assignment below keeps the tower-center convention.
             if self.count_pt_min is not None:
-                gate = gate * torch.sigmoid(
-                    (pt_soft - self.count_pt_min) / (tau * self.count_pt_min)
-                )
-                count_hard = significant_neutral & (
-                    neutral_energy.detach() / cosh_eta_d >= self.count_pt_min
-                )
+                gate = gate * ramp(pt_soft, self.count_pt_min)
+                count_hard = significant_neutral & (pt_soft.detach() >= self.count_pt_min)
             else:
                 count_hard = significant_neutral
             # Straight-through: hard forward value == exact hard count, soft backward.
@@ -858,8 +836,8 @@ class SimpleCalorimeter(nn.Module):
                 calo_count_eta_edges(self.is_ecal, self.count_abs_eta_max),
                 self.count_abs_eta_max,
             )
-            # +0*sigma_after_c.sum() anchors a graph path even when n_towers == 0.
-            anchor = sigma_after_c.sum() * 0.0
+            # +0*sigma_after.sum() anchors a graph path even when n_towers == 0.
+            anchor = sigma_after.sum() * 0.0
             expected_calo_counts = torch.stack([
                 anchor + (gate_st * m.to(gate_st.dtype)).sum() for m in region_masks
             ])
@@ -873,9 +851,7 @@ class SimpleCalorimeter(nn.Module):
             # would zero every cluster mate's gradient through prod(1 - g)).
             count_export = {
                 "gate_nopt": gate_nopt,
-                "log_gate_nopt": -(
-                    F.softplus(-arg_neutral_e) + F.softplus(-arg_neutral_sig)
-                ),
+                "log_gate_nopt": torch.log(gate_nopt.clamp_min(1e-300)),
                 "pt_soft": pt_soft,
                 "emitted": significant_neutral,
                 "abs_eta_center": abs_eta_center,
@@ -887,6 +863,7 @@ class SimpleCalorimeter(nn.Module):
         else:
             expected_calo_counts = None
             count_export = None
+            gate_nopt = None
 
         # ===== Create Tower output =====
         # Towers with energy > 0 after thresholds
@@ -1102,10 +1079,15 @@ class SimpleCalorimeter(nn.Module):
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
             eflow_excess_neutrals[:, ColumnMap.EVENT_NUMBER] = eflow_tower_event_num
 
-            # Coin log-weight inherited from the tower's tracks (step 3); stays 0
-            # (== weight 1) outside grad mode.
+            # Coin log-weight inherited from the tower's tracks (step 3) plus the tower's
+            # own threshold-gate factor log(1 + (g - sg g)) (step 6): both exactly 0 in
+            # value (== weight 1), only their graphs matter; stays 0 outside grad mode.
             if tower_logw is not None:
-                eflow_excess_neutrals[:, ColumnMap.LOG_OBJ_WEIGHT] = tower_logw[significant_neutral]
+                logw_rows = tower_logw[significant_neutral]
+                if _CALO_GATE_LOGW and gate_nopt is not None:
+                    g = gate_nopt[significant_neutral]
+                    logw_rows = logw_rows + torch.log(1.0 + (g - g.detach()))
+                eflow_excess_neutrals[:, ColumnMap.LOG_OBJ_WEIGHT] = logw_rows
 
         # Return results
         return eflow_tracks, towers, eflow_excess_neutrals, expected_calo_counts, count_export

@@ -312,6 +312,12 @@ def test_composed_count_forward_is_hard_merged_count():
     per-tower count (merging reduces photon counts on the dense fixture)."""
     truth = _make_truth_particles(4)
     plain, merged = _cut_cards(radius=RADIUS)
+    # The one-sided ramp gate (critic_loss_plan.md 2b) carries gradient only on
+    # towers within ``count_tau_rel`` of a threshold; this fixture's photons all sit
+    # far above the ECal thresholds, so widen the ramp (gradient only, the forward
+    # value is straight-through and unchanged) so the gradient assertion below is
+    # about the composition path, not about the fixture.
+    merged.ECal.count_tau_rel = 2.0
     torch.manual_seed(29)
     out_plain = plain(truth.clone())
     torch.manual_seed(29)
@@ -341,7 +347,7 @@ def _reference_compose(args, pt_soft, members, hard_pt, pt_min, tau):
         for i in mem:
             miss = miss * (1.0 - gates[i])
         s = gates[mem[0]] if len(mem) == 1 else 1.0 - miss
-        s = s * torch.sigmoid((pt_soft[mem].sum() - pt_min) / (tau * pt_min))
+        s = s * torch.clamp((pt_soft[mem].sum() - pt_min) / (tau * pt_min), 0.0, 1.0)  # one-sided ramp
         survivals.append(s)
         hards.append(hpt)
     st = [float(h) + (s - s.detach()) for s, h in zip(survivals, hards, strict=True)]

@@ -370,8 +370,9 @@ def compose_merged_photon_count(
         pt_sum = torch.zeros(n_total, dtype=torch.float64, device=device).index_add_(
             0, mem_cid, export["pt_soft"][mem_tower]
         )
-        survival = survival * torch.sigmoid(
-            (pt_sum - calo.count_pt_min) / (calo.count_tau_rel * calo.count_pt_min)
+        # Same one-sided ramp as the calorimeter's pt gate (critic_loss_plan.md 2b).
+        survival = survival * torch.clamp(
+            (pt_sum - calo.count_pt_min) / (calo.count_tau_rel * calo.count_pt_min), 0.0, 1.0
         )
         if n_clusters > 0:
             hard[:n_clusters] = merged[:, ColumnMap.PT].detach() >= calo.count_pt_min

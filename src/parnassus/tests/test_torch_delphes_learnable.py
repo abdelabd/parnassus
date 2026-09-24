@@ -908,3 +908,60 @@ def test_pred_dict_carries_log_w_with_gradient_to_eff_logits() -> None:
     assert "log_w" in _OBJECT_OBS_KEYS
     cut = apply_reco_acceptance_cut({k: v.detach() for k, v in pred.items()}, 5.0, None)
     assert torch.all(cut["log_w"][cut["pt"] == 0] == 0.0)
+
+
+# ---------------------------------------------------------------------------
+# 7. One-sided calorimeter threshold gate (critic_loss_plan.md 2b, step 6)
+# ---------------------------------------------------------------------------
+
+
+def test_one_sided_ramp_gate_estimates_the_full_boundary_term() -> None:
+    """Toy version of the calorimeter gate: ``X = exp(mu + s z)`` with a hard cut
+    ``X > thr``. The mean over EMITTED samples of ``d ramp/d mu`` must equal the
+    boundary term ``p_X(thr) * d(X - thr)/d mu |_thr = p_X(thr) * thr`` -- i.e. the
+    emitted side alone carries the whole membership derivative, appearance included.
+    """
+    torch.manual_seed(0)
+    n, s, thr, tau = 2_000_000, 0.4, 1.0, 0.05
+    mu = torch.zeros((), dtype=torch.float64, requires_grad=True)
+    x = torch.exp(mu + s * torch.randn(n, dtype=torch.float64))
+    emitted = x > thr
+    ramp = torch.clamp((x[emitted] - thr) / (tau * thr), 0.0, 1.0)
+    (ramp.sum() / n).backward()
+    z = (math.log(thr) - 0.0) / s
+    pdf_at_thr = math.exp(-0.5 * z * z) / (math.sqrt(2 * math.pi) * s * thr)
+    assert float(mu.grad) == pytest.approx(pdf_at_thr * thr, rel=0.03)
+
+
+def test_neutral_rows_column_reaches_calorimeter_parameters(monkeypatch) -> None:
+    """Card level: the neutral rows' log-weight column stays exactly 0 but now
+    back-propagates a finite, non-zero gradient to the calorimeter scale and
+    resolution parameters (some towers always sit within the ramp width of a
+    threshold); with the ablation switch off, those gradients vanish."""
+    import importlib
+
+    calo_mod = importlib.import_module("parnassus.torch_delphes.SimpleCalorimeter")
+
+    def calo_grads(switch: bool) -> dict[str, torch.Tensor | None]:
+        monkeypatch.setattr(calo_mod, "_CALO_GATE_LOGW", switch)
+        torch.manual_seed(33)
+        card = CMSEnergyFlowDefault(debug=False, learnable=True)
+        obj = card(_make_batch(n=600, seed=33))["EFlowObject"]
+        col = obj[obj[:, ColumnMap.CHARGE] == 0, ColumnMap.LOG_OBJ_WEIGHT]
+        assert torch.all(col == 0.0)
+        col.sum().backward()
+        return {
+            n: p.grad for n, p in card.named_parameters()
+            if "scale_module" in n or "resolution_func" in n
+        }
+
+    live = calo_grads(True)
+    assert len(live) > 0
+    for name, g in live.items():
+        assert g is None or torch.isfinite(g).all(), name
+    assert sum(float(g.abs().sum()) for g in live.values() if g is not None) > 0
+    assert any(g is not None and float(g.abs().sum()) > 0
+               for n, g in live.items() if "scale_module" in n)
+
+    off = calo_grads(False)
+    assert all(g is None or float(g.abs().sum()) == 0.0 for g in off.values())
