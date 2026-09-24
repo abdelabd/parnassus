@@ -877,3 +877,34 @@ def test_neutral_rows_column_reaches_track_efficiency_logits() -> None:
     assert grads["ElectronTrackingEfficiency.eff_logits"].abs().sum() > 0
     mu = grads["MuonTrackingEfficiency.eff_logits"]
     assert mu is None or float(mu.abs().sum()) == 0.0
+
+
+def test_pred_dict_carries_log_w_with_gradient_to_eff_logits() -> None:
+    """``load_pflow_targets_from_tensor`` exposes the coin log-weight as ``log_w``:
+    same shape as ``pt``, exactly 0 everywhere (weight 1 on real objects, 0 on
+    padding / ghosts), on the graph, and its sum back-propagates to the charged
+    hadron efficiency logits; the loss-side filters zero it on dropped slots."""
+    from parnassus.torch_delphes.tune_cms_fullsim.data import (
+        _OBJECT_OBS_KEYS,
+        apply_reco_acceptance_cut,
+        load_pflow_targets_from_tensor,
+        restore_event_format,
+    )
+
+    torch.manual_seed(9)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    truth = _make_batch(n=200, seed=9).unsqueeze(0)  # one event
+    mask = torch.any(truth != 0, dim=-1)
+    out = card(truth[mask])
+    pred = load_pflow_targets_from_tensor(restore_event_format(out["EFlowObject"], mask))
+
+    log_w = pred["log_w"]
+    assert log_w.shape == pred["pt"].shape
+    assert torch.all(log_w == 0.0) and log_w.requires_grad
+    assert torch.all(log_w[pred["pt"] == 0] == 0.0)
+    log_w.sum().backward()
+    assert card.ChargedHadronTrackingEfficiency.eff_logits.grad.abs().sum() > 0
+
+    assert "log_w" in _OBJECT_OBS_KEYS
+    cut = apply_reco_acceptance_cut({k: v.detach() for k, v in pred.items()}, 5.0, None)
+    assert torch.all(cut["log_w"][cut["pt"] == 0] == 0.0)

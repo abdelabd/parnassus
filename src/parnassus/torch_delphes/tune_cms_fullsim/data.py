@@ -733,6 +733,12 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = 1
     # rare empty event. Floor matches the target side.
     log_ht = torch.log(torch.clamp(ht, min=1e-6))
 
+    # Per-object coin log-weight for the critic loss (critic_loss_plan.md, step 4):
+    # exactly 0 on every real object (weight 1) and 0 on invalid slots; only its
+    # autograd graph (to the tracking-efficiency logits) carries information. The
+    # target side has no such key (every data object has weight 1).
+    log_w = torch.where(valid, arrays[..., ColumnMap.LOG_OBJ_WEIGHT], torch.zeros_like(pt))
+
     return {
         "pt": pt_out,
         "eta": eta_out,
@@ -741,6 +747,7 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = 1
         # "E": e,
         "log_pt": log_pt,
         "pid": pid_out,
+        "log_w": log_w,
         "multiplicity": multiplicity,
         "ht": ht,
         "log_ht": log_ht,
@@ -755,13 +762,13 @@ def load_pflow_targets_from_tensor(arrays: torch.Tensor, log_pt_floor: float = 1
 # pt == 0 AND pid == 0 -- identical to the padding/ghost convention -- so
 # _group_objects_by_pid (loss) and the ``pt != 0`` plot cuts exclude them with
 # no downstream changes.
-_OBJECT_OBS_KEYS: tuple[str, ...] = ("pt", "eta", "phi", "log_E", "log_pt", "pid")
+_OBJECT_OBS_KEYS: tuple[str, ...] = ("pt", "eta", "phi", "log_E", "log_pt", "pid", "log_w")
 
 
 def _zero_dropped_and_recompute(
     obs: dict[str, torch.Tensor], keep: torch.Tensor
 ) -> dict[str, torch.Tensor]:
-    """Shared tail of the loss-side filters: zero dropped slots on the six
+    """Shared tail of the loss-side filters: zero dropped slots on the
     per-object keys and recompute ``multiplicity`` / ``ht`` / ``log_ht`` from the
     kept objects (1e-6 floor matches the loaders). Shallow copy -- every other
     key (``*_region_counts``, ``*_expected_counts``, ``n_truth_chad``, ...)
