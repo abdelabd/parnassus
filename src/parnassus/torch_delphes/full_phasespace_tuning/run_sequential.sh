@@ -16,9 +16,6 @@
 #   N_STEPS         epochs per stage               (default 100; the CLI's global batch is 4096)
 #   N_EVENTS        events per stage               (default -1 = all; small values for a dry run)
 #   NPROC           GPUs; >1 launches torchrun     (default 4; per-rank batch = 4096/NPROC)
-#   PID_WEIGHTING   --pid-weighting of the per-species shape terms (default fraction: in every
-#                   stage the fitted species is the abundant one, so this keeps its terms at full
-#                   weight and mutes the stray-species noise/floor; count/pair/log_ht untouched)
 #   EARLY_STOP      early-stopping patience in epochs, 0 = off (default 10: the val loss of every
 #                   stage sits on a floor from the frozen species, so late epochs only track noise)
 #   PICK            best|last epoch carried to the next stage (default best = the early-stopping
@@ -38,7 +35,6 @@ OUT_BASE="${OUT_BASE:-$REPO/doc/figure_sequential}"
 N_STEPS="${N_STEPS:-100}"
 N_EVENTS="${N_EVENTS:--1}"
 NPROC="${NPROC:-4}"
-PID_WEIGHTING="${PID_WEIGHTING:-fraction}"
 EARLY_STOP="${EARLY_STOP:-10}"
 PICK="${PICK:-best}"
 PLOT="${PLOT:-1}"
@@ -63,7 +59,7 @@ else
 fi
 
 echo "[seq] REPO=$REPO  SAMPLE_DIR=$SAMPLE_DIR  OUT_BASE=$OUT_BASE"
-echo "[seq] N_STEPS=$N_STEPS  N_EVENTS=$N_EVENTS  NPROC=$NPROC  PID_WEIGHTING=$PID_WEIGHTING  EARLY_STOP=$EARLY_STOP  PICK=$PICK  PLOT=$PLOT  FROM_HISTORY=${FROM_HISTORY:-<card defaults>}"
+echo "[seq] N_STEPS=$N_STEPS  N_EVENTS=$N_EVENTS  NPROC=$NPROC  EARLY_STOP=$EARLY_STOP  PICK=$PICK  PLOT=$PLOT  FROM_HISTORY=${FROM_HISTORY:-<card defaults>}"
 mkdir -p "$OUT_BASE"
 
 PREV="$FROM_HISTORY"
@@ -88,7 +84,7 @@ for stage in "${STAGES[@]}"; do
         --root-file "$root_file" \
         --param-config "$rdir/materialized_config.yaml" \
         --lr 1 \
-        --loss wasserstein_1d --mode delphes --pid-weighting "$PID_WEIGHTING" \
+        --mode delphes \
         --early-stopping-patience "$EARLY_STOP" --lr-scheduler-patience 0 \
         --n-events "$N_EVENTS" --n-steps "$N_STEPS" \
         --history-path "$rdir/history.json" \

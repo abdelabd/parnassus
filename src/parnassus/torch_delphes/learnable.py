@@ -38,11 +38,11 @@ Design notes
   *count* term, one per track species (charged hadron, electron, muon): each
   track is tagged with its pre-reco region (:meth:`region_index_1based`), using
   a per-species :class:`EfficiencyRegionSpec` with disjoint global label ranges
-  (chad 1-4, electron 5-10, muon 11-16; 0 = outside all regions), and the loss
-  reweights the trainee's per-(species, reco-bin) counts by ``eff`` to match the
-  reconstructed data (see ``CMSEnergyFlowDefault._expected_reco_counts`` and
-  ``tune_cms_fullsim.loss.per_event_wasserstein_loss``). The muon high-pt
-  ``rate_raw`` (the exponential roll-off constant) has no count-term gradient
+  (chad 1-4, electron 5-10, muon 11-16; 0 = outside all regions), and every
+  reconstructed object carries the likelihood ratio of its coin in the
+  ``LOG_OBJ_WEIGHT`` column (see ``_write_coin_log_weight``), which is how the
+  efficiency gradient reaches the training loss. The muon high-pt
+  ``rate_raw`` (the exponential roll-off constant) has no gradient
   path -- it is intentionally left frozen (see
   :class:`CMSMuonLearnableEfficiency`). Masked particles have their
   (PT, PX, PY, PZ, E) multiplied by the binary mask; their rows remain in
@@ -299,9 +299,8 @@ class EfficiencyRegionSpec:
 
     A single source of truth for the region geometry, shared by three call
     sites that previously each hard-coded the same cuts: the trainee's
-    efficiency evaluation / region tagging (:class:`_LearnableEfficiencyBase`),
-    the reco-bin migration in ``CMSEnergyFlowDefault._expected_reco_counts``,
-    and the data-target binning in ``tune_cms_fullsim.data.load_pflow_targets``.
+    efficiency evaluation / region tagging (:class:`_LearnableEfficiencyBase`)
+    and any reco-bin analysis of the tagged objects.
 
     Binning conventions (chosen to reproduce the original inline cuts exactly):
 
@@ -467,9 +466,7 @@ class _LearnableEfficiencyBase(nn.Module):
         ``region_spec.label_offset + r + 1``; ``0`` for particles outside all
         regions. Offsets keep the species' label ranges disjoint (chad 1-4,
         electron 5-10, muon 11-16) so one shared column carries every species,
-        and the loss can build the per-(species, reco-bin) <- pre-reco-region
-        migration for the differentiable count term (see
-        ``CMSEnergyFlowDefault._expected_reco_counts``).
+        so a downstream analysis can recover each object's pre-reco region.
 
         Returns
         -------
@@ -524,9 +521,8 @@ class _LearnableEfficiencyBase(nn.Module):
         # Detach the mask: the forward stays a hard ~Bernoulli(eff) sample, but no
         # gradient reaches eff_logits through this momentum multiply. The old
         # straight-through gradient was biased (a survivor-momentum scale, not the
-        # keep-probability). eff_logits are fit via the differentiable reco-space
-        # count term instead (see region_index_1based /
-        # CMSEnergyFlowDefault._expected_reco_counts).
+        # keep-probability). eff_logits are fit through the per-object
+        # likelihood-ratio log-weight written by _write_coin_log_weight instead.
         mask = self._gumbel_sigmoid_st(eff).detach()  # shape (N,)
 
         # Build a per-column multiplier: mask[i] for momentum columns, 1

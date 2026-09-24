@@ -6,17 +6,17 @@ the previous stage's final values of *all* parameters and trains only the block 
 sample constrains. A trainable parameter with no lever drifts, and a later stage would
 otherwise overwrite an earlier one, so the masks below are the whole method.
 
-Why not one joint fit on the shuffled 800k mix: the pair-response terms are standardized
-by one std pooled over all classes; dijet leading-2 charged-hadron pairs (a mis-pairing
-continuum, std 1.9, half of all pairs) push it from ~0.15 to 1.42 and suppress the gun
-pair terms 50-250x (2026-08-18). Fixing that (per-class / per-truth-group robust scale) is a
-separate loss change.
+Why not one joint fit on the shuffled 800k mix (2026-08-18, with the per-pid pair-mass
+loss since removed in favour of the critic loss, see `.claude/docs/critic_loss_plan.md`):
+the pair-response terms were standardized by one std pooled over all classes; dijet
+leading-2 charged-hadron pairs (a mis-pairing continuum, std 1.9, half of all pairs) pushed
+it from ~0.15 to 1.42 and suppressed the gun pair terms 50-250x.
 
 | stage | sample | trainable | frozen at fitted values | why here |
 |---|---|---|---|---|
 | 1 `stage1_muons` | muongun | muon eff[0,1,3,4], a, b, scale (13) | -- | track-only, no cross-talk |
 | 2 `stage2_chads` | ksgun | chad eff, a, b, scale (13) | muon | track-only; chad tracks are needed before the calo stage |
-| 3 `stage3_calo` | dijet | ECal + HCal (17, incl. the four c_E) | muon, chad | calo needs the chad tracks; `--no-pair-mass` |
+| 3 `stage3_calo` | dijet | ECal + HCal (17, incl. the four c_E) | muon, chad | calo needs the chad tracks |
 | 4 `stage4_electrons` | electrongun | electron eff, a, b, scale (15) | muon, chad, calo | electron energy = track (+) ECal, so after the calo stage |
 
 Never trained: muon eff[2,5] and rate_raw (> 1 TeV), ECal barrel_a (anchor), HadronFractions.
@@ -41,10 +41,8 @@ the electron gun with the electron block frozen -- is not part of the chain for 
   m_ee / m_mumu (leading 2 same-flavour leptons) and m_4l (leading 4 e/mu). Delphes mode, all
   events by default (`--n-events`), CPU (~20 s per 5k gun events).
 - `run_sequential.sh` -- runs the stages in order (`python -m
-  parnassus.torch_delphes.tune_cms_fullsim`, `--loss wasserstein_1d --mode delphes
-  --pid-weighting fraction` (`PID_WEIGHTING`; the fitted species is the abundant one in
-  every stage, so this mutes the stray-species shape terms without touching the count / pair /
-  log HT levers), early stopping with patience `EARLY_STOP` (default 10; each stage's val loss sits on a floor from the
+  parnassus.torch_delphes.tune_cms_fullsim`, `--mode delphes`, early stopping with patience
+  `EARLY_STOP` (default 10; each stage's val loss sits on a floor from the
   frozen species, so late epochs only track noise), no lr decay, the early-stopping checkpoint
   carried on (`PICK=best`)), plots each stage (`plot_parameter_regression` -> `params_reg.pdf`,
   `plot_fit_results`, both against `param_config_all.yaml`), and writes

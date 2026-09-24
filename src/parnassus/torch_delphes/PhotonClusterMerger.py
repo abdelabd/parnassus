@@ -20,9 +20,7 @@ on sparse events.
 Cluster assignment is discrete and computed under no_grad. Merged
 four-vectors are on-graph sums over cluster members, so upstream parameters
 (resolutions, scales, fractions) keep their gradients through the merged
-kinematics. ``merge_radius`` itself is a constant and receives NO gradient
-here (milestone M0); per the design it is fit only through the recounted
-photon count term (milestone M1+).
+kinematics. ``merge_radius`` itself is a constant and receives NO gradient.
 """
 
 import math
@@ -31,10 +29,6 @@ import torch
 from torch import nn
 
 from parnassus.data.particle_io import PT_MIN, ColumnMap
-from parnassus.torch_delphes.SimpleCalorimeter import (
-    calo_count_eta_edges,
-    calo_count_region_masks,
-)
 
 # Events per padded assignment chunk: bounds the (chunk, m, m) pairwise-dR
 # memory without changing the result (clustering is per-event).
@@ -67,96 +61,9 @@ class PhotonClusterMerger(nn.Module):
         columns are the seed's. Single-photon clusters pass through
         untouched.
         """
-        return self.forward_with_assignment(photons)[0]
-
-    def forward_with_assignment(
-        self, photons: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Like forward, but also returns the owner map: owner[i] is the input
-        row index of photon i's cluster seed (owner[i] == i marks a seed).
-        Merged output rows are the seeds in ascending input-row order."""
         if photons.shape[0] <= 1:
-            owner = torch.arange(photons.shape[0], device=photons.device)
-            return photons, owner
-        owner = self._assign_clusters(photons)
-        return self._merge(photons, owner), owner
-
-    @torch.no_grad()
-    def assign_to_seeds(
-        self,
-        eta: torch.Tensor,
-        phi: torch.Tensor,
-        event: torch.Tensor,
-        seed_eta: torch.Tensor,
-        seed_phi: torch.Tensor,
-        seed_event: torch.Tensor,
-    ) -> torch.Tensor:
-        """Assign each (eta, phi, event) point to the nearest seed of the same
-        event within merge_radius; returns indices into the seed arrays, -1
-        when no seed is in reach. Used for the virtual (sub-threshold) towers
-        of the merged-count composition."""
-        n_pts = eta.shape[0]
-        out = torch.full((n_pts,), -1, dtype=torch.long, device=eta.device)
-        n_seeds = seed_eta.shape[0]
-        if n_pts == 0 or n_seeds == 0:
-            return out
-        # Shared per-event indexing across both point sets.
-        _, ev = torch.unique(torch.cat([event, seed_event]), return_inverse=True)
-        p_ev, s_ev = ev[:n_pts], ev[n_pts:]
-        n_events = int(ev.max()) + 1
-        p_order = torch.argsort(p_ev, stable=True)
-        s_order = torch.argsort(s_ev, stable=True)
-        p_counts = torch.bincount(p_ev, minlength=n_events)
-        s_counts = torch.bincount(s_ev, minlength=n_events)
-
-        p_start = s_start = 0
-        for ev0 in range(0, n_events, _CHUNK_EVENTS):
-            pc = p_counts[ev0 : ev0 + _CHUNK_EVENTS]
-            sc = s_counts[ev0 : ev0 + _CHUNK_EVENTS]
-            np_, ns = int(pc.sum()), int(sc.sum())
-            p_rows = p_order[p_start : p_start + np_]
-            s_rows = s_order[s_start : s_start + ns]
-            p_start += np_
-            s_start += ns
-            if np_ == 0 or ns == 0:
-                continue
-            out[p_rows] = self._nearest_in_chunk(
-                eta[p_rows], phi[p_rows], pc,
-                seed_eta[s_rows], seed_phi[s_rows], sc, s_rows,
-            )
-        return out
-
-    def _nearest_in_chunk(self, p_eta, p_phi, p_counts, s_eta, s_phi, s_counts, s_rows):
-        """Nearest same-event seed within merge_radius for one event chunk;
-        both point sets arrive event-grouped. Returns global seed indices or -1."""
-        device = p_eta.device
-        b = p_counts.shape[0]
-        mp, ms = int(p_counts.max()), int(s_counts.max())
-
-        def layout(counts, n):
-            ev_of = torch.repeat_interleave(torch.arange(b, device=device), counts)
-            slot = torch.arange(n, device=device) - (torch.cumsum(counts, 0) - counts)[ev_of]
-            return ev_of, slot
-
-        p_ev, p_slot = layout(p_counts, p_eta.shape[0])
-        s_ev, s_slot = layout(s_counts, s_eta.shape[0])
-
-        def padded(ev_of, slot, m, values, fill):
-            out = torch.full((b * m,), fill, dtype=values.dtype, device=device)
-            out[ev_of * m + slot] = values
-            return out.view(b, m)
-
-        se = padded(s_ev, s_slot, ms, s_eta, torch.inf)  # inf -> never within radius
-        sp = padded(s_ev, s_slot, ms, s_phi, 0.0)
-        sr = padded(s_ev, s_slot, ms, s_rows.to(torch.float64), -1.0).long()
-
-        deta = p_eta.view(-1, 1) - se[p_ev]                      # (n_pts, ms)
-        dphi = p_phi.view(-1, 1) - sp[p_ev]
-        dphi = torch.remainder(dphi + math.pi, 2.0 * math.pi) - math.pi
-        dr2 = deta.square() + dphi.square()
-        best = dr2.argmin(dim=1)
-        within = dr2.gather(1, best.unsqueeze(1)).squeeze(1) < self.merge_radius**2
-        return torch.where(within, sr[p_ev, best], torch.full_like(best, -1))
+            return photons
+        return self._merge(photons, self._assign_clusters(photons))
 
     # ------------------------------------------------------------------
     # discrete cluster assignment (off-graph)
@@ -287,105 +194,3 @@ class PhotonClusterMerger(nn.Module):
             merged[multi, ColumnMap.PHI_OUTER] = phi.detach()
         return merged
 
-
-def compose_merged_photon_count(
-    export: dict,
-    owner: torch.Tensor,
-    merged: torch.Tensor,
-    merger: PhotonClusterMerger,
-    calo,
-) -> torch.Tensor:
-    """Merged-photon replacement for the calo's per-region expected count.
-
-    Generalizes compute_soft_count from towers to clusters: a merged photon
-    exists iff at least one member tower survives, so per cluster c
-
-        S_c = [1 - prod_{i in c} (1 - g_i)] * G_pt(c)
-
-    with g_i the tower survival gates (live via sigma_after_c -- the c_E/c_S
-    count-gradient channel this composition must preserve) and G_pt the pt
-    acceptance moved from tower to cluster level (a merged cluster can pass
-    pt >= count_pt_min when its towers individually do not). Members are the
-    merger's emitted-photon clusters plus VIRTUAL members: every sub-threshold
-    tower joins the nearest seed within merge_radius, or forms a virtual
-    singleton cluster (pure gradient, zero forward -- today's sub-threshold
-    role). Hard mirror: a real cluster counts iff its merged ROW passes the pt
-    cut (exact vs the loss-side acceptance); virtual clusters never count.
-    Straight-through pins the forward value to that hard count.
-
-    Size-1 clusters take a fast path S = gate_nopt * pt_sigmoid that is
-    arithmetically identical to the legacy per-tower gate, so merge_radius -> 0
-    reproduces compute_soft_count bit-for-bit. Multi-member complements use
-    the saturation-safe log_gate export (a float64 sigmoid saturates to exactly
-    1.0, which would otherwise zero all cluster mates' gradients).
-
-    Parameters: ``export`` = the calo's per-tower count export; ``owner`` = the
-    merger's owner map over the pre-merge photon rows; ``merged`` = the merged
-    photon stream (rows = seeds ascending); ``calo`` needs attributes
-    ``count_pt_min, count_tau_rel, count_abs_eta_max, is_ecal``.
-    """
-    emitted = export["emitted"]
-    device = emitted.device
-    n_photons = owner.shape[0]
-    tower_of_photon = emitted.nonzero(as_tuple=True)[0]
-    assert tower_of_photon.shape[0] == n_photons, "export/photon stream misaligned"
-
-    seed_rows = (owner == torch.arange(n_photons, device=device)).nonzero(as_tuple=True)[0]
-    n_clusters = seed_rows.shape[0]
-    assert merged.shape[0] == n_clusters, "merged rows must be the cluster seeds"
-    seed_tower = tower_of_photon[seed_rows]
-
-    # Virtual members: sub-threshold towers join the nearest seed within R.
-    virt_tower = (~emitted).nonzero(as_tuple=True)[0]
-    v_cluster = merger.assign_to_seeds(
-        export["eta"][virt_tower], export["phi"][virt_tower], export["event"][virt_tower],
-        export["eta"][seed_tower], export["phi"][seed_tower], export["event"][seed_tower],
-    )
-    attached = v_cluster >= 0
-    v_single = virt_tower[~attached]
-    n_total = n_clusters + v_single.shape[0]
-
-    mem_tower = torch.cat([tower_of_photon, virt_tower[attached], v_single])
-    mem_cid = torch.cat([
-        torch.searchsorted(seed_rows, owner),
-        v_cluster[attached],
-        n_clusters + torch.arange(v_single.shape[0], device=device),
-    ])
-
-    # Cluster survival: singletons reuse the legacy gate arithmetic (bit-exact
-    # R->0 reduction); multi-member clusters use saturation-safe complements.
-    sizes = torch.bincount(mem_cid, minlength=n_total)
-    gate_sum = torch.zeros(n_total, dtype=torch.float64, device=device).index_add_(
-        0, mem_cid, export["gate_nopt"][mem_tower]
-    )
-    complements = (-torch.expm1(export["log_gate_nopt"][mem_tower])).clamp_min(1e-300)
-    log_miss = torch.zeros(n_total, dtype=torch.float64, device=device).index_add_(
-        0, mem_cid, torch.log(complements)
-    )
-    survival = torch.where(sizes == 1, gate_sum, 1.0 - torch.exp(log_miss))
-
-    hard = torch.zeros(n_total, dtype=torch.bool, device=device)
-    hard[:n_clusters] = True
-    if calo.count_pt_min is not None:
-        pt_sum = torch.zeros(n_total, dtype=torch.float64, device=device).index_add_(
-            0, mem_cid, export["pt_soft"][mem_tower]
-        )
-        # Same one-sided ramp as the calorimeter's pt gate (critic_loss_plan.md 2b).
-        survival = survival * torch.clamp(
-            (pt_sum - calo.count_pt_min) / (calo.count_tau_rel * calo.count_pt_min), 0.0, 1.0
-        )
-        if n_clusters > 0:
-            hard[:n_clusters] = merged[:, ColumnMap.PT].detach() >= calo.count_pt_min
-
-    cluster_abs_eta = torch.cat([
-        export["abs_eta_center"][seed_tower], export["abs_eta_center"][v_single]
-    ])
-    region_masks = calo_count_region_masks(
-        cluster_abs_eta,
-        calo_count_eta_edges(calo.is_ecal, calo.count_abs_eta_max),
-        calo.count_abs_eta_max,
-    )
-    st = hard.to(survival.dtype).detach() + (survival - survival.detach())
-    return torch.stack([
-        export["anchor"] + (st * m.to(st.dtype)).sum() for m in region_masks
-    ])

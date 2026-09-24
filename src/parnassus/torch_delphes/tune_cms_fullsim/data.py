@@ -27,39 +27,9 @@ from parnassus.data.particle_io import (
     get_charge_from_pdg_id,
     get_mass_from_pdg_id,
 )
-from parnassus.torch_delphes.learnable import CMS_EFF_REGION_SPECS
-from parnassus.torch_delphes.SimpleCalorimeter import (
-    calo_count_eta_edges,
-    calo_count_region_masks,
-)
 from parnassus.utils import class_to_pid_vectorized, pid_to_class_vectorized
 
 from .config import PFLOW_BRANCHES, TRUTH_BRANCHES
-
-# Per-species reconstructed-data count targets for the differentiable count terms.
-# (region-spec key, |pid| selecting that species in the reco data, target dict key).
-# Each target is matched against ``CMSEnergyFlowDefault._expected_reco_counts`` for
-# the same species, in the SAME reco (pt, |eta|) bins. Charged hadrons collapse to
-# pid 211, electrons to 11, muons to 13 (see parnassus.utils.class_to_pid).
-_COUNT_TERM_SPECIES: tuple[tuple[str, int, str], ...] = (
-    ("charged_hadron", 211, "chad_region_counts"),
-    ("electron", 11, "electron_region_counts"),
-    ("muon", 13, "muon_region_counts"),
-)
-
-# Per-species calorimeter object-count targets for the differentiable resolution-param
-# count term. Unlike the efficiency regions above these bin by |eta| ONLY, matching
-# the soft significance gate in ``SimpleCalorimeter.forward``: ECal photons
-# (|pid|==22) and HCal neutral hadrons (|pid|==111). Tuple = (|pid| selecting the
-# species, is_ecal, target dict key). The region edges are derived from the SAME
-# shared helpers (calo_count_eta_edges / calo_count_region_masks in
-# parnassus.torch_delphes.SimpleCalorimeter) that the soft gate uses, optionally
-# bounded by the reco |eta| acceptance cut, so pred and target region layouts
-# cannot drift.
-_CALO_COUNT_SPECIES: tuple[tuple[int, bool, str], ...] = (
-    (22, True, "ecal_photon_region_counts"),
-    (111, False, "hcal_nh_region_counts"),
-)
 
 # =============================================================================
 # ROOT I/O
@@ -324,7 +294,7 @@ def _build_pflow_event_data(
     """Build the per-event pflow target arrays shared by the dense and ragged loaders.
 
     Returns ``(n_events, all_pt, all_eta, all_e, all_pids, per_event_mult,
-    per_event_ht, per_event_n_truth_chad, per_event_region_counts)`` where the
+    per_event_ht, per_event_n_truth_chad)`` where the
     ``all_*`` are per-event lists of variable-length 1-D float64 arrays
     (``all_pids`` int64) and the ``per_event_*`` are dense ``(n_events, ...)``
     arrays. Every event is kept (including empty ones), so the first axis is the
@@ -344,8 +314,8 @@ def _build_pflow_event_data(
       charged hadrons by pt (other classes untouched). Removes the reco chads
       the data contains but a truth-fed sim can never make (decay-in-flight
       daughters, baryons missing from the truth record, GEANT4 material
-      secondaries). Everything downstream (mult, ht, region counts -- including
-      the chad count-term targets) is built from the cut + truncated set.
+      secondaries). Everything downstream (mult, ht) is built from the cut +
+      truncated set.
     """
     # get num of events
     key_0 = arrays.keys().__iter__().__next__()
@@ -367,34 +337,13 @@ def _build_pflow_event_data(
     per_event_mult = np.zeros(n_events, dtype=np.float64)
     per_event_ht = np.zeros(n_events, dtype=np.float64)
     per_event_n_truth_chad = np.zeros(n_events, dtype=np.float64)
-    # Per-event reconstructed per-species count in each RECO (pt, |eta|) region.
-    # These are the (realistic, data-only) TARGETS for the differentiable count terms:
-    # the trainee builds a differentiable expected count in these SAME reco bins from
-    # its own reco-bin <- pre-reco-region migration (see
-    # CMSEnergyFlowDefault._expected_reco_counts) and matches it here. Binning comes
-    # from the shared CMS_EFF_REGION_SPECS so the three call sites cannot drift.
-    per_event_region_counts: dict[str, np.ndarray] = {
-        key: np.zeros((n_events, CMS_EFF_REGION_SPECS[spec_key].n_regions), dtype=np.float64)
-        for spec_key, _pid, key in _COUNT_TERM_SPECIES
-    }
-    # Calorimeter object-count targets share the same dict, so they spread into the
-    # loader output (and the loss) automatically alongside the efficiency counts.
-    # Region layout (possibly |eta|-bounded) comes from the shared helpers so it
-    # matches the card's soft-count regions when both get the same abs_eta_cut.
-    per_event_region_counts.update({
-        key: np.zeros(
-            (n_events, len(calo_count_eta_edges(is_ecal, abs_eta_cut)) + 1),
-            dtype=np.float64,
-        )
-        for _pid, is_ecal, key in _CALO_COUNT_SPECIES
-    })
     for i in range(n_events):
         pt = np.asarray(arrays["pflow_pt"][i], dtype=np.float64)
         eta = np.asarray(arrays["pflow_eta"][i], dtype=np.float64)
         phi = np.asarray(arrays["pflow_phi"][i], dtype=np.float64)
         cls = np.asarray(arrays["pflow_class"][i], dtype=np.int64)
         # Reco acceptance cut (all classes) BEFORE anything downstream, so the
-        # observables, ht and every region-count target see the cut set only.
+        # observables and ht see the cut set only.
         if reco_pt_cut is not None or abs_eta_cut is not None:
             sel = np.ones(pt.shape[0], dtype=bool)
             if reco_pt_cut is not None:
@@ -451,23 +400,6 @@ def _build_pflow_event_data(
         per_event_mult[i] = float(pt.shape[0])
         per_event_ht[i] = float(pt.sum())
 
-        # Per-region per-species counts (regions match the learnable efficiency,
-        # via the shared spec; binning is duck-typed so it runs on these numpy arrays).
-        abs_eta = np.abs(eta)
-        for spec_key, pid_sel, key in _COUNT_TERM_SPECIES:
-            spec = CMS_EFF_REGION_SPECS[spec_key]
-            is_species = abs_pid == pid_sel
-            for b, region_mask in enumerate(spec.region_masks(pt, abs_eta)):
-                per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
-        # Calorimeter object counts: |eta|-only regions matching the soft gate.
-        for pid_sel, is_ecal, key in _CALO_COUNT_SPECIES:
-            is_species = abs_pid == pid_sel
-            edges = calo_count_eta_edges(is_ecal, abs_eta_cut)
-            for b, region_mask in enumerate(
-                calo_count_region_masks(abs_eta, edges, abs_eta_cut)
-            ):
-                per_event_region_counts[key][i, b] = float(np.sum(is_species & region_mask))
-
     return (
         n_events,
         all_pt,
@@ -478,7 +410,6 @@ def _build_pflow_event_data(
         per_event_mult,
         per_event_ht,
         per_event_n_truth_chad,
-        per_event_region_counts,
     )
 
 
@@ -507,7 +438,6 @@ def load_pflow_targets(
         per_event_mult,
         per_event_ht,
         per_event_n_truth_chad,
-        per_event_region_counts,
     ) = _build_pflow_event_data(
         arrays,
         reco_pt_cut=reco_pt_cut,
@@ -562,7 +492,6 @@ def load_pflow_targets(
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
         "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
-        **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 
 
@@ -579,7 +508,7 @@ def load_pflow_targets_ragged(
     are returned as a ``list`` of per-event 1-D float64 tensors instead of dense
     ``(n_events, max_n_particles)`` arrays padded to the GLOBAL max multiplicity.
     The per-event scalars (``multiplicity``, ``ht``, ``log_ht``, ``n_truth_chad``)
-    and the per-region count targets (``*_region_counts``) stay dense
+    stay dense
     ``(n_events, ...)`` exactly as in the dense loader. Per-batch padding in
     ``delphes_collate_fn`` reconstructs the same batch the fit loop expects
     (padded slots carry ``pid == 0`` and are dropped by the loss), so this is
@@ -598,7 +527,6 @@ def load_pflow_targets_ragged(
         per_event_mult,
         per_event_ht,
         per_event_n_truth_chad,
-        per_event_region_counts,
     ) = _build_pflow_event_data(
         arrays,
         reco_pt_cut=reco_pt_cut,
@@ -634,7 +562,6 @@ def load_pflow_targets_ragged(
         "ht": torch.from_numpy(per_event_ht),
         "log_ht": torch.from_numpy(per_event_log_ht),
         "n_truth_chad": torch.from_numpy(per_event_n_truth_chad),
-        **{key: torch.from_numpy(arr) for key, arr in per_event_region_counts.items()},
     }
 
 
@@ -771,8 +698,8 @@ def _zero_dropped_and_recompute(
     """Shared tail of the loss-side filters: zero dropped slots on the
     per-object keys and recompute ``multiplicity`` / ``ht`` / ``log_ht`` from the
     kept objects (1e-6 floor matches the loaders). Shallow copy -- every other
-    key (``*_region_counts``, ``*_expected_counts``, ``n_truth_chad``, ...)
-    passes through untouched; the input dict is never mutated.
+    key (``n_truth_chad``, ...) passes through untouched; the input dict is never
+    mutated.
     """
     out = dict(obs)
     for key in _OBJECT_OBS_KEYS:
@@ -797,9 +724,8 @@ def apply_reco_acceptance_cut(
     :func:`_build_pflow_event_data`: the target files already carry the cut (or
     get it at load time), while the trainee output must be cut here so both
     sides of the loss live in the same acceptance. Gradients flow through the
-    kept slots only (the keep mask is built off-graph); the differentiable
-    membership gradient at the thresholds is supplied by the count terms'
-    soft/hard gates instead (``count_pt_min`` in the card).
+    kept slots only (the keep mask is built off-graph); the cut itself has no
+    membership gradient here.
     """
     if (reco_pt_cut is None and abs_eta_cut is None) or obs["pt"].shape[1] == 0:
         return dict(obs)

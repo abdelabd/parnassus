@@ -32,56 +32,6 @@ N_FEATURES = len(ColumnMap)
 # threshold gate from the neutral objects' LOG_OBJ_WEIGHT (coins still flow).
 _CALO_GATE_LOGW: bool = True
 
-# Canonical |eta| upper edges of the soft-count regions (final region is "> last
-# edge"). Shared with tune_cms_fullsim.data, which builds the matching TARGET
-# region counts from the reco data -- deriving both sides from these constants
-# (via the two helpers below) keeps the pred/target region layouts in lockstep.
-ECAL_COUNT_ETA_EDGES: tuple[float, ...] = (1.5, 2.5)
-HCAL_COUNT_ETA_EDGES: tuple[float, ...] = (3.0,)
-
-
-def calo_count_eta_edges(is_ecal: bool, abs_eta_max: float | None = None) -> tuple[float, ...]:
-    """|eta| upper edges of the calo count regions, optionally bounded.
-
-    With ``abs_eta_max`` set, edges at or beyond the bound are dropped (their
-    regions would be empty or partial): e.g. HCal ``(3.0,)`` bounded at 2.7
-    becomes ``()`` -- a single ``<= 2.7`` region.
-    """
-    base = ECAL_COUNT_ETA_EDGES if is_ecal else HCAL_COUNT_ETA_EDGES
-    if abs_eta_max is None:
-        return base
-    return tuple(e for e in base if e < abs_eta_max)
-
-
-def calo_count_region_masks(abs_eta, upper_edges, abs_eta_max=None) -> list:
-    """|eta| region masks for the calo count terms (duck-typed: numpy or torch).
-
-    For ``upper_edges = (1.5, 2.5)`` returns 3 masks: ``<=1.5``, ``(1.5, 2.5]``
-    and a final region that is ``> 2.5`` when ``abs_eta_max`` is None (the
-    unbounded legacy layout) or ``(2.5, abs_eta_max]`` when a bound is given, so
-    objects beyond the acceptance fall in NO region on either side. With empty
-    ``upper_edges`` the single region is ``<= abs_eta_max`` (all |eta| if None).
-    """
-    masks: list = []
-    prev = None
-    for up in upper_edges:
-        if prev is None:
-            masks.append(abs_eta <= up)
-        else:
-            masks.append((abs_eta > prev) & (abs_eta <= up))
-        prev = up
-    if prev is None:
-        if abs_eta_max is None:
-            masks.append(abs_eta == abs_eta)  # all-True, duck-typed
-        else:
-            masks.append(abs_eta <= abs_eta_max)
-    elif abs_eta_max is None:
-        masks.append(abs_eta > prev)
-    else:
-        masks.append((abs_eta > prev) & (abs_eta <= abs_eta_max))
-    return masks
-
-
 class SimpleCalorimeter(nn.Module):
     """PyTorch implementation of Delphes SimpleCalorimeter module.
 
@@ -111,8 +61,6 @@ class SimpleCalorimeter(nn.Module):
         disable_significance_cut: bool = False,
         compute_soft_count: bool = False,
         count_tau_rel: float = 0.05,
-        count_pt_min: float | None = None,
-        count_abs_eta_max: float | None = None,
     ) -> None:
         super().__init__()
 
@@ -127,23 +75,15 @@ class SimpleCalorimeter(nn.Module):
         # generation byte-identical; the gradient-bias probe toggles it ON/OFF to
         # isolate the selection-gradient term that biases the resolution params.
         self.disable_significance_cut = disable_significance_cut
-        # Differentiable per-|eta|-region expected-object-count term (internal
-        # plumbing, not a CLI/YAML option). When True, forward() also returns a
-        # per-region sum of soft tower-survival probabilities, supplying the
-        # correctly-signed d(membership)/d(theta) gradient that the two hard
-        # significance cuts drop. A hard straight-through keeps the forward count
-        # byte-identical to the hard selection, so generation is unaffected.
-        # CMSDefault sets this True exactly in learnable mode.
+        # One-sided straight-through threshold gate (internal plumbing, not a
+        # CLI/YAML option). When True, forward() adds the log of the gate (exactly
+        # 0 forward) to the emitted neutral objects' LOG_OBJ_WEIGHT, supplying the
+        # correctly-signed d(membership)/d(theta) gradient that the hard
+        # significance cuts drop; the objects themselves are unchanged, so
+        # generation is unaffected. CMSDefault sets this True exactly in learnable
+        # mode. count_tau_rel is the ramp width relative to each threshold.
         self.compute_soft_count = compute_soft_count
         self.count_tau_rel = count_tau_rel
-        # Acceptance harmonization for the soft-count term ONLY (object creation
-        # is untouched): with count_pt_min set, the expected count carries a soft
-        # pt >= count_pt_min gate (matching the reco-side acceptance cut applied
-        # to the loss objects and to the pt >= 1 preprocessed data targets); with
-        # count_abs_eta_max set, the count regions are bounded at |eta| <= max so
-        # towers beyond the data acceptance fall in no region.
-        self.count_pt_min = count_pt_min
-        self.count_abs_eta_max = count_abs_eta_max
 
         # Optional per-region energy scale (for differentiable tuning).
         # Applied to the tower energy passed into the log-normal smear so
@@ -787,11 +727,10 @@ class SimpleCalorimeter(nn.Module):
         # above threshold carry the WHOLE boundary term of the object count (appearance
         # direction included); a tower below threshold is done. All inputs are LIVE, so
         # ``d(x - thr)/dtheta`` covers scale, resolution, fractions and track energies
-        # (only the tower position, a parameter-free draw, is detached). ``gate_st`` has
-        # the hard selection as value and ``d gate/d theta`` as gradient: its per-region
-        # sum is the expected object count (count term, kept until the count terms are
-        # deleted) and its log (exactly 0) is added to the emitted neutral rows'
-        # LOG_OBJ_WEIGHT below. None unless explicitly enabled (learnable tuning).
+        # (only the tower position, a parameter-free draw, is detached). The gate is
+        # exactly 1 on every emitted tower, so its log (exactly 0) added to the emitted
+        # neutral rows' LOG_OBJ_WEIGHT below leaves the forward untouched and carries
+        # ``d gate/d theta``. None unless explicitly enabled (learnable tuning).
         if self.compute_soft_count:
             tau = self.count_tau_rel
 
@@ -810,59 +749,7 @@ class SimpleCalorimeter(nn.Module):
                 * ramp(neutral_energy, self.energy_min)
                 * ramp(neutral_sigma, self.energy_sig_min)
             )
-            gate = gate_nopt
-            # pt of the would-be object (count_pt_min gate and the merged-count cluster
-            # pt gate); live through neutral_energy.
-            cosh_eta_d = torch.cosh(tower_eta.detach())
-            pt_soft = neutral_energy / cosh_eta_d
-            # Acceptance harmonization: soft pt >= count_pt_min gate so the expected
-            # count matches the reco-side acceptance cut (data targets carry pt >= 1
-            # from preprocessing; the loss cuts the trainee objects the same way).
-            # Same relative-width sharpness convention as the gates above. The hard
-            # side mirrors it exactly so the straight-through forward value equals
-            # the hard count of objects that would survive the acceptance cut.
-            # Uses tower_eta (the emitted object's eta) for pt, like the eflow
-            # output; region assignment below keeps the tower-center convention.
-            if self.count_pt_min is not None:
-                gate = gate * ramp(pt_soft, self.count_pt_min)
-                count_hard = significant_neutral & (pt_soft.detach() >= self.count_pt_min)
-            else:
-                count_hard = significant_neutral
-            # Straight-through: hard forward value == exact hard count, soft backward.
-            gate_st = count_hard.to(gate.dtype).detach() + (gate - gate.detach())
-            abs_eta_center = tower_eta_center.abs()
-            region_masks = calo_count_region_masks(
-                abs_eta_center,
-                calo_count_eta_edges(self.is_ecal, self.count_abs_eta_max),
-                self.count_abs_eta_max,
-            )
-            # +0*sigma_after.sum() anchors a graph path even when n_towers == 0.
-            anchor = sigma_after.sum() * 0.0
-            expected_calo_counts = torch.stack([
-                anchor + (gate_st * m.to(gate_st.dtype)).sum() for m in region_masks
-            ])
-            # Per-tower export for the merged-photon cluster count composition
-            # (PhotonClusterMerger.compose_merged_photon_count). All tensors are
-            # per compact tower; emitted eflow rows are the [significant_neutral]
-            # slice, in order. gate_nopt is the survival gate WITHOUT the pt
-            # factor (the pt acceptance moves to cluster level after merging);
-            # log_gate_nopt is the saturation-safe log of the same product
-            # (sigmoid(x) saturates to exactly 1.0 in float64 at x ~ 37, which
-            # would zero every cluster mate's gradient through prod(1 - g)).
-            count_export = {
-                "gate_nopt": gate_nopt,
-                "log_gate_nopt": torch.log(gate_nopt.clamp_min(1e-300)),
-                "pt_soft": pt_soft,
-                "emitted": significant_neutral,
-                "abs_eta_center": abs_eta_center,
-                "eta": tower_eta.detach(),
-                "phi": tower_phi.detach(),
-                "event": tower_event_num.detach(),
-                "anchor": anchor,
-            }
         else:
-            expected_calo_counts = None
-            count_export = None
             gate_nopt = None
 
         # ===== Create Tower output =====
@@ -1090,7 +977,7 @@ class SimpleCalorimeter(nn.Module):
                 eflow_excess_neutrals[:, ColumnMap.LOG_OBJ_WEIGHT] = logw_rows
 
         # Return results
-        return eflow_tracks, towers, eflow_excess_neutrals, expected_calo_counts, count_export
+        return eflow_tracks, towers, eflow_excess_neutrals
 
     def _compute_phi_bins(
         self,

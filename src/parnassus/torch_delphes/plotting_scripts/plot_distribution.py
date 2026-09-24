@@ -62,9 +62,8 @@ plt.rcParams.update({
 })
 
 SPECIES = {"Charged hadron": 211, "Neutral hadron": 111, "Electron": 11, "Muon": 13, "Photon": 22}
-# Leading-2 pair-mass response pages (the loss's pair-mass observable,
-# loss.compute_pair_masses): one page per class, truth-mass groups and |eta|-region pair
-# categories pooled.
+# Leading-2 pair-mass response pages: one page per class, truth-mass groups and
+# |eta|-region pair categories pooled.
 PAIR_SPECIES = {"Electron": 11, "Muon": 13, "Charged hadron": 211}
 OBSERVABLES = {  # x labels (drawn only with X_LABEL)
     "log_pt": r"$\log(p_\mathrm{T}\,/\,\mathrm{GeV})$",

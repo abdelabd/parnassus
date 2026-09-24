@@ -22,26 +22,13 @@ from tqdm import tqdm
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.param_config import to_physical
 
-from .config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS, OBSERVABLES
+from .config import OBSERVABLES
 from .data import (
-    apply_chad_truncation,
-    apply_reco_acceptance_cut,
     batch_event_ids,
     load_pflow_targets_from_tensor,
     restore_event_format,
 )
 from .distributed import _is_dist, _is_main
-from .loss import (
-    CALO_COUNT_WEIGHT,
-    COUNT_RATE_FLOOR,
-    COUNT_WEIGHT,
-    EVENT_WEIGHT,
-    LOSS_CHOICES,
-    PAIR_MASS_WEIGHT,
-    attach_truth_pair_lnm,
-    compute_pair_masses,
-    get_loss_fn,
-)
 
 # =============================================================================
 # Fit loop
@@ -54,6 +41,22 @@ def _all_reduce_mean(value: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(value, op=dist.ReduceOp.SUM)
         value /= dist.get_world_size()
     return value
+
+
+def _placeholder_loss(
+    pred: dict[str, torch.Tensor], target: dict[str, torch.Tensor]
+) -> torch.Tensor:
+    """Stand-in for the training loss between critic_loss_plan.md steps 5a and 5c.
+
+    Step 5a deleted the count terms and the per-pid shape losses; the critic loss
+    (``critic.py``, step 5b) is wired in here in step 5c, together with the
+    pred-side acceptance cut + chad truncation (fullsim mode) and the validation
+    monitor. Until then the fit loop cannot run.
+    """
+    raise NotImplementedError(
+        "training loss removed in critic_loss_plan.md step 5a; the critic loss "
+        "arrives in step 5c"
+    )
 
 
 def fit_card_to_fullsim(
@@ -71,16 +74,6 @@ def fit_card_to_fullsim(
     early_stopping_patience: int | None = 10,
     lr_scheduler_patience: int | None = 4,
     lr_scheduler_factor: float = 0.5,
-    count_weight: float = COUNT_WEIGHT,
-    calo_count_weight: float = CALO_COUNT_WEIGHT,
-    count_rate_floor: float = COUNT_RATE_FLOOR,
-    event_weight: float = EVENT_WEIGHT,
-    loss_name: str = "wasserstein",
-    pid_weighting: str = "equal",
-    pid_weight_floor: float = 0.0,
-    eta_split: bool = True,
-    pair_mass: bool = True,
-    pair_mass_weight: float = PAIR_MASS_WEIGHT,
     reco_pt_cut: float | None = None,
     reco_abs_eta_cut: float | None = None,
     truncate_chads: bool = False,
@@ -109,7 +102,7 @@ def fit_card_to_fullsim(
         If set (and not ``""``), write a multi-page PDF per epoch
         (``intermediate_epoch_<step>.pdf``, one observable per page)
         comparing the trainee prediction to the full-sim target on the
-        validation set, with each observable's soft-hist MSE in the page
+        validation set, with each observable's histogram MSE in the page
         title. Only the main rank plots. ``None``/``""`` disables it. See
         :mod:`tune_cms_fullsim.intermediate_plots`.
     plot_every : int
@@ -130,62 +123,6 @@ def fit_card_to_fullsim(
     lr_scheduler_factor : float
         Multiplicative factor applied to the lr on each plateau reduction
         (only used when ``lr_scheduler_patience`` is enabled). Default is 0.5.
-    count_weight : float
-        Scales the tracking-efficiency expected-count terms in the loss relative
-        to the unit-weighted per-pid object Wasserstein terms. Passed straight
-        through to :func:`per_event_wasserstein_loss`. Defaults to the loss
-        module's ``COUNT_WEIGHT``; surfaced on the CLI as ``--count-weight``.
-    calo_count_weight : float
-        Scales the calo-resolution expected-count terms (ecal_photon,
-        hcal_neutral_hadron), kept separate from ``count_weight`` because they
-        must out-vote a wrong-signed Wasserstein gradient on the forward
-        resolution coefficients. Defaults to the loss module's
-        ``CALO_COUNT_WEIGHT``; surfaced on the CLI as ``--calo-count-weight``.
-    count_rate_floor : float
-        Per-event-rate floor in the count-term Pearson denominators that makes the
-        count terms batch-size invariant (the count terms are evaluated on per-event
-        rates = counts / batch event count). Defaults to the loss module's
-        ``COUNT_RATE_FLOOR``; surfaced on the CLI as ``--count-rate-floor``.
-    event_weight : float
-        Scales the per-event ``log(HT)`` Wasserstein term, likewise. Defaults
-        to ``EVENT_WEIGHT``; surfaced on the CLI as ``--event-weight``.
-    loss_name : str
-        Selects the training loss. One of :data:`tune_cms_fullsim.loss.LOSS_CHOICES`.
-        ``"wasserstein"`` uses the per-pid sliced-Wasserstein loss; ``"soft_hist"``
-        uses the per-pid, per-observable soft-histogram MSE loss; ``"wasserstein_1d"``
-        uses the per-pid, per-observable bin-free 1D quantile-Wasserstein loss
-        (deterministic, no histogram / bin grid at all). All three apply the same
-        ``count_weight`` / ``calo_count_weight`` / ``event_weight`` knobs. The two per-pid
-        shape losses (``soft_hist`` / ``wasserstein_1d``) additionally get the DDP graph
-        anchor below.
-    pid_weighting : str
-        Per-pid population weighting of the SHAPE terms, one of
-        :data:`tune_cms_fullsim.loss.PID_WEIGHTING_CHOICES`. ``"equal"`` (default) weights
-        every species the same (no-op); ``"sqrt_fraction"`` / ``"fraction"`` down-weight
-        rare species (muon, electron) by their population fraction so they do not dominate
-        the shape match. Count and ``log(HT)`` terms are untouched. Surfaced on the CLI as
-        ``--pid-weighting``.
-    pid_weight_floor : float
-        Lower clamp on the per-pid shape weight (default 0.0 = off), re-normalized to keep
-        the mean-1 invariant -- protects a rare species' gradient in a low-stat batch.
-        Surfaced on the CLI as ``--pid-weight-floor``.
-    eta_split : bool
-        Split the per-pid ``log_E`` / ``log_pt`` shape terms of the two per-pid losses by
-        the reco |eta| region (``loss.SHAPE_ETA_EDGES``; default True, CLI
-        ``--eta-split/--no-eta-split``). Needed so per-region detector parameters
-        (momentum-smearing scale/resolution, calo scale) are attributable instead of being
-        fitted as an eta-mixture. ``False`` reproduces the pooled terms bit-for-bit. Ignored
-        by the sliced ``wasserstein`` loss.
-    pair_mass : bool
-        Add the per-event leading-2 pair-mass shape terms (``loss.compute_pair_masses``:
-        the response ln(m_reco / m_truth) of m_ee / m_mumu / m_hh per truth-mass group and
-        |eta|-region pair; default True, CLI
-        ``--pair-mass/--no-pair-mass``). On a resonance-gun sample the peak width is the
-        track resolution -- the only 1-D lever on ``a_raw``/``b_raw``. Ignored by the
-        sliced ``wasserstein`` loss.
-    pair_mass_weight : float
-        Weight of every pair-mass term (default ``loss.PAIR_MASS_WEIGHT``; CLI
-        ``--pair-mass-weight``).
     reco_pt_cut, reco_abs_eta_cut : float | None
         Reco acceptance cut applied to the PRED side only, right before the loss
         (``apply_reco_acceptance_cut``): the TARGET already carries the same cut
@@ -213,8 +150,7 @@ def fit_card_to_fullsim(
     comet_exp : comet_ml.Experiment | None
         Optional live Comet experiment (build one with
         :func:`.comet_utils.init_comet_experiment`). When set, each epoch logs the
-        train/val loss, the per-group effective learning rates, and the full
-        labeled loss breakdown (``loss/<category>/<label>/{raw,weighted}``) at
+        train/val loss and the per-group effective learning rates at
         ``step=<epoch>``; ``snapshot_parameters=True`` additionally logs every
         card parameter's physical value as ``param/<name>``. The caller owns the
         experiment's lifetime (call :func:`.comet_utils.end_comet_experiment`
@@ -231,43 +167,7 @@ def fit_card_to_fullsim(
         ``"parameters"`` (a list of ``dict[str, float]``) for offline
         plotting of the per-parameter trajectory.
     """
-    # All training losses accept the same count_weight / calo_count_weight / event_weight
-    # and per-pid pid_weighting / pid_weight_floor knobs, so wrap unconditionally to inject
-    # them. The eta-split / pair-mass knobs exist only on the two per-pid losses.
-    base_loss_fn = get_loss_fn(loss_name)
-    per_pid_kwargs = (
-        {"eta_split": eta_split, "pair_mass": pair_mass, "pair_mass_weight": pair_mass_weight}
-        if loss_name in {"soft_hist", "wasserstein_1d"}
-        else {}
-    )
-
-    def loss_fn(
-        pred: dict[str, torch.Tensor],
-        target: dict[str, torch.Tensor],
-        want_breakdown: bool = False,
-    ):
-        # With want_breakdown=True the loss returns (scalar, list[LossComponent]) for
-        # the per-epoch component print; otherwise it returns the bare scalar exactly
-        # as before (val and any other caller).
-        return base_loss_fn(
-            pred,
-            target,
-            count_weight=count_weight,
-            calo_count_weight=calo_count_weight,
-            count_rate_floor=count_rate_floor,
-            event_weight=event_weight,
-            pid_weighting=pid_weighting,
-            pid_weight_floor=pid_weight_floor,
-            return_breakdown=want_breakdown,
-            **per_pid_kwargs,
-        )
-
     opt = torch.optim.Adam(param_groups)
-    if _is_main(rank):
-        print(
-            f"  training loss: {loss_name!r} "
-            f"(choices: {list(LOSS_CHOICES)})"
-        )
     if _is_main(rank):
         for g in param_groups:
             print(
@@ -361,23 +261,6 @@ def fit_card_to_fullsim(
     underlying_for_snap = card.module if isinstance(card, DDP) else card
     trainable_params = [p for p in underlying_for_snap.parameters() if p.requires_grad]
 
-    def _soft_hist_graph_anchor() -> torch.Tensor:
-        """Return a zero-weight scalar connected to every trainable parameter.
-
-        Under DDP + DistributedSampler, a rank-local shard can miss some
-        species/objects, so the soft-hist loss may not route gradient through
-        every parameter branch on that rank for a given step. Adding
-        ``0.0 * anchor`` keeps those parameters in the autograd graph with
-        exactly zero gradient, which avoids DDP "unused parameter" reduction
-        errors while keeping the fast ``find_unused_parameters=False`` path.
-        """
-        if not trainable_params:
-            return torch.zeros((), device=device, dtype=torch.float64)
-        anchor = trainable_params[0].sum()
-        for p in trainable_params[1:]:
-            anchor = anchor + p.sum()
-        return anchor * 0.0
-
     def _snapshot() -> dict[str, float]:
         """Record the current post-transform value of every parameter.
 
@@ -419,7 +302,6 @@ def fit_card_to_fullsim(
         step: int,
         train_loss: float,
         val_loss: float,
-        n_batches: int,
         snapshot: dict[str, float] | None,
     ) -> None:
         """Log one epoch's metrics to Comet (no-op when logging is off).
@@ -440,16 +322,6 @@ def fit_card_to_fullsim(
             for i, g in enumerate(opt.param_groups):
                 metrics[_comet_metric_name("lr", g.get("name", f"group{i}"))] = float(
                     g["lr"]
-                )
-            # Labeled loss breakdown, means over the epoch's train batches -- the
-            # same numbers the periodic stdout table prints, but every epoch.
-            for key, wtd in bd_wtd.items():
-                cat, label = key
-                metrics[_comet_metric_name("loss", cat, label, "weighted")] = (
-                    wtd / n_batches
-                )
-                metrics[_comet_metric_name("loss", cat, label, "raw")] = (
-                    bd_raw[key] / n_batches
                 )
             # Physical (post-transform) parameter values, so parameter drift is
             # visible in Comet without post-processing the history JSON.
@@ -491,14 +363,6 @@ def fit_card_to_fullsim(
         loss_acc = torch.zeros(
             (), dtype=torch.float64, device=device
         )
-        # Per-epoch labeled loss-component breakdown: sum each component's raw
-        # (pre-weight) and weighted (post-weight) value over the epoch's train
-        # batches, keyed by (category, label); divided by the batch count below.
-        # Absent terms (a rare pid missing from a batch) contribute 0, so the grand
-        # total of the means reconciles with the per-epoch mean train loss.
-        bd_raw: dict[tuple[str, str], float] = {}
-        bd_wtd: dict[tuple[str, str], float] = {}
-        bd_w: dict[tuple[str, str], float] = {}  # last-seen configured weight (fallback)
         for batch in train_dataloader:
 
             opt.zero_grad()
@@ -519,46 +383,15 @@ def fit_card_to_fullsim(
             )
             # Then extract the observables from predicted objects
             pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
-            # Differentiable per-region expected counts -- the honest gradient signal
-            # for the eff_logits (track species) and the resolution params (calo
-            # object counts, via the soft significance gate). Injected BEFORE the
-            # filters below (they pass non-object keys through untouched).
-            for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
-                pred_observables[pred_key] = out[out_key]
 
             # get the target from batch
             target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-            # Per-event truth leading-2 pair masses (the pair-mass terms compare the
-            # response ln(m_reco / m_truth)); one label per event, shared by both sides.
-            attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)
-            # Acceptance cut (pred side only -- the target was cut in the loader),
-            # then the truth-ceiling chad truncation (cut first: the ranking must
-            # only see in-acceptance chads).
-            if reco_pt_cut is not None or reco_abs_eta_cut is not None:
-                pred_observables = apply_reco_acceptance_cut(
-                    pred_observables, reco_pt_cut, reco_abs_eta_cut
-                )
-            if truncate_chads:
-                pred_observables = apply_chad_truncation(
-                    pred_observables, target_observables["n_truth_chad"]
-                )
-            loss, breakdown = loss_fn(
-                pred_observables, target_observables, want_breakdown=True
-            )
-            if loss_name in ("soft_hist", "wasserstein_1d"):
-                loss = loss + _soft_hist_graph_anchor()
 
+            loss = _placeholder_loss(pred_observables, target_observables)
             loss.backward()
             opt.step()
 
             loss_acc += loss.detach()
-            # Accumulate the labeled component breakdown (the graph anchor above adds
-            # 0.0 and is intentionally not a component, so the totals still reconcile).
-            for c in breakdown:
-                key = (c.category, c.label)
-                bd_raw[key] = bd_raw.get(key, 0.0) + c.raw
-                bd_wtd[key] = bd_wtd.get(key, 0.0) + c.weighted
-                bd_w[key] = c.weight
 
         loss_acc /= len(train_dataloader)
         loss_acc = _all_reduce_mean(loss_acc)
@@ -570,48 +403,6 @@ def fit_card_to_fullsim(
         history["loss"].append(print_loss)
         if snapshot_parameters:
             history["parameters"].append(_snapshot())
-        if _is_main(rank):
-            pbar.set_postfix(loss=f"{print_loss:.4e}", refresh=False)
-        if _is_main(rank) and log_every > 0 and (step % log_every == 0 or step == n_steps - 1):
-            tqdm.write(f"  step {step:3d}/{n_steps}  loss = {print_loss:.4e}")
-            # Labeled per-component breakdown (mean over the epoch's train batches).
-            # raw = before weight; weight = effective mean_weighted/mean_raw (exact for
-            # the constant event/count weights, population-weighted-effective for the
-            # per-batch-varying pid weights); weighted = after weight. The grand total
-            # of the weighted means reconciles with the mean train loss above.
-            n_b = len(train_dataloader)
-            tqdm.write(
-                f"  step {step:3d}/{n_steps}  LOSS BREAKDOWN "
-                f"(raw=pre-weight, weighted=post-weight; mean over {n_b} batches)"
-            )
-            grand = 0.0
-            for cat in ("pid_shape", "pair", "event", "count"):
-                keys = sorted(k for k in bd_wtd if k[0] == cat)
-                if not keys:
-                    continue
-                tqdm.write(f"    [{cat}]")
-                sub = 0.0
-                for k in keys:
-                    mraw = bd_raw[k] / n_b
-                    mwtd = bd_wtd[k] / n_b
-                    # Effective weight = mean_weighted / mean_raw (exact for the
-                    # constant event/count weights, population-weighted-effective for
-                    # the per-batch pid weights). When the term is identically zero
-                    # this epoch (mraw == 0, since every shape/count metric is >= 0),
-                    # fall back to the configured weight (which multiplied a zero).
-                    eff_w = (mwtd / mraw) if mraw != 0 else bd_w[k]
-                    sub += mwtd
-                    tqdm.write(
-                        f"      {k[1]:<22} raw={mraw:.4e}  weight={eff_w:.3g}  "
-                        f"weighted={mwtd:.4e}"
-                    )
-                grand += sub
-                tqdm.write(f"      {'subtotal':<22} weighted={sub:.4e}")
-            tqdm.write(
-                f"    GRAND TOTAL weighted={grand:.4e}  "
-                f"(mean train loss={print_loss:.4e})"
-            )
-
         # Per-epoch intermediate plots: collect this rank's validation-shard
         # observables so we can render below. Under DDP every rank collects its
         # shard and `_render_with_gather` all-gathers them to the main rank, so the
@@ -642,52 +433,12 @@ def fit_card_to_fullsim(
                     eflow_objects, mask, event_ids=batch_event_ids(truth_particles, mask)
                 )
                 pred_observables = load_pflow_targets_from_tensor(eflow_objects_restored)
-                for out_key, pred_key, _tgt_key in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS):
-                    pred_observables[pred_key] = out[out_key]
-
+                # get the target from batch
                 target_observables = {k: batch[k] for k in batch.keys() if k != "truth_particles"}
-                attach_truth_pair_lnm(truth_particles, pred_observables, target_observables)
-                # Same pred-side acceptance cut + chad truncation as the train
-                # loop (the target is cut/truncated statically in the loader);
-                # the intermediate-plot accumulators below therefore collect the
-                # filtered view on both sides.
-                if reco_pt_cut is not None or reco_abs_eta_cut is not None:
-                    pred_observables = apply_reco_acceptance_cut(
-                        pred_observables, reco_pt_cut, reco_abs_eta_cut
-                    )
-                if truncate_chads:
-                    pred_observables = apply_chad_truncation(
-                        pred_observables, target_observables["n_truth_chad"]
-                    )
-                val_loss = loss_fn(pred_observables, target_observables)
+
+                val_loss = _placeholder_loss(pred_observables, target_observables)
                 val_loss_acc += val_loss.detach()
 
-                # Accumulate the flattened, padding/ghost-stripped values for
-                # each observable (same cut the loss uses: pt != 0 for 2-D
-                # per-particle obs; 1-D per-event obs pass through). Detached to
-                # CPU so memory stays flat and concatenation across batches with
-                # different max_n_objects is safe.
-                if collect_obs:
-                    for key in OBSERVABLES:
-                        if key not in pred_observables or key not in target_observables:
-                            continue
-                        pv, tv = pred_observables[key], target_observables[key]
-                        if pv.ndim >= 2:
-                            pv = pv[pred_observables["pt"] != 0]
-                            tv = tv[target_observables["pt"] != 0]
-                        else:
-                            pv, tv = pv.reshape(-1), tv.reshape(-1)
-                        acc_pred.setdefault(key, []).append(pv.detach().cpu())
-                        acc_tgt.setdefault(key, []).append(tv.detach().cpu())
-                    # Per-event leading-2 pair-mass responses (the loss's pair-mass
-                    # observable): flat ln(m_reco/m_truth) + |eta|-region pair category +
-                    # truth-mass group per class, computed here while the event structure
-                    # is still available.
-                    for obs, acc in ((pred_observables, acc_pred), (target_observables, acc_tgt)):
-                        for pid_p, (resp, cat, grp) in compute_pair_masses(obs).items():
-                            acc.setdefault(f"pair_r:{pid_p}", []).append(resp.detach().cpu())
-                            acc.setdefault(f"pair_cat:{pid_p}", []).append(cat.detach().cpu())
-                            acc.setdefault(f"pair_grp:{pid_p}", []).append(grp.detach().cpu())
             val_loss_acc /= len(val_dataloader)
             val_loss_acc = _all_reduce_mean(val_loss_acc)
             print_val_loss = float(val_loss_acc)
@@ -699,13 +450,12 @@ def fit_card_to_fullsim(
         # the same epoch across every list).
         history["val_loss"].append(print_val_loss)
 
-        # Comet: one point per epoch (loss curves, per-group lr, labeled loss
-        # breakdown, and -- when snapshotting -- every parameter's physical value).
+        # Comet: one point per epoch (loss curves, per-group lr and -- when
+        # snapshotting -- every parameter's physical value).
         _log_comet_epoch(
             step,
             print_loss,
             print_val_loss,
-            len(train_dataloader),
             history["parameters"][-1] if snapshot_parameters else None,
         )
 

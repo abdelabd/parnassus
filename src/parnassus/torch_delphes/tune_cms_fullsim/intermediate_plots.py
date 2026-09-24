@@ -9,18 +9,15 @@ epoch (``intermediate_epoch_<step>.pdf``). The first pages are the combined
 (all-PID) observables, one per page; they are followed by one **per-PID** page
 per particle type (charged hadron / electron / muon / neutral hadron / photon),
 each a grid of the per-particle observables for that subgroup: ``log_pt`` and
-``log_E`` **per |eta| region** (the regions of the loss's ``eta_split``,
-``loss.SHAPE_ETA_EDGES``: one column per populated region, so the per-region shape
-terms can be watched individually), plus the pooled ``eta`` and ``pt`` -- the
+``log_E`` **per |eta| region** (the tracker smearing regions,
+:data:`SHAPE_ETA_EDGES`: one column per populated region, so per-region detector
+parameters can be watched individually), plus the pooled ``eta`` and ``pt`` -- the
 per-epoch analogue of the per-PID figures :mod:`tune_cms_fullsim.plot_fit_results`
-writes offline. They are followed by one **pair-mass** page per class with pairs
-(electron / muon / charged hadron): the leading-2 pair-mass response
-``ln(m_reco / m_truth)`` of the loss's pair-mass terms, pooled and, per truth-mass
-group, per |eta|-region pair category. Each panel overlays the
+writes offline. Each panel overlays the
 full-sim target, the current-epoch trainee prediction, and a faint epoch-0
-reference, and shows that observable's soft-histogram MSE in the title as a quick
-distribution-mismatch diagnostic (this is display-only; the training loss lives in
-:mod:`tune_cms_fullsim.loss`). The bin edges are derived per panel from the pooled
+reference, and shows the MSE between the two normalized histograms in the title as
+a quick distribution-mismatch diagnostic (display-only; it is not the training
+loss). The bin edges are derived per panel from the pooled
 target/prediction range (linear, ``_N_BINS`` bins); the same edges feed both the
 title MSE and the plotted histogram, so the number always corresponds exactly to
 the curves shown.
@@ -46,14 +43,18 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 import torch
 
-from .loss import (
-    N_SHAPE_ETA_REGIONS,
-    SHAPE_ETA_EDGES,
-    _eta_region_index,
-    _pair_category_label,
-    _pair_truth_group_label,
-    histogram_mse_loss,
-)
+# |eta| regions of the per-PID pages = the tracker momentum-smearing regions of the
+# CMS card (learnable.py LearnableTrackResolution boundaries): [0, 0.5], (0.5, 1.5],
+# (1.5, 2.5], (2.5, inf) -- the overflow bin holds forward calorimeter objects.
+SHAPE_ETA_EDGES: tuple[float, ...] = (0.5, 1.5, 2.5)
+N_SHAPE_ETA_REGIONS: int = len(SHAPE_ETA_EDGES) + 1
+
+
+def _eta_region_index(eta: torch.Tensor) -> torch.Tensor:
+    """Region index in ``[0, N_SHAPE_ETA_REGIONS)`` of ``|eta|`` w.r.t.
+    :data:`SHAPE_ETA_EDGES` (``|eta| <= 0.5`` -> 0, ``(0.5, 1.5]`` -> 1, ...)."""
+    edges = torch.tensor(SHAPE_ETA_EDGES, dtype=eta.dtype, device=eta.device)
+    return torch.bucketize(eta.detach().abs(), edges, right=False)
 
 # Order of pages in the per-epoch PDF: the particle-level observables first,
 # then the per-event scalars. Keys missing from a run's obs dict are skipped.
@@ -70,7 +71,6 @@ _XLABELS: dict[str, str] = {
     "ht": r"PF scalar $H_\mathrm{T}$ [GeV]",
     "log_ht": r"PF scalar $\log\,H_\mathrm{T}$",
     "multiplicity": r"PF objects per event",
-    "pair_r": r"leading-2 pair $\ln(m^{\mathrm{reco}}\,/\,m^{\mathrm{truth}})$",
 }
 
 # Observables drawn on a log-y scale (wide dynamic range / steep tails).
@@ -85,16 +85,6 @@ _N_BINS: int = 50
 # charged hadrons) don't squash the bulk of a per-PID distribution into one bin.
 _CLIP_PCT: float = 1.0
 
-# The observables the Wasserstein training loss actually optimizes. Panels for
-# observables outside this set are still drawn (for reference) but annotated as
-# not being part of the loss.
-_LOSS_OBSERVABLES: frozenset[str] = frozenset({"log_E", "log_pt", "eta", "log_ht"})
-
-# Softness of the diagnostic soft-histogram MSE shown in each panel title. This
-# is a display-only diagnostic (the training loss is the Wasserstein distance),
-# so it is fixed here rather than exposed as a CLI flag.
-_DIAG_BETA: float = 0.15
-
 # Per-PID pages: one page per particle type (mirrors
 # plot_fit_results._FINAL_PID_GROUPS), each a grid of the per-particle observables
 # for that |pid| subgroup. (name, |pid|, human label).
@@ -107,24 +97,17 @@ _PID_GROUPS: tuple[tuple[str, int, str], ...] = (
 )
 
 # Per-particle observables drawn on each per-PID page. The first two are split by
-# |eta| region (one column per populated region, mirroring the loss's eta_split
-# terms ``{pid}:{obs}:eta{r}``); the last two are pooled. Per-event scalars
-# (ht/log_ht/multiplicity) have no per-PID meaning and are intentionally omitted here.
+# |eta| region (one column per populated region); the last two are pooled. Per-event
+# scalars (ht/log_ht/multiplicity) have no per-PID meaning and are intentionally
+# omitted here.
 _PER_PID_SPLIT_OBS: tuple[str, ...] = ("log_pt", "log_E")
 _PER_PID_POOLED_OBS: tuple[str, ...] = ("eta", "pt")
 
-# Human labels of the |eta| regions of loss.SHAPE_ETA_EDGES.
+# Human labels of the |eta| regions of SHAPE_ETA_EDGES.
 _REGION_LABELS: tuple[str, ...] = tuple(
     [f"|eta| <= {SHAPE_ETA_EDGES[0]}"]
     + [f"{lo} < |eta| <= {hi}" for lo, hi in pairwise(SHAPE_ETA_EDGES)]
     + [f"|eta| > {SHAPE_ETA_EDGES[-1]}"]
-)
-
-# Pair-mass pages: (|pid|, human label) for the classes the loss pairs.
-_PAIR_GROUPS: tuple[tuple[int, str], ...] = (
-    (11, "electron"),
-    (13, "muon"),
-    (211, "charged hadron"),
 )
 
 
@@ -157,8 +140,8 @@ def _auto_bin_edges(
     pages), the range is automatically **per-PID**. Non-finite entries are ignored.
     Returns ``None`` when no finite value is available (the caller then skips that page
     / blanks that grid cell), and widens a zero-width range (all values identical) into
-    a small non-degenerate interval so the edges stay strictly increasing for both
-    ``np.histogram`` and ``soft_histogram``.
+    a small non-degenerate interval so the edges stay strictly increasing for
+    ``np.histogram``.
     """
     finite: list[np.ndarray] = []
     for v in value_tensors:
@@ -189,33 +172,32 @@ def _draw_observable_panel(
     init_vals: torch.Tensor | None,
     step: int,
     title_prefix: str | None = None,
-    in_loss: bool | None = None,
 ) -> bool:
     """Draw one observable's target/initial/current histograms onto ``ax``.
 
     Bins are derived from the pooled target/pred/init range (the same edges feed the
-    title soft-hist MSE diagnostic and every histogram, so they stay consistent).
-    ``title_prefix`` replaces ``key`` in the title (e.g. a per-region label) and
-    ``in_loss`` overrides the "(not in loss)" annotation (default: from
-    :data:`_LOSS_OBSERVABLES`). Returns ``False`` without drawing when no side has any
-    finite value (the caller then skips the page or blanks the subplot).
+    title MSE diagnostic and every histogram, so they stay consistent).
+    ``title_prefix`` replaces ``key`` in the title (e.g. a per-region label).
+    Returns ``False`` without drawing when no side has any finite value (the caller
+    then skips the page or blanks the subplot).
     """
     np_edges = _auto_bin_edges([tgt_vals, pred_vals, init_vals])
     if np_edges is None:  # no finite values on any side -> nothing to draw
         return False
     centers = 0.5 * (np_edges[1:] + np_edges[:-1])
 
-    # Unweighted per-observable soft-hist MSE over these bins -- a distribution-
+    # MSE between the two normalized histograms over these bins -- a distribution-
     # mismatch diagnostic. NaN when a side is empty.
-    if pred_vals.numel() == 0 or tgt_vals.numel() == 0:
+    tgt_counts = _histogram_counts(tgt_vals, np_edges)
+    pred_counts = _histogram_counts(pred_vals, np_edges)
+    if pred_counts.sum() == 0 or tgt_counts.sum() == 0:
         mse = float("nan")
     else:
-        edges_t = torch.as_tensor(np_edges, dtype=pred_vals.dtype)
-        mse = float(histogram_mse_loss(pred_vals, tgt_vals, edges_t, beta=_DIAG_BETA))
+        mse = float(np.mean((pred_counts / pred_counts.sum() - tgt_counts / tgt_counts.sum()) ** 2))
 
     ax.step(
         centers,
-        _histogram_counts(tgt_vals, np_edges),
+        tgt_counts,
         where="mid",
         color="black",
         label="target (full sim)",
@@ -232,7 +214,7 @@ def _draw_observable_panel(
         )
     ax.step(
         centers,
-        _histogram_counts(pred_vals, np_edges),
+        pred_counts,
         where="mid",
         color="tab:blue",
         label=f"trainee, epoch {step}",
@@ -243,10 +225,7 @@ def _draw_observable_panel(
     if key in _LOG_Y:
         ax.set_yscale("log")
 
-    title = f"{title_prefix or key}: soft-hist MSE = {mse:.3e}"
-    if not (in_loss if in_loss is not None else key in _LOSS_OBSERVABLES):
-        title += " (not in loss)"
-    ax.set_title(title)
+    ax.set_title(f"{title_prefix or key}: hist MSE = {mse:.3e}")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=8)
     return True
@@ -360,94 +339,8 @@ def _render_per_pid_pages(
                     ax.set_title(f"{title}: (no {pid_label})")
 
         fig.suptitle(
-            f"per-PID {pid_label} (|pid| = {pid_abs}) -- log_pt / log_E per |eta| region "
-            f"(loss eta_split), eta / pt pooled"
-        )
-        _page_footer(fig, step, val_loss)
-        fig.tight_layout()
-        pdf.savefig(fig)
-        plt.close(fig)
-
-
-def _render_pair_mass_pages(
-    pdf: PdfPages,
-    pred_by_key: dict[str, torch.Tensor],
-    target_by_key: dict[str, torch.Tensor],
-    init_by_key: dict[str, torch.Tensor] | None,
-    step: int,
-    val_loss: float | None,
-) -> None:
-    """Append one page per class with pairs: the leading-2 pair-mass response
-    ``ln(m_reco / m_truth)`` (the loss's pair-mass observable, collected as
-    ``pair_r:{pid}`` / ``pair_cat:{pid}`` / ``pair_grp:{pid}``). First panel: everything
-    pooled; then, per truth-mass group holding >= 5 % of the target's pairs, the group's
-    pairs pooled over categories plus one panel per populated |eta|-region pair category
-    (mirroring the loss terms ``pair:{pid}:mt{lo}-{hi}:eta{r1}{r2}``). Silently does
-    nothing for classes without pairs.
-    """
-    for pid_abs, pid_label in _PAIR_GROUPS:
-        rk, ck, gk = f"pair_r:{pid_abs}", f"pair_cat:{pid_abs}", f"pair_grp:{pid_abs}"
-        if rk not in pred_by_key or rk not in target_by_key:
-            continue
-        pm, tm = pred_by_key[rk], target_by_key[rk]
-        pc_, tc_ = pred_by_key.get(ck), target_by_key.get(ck)
-        pg, tg = pred_by_key.get(gk), target_by_key.get(gk)
-        im = init_by_key.get(rk) if init_by_key is not None else None
-        ic = init_by_key.get(ck) if init_by_key is not None else None
-        ig = init_by_key.get(gk) if init_by_key is not None else None
-        if pm.numel() == 0 and tm.numel() == 0:
-            continue
-
-        def _uniq(*ts: torch.Tensor | None) -> list[int]:
-            return sorted({int(v) for t in ts if t is not None for v in torch.unique(t).tolist()})
-
-        panels: list[tuple[str, torch.Tensor, torch.Tensor, torch.Tensor | None]] = [
-            (f"r({pid_label}) all groups, all cats", tm, pm, im)
-        ]
-        cats = _uniq(pc_, tc_) if (pc_ is not None and tc_ is not None) else []
-        # Only the truth-mass groups holding >= 5 % of the target's pairs (the sparse
-        # radiative-tail groups still enter the loss, with their tiny weights).
-        groups = (
-            [g for g in _uniq(tg) if float((tg == g).float().mean()) >= 0.05]
-            if (pg is not None and tg is not None and tg.numel())
-            else []
-        )
-        for g in groups:
-            gl = _pair_truth_group_label(g)
-            sp, st = pg == g, tg == g
-            si = ig == g if ig is not None else None
-            panels.append(
-                (
-                    f"r({pid_label}) {gl} all cats",
-                    tm[st],
-                    pm[sp],
-                    im[si] if si is not None else None,
-                )
-            )
-            panels.extend(
-                (
-                    f"r({pid_label}) {gl} {_pair_category_label(c)}",
-                    tm[st & (tc_ == c)],
-                    pm[sp & (pc_ == c)],
-                    im[si & (ic == c)] if (si is not None and ic is not None) else None,
-                )
-                for c in cats
-            )
-        ncols = 3 if len(panels) > 4 else min(len(panels), 2)
-        nrows = math.ceil(len(panels) / ncols)
-        fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols, 3.8 * nrows), squeeze=False)
-        axes_flat = axes.flatten()
-        for i, (title, tv, pv, iv) in enumerate(panels):
-            if not _draw_observable_panel(
-                axes_flat[i], "pair_r", tv, pv, iv, step, title_prefix=title, in_loss=True
-            ):
-                axes_flat[i].set_axis_off()
-                axes_flat[i].set_title(f"{title}: (no pairs)")
-        for j in range(len(panels), len(axes_flat)):
-            axes_flat[j].set_axis_off()
-        fig.suptitle(
-            f"pair-mass response, leading-2 {pid_label}s per event (|pid| = {pid_abs}); "
-            f"per truth-mass group, one panel per |eta|-region pair category (loss pair-mass terms)"
+            f"per-PID {pid_label} (|pid| = {pid_abs}) -- log_pt / log_E per |eta| region, "
+            f"eta / pt pooled"
         )
         _page_footer(fig, step, val_loss)
         fig.tight_layout()
@@ -510,7 +403,5 @@ def save_intermediate_observable_plots(
         # the per-particle observables (log_pt / log_E per |eta| region, eta / pt pooled)
         # for that subgroup.
         _render_per_pid_pages(pdf, pred_by_key, target_by_key, init_by_key, step, val_loss)
-        # Pair-mass pages: one per class with pairs (11, 13, 211).
-        _render_pair_mass_pages(pdf, pred_by_key, target_by_key, init_by_key, step, val_loss)
 
     return out_path

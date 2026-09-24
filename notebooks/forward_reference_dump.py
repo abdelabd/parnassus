@@ -6,7 +6,6 @@ dumps everything downstream code consumes:
 
 - the concatenated ``EFlowObject`` tensor (all columns, stored BY COLUMN NAME so a later
   ColumnMap extension can still be compared on the shared columns),
-- the five ``*ExpectedCounts`` outputs per batch,
 - the per-event ``multiplicity`` / ``ht`` / ``log_ht`` from ``load_pflow_targets_from_tensor``,
 - the torch RNG state after the pass,
 
@@ -37,7 +36,6 @@ import torch
 
 from parnassus.data.particle_io import N_FEATURES, ColumnMap
 from parnassus.torch_delphes.defaults.CMSDefault import CMSEnergyFlowDefault
-from parnassus.torch_delphes.tune_cms_fullsim.config import CALO_COUNT_TERM_KEYS, COUNT_TERM_KEYS
 from parnassus.torch_delphes.tune_cms_fullsim.data import (
     batch_event_ids,
     load_cms_flow_root,
@@ -51,7 +49,6 @@ from parnassus.torch_delphes import param_config as pc
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = REPO / "src" / "parnassus" / "tests" / "benchmark_data" / "cms_pseudodata.root"
-COUNT_KEYS = [row[0] for row in (*COUNT_TERM_KEYS, *CALO_COUNT_TERM_KEYS)]
 EVENT_KEYS = ("multiplicity", "ht", "log_ht")
 
 
@@ -69,7 +66,7 @@ def _run_pass(card, loader, *, grad: bool, seed: int) -> dict[str, np.ndarray]:
     torch.manual_seed(seed)
     np.random.seed(seed)
     card.train(grad)
-    objects, counts, events = [], {k: [] for k in COUNT_KEYS}, {k: [] for k in EVENT_KEYS}
+    objects, events = [], {k: [] for k in EVENT_KEYS}
     n_obj_per_batch = []
     ctx = torch.enable_grad() if grad else torch.no_grad()
     with ctx:
@@ -82,8 +79,6 @@ def _run_pass(card, loader, *, grad: bool, seed: int) -> dict[str, np.ndarray]:
             obs = load_pflow_targets_from_tensor(restored)
             objects.append(eflow.detach().to(torch.float64).cpu().numpy())
             n_obj_per_batch.append(eflow.shape[0])
-            for k in COUNT_KEYS:
-                counts[k].append(out[k].detach().to(torch.float64).cpu().numpy().reshape(1, -1))
             for k in EVENT_KEYS:
                 events[k].append(obs[k].detach().to(torch.float64).cpu().numpy().reshape(-1))
     tag = "grad" if grad else "nograd"
@@ -92,8 +87,6 @@ def _run_pass(card, loader, *, grad: bool, seed: int) -> dict[str, np.ndarray]:
     for col in ColumnMap:  # stored by NAME so a later extra column is still comparable
         result[f"{tag}/eflow/{col.name}"] = eflow_all[:, int(col)].copy()
     result[f"{tag}/n_obj_per_batch"] = np.asarray(n_obj_per_batch, dtype=np.int64)
-    for k in COUNT_KEYS:
-        result[f"{tag}/counts/{k}"] = np.concatenate(counts[k], axis=0)
     for k in EVENT_KEYS:
         result[f"{tag}/event/{k}"] = np.concatenate(events[k], axis=0)
     result[f"{tag}/rng_state_after"] = torch.get_rng_state().numpy().copy()

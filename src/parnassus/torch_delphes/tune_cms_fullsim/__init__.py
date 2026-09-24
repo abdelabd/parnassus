@@ -13,7 +13,6 @@ Submodules
 - :mod:`.config`      — constants (branch names, observable keys, default LR).
 - :mod:`.distributed` — DDP / rank helpers.
 - :mod:`.data`        — ROOT I/O and observable construction.
-- :mod:`.loss`        — the sliced-Wasserstein training loss (self-contained).
 - :mod:`.training`    — the Adam fit loop.
 - :mod:`.cli`         — the ``main()`` entry point (see also :mod:`.__main__`).
 

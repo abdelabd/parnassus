@@ -44,7 +44,6 @@ from parnassus.torch_delphes.learnable import (
 from parnassus.torch_delphes.Merger import Merger
 from parnassus.torch_delphes.MomentumSmearing import MomentumSmearing
 from parnassus.torch_delphes.ParticlePropagator import ParticlePropagator
-from parnassus.torch_delphes.PhotonClusterMerger import compose_merged_photon_count
 from parnassus.torch_delphes.SimpleCalorimeter import SimpleCalorimeter
 
 from .base import DelphesBaseCard
@@ -111,8 +110,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         debug: bool = False,
         learnable: bool = False,
         gumbel_temperature: float = 0.5,
-        count_pt_min: float | None = None,
-        count_abs_eta_max: float | None = None,
         photon_merger: nn.Module | None = None,
     ) -> None:
         """Initialize the CMS detector simulation.
@@ -139,15 +136,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             values (e.g. 0.1) give sharper Bernoulli-like behavior; higher
             values (e.g. 1.0) give smoother gradients but more sampling
             noise. The training loop may anneal this value over time.
-        count_pt_min, count_abs_eta_max:
-            Acceptance harmonization for the differentiable COUNT TERMS only
-            (tracking expected counts + calo soft counts); object creation is
-            untouched. With ``count_pt_min`` set, expected counts only include
-            objects with reco pt >= count_pt_min (matching data targets built
-            from pt-cut files); with ``count_abs_eta_max`` set, the calo count
-            regions are bounded at |eta| <= max. Defaults None = legacy
-            behavior. Set by the tune_cms_fullsim fit entrypoints from
-            --reco-pt-cut / --eta-cut.
         photon_merger:
             Optional module applied to the flat eflow photon stream between
             the ECal and the EFlowMerger (see
@@ -159,8 +147,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         super().__init__()
         self.debug = debug
         self.learnable = learnable
-        self.count_pt_min = count_pt_min
-        self.count_abs_eta_max = count_abs_eta_max
         self.photon_merger = photon_merger
 
         # Attribute-type declarations so mypy accepts the learnable / legacy
@@ -354,34 +340,19 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             muons_smeared,
         ])
 
-        # ECal (4th return: differentiable per-region expected photon count; 5th:
-        # per-tower count export for the merged-count composition; None unless
-        # learnable)
-        ecal_tracks, ecal_towers, eflow_photons, ecal_calo_counts, ecal_count_export = self.ECal(
+        # ECal
+        ecal_tracks, ecal_towers, eflow_photons = self.ECal(
             particles_propagated, merged_tracks
         )
 
         # PhotonClusterMerger (optional): supercluster-scale merging of the
         # photon stream. Runs here so training, plotting, and generation all
-        # see the same merged photons. None => untouched. When the soft count
-        # is active, the per-tower expected photon count would still describe
-        # UNMERGED towers, so it is replaced by the cluster-survival
-        # composition (fixes the count-term desync; see
-        # compose_merged_photon_count).
+        # see the same merged photons. None => untouched.
         if self.photon_merger is not None:
-            if ecal_count_export is not None:
-                eflow_photons, photon_owner = self.photon_merger.forward_with_assignment(
-                    eflow_photons
-                )
-                ecal_calo_counts = compose_merged_photon_count(
-                    ecal_count_export, photon_owner, eflow_photons, self.photon_merger, self.ECal
-                )
-            else:
-                eflow_photons = self.photon_merger(eflow_photons)
+            eflow_photons = self.photon_merger(eflow_photons)
 
-        # HCal (4th return: per-region expected neutral-hadron count; None unless
-        # learnable; per-tower export unused -- the NH stream is not merged)
-        hcal_tracks, hcal_towers, eflow_neutral_hadrons, hcal_calo_counts, _ = self.HCal(
+        # HCal
+        hcal_tracks, hcal_towers, eflow_neutral_hadrons = self.HCal(
             particles_propagated, ecal_tracks
         )
 
@@ -390,25 +361,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
 
         # EFlowMerger
         eflow_objects = self.EFlowMerger([hcal_tracks, eflow_photons, eflow_neutral_hadrons])
-
-        # Differentiable expected reconstructed track count per RECO bin, per track
-        # species, built from the reco-bin <- pre-reco-region migration of the
-        # trainee's own hard reco (see _expected_reco_counts). This is the gradient
-        # source for the eff_logits. None in the legacy (non-learnable) path.
-        if self.learnable:
-            chad_expected_counts = self._expected_reco_counts(
-                eflow_objects, self.ChargedHadronTrackingEfficiency
-            )
-            electron_expected_counts = self._expected_reco_counts(
-                eflow_objects, self.ElectronTrackingEfficiency
-            )
-            muon_expected_counts = self._expected_reco_counts(
-                eflow_objects, self.MuonTrackingEfficiency
-            )
-        else:
-            chad_expected_counts = None
-            electron_expected_counts = None
-            muon_expected_counts = None
 
         if self.debug:
             return {
@@ -433,11 +385,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
                 "EFlowNeutralHadron": eflow_neutral_hadrons,
                 "Tower": merged_towers,
                 "EFlowObject": eflow_objects,
-                "ChargedHadronExpectedCounts": chad_expected_counts,
-                "ElectronExpectedCounts": electron_expected_counts,
-                "MuonExpectedCounts": muon_expected_counts,
-                "EcalPhotonExpectedCounts": ecal_calo_counts,
-                "HcalNeutralHadronExpectedCounts": hcal_calo_counts,
             }
         return {
             "Track": merged_tracks,
@@ -446,11 +393,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             "EFlowPhoton": eflow_photons,
             "EFlowNeutralHadron": eflow_neutral_hadrons,
             "EFlowObject": eflow_objects,
-            "ChargedHadronExpectedCounts": chad_expected_counts,
-            "ElectronExpectedCounts": electron_expected_counts,
-            "MuonExpectedCounts": muon_expected_counts,
-            "EcalPhotonExpectedCounts": ecal_calo_counts,
-            "HcalNeutralHadronExpectedCounts": hcal_calo_counts,
         }
 
     @staticmethod
@@ -474,71 +416,6 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             idx.unsqueeze(1).to(masked.dtype),  # (N, 1)
             masked,
         )
-
-    def _expected_reco_counts(
-        self, eflow_objects: torch.Tensor, eff_module: nn.Module
-    ) -> torch.Tensor:
-        """Differentiable expected reconstructed track count per RECO bin, for one
-        track species.
-
-        Each reconstructed track carries its pre-reco efficiency region (global
-        label) in the ``EFF_REGION`` column. We histogram the trainee's survivors of
-        this species into the migration ``M[b, r]`` = number landing in reco-bin ``b``
-        whose pre-reco region was ``r`` (a gradient-free count of the current hard
-        reco), then form
-
-            expected[b] = sum_r (eff_r / eff_r.detach()) * M[b, r]
-
-        which equals the hard reco count ``sum_r M[b, r]`` at the current efficiencies
-        but is differentiable wrt ``eff_logits``. The tuning loss matches ``expected``
-        to the reconstructed-data per-reco-bin counts; its minimum is a fixed point at
-        the true efficiency (at ``eff = truth`` the trainee's migration reproduces the
-        data's, so ``expected = target``).
-
-        The reco bins use the SAME ``(pt, |eta|)`` binning (from the module's
-        :class:`~parnassus.torch_delphes.learnable.EfficiencyRegionSpec`) as the
-        target in ``tune_cms_fullsim.data.load_pflow_targets``. Selection on the reco
-        side is by the species' label range (``EFF_REGION in [offset+1, offset+n]``);
-        no PID test is needed because the label already encodes the species.
-
-        Returns
-        -------
-        torch.Tensor
-            ``(n_regions,)`` differentiable expected reco-bin counts.
-        """
-        spec = eff_module.region_spec
-        effs = eff_module.get_efficiencies()  # (n_regions,)
-        if eflow_objects.shape[0] == 0:
-            # Graph-connected zeros so backward() always has a path through effs.
-            return effs * 0.0
-        eff_det = effs.detach().clamp_min(1e-12)  # guard the 1/eff division
-        pt = eflow_objects[:, ColumnMap.PT]
-        abs_eta = eflow_objects[:, ColumnMap.ETA].abs()
-        region = eflow_objects[:, ColumnMap.EFF_REGION]  # global label; 0 = untagged
-        valid = pt > 0  # drop efficiency-killed ghosts (zeroed momentum)
-        # Acceptance harmonization: the data-side region-count targets are built
-        # from pt/eta-cut reco files, so exclude out-of-acceptance survivors here
-        # too. Hard mask by design -- this term's gradient is confined to the
-        # eff_logits via the eff/eff.detach() reweight below; the counts M[b, r]
-        # are gradient-free either way.
-        if self.count_pt_min is not None:
-            valid = valid & (pt >= self.count_pt_min)
-        if self.count_abs_eta_max is not None:
-            valid = valid & (abs_eta <= self.count_abs_eta_max)
-        offset = spec.label_offset
-
-        # For each reco bin, find which pre-reco region the survivors came from, then
-        # add their counts reweighted by eff/eff.detach(); the ratio is 1 in value
-        # (forward count stays exact) but passes gradient M[b,r]/eff_r to eff_logits.
-        expected = []
-        for b_mask in spec.region_masks(pt, abs_eta):
-            term = torch.zeros((), dtype=effs.dtype, device=effs.device)
-            for r in range(spec.n_regions):
-                label = float(offset + r + 1)
-                m_br = (valid & b_mask & (region == label)).sum().to(effs.dtype)
-                term = term + (effs[r] / eff_det[r]) * m_br
-            expected.append(term)
-        return torch.stack(expected)
 
     def _setup_ECal(self):
         energy_fractions = {
@@ -654,11 +531,9 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             smear_tower_center=True,  # Match C++ Delphes: SmearTowerCenter true
             scale_fn=ecal_scale_fn,
             learnable_fractions=learnable_fractions,
-            # Differentiable per-region count term: on exactly in learnable mode,
-            # mirroring the efficiency count term (off => generation byte-identical).
+            # Threshold gate on the neutral objects' log-weight: on exactly in
+            # learnable mode (off => generation byte-identical).
             compute_soft_count=self.learnable,
-            count_pt_min=self.count_pt_min,
-            count_abs_eta_max=self.count_abs_eta_max,
         )
 
     def _setup_HCal(self):
@@ -812,6 +687,4 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             scale_fn=hcal_scale_fn,
             learnable_fractions=learnable_fractions,
             compute_soft_count=self.learnable,
-            count_pt_min=self.count_pt_min,
-            count_abs_eta_max=self.count_abs_eta_max,
         )

@@ -18,9 +18,7 @@ and is fitted by Adam -- unless the optional ``parameters:`` block (a per-scalar
 pins it at that default. Every scalar that IS listed in ``constants:`` is a
 per-trial CONSTANT (``trainable: false``), either pinned (``{value}``) or
 TPE-sampled (``{low, high, init}``). The shipped block lists the five ``HadronFractions``
-logits: their count-level effects are invisible to Adam (the soft-count gate
-reads a DETACHED energy), but they are visible to the study, which is scored on
-the val-loss VALUE -- count terms included.
+logits: they are visible to the study, which is scored on the val-loss VALUE.
 
 Each trial materializes a normal full-cover ``{value, trainable, lr_scale}``
 param config (with ``lr_scale`` holding the group's absolute lr, i.e.
@@ -141,15 +139,6 @@ from .config import (
 )
 from .dataloader import DelphesDataLoader
 from .distributed import _cleanup_distributed, _init_distributed
-from .loss import (
-    CALO_COUNT_WEIGHT,
-    COUNT_RATE_FLOOR,
-    COUNT_WEIGHT,
-    EVENT_WEIGHT,
-    LOSS_CHOICES,
-    PAIR_MASS_WEIGHT,
-    PID_WEIGHTING_CHOICES,
-)
 from .runner import load_split_datasets, resolve_acceptance_cuts, write_history_json
 from .training import fit_card_to_fullsim
 
@@ -450,8 +439,8 @@ def coupled_photon_constants(constants: dict) -> list[str]:
     ``photon_logit`` and ``k0l_logit`` both move the photon<->NH balance, as the
     radius does, so their optima are correlated. They are NOT degenerate -- only
     the fractions move energy into the HCal stream, and merging HARDENS the
-    photon spectrum (merged = sum) where a leak SOFTENS it, so the per-pid shape
-    and ``hcal_nh`` count terms can separate them. Expect a ridge and judge the
+    photon spectrum (merged = sum) where a leak SOFTENS it, so the per-pid shapes
+    can separate them. Expect a ridge and judge the
     study on the response surface, not on the single best trial.
 
     Returns
@@ -730,24 +719,6 @@ def main() -> None:
         action="store_true",
         help="Disable Comet logging even when COMET_API_KEY is set.",
     )
-    # Fit knobs passed straight through (defaults match the tuning CLI).
-    parser.add_argument("--loss", type=str, default="wasserstein_1d", choices=list(LOSS_CHOICES))
-    parser.add_argument(
-        "--pid-weighting",
-        type=str,
-        default="fraction",
-        choices=list(PID_WEIGHTING_CHOICES),
-    )
-    parser.add_argument("--pid-weight-floor", type=float, default=0.0)
-    parser.add_argument("--count-weight", type=float, default=COUNT_WEIGHT)
-    parser.add_argument("--calo-count-weight", type=float, default=CALO_COUNT_WEIGHT)
-    parser.add_argument("--count-rate-floor", type=float, default=COUNT_RATE_FLOOR)
-    parser.add_argument("--event-weight", type=float, default=EVENT_WEIGHT)
-    # Loss-definition switches of the per-pid losses (see tune_cms_fullsim.cli): one
-    # study == one setting (guarded via study user_attrs below).
-    parser.add_argument("--eta-split", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--pair-mass", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--pair-mass-weight", type=float, default=PAIR_MASS_WEIGHT)
     parser.add_argument(
         "--mode",
         choices=MODE_CHOICES,
@@ -776,8 +747,8 @@ def main() -> None:
         default=DEFAULT_RECO_PT_CUT,
         help=(
             "Reco acceptance on BOTH target and trainee (all classes): pt >= "
-            "this and |eta| <= --eta-cut; also gates the count terms and sets "
-            "the n_truth_chad truncation-ceiling floor. Default "
+            "this and |eta| <= --eta-cut; also sets the n_truth_chad "
+            "truncation-ceiling floor. Default "
             f"{DEFAULT_RECO_PT_CUT}. <= 0 disables the pt part. Losses are not "
             "comparable across different settings."
         ),
@@ -787,8 +758,8 @@ def main() -> None:
         type=float,
         default=DEFAULT_ABS_ETA_CUT,
         help=(
-            "|eta| acceptance bound shared by the truth and reco cuts (and the "
-            f"calo count regions). Default {DEFAULT_ABS_ETA_CUT}. <= 0 disables."
+            "|eta| acceptance bound shared by the truth and reco cuts. "
+            f"Default {DEFAULT_ABS_ETA_CUT}. <= 0 disables."
         ),
     )
     parser.add_argument(
@@ -892,9 +863,7 @@ def main() -> None:
     n_sampled = sum(1 for s in constants.values() if "value" not in s)
     log(
         f"[optuna] world_size={world_size} device={device} n_trials={n_trials} "
-        f"batch={global_batch_size} global ({batch_size}/rank) loss={args.loss!r} "
-        f"pid_weighting={args.pid_weighting!r} eta_split={args.eta_split} "
-        f"pair_mass={args.pair_mass} (w={args.pair_mass_weight}) mode={args.mode} "
+        f"batch={global_batch_size} global ({batch_size}/rank) mode={args.mode} "
         f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
         f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'} "
         f"photon_merge_radius={f'[{r_lo}, {r_hi}]' if search_radius else 'OFF (delphes)'} "
@@ -919,8 +888,8 @@ def main() -> None:
         log(
             "[optuna] NOTE: sampling " + ", ".join(coupled) + " together with "
             "photon_merge_radius -- all move the photon<->NH balance, so their "
-            "optima are correlated (separable via the photon shape + hcal_nh "
-            "count terms, but it costs trials). Judge on the response surface "
+            "optima are correlated (separable via the photon and NH shapes, "
+            "but it costs trials). Judge on the response surface "
             "(the importances printed at the end), not on the single best trial."
         )
 
@@ -984,13 +953,7 @@ def main() -> None:
         trainee = CMSEnergyFlowDefault(
             debug=False,
             learnable=True,
-            # Harmonize the differentiable count terms with the reco acceptance
-            # cut (tracking expected counts + calo soft counts).
-            count_pt_min=reco_pt_cut,
-            count_abs_eta_max=abs_eta_cut,
-            # Supercluster-scale photon merging (per-trial constant; the
-            # ecal_photon count term is recomputed from the merged clusters
-            # inside the card).
+            # Supercluster-scale photon merging (per-trial constant).
             photon_merger=(
                 PhotonClusterMerger(merge_radius) if merge_radius is not None else None
             ),
@@ -1061,16 +1024,6 @@ def main() -> None:
             lr_scheduler_patience=(
                 args.lr_scheduler_patience if args.lr_scheduler_patience > 0 else None
             ),
-            count_weight=args.count_weight,
-            calo_count_weight=args.calo_count_weight,
-            count_rate_floor=args.count_rate_floor,
-            event_weight=args.event_weight,
-            loss_name=args.loss,
-            pid_weighting=args.pid_weighting,
-            pid_weight_floor=args.pid_weight_floor,
-            eta_split=args.eta_split,
-            pair_mass=args.pair_mass,
-            pair_mass_weight=args.pair_mass_weight,
             reco_pt_cut=reco_pt_cut,
             reco_abs_eta_cut=abs_eta_cut,
             truncate_chads=truncate_chads,
@@ -1133,11 +1086,6 @@ def main() -> None:
                 "batch_size": batch_size,
                 "n_steps": args.n_steps,
                 "n_events": args.n_events,
-                "loss": args.loss,
-                "pid_weighting": args.pid_weighting,
-                "eta_split": bool(args.eta_split),
-                "pair_mass": bool(args.pair_mass),
-                "pair_mass_weight": args.pair_mass_weight,
                 "world_size": world_size,
                 "round_dir": str(round_dir),
             },
@@ -1197,11 +1145,6 @@ def main() -> None:
             # THIS trial's radius (sampled when the scan block is active; None =
             # merger off). plot_fit_results resolves the per-round merger from it.
             "photon_merge_radius": trial_merge_radius,
-            # Loss-definition switches (per-pid losses only).
-            "loss": args.loss,
-            "eta_split": bool(args.eta_split),
-            "pair_mass": bool(args.pair_mass),
-            "pair_mass_weight": args.pair_mass_weight,
         }
         write_history_json(round_dir / "history.json", history, metadata)
 
@@ -1246,20 +1189,6 @@ def main() -> None:
             f"use a different --study-name for --mode {args.mode}."
         )
     study.set_user_attr("mode", args.mode)
-    # Same for the loss-definition switches: trials with different eta_split /
-    # pair_mass settings minimize different objectives. Studies predating the attrs
-    # were pooled / without pair-mass terms.
-    loss_flags = {"eta_split": bool(args.eta_split), "pair_mass": bool(args.pair_mass)}
-    for key, val in loss_flags.items():
-        prev = study.user_attrs.get(key, False if n_existing else val)
-        if prev != val:
-            if world_size > 1:
-                dist.broadcast_object_list([{"stop": True}], src=0)
-            raise SystemExit(
-                f"[optuna] study {args.study_name!r} was run with {key}={prev}; "
-                f"use a different --study-name for {key}={val}."
-            )
-        study.set_user_attr(key, val)
     # Seed trial (rank 0 only -- ranks != 0 returned into the mirror loop above):
     # the config's `init:` values, i.e. the believed-truth constants at the
     # calibrated radius. (Re-)enqueued whenever the study has no

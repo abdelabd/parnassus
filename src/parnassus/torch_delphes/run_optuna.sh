@@ -31,8 +31,6 @@ STUDY_NAME=${STUDY_NAME:-fullsim_100k}
 N_STEPS=${N_STEPS:-100}
 N_TRIALS=${N_TRIALS:-40}          # trials ADDED per run (re-run to add more; resumes the study
                                   # below). The seed trial counts toward this number.
-LOSS=wasserstein_1d  # can be "soft_hist"
-PID_WEIGHTING=sqrt_fraction
 OPTUNA_CONFIG=src/parnassus/torch_delphes/param_configs/optuna_config.yaml
 # Trial 0 runs the optuna_config `init:` values (believed-truth constants at the
 # calibrated radius) with every fitted scalar at its card default -- no external
@@ -62,8 +60,6 @@ export OMP_NUM_THREADS=8        # CPU threads per rank (lower if the N ranks con
     --n-events "$N_EVENTS" \
     --n-steps "$N_STEPS" \
     --n-trials "$N_TRIALS" \
-    --loss "$LOSS" \
-    --pid-weighting "$PID_WEIGHTING" \
     --output-base "$OUTPUT_BASE" \
     --history-path "$HISTORY_PATH" \
     --comet-name "$COMET_NAME" \

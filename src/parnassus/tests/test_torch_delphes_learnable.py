@@ -36,7 +36,6 @@ import torch
 from parnassus.data.particle_io import N_FEATURES, ColumnMap
 from parnassus.torch_delphes.defaults import CMSEnergyFlowDefault
 from parnassus.torch_delphes.learnable import (
-    CMS_EFF_REGION_SPECS,
     CMSChargedHadronLearnableEfficiency,
     LearnableEcalCMSResolution,
     LearnableHadronFractions,
@@ -347,28 +346,9 @@ def test_learnable_forward_produces_expected_branches(seed: int) -> None:
         "EFlowPhoton",
         "EFlowNeutralHadron",
         "EFlowObject",
-        "ChargedHadronExpectedCounts",
-        "ElectronExpectedCounts",
-        "MuonExpectedCounts",
-        # Differentiable per-|eta|-region calo object counts (resolution-param count term).
-        "EcalPhotonExpectedCounts",
-        "HcalNeutralHadronExpectedCounts",
     }
     assert set(out.keys()) == expected_keys
-    # Per-(pt,eta) region differentiable expected counts (one tensor per track
-    # species), shape (n_regions,) -- not an (N, N_FEATURES) object cloud.
-    expected_count_shapes = {
-        "ChargedHadronExpectedCounts": 4,
-        "ElectronExpectedCounts": 6,
-        "MuonExpectedCounts": 6,
-        # Calo object counts: ECal barrel/endcap/forward (3), HCal central/forward (2).
-        "EcalPhotonExpectedCounts": 3,
-        "HcalNeutralHadronExpectedCounts": 2,
-    }
     for k, v in out.items():
-        if k in expected_count_shapes:
-            assert v.ndim == 1 and v.shape[0] == expected_count_shapes[k]
-            continue
         assert v.ndim == 2
         assert v.shape[1] == N_FEATURES, f"{k} has wrong feature count"
 
@@ -393,11 +373,10 @@ def test_gradient_flows_to_all_reachable_parameters():
     The tracking-efficiency logits (charged-hadron / electron / muon) and the muon
     high-pt rate are INTENTIONALLY detached from the momentum path: the Gumbel mask
     is applied with ``.detach()`` so the biased straight-through gradient never
-    reaches them. The eff_logits are fit through the differentiable reco-space count
-    terms instead (CMSEnergyFlowDefault._expected_reco_counts / tune_cms_fullsim.loss),
-    which this momentum-only loss does not include -- so they legitimately get no
-    gradient here. (``rate_raw`` has no count-term path either and stays frozen; see
-    test_count_term_gradient_flows_to_eff_logits for the count-path coverage.)
+    reaches them. The eff_logits are fit through the per-object LOG_OBJ_WEIGHT
+    column instead (see the coin log-weight tests below), which this momentum-only
+    loss does not read -- so they legitimately get no gradient here. (``rate_raw``
+    has no gradient path at all and stays frozen.)
     """
     torch.manual_seed(123)
     card = CMSEnergyFlowDefault(debug=False, learnable=True)
@@ -436,7 +415,7 @@ def test_gradient_flows_to_all_reachable_parameters():
     # The learnable params that our batch actually exercises must have
     # non-zero gradients. We list them by name-fragment so the test is
     # robust to future renames of specific components. (The efficiency logits
-    # are excluded -- they are fit via the expected-count term, not this loss.)
+    # are excluded -- they are fit via the LOG_OBJ_WEIGHT column, not this loss.)
     must_have_grad_fragments = [
         "ChargedHadronMomentumSmearing.resolution_module.a_raw",
         "ChargedHadronMomentumSmearing.resolution_module.b_raw",
@@ -458,94 +437,21 @@ def test_gradient_flows_to_all_reachable_parameters():
 
 
 # ---------------------------------------------------------------------------
-# 3b. Differentiable count term (the eff_logits gradient path)
+# 3b. EFF_REGION bookkeeping column
 # ---------------------------------------------------------------------------
 
 
-# (card forward-output key, efficiency module attribute, region-spec key) for each
-# of the three track-species count terms.
-_COUNT_SPECIES = (
-    ("ChargedHadronExpectedCounts", "ChargedHadronTrackingEfficiency", "charged_hadron"),
-    ("ElectronExpectedCounts", "ElectronTrackingEfficiency", "electron"),
-    ("MuonExpectedCounts", "MuonTrackingEfficiency", "muon"),
-)
-
-
-def _hard_reco_counts(eflow_objects: torch.Tensor, spec_key: str) -> list[int]:
-    """Recompute, independent of the card, the hard per-reco-bin survivor count of
-    one species directly from the ``EFlowObject`` cloud (selecting by EFF_REGION
-    label range, the same way the count term does)."""
-    spec = CMS_EFF_REGION_SPECS[spec_key]
-    pt = eflow_objects[:, ColumnMap.PT]
-    abs_eta = eflow_objects[:, ColumnMap.ETA].abs()
-    region = eflow_objects[:, ColumnMap.EFF_REGION]
-    valid = pt > 0
-    in_species = (region >= spec.label_offset + 1) & (region <= spec.label_offset + spec.n_regions)
-    return [int((valid & b & in_species).sum()) for b in spec.region_masks(pt, abs_eta)]
-
-
 @pytest.mark.parametrize("seed", [0, 3, 11])
-def test_expected_counts_match_hard_counts_and_labels(seed: int) -> None:
-    """The differentiable expected counts equal the trainee's actual hard reco
-    counts in value (the ``eff/eff.detach()`` factor is exactly 1 forward), the
-    EFF_REGION labels land in the right disjoint per-species ranges, and calorimeter
-    towers carry no label.
-    """
+def test_eff_region_labels_in_species_ranges(seed: int) -> None:
+    """EFF_REGION labels on the EFlowObject sit in the species' disjoint global
+    ranges (chad 1-4, electron 5-10, muon 11-16; 0 = untagged) and calorimeter
+    towers carry no label."""
     torch.manual_seed(seed)
     card = CMSEnergyFlowDefault(debug=True, learnable=True)
     out = card(_make_batch(n=300, seed=seed))
-
-    # Value invariance, per species.
-    for out_key, _mod, spec_key in _COUNT_SPECIES:
-        expected = out[out_key]
-        hard = _hard_reco_counts(out["EFlowObject"], spec_key)
-        assert torch.allclose(
-            expected, torch.tensor(hard, dtype=expected.dtype)
-        ), f"{out_key}: expected {expected.tolist()} != hard count {hard}"
-
-    # Labels on the EFlowObject sit in the species' disjoint ranges (or 0); towers 0.
     reg = out["EFlowObject"][:, ColumnMap.EFF_REGION]
     assert reg.min() >= 0 and reg.max() <= 16
     assert float(out["Tower"][:, ColumnMap.EFF_REGION].abs().max()) == 0.0
-
-
-def test_count_term_gradient_flows_to_eff_logits() -> None:
-    """Backprop through the three expected-count outputs gives a finite, non-negative
-    gradient on every eff_logit whose reco bin is populated, and EXACTLY zero on the
-    empty high-pt bins (electron/muon [2],[5]; the batch has pt <= 60.5 GeV) and on
-    the muon ``rate_raw`` (which has no count-term path by construction).
-    """
-    torch.manual_seed(123)
-    card = CMSEnergyFlowDefault(debug=False, learnable=True)
-    out = card(_make_batch(n=400, seed=123))
-
-    loss = (
-        out["ChargedHadronExpectedCounts"].sum()
-        + out["ElectronExpectedCounts"].sum()
-        + out["MuonExpectedCounts"].sum()
-    )
-    loss.backward()
-
-    params = dict(card.named_parameters())
-    # rate_raw gets no count-term gradient at all.
-    rate_grad = params["MuonTrackingEfficiency.rate_raw"].grad
-    assert rate_grad is None or float(rate_grad.abs().sum()) == 0.0
-
-    # High-pt bins are empty in this batch -> exactly zero; the bins that the batch
-    # populates must have a finite, non-negative gradient (dN/d eff_r = M[b,r]/eff_r).
-    empty_high_pt = {
-        "ElectronTrackingEfficiency.eff_logits": (2, 5),
-        "MuonTrackingEfficiency.eff_logits": (2, 5),
-    }
-    any_nonzero = False
-    for _out_key, mod, _spec_key in _COUNT_SPECIES:
-        g = params[f"{mod}.eff_logits"].grad
-        assert g is not None and torch.isfinite(g).all()
-        assert (g >= 0).all(), f"{mod}: count-term gradient must be non-negative"
-        for r in empty_high_pt.get(f"{mod}.eff_logits", ()):  # type: ignore[arg-type]
-            assert float(g[r]) == 0.0, f"{mod}.eff_logits[{r}] should be empty (zero grad)"
-        any_nonzero = any_nonzero or float(g.abs().sum()) > 0
-    assert any_nonzero, "no eff_logit received a count-term gradient"
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +758,7 @@ def test_neutral_excess_inherits_tower_coin_log_weights(calo: str) -> None:
         tracks=False,
     )
 
-    _tracks_out, _towers, neutrals, _counts, _export = module(particles, tracks)
+    _tracks_out, _towers, neutrals = module(particles, tracks)
     in_tower = neutrals[:, ColumnMap.ETA].abs() < 0.5
     assert int(in_tower.sum()) == 1, "expected exactly one neutral object in the test tower"
     got = neutrals[in_tower, ColumnMap.LOG_OBJ_WEIGHT]

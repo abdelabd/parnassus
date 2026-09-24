@@ -4,7 +4,6 @@
 # drop them from this list to pin them at the card default. barrel_a stays frozen (anchor
 # of the k-null direction of the ECal formula). Muon + chad blocks are frozen at their
 # stage-1/2 values, the electron block at card defaults (in-jet electrons are rare).
-# --no-pair-mass: the pair terms only carry charged-hadron track information, frozen here.
 name: stage3_calo
 process: dijet
 trainable:
@@ -25,4 +24,4 @@ trainable:
   - HCal.resolution_func.central_c_S
   - HCal.resolution_func.forward_c_E
   - HCal.resolution_func.forward_c_S
-extra_args: [--no-pair-mass]
+extra_args: []

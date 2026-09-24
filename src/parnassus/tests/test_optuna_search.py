@@ -546,6 +546,11 @@ def test_apply_init_overrides(card_defaults):
 # ---------------------------------------------------------------------------
 
 
+# Fit-loop tests wait for the critic loss (critic_loss_plan.md step 5c).
+_STEP5A_SKIP = "training loss removed in critic_loss_plan.md step 5a; re-enabled in step 5c"
+
+
+@pytest.mark.skip(reason=_STEP5A_SKIP)
 def test_epoch_callback_breaks_loop(fixture_root: Path):
     """`epoch_callback` returning True breaks the fit cleanly with history intact."""
     device = torch.device("cpu")
@@ -613,6 +618,7 @@ def test_load_split_datasets_seed(fixture_root: Path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason=_STEP5A_SKIP)
 def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatch):
     """A tiny study writes per-round artifacts and a best history the plot pipeline accepts."""
     from parnassus.torch_delphes.tune_cms_fullsim.plot_fit_results import (
@@ -632,8 +638,6 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
         "--plot-every", "1",
         "--output-base", str(out_base),
         "--history-path", str(history_path),
-        "--loss", "wasserstein_1d",
-        "--pid-weighting", "sqrt_fraction",
     ]
     monkeypatch.setattr(sys, "argv", argv)
     osearch.main()
@@ -695,6 +699,7 @@ def test_optuna_search_end_to_end(fixture_root: Path, tmp_path: Path, monkeypatc
     assert best_val == pytest.approx(min(history["val_loss"]))
 
 
+@pytest.mark.skip(reason=_STEP5A_SKIP)
 def test_optuna_search_radius_is_per_trial_and_reaches_the_card(
     fixture_root: Path, tmp_path: Path, monkeypatch
 ):
@@ -732,7 +737,6 @@ def test_optuna_search_radius_is_per_trial_and_reaches_the_card(
         "--plot-every", "1",
         "--output-base", str(out_base),
         "--history-path", str(out_base / "all.json"),
-        "--loss", "wasserstein_1d",
     ]
     monkeypatch.setattr(sys, "argv", argv)
     osearch.main()
@@ -751,6 +755,7 @@ def test_optuna_search_radius_is_per_trial_and_reaches_the_card(
     assert built == pytest.approx(radii)
 
 
+@pytest.mark.skip(reason=_STEP5A_SKIP)
 def test_optuna_search_delphes_mode_disables_merger(
     fixture_root: Path, tmp_path: Path, monkeypatch
 ):

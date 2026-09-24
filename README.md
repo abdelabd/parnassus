@@ -78,7 +78,7 @@ CFG=src/parnassus/torch_delphes/param_configs
 python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$SAMPLE_DIR/pseudo_data_200k_param_config_chads_ksgun.root" \
     --optuna-config "$CFG/optuna_config_chads.yaml" \
-    --n-events 200000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --mode delphes \
+    --n-events 200000 --n-steps 100 --n-trials 1 --mode delphes \
     --output-base "$OUT" --history-path "$OUT/all_optuna.json"
 # plot
 python -m parnassus.torch_delphes.plotting_scripts.plot_parameter_regression \
@@ -94,7 +94,7 @@ CFG=src/parnassus/torch_delphes/param_configs
 python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$SAMPLE_DIR/pseudo_data_200k_param_config_muons_muongun.root" \
     --optuna-config "$CFG/optuna_config_muons.yaml" \
-    --n-events 200000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --mode delphes \
+    --n-events 200000 --n-steps 100 --n-trials 1 --mode delphes \
     --output-base "$OUT" --history-path "$OUT/all_optuna.json"
 # plot
 python -m parnassus.torch_delphes.plotting_scripts.plot_parameter_regression \
@@ -110,7 +110,7 @@ CFG=src/parnassus/torch_delphes/param_configs
 python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$SAMPLE_DIR/pseudo_data_200k_param_config_electrons_electrongun.root" \
     --optuna-config "$CFG/optuna_config_electrons.yaml" \
-    --n-events 200000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --mode delphes \
+    --n-events 200000 --n-steps 100 --n-trials 1 --mode delphes \
     --output-base "$OUT" --history-path "$OUT/all_optuna.json"
 # plot
 python -m parnassus.torch_delphes.plotting_scripts.plot_parameter_regression \
@@ -126,7 +126,7 @@ CFG=src/parnassus/torch_delphes/param_configs
 python -m parnassus.torch_delphes.tune_cms_fullsim.optuna_search \
     --root-file "$SAMPLE_DIR/pseudo_data_200k_param_config_dijets_dijet.root" \
     --optuna-config "$CFG/optuna_config_dijets.yaml" \
-    --n-events 200000 --n-steps 100 --n-trials 1 --loss wasserstein_1d --mode delphes \
+    --n-events 200000 --n-steps 100 --n-trials 1 --mode delphes \
     --output-base "$OUT" --history-path "$OUT/all_optuna.json"
 # plot
 python -m parnassus.torch_delphes.plotting_scripts.plot_parameter_regression \
@@ -157,7 +157,7 @@ parameters and trains only the block its sample constrains (see
 |---|---|---|
 | `stage1_muons` | `pseudo_data_200k_param_config_all_muongun.root` | muon efficiency + momentum resolution/scale (13) |
 | `stage2_chads` | `pseudo_data_200k_param_config_all_ksgun.root` | charged-hadron efficiency + momentum resolution/scale (13) |
-| `stage3_calo` | `pseudo_data_200k_param_config_all_dijet.root` | ECal + HCal scale and resolution (17; run with `--no-pair-mass`) |
+| `stage3_calo` | `pseudo_data_200k_param_config_all_dijet.root` | ECal + HCal scale and resolution (17) |
 | `stage4_electrons` | `pseudo_data_200k_param_config_all_electrongun.root` | electron efficiency + momentum resolution/scale (15) |
 
 ```bash

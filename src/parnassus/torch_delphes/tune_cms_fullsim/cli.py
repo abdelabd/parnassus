@@ -81,15 +81,6 @@ from .dataloader import DelphesDataLoader
 
 from .runner import load_split_datasets, resolve_acceptance_cuts, write_history_json
 
-from .loss import (
-    CALO_COUNT_WEIGHT,
-    COUNT_RATE_FLOOR,
-    COUNT_WEIGHT,
-    EVENT_WEIGHT,
-    LOSS_CHOICES,
-    PAIR_MASS_WEIGHT,
-    PID_WEIGHTING_CHOICES,
-)
 from .distributed import (
     _cleanup_distributed,
     _init_distributed,
@@ -131,140 +122,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--loss",
-        type=str,
-        default="wasserstein",
-        choices=list(LOSS_CHOICES),
-        help=(
-            "Training loss. 'wasserstein' (default) is the per-pid sliced "
-            "Wasserstein-2 over [log_E, log_pt, eta] plus a down-weighted "
-            "log(HT) term and expected-count terms. 'soft_hist' is the same "
-            "structure with a per-pid, per-observable soft-histogram MSE over "
-            "[log_E, log_pt, eta] in place of the optimal-transport term, plus "
-            "the same log(HT) and expected-count terms (it directly optimizes "
-            "histogram shape on a fixed bin grid). 'wasserstein_1d' keeps the same "
-            "per-pid/per-observable scaffolding but matches each axis with the exact "
-            "BIN-FREE 1D Wasserstein distance via quantiles (no histogram, no bin grid, "
-            "no range, no softness; deterministic, with no random projections -- so it "
-            "avoids both the manual binning of soft_hist and the instability of the "
-            "point-cloud sliced Wasserstein); same log(HT) and count terms. NOTE: its "
-            "standardized shape-term scale differs from soft_hist's MSE, so re-check the "
-            "count/shape balance with MCGEN_LOSS_DEBUG=1 before a production fit. All "
-            "three honor --count-weight/--calo-count-weight/--event-weight."
-        ),
-    )
-    parser.add_argument(
-        "--count-weight",
-        type=float,
-        default=COUNT_WEIGHT,
-        help=(
-            "Weight on the tracking-efficiency per-species expected-count terms, "
-            "relative to the unit-weighted per-pid object Wasserstein terms. The count "
-            "term is a normalized relative chi^2 on per-event rates with a fixed rate "
-            "floor (--count-rate-floor), making it dimensionless and batch-size invariant "
-            f"(~O(1)), so this is a meaningful balance knob. Default {COUNT_WEIGHT}. Set 0 "
-            "to disable the tracking-efficiency count terms (drops the eff_logits count "
-            "gradient)."
-        ),
-    )
-    parser.add_argument(
-        "--calo-count-weight",
-        type=float,
-        default=CALO_COUNT_WEIGHT,
-        help=(
-            "Weight on the CALO-resolution expected-count terms (ecal_photon, "
-            "hcal_neutral_hadron), kept SEPARATE from --count-weight. These must "
-            "out-vote a wrong-signed Wasserstein gradient on the forward resolution "
-            "coefficients (forward_c_E/forward_c_S/common_c_E), so they need a larger "
-            f"weight and a per-region-fair normalization. Default {CALO_COUNT_WEIGHT}. "
-            "Set 0 to disable the calo-resolution count gradient."
-        ),
-    )
-    parser.add_argument(
-        "--count-rate-floor",
-        type=float,
-        default=COUNT_RATE_FLOOR,
-        help=(
-            "Per-event-RATE floor in the count-term Pearson denominators (shared by the "
-            "tracking and calo count terms). The count terms are evaluated on per-event "
-            "rates (counts / batch event count); this fixed floor is what makes them "
-            "batch-size INVARIANT. The old constant '+1' count floor had an effective "
-            "rate floor 1/N that shrank with batch size N, so sparse data regions (lepton "
-            "bins, forward |eta| HCal neutral hadrons) where the trainee still predicted a "
-            "count grew with N. A region with rate << this floor is regularized; a region "
-            f"with rate >> it is unchanged. Default {COUNT_RATE_FLOOR}. Re-validate the "
-            "count/shape balance with MCGEN_LOSS_DEBUG=1 if you change it."
-        ),
-    )
-    parser.add_argument(
-        "--event-weight",
-        type=float,
-        default=EVENT_WEIGHT,
-        help=(
-            "Weight on the per-event log(HT) Wasserstein term, relative to the "
-            f"per-pid object terms. Default {EVENT_WEIGHT}."
-        ),
-    )
-    parser.add_argument(
-        "--pid-weighting",
-        type=str,
-        default="equal",
-        choices=list(PID_WEIGHTING_CHOICES),
-        help=(
-            "Per-pid population weighting of the per-species SHAPE terms (count and "
-            "log(HT) terms are untouched). 'equal' (default) weights every particle type "
-            "the same -- so rare species (muon ~0.2%%, electron ~0.5%%) cost the optimizer "
-            "as much as the abundant charged/neutral hadrons and photons. 'fraction' "
-            "down-weights each pid by its population fraction (aggressive: rare species "
-            "~100-250x lighter, which effectively FREEZES their momentum-smearing params). "
-            "'sqrt_fraction' down-weights by sqrt(fraction) (gentle: rare species ~8-20x "
-            "lighter but still learnable -- the recommended mode when training "
-            "muon/electron smearing). Weights are mean-1 normalized, so only the "
-            "cross-species balance changes, not the overall shape-vs-count balance."
-        ),
-    )
-    parser.add_argument(
-        "--pid-weight-floor",
-        type=float,
-        default=0.0,
-        help=(
-            "Lower clamp on the per-pid shape weight (default 0.0 = off), re-normalized to "
-            "keep the mean-1 invariant. A small floor (e.g. 0.1) protects a rare species' "
-            "gradient in a low-statistics batch. Only meaningful with --pid-weighting "
-            "fraction/sqrt_fraction."
-        ),
-    )
-    parser.add_argument(
-        "--eta-split",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Split the per-pid log_E / log_pt shape terms of the per-pid losses "
-            "(soft_hist, wasserstein_1d) by reco |eta| region (edges 0.5/1.5/2.5 = the "
-            "tracker smearing regions), one term per (pid, obs, region) weighted by the "
-            "target population fraction. Default ON. --no-eta-split reproduces the old "
-            "pooled terms bit-for-bit. Losses are NOT comparable across this switch."
-        ),
-    )
-    parser.add_argument(
-        "--pair-mass",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Add the per-event pair-mass shape terms (m_ee, m_mumu, m_hh from the two "
-            "leading-pt objects of each class under the class mass hypothesis, per "
-            "|eta|-region pair) to the per-pid losses. On a resonance-gun sample the peak "
-            "width is the track resolution -- the only 1-D lever on a_raw / b_raw. "
-            "Default ON. Losses are NOT comparable across this switch."
-        ),
-    )
-    parser.add_argument(
-        "--pair-mass-weight",
-        type=float,
-        default=PAIR_MASS_WEIGHT,
-        help=f"Weight of every pair-mass term (default {PAIR_MASS_WEIGHT}).",
-    )
-    parser.add_argument(
         "--mode",
         choices=MODE_CHOICES,
         default=DEFAULT_MODE,
@@ -272,7 +129,7 @@ def main() -> None:
             "Target flavour. fullsim (default): apply --truth-pt-cut/--reco-pt-cut/"
             "--eta-cut, the chad truncation and the photon merger so the trainee "
             "matches the CMS selection + supercluster scale. delphes: no acceptance "
-            "cuts, no chad truncation, count terms ungated, photon merger OFF "
+            "cuts, no chad truncation, photon merger OFF "
             "(those flags incl. --photon-merge-radius are ignored) -- diff-Delphes "
             "has to reproduce Delphes as-is."
         ),
@@ -297,9 +154,8 @@ def main() -> None:
             "Reco acceptance: keep reco objects (ALL classes) with pt >= this "
             "and |eta| <= --eta-cut, applied to BOTH the pflow target (at load "
             "time; no-op on pre-cut files) and the trainee output (at loss "
-            "time; a real cut: sub-GeV photons, forward NH). Also gates the "
-            "differentiable count terms and sets the floor for the "
-            f"n_truth_chad truncation ceiling. Default {DEFAULT_RECO_PT_CUT}. "
+            "time; a real cut: sub-GeV photons, forward NH). Also sets the floor "
+            f"for the n_truth_chad truncation ceiling. Default {DEFAULT_RECO_PT_CUT}. "
             "<= 0 disables the pt part. NOTE: losses are not comparable "
             "across different cut settings."
         ),
@@ -309,8 +165,8 @@ def main() -> None:
         type=float,
         default=DEFAULT_ABS_ETA_CUT,
         help=(
-            "|eta| acceptance bound shared by the truth and reco cuts (and the "
-            f"calo count regions). Default {DEFAULT_ABS_ETA_CUT}, matching the "
+            "|eta| acceptance bound shared by the truth and reco cuts. "
+            f"Default {DEFAULT_ABS_ETA_CUT}, matching the "
             "preprocessing of the _selected files. <= 0 disables."
         ),
     )
@@ -332,8 +188,7 @@ def main() -> None:
         default=DEFAULT_PHOTON_MERGE_RADIUS,
         help=(
             "PhotonClusterMerger seed-cone radius: greedy dR merging of the "
-            "eflow photon stream (CMS supercluster scale), with the ecal_photon "
-            "count term recomputed from the merged clusters. Frozen constant "
+            "eflow photon stream (CMS supercluster scale). Frozen constant "
             f"(not fitted). Default {DEFAULT_PHOTON_MERGE_RADIUS}. <= 0 "
             "disables; ignored (merger OFF) in --mode delphes. Losses are not "
             "comparable across different settings."
@@ -475,10 +330,8 @@ def main() -> None:
 
     # Ragged (no global padding): truth particles are kept as a per-event list and
     # each batch is padded to its own max in delphes_collate_fn. Padding every event
-    # to the GLOBAL max multiplicity here would allocate ~50 GB at 100k events. The
-    # target carries the per-reco-bin per-species counts (chad/electron/muon
-    # _region_counts) the differentiable count terms match against. Shared with the
-    # Optuna search via tune_cms_fullsim.runner.
+    # to the GLOBAL max multiplicity here would allocate ~50 GB at 100k events.
+    # Shared with the Optuna search via tune_cms_fullsim.runner.
     train_dataset, val_dataset = load_split_datasets(
         root_file,
         n_events=args.n_events,
@@ -517,14 +370,9 @@ def main() -> None:
         train_sampler = None
         val_sampler = None
 
-    # Batch size: for wasserstein / wasserstein_1d, divide by world_size so
-    # that after all_gather the combined batch matches the single-process
-    # case. For soft_hist, use the full batch size — the loss does not need
-    # all_gather and benefits from larger per-rank batches.
-    if args.loss in ("wasserstein", "wasserstein_1d"):
-        batch_size = max(1, 4096 // world_size)
-    else:
-        batch_size = 4096
+    # Batch size: divide by world_size so that after all_gather the combined
+    # batch matches the single-process case.
+    batch_size = max(1, 4096 // world_size)
 
     train_dataloader = DelphesDataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, sampler=train_sampler
@@ -538,12 +386,7 @@ def main() -> None:
     trainee = CMSEnergyFlowDefault(
         debug=False,
         learnable=True,
-        # Harmonize the differentiable count terms with the reco acceptance cut
-        # (tracking expected counts + calo soft counts; object creation untouched).
-        count_pt_min=reco_pt_cut,
-        count_abs_eta_max=abs_eta_cut,
-        # Supercluster-scale photon merging (frozen radius; the ecal_photon
-        # count term is recomputed from the merged clusters inside the card).
+        # Supercluster-scale photon merging (frozen radius).
         photon_merger=(
             PhotonClusterMerger(photon_merge_radius)
             if photon_merge_radius is not None
@@ -575,8 +418,8 @@ def main() -> None:
         # can run with find_unused_parameters disabled.
         ddp_kwargs["find_unused_parameters"] = False
         trainee = DDP(trainee, **ddp_kwargs)
-        # For Wasserstein+DDP, use separate RNGs to efficiently sample unit-vectors
-        if args.loss in ("wasserstein", "wasserstein_1d") and _is_dist():
+        # Under DDP, decorrelate the per-rank RNG streams.
+        if _is_dist():
             torch.manual_seed(args.seed + rank)
             import numpy as np
             np.random.seed(args.seed + rank)
@@ -623,16 +466,6 @@ def main() -> None:
         lr_scheduler_patience=(
             args.lr_scheduler_patience if args.lr_scheduler_patience > 0 else None
         ),
-        count_weight=args.count_weight,
-        calo_count_weight=args.calo_count_weight,
-        count_rate_floor=args.count_rate_floor,
-        event_weight=args.event_weight,
-        loss_name=args.loss,
-        pid_weighting=args.pid_weighting,
-        pid_weight_floor=args.pid_weight_floor,
-        eta_split=args.eta_split,
-        pair_mass=args.pair_mass,
-        pair_mass_weight=args.pair_mass_weight,
         reco_pt_cut=reco_pt_cut,
         reco_abs_eta_cut=abs_eta_cut,
         truncate_chads=truncate_chads,
@@ -672,12 +505,6 @@ def main() -> None:
             "eta_cut": abs_eta_cut,
             "chad_truncation": truncate_chads,
             "photon_merge_radius": photon_merge_radius,
-            # Loss-definition switches (per-pid losses only). Losses are NOT
-            # comparable across different settings.
-            "loss": args.loss,
-            "eta_split": bool(args.eta_split),
-            "pair_mass": bool(args.pair_mass),
-            "pair_mass_weight": args.pair_mass_weight,
         }
         # The {metadata, history, best_result} schema (best = min val loss) is the
         # single source of truth shared with the Optuna search and consumed by
