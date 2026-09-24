@@ -74,6 +74,10 @@ from . import pdg_filters
 # multiplied into these (and only these) so that masked particles become
 # "invisible" to downstream tracking-side code while leaving the calorimeter
 # input (which uses the unfiltered particles tensor) untouched.
+# Clamp applied to the per-particle efficiency before it is used as a coin probability
+# (Gumbel logit) and in the coin log-weight (same value, so the two stay consistent).
+_COIN_EPS: float = 1e-6
+
 _MOMENTUM_COLS: tuple[int, ...] = (
     int(ColumnMap.PT),
     int(ColumnMap.PX),
@@ -500,7 +504,7 @@ class _LearnableEfficiencyBase(nn.Module):
           Gumbel noise and is what makes ``sigmoid((logits + L) / tau)``
           converge to ``Bernoulli(eff)`` as ``tau -> 0``.
         """
-        eps = 1e-6
+        eps = _COIN_EPS
         eff_c = eff.clamp(eps, 1.0 - eps)
         logits = torch.log(eff_c) - torch.log1p(-eff_c)
         u = torch.rand_like(logits).clamp(eps, 1.0 - eps)
@@ -537,7 +541,36 @@ class _LearnableEfficiencyBase(nn.Module):
             mask.unsqueeze(1).to(particles.dtype),  # (N, 1)
             torch.ones((), dtype=particles.dtype, device=particles.device),
         )
-        return particles * multiplier
+        out = particles * multiplier
+        # Per-object coin log-weight for the critic loss (value exactly 0; only its
+        # autograd graph matters). Skipped under no_grad (generation, validation) and
+        # when the efficiency block is frozen, so those paths stay bit-identical and free.
+        if torch.is_grad_enabled() and eff.requires_grad:
+            out = self._write_coin_log_weight(out, eff, mask)
+        return out
+
+    @staticmethod
+    def _write_coin_log_weight(
+        particles: torch.Tensor, eff: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Write ``log p(m) - stopgrad(log p(m))`` of the sampled coin into
+        ``ColumnMap.LOG_OBJ_WEIGHT`` (critic_loss_plan.md, step 2).
+
+        ``p(1) = eff`` on alive rows, ``p(0) = 1 - eff`` on killed rows: the value is
+        exactly 0.0 (the forward stays byte-identical) and the gradient w.r.t. ``eff``
+        is ``+1/eff`` (alive) / ``-1/(1 - eff)`` (killed) -- the score of the coin that
+        was actually drawn, i.e. the likelihood-ratio weight ``p(m)/stopgrad(p(m))`` in
+        log form. Killed rows keep it so the calorimeter can fold it into the
+        neutral-excess object of their tower. Rows outside every efficiency region
+        (``eff == 0``: the pt / eta_outer acceptance, geometry not a coin) get 0 with
+        no gradient. Functional column write (``torch.where``), like ``_tag_eff_region``.
+        """
+        eff_c = eff.clamp(_COIN_EPS, 1.0 - _COIN_EPS)  # same clamp as the coin itself
+        log_p = torch.where(mask > 0, torch.log(eff_c), torch.log1p(-eff_c))
+        logw = torch.where(eff.detach() > 0, log_p - log_p.detach(), torch.zeros_like(log_p))
+        is_col = torch.zeros(particles.shape[1], dtype=torch.bool, device=particles.device)
+        is_col[ColumnMap.LOG_OBJ_WEIGHT] = True
+        return torch.where(is_col.unsqueeze(0), logw.unsqueeze(1).to(particles.dtype), particles)
 
 
 class CMSChargedHadronLearnableEfficiency(_LearnableEfficiencyBase):

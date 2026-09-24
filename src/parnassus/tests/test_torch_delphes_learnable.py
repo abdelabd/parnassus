@@ -722,3 +722,64 @@ def test_tune_cms_to_target_moves_charged_hadron_scale_toward_target():
     assert dist_after < 0.7 * dist_before, (
         f"L1 distance did not improve enough: before={dist_before:.3g}, after={dist_after:.3g}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. Per-object coin log-weight (critic_loss_plan.md, step 2)
+# ---------------------------------------------------------------------------
+
+
+def test_coin_log_weight_keeps_forward_byte_identical():
+    """With grad enabled the ``LOG_OBJ_WEIGHT`` column is written (value exactly 0)
+    and every other column of every output is bit-equal to the no-grad forward;
+    under ``no_grad`` the column is left untouched (still 0, no graph)."""
+    particles = _make_batch(n=200, seed=11)
+    outs = {}
+    for grad in (False, True):
+        torch.manual_seed(11)
+        card = CMSEnergyFlowDefault(debug=False, learnable=True)
+        torch.manual_seed(11)
+        with torch.set_grad_enabled(grad):
+            outs[grad] = card(particles.clone())
+    for key, ref in outs[False].items():
+        got = outs[True][key]
+        if ref.ndim != 2:
+            continue
+        w = ColumnMap.LOG_OBJ_WEIGHT
+        assert torch.equal(got[:, :w], ref[:, :w]), key
+        assert torch.all(ref[:, w] == 0.0) and torch.all(got[:, w] == 0.0), key
+    assert outs[True]["EFlowObject"][:, ColumnMap.LOG_OBJ_WEIGHT].requires_grad
+    assert not outs[False]["EFlowObject"][:, ColumnMap.LOG_OBJ_WEIGHT].requires_grad
+
+
+def test_coin_log_weight_gradient_matches_closed_form():
+    """``d/d eff_logits[r] sum(LOG_OBJ_WEIGHT) == n_alive_r (1 - eff_r) - n_dead_r eff_r``
+    with the counts taken from the sampled mask (alive ``+1/eff``, killed
+    ``-1/(1-eff)``, times ``d sigmoid = eff (1 - eff)``); rows outside every region
+    contribute nothing."""
+    torch.manual_seed(3)
+    module = CMSChargedHadronLearnableEfficiency()
+    n = 4000
+    arr = torch.zeros(n, N_FEATURES, dtype=torch.float64)
+    arr[:, ColumnMap.PT] = torch.rand(n, dtype=torch.float64) * 5.0  # spans the 0.1 / 1.0 pt edges
+    arr[:, ColumnMap.ETA_OUTER] = (torch.rand(n, dtype=torch.float64) - 0.5) * 6.0  # up to |3| > 2.5
+    arr[:200, ColumnMap.PT] = 0.05  # below the lowest pt edge: in no region
+    arr[:, ColumnMap.E] = arr[:, ColumnMap.PT]
+    pt, eta_outer = arr[:, ColumnMap.PT].clone(), arr[:, ColumnMap.ETA_OUTER].clone()
+
+    out = module(arr)
+    logw = out[:, ColumnMap.LOG_OBJ_WEIGHT]
+    assert torch.all(logw == 0.0)
+    logw.sum().backward()
+
+    alive = out[:, ColumnMap.PT] != 0
+    region = module.region_index_1based(pt, eta_outer)  # 1..4, 0 outside
+    assert int((region == 0).sum()) > 0
+    eff = module.get_efficiencies().detach()
+    expected = torch.zeros_like(eff)
+    for r in range(module.region_spec.n_regions):
+        in_r = region == r + 1
+        n_alive = (in_r & alive).sum().to(eff.dtype)
+        n_dead = (in_r & ~alive).sum().to(eff.dtype)
+        expected[r] = n_alive * (1.0 - eff[r]) - n_dead * eff[r]
+    assert torch.allclose(module.eff_logits.grad, expected, rtol=1e-9, atol=1e-9)
