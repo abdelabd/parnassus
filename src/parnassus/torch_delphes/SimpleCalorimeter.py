@@ -428,6 +428,20 @@ class SimpleCalorimeter(nn.Module):
         tower_track_energy.scatter_add_(
             0, track_compact_idx[valid_track_mask], track_weighted_energy[valid_track_mask]
         )
+        # Per-tower sum of the tracks' coin log-weights (critic_loss_plan.md, step 3).
+        # The neutral-excess object of a tower depends on the coins of every track
+        # binned into it (alive: subtracted; killed: its deposit stays), so it inherits
+        # their summed log-weight. Same mask as the energy sum: bypass tracks are
+        # excluded, killed rows (energy 0, still binned) are included. The value is
+        # exactly 0; only the autograd graph matters, hence skipped outside grad mode.
+        tower_logw = None
+        if torch.is_grad_enabled():
+            tower_logw = torch.zeros(n_towers, dtype=torch.float64, device=particles.device)
+            tower_logw.scatter_add_(
+                0,
+                track_compact_idx[valid_track_mask],
+                tracks[valid_track_mask, ColumnMap.LOG_OBJ_WEIGHT].to(torch.float64),
+            )
 
         # 4b. Compute Time-Weighted Average per Tower ########
         # C++: fTowerTime += energy * energy * position.T();  // sigma_t ~ 1/E
@@ -1087,6 +1101,11 @@ class SimpleCalorimeter(nn.Module):
 
             # Set EVENT_NUMBER from tower's event (supports batched multi-event processing)
             eflow_excess_neutrals[:, ColumnMap.EVENT_NUMBER] = eflow_tower_event_num
+
+            # Coin log-weight inherited from the tower's tracks (step 3); stays 0
+            # (== weight 1) outside grad mode.
+            if tower_logw is not None:
+                eflow_excess_neutrals[:, ColumnMap.LOG_OBJ_WEIGHT] = tower_logw[significant_neutral]
 
         # Return results
         return eflow_tracks, towers, eflow_excess_neutrals, expected_calo_counts, count_export

@@ -783,3 +783,97 @@ def test_coin_log_weight_gradient_matches_closed_form():
         n_dead = (in_r & ~alive).sum().to(eff.dtype)
         expected[r] = n_alive * (1.0 - eff[r]) - n_dead * eff[r]
     assert torch.allclose(module.eff_logits.grad, expected, rtol=1e-9, atol=1e-9)
+
+
+def _calo_rows(specs, *, tracks: bool) -> torch.Tensor:
+    """Hand-built calorimeter input rows: ``specs`` = (pid, charge, energy, eta, phi).
+    Straight rows at the calorimeter surface (ETA/PHI == ETA_OUTER/PHI_OUTER), one event.
+    Track rows with energy 0 are efficiency-killed ghosts (momentum zeroed, still binned).
+    """
+    arr = torch.zeros(len(specs), N_FEATURES, dtype=torch.float64)
+    for i, (pid, charge, e, eta, phi) in enumerate(specs):
+        pt = e / math.cosh(eta)
+        arr[i, ColumnMap.PID] = pid
+        arr[i, ColumnMap.CHARGE] = charge
+        arr[i, ColumnMap.STATUS] = 1.0
+        arr[i, ColumnMap.E] = e
+        arr[i, ColumnMap.PT] = pt
+        arr[i, ColumnMap.PX] = pt * math.cos(phi)
+        arr[i, ColumnMap.PY] = pt * math.sin(phi)
+        arr[i, ColumnMap.PZ] = pt * math.sinh(eta)
+        arr[i, ColumnMap.ETA] = eta
+        arr[i, ColumnMap.PHI] = phi
+        arr[i, ColumnMap.ETA_OUTER] = eta
+        arr[i, ColumnMap.PHI_OUTER] = phi
+        if tracks:
+            arr[i, ColumnMap.TRACK_RESOLUTION] = 0.02
+    return arr
+
+
+@pytest.mark.parametrize("calo", ["HCal", "ECal"])
+def test_neutral_excess_inherits_tower_coin_log_weights(calo: str) -> None:
+    """The emitted neutral-excess object of a tower carries the SUM of the coin
+    log-weights of the tracks binned into that tower (alive and killed), and none
+    from bypass tracks (muons everywhere; charged hadrons in the ECal) or from
+    tracks in other towers. Synthetic non-zero column values make the sum visible.
+    """
+    torch.manual_seed(5)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    eta, phi = 0.05, 0.05  # inside one barrel tower (0 is a bin edge in both)
+    if calo == "HCal":
+        module, depositor, subtracting, bypass = card.HCal, 130, 211, 13  # K_L; pion; muon
+    else:
+        module, depositor, subtracting, bypass = card.ECal, 22, 11, 211  # photon; electron; pion
+    # Tracks: two alive subtracting tracks + one killed (energy 0) in the tower, one
+    # bypass track in the tower, one subtracting track in another tower.
+    tracks = _calo_rows(
+        [
+            (subtracting, 1.0, 20.0, eta, phi),
+            (subtracting, -1.0, 20.0, eta, phi),
+            (subtracting, 1.0, 0.0, eta, phi),  # killed ghost
+            (bypass, 1.0, 20.0, eta, phi),
+            (subtracting, 1.0, 20.0, 1.0, phi),  # other tower
+        ],
+        tracks=True,
+    )
+    logw = torch.tensor([0.3, -0.2, 0.7, 0.5, 0.1], dtype=torch.float64, requires_grad=True)
+    tracks[:, ColumnMap.LOG_OBJ_WEIGHT] = logw
+    # Particles: every charged particle deposits regardless of its coin, plus a big
+    # neutral deposit so the excess is significant whatever the smear draw.
+    particles = _calo_rows(
+        [
+            (subtracting, 1.0, 20.0, eta, phi),
+            (subtracting, -1.0, 20.0, eta, phi),
+            (subtracting, 1.0, 20.0, eta, phi),
+            (bypass, 1.0, 20.0, eta, phi),
+            (subtracting, 1.0, 20.0, 1.0, phi),
+            (depositor, 0.0, 200.0, eta, phi),
+        ],
+        tracks=False,
+    )
+
+    _tracks_out, _towers, neutrals, _counts, _export = module(particles, tracks)
+    in_tower = neutrals[:, ColumnMap.ETA].abs() < 0.5
+    assert int(in_tower.sum()) == 1, "expected exactly one neutral object in the test tower"
+    got = neutrals[in_tower, ColumnMap.LOG_OBJ_WEIGHT]
+    assert torch.allclose(got, torch.tensor([0.3 - 0.2 + 0.7], dtype=torch.float64))
+    got.sum().backward()
+    assert torch.equal(logw.grad, torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0], dtype=torch.float64))
+
+
+def test_neutral_rows_column_reaches_track_efficiency_logits() -> None:
+    """Card level: the neutral rows' log-weight column back-propagates to the charged
+    hadron (HCal) and electron (ECal) efficiency logits and never to the muon ones."""
+    torch.manual_seed(21)
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    out = card(_make_batch(n=400, seed=21))
+    obj = out["EFlowObject"]
+    neutral = obj[:, ColumnMap.CHARGE] == 0
+    obj[neutral, ColumnMap.LOG_OBJ_WEIGHT].sum().backward()
+    grads = {
+        name: p.grad for name, p in card.named_parameters() if name.endswith("eff_logits")
+    }
+    assert grads["ChargedHadronTrackingEfficiency.eff_logits"].abs().sum() > 0
+    assert grads["ElectronTrackingEfficiency.eff_logits"].abs().sum() > 0
+    mu = grads["MuonTrackingEfficiency.eff_logits"]
+    assert mu is None or float(mu.abs().sum()) == 0.0
