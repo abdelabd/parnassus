@@ -507,7 +507,7 @@ def fit_card_to_fullsim(
             mask = torch.any(truth_particles != 0, dim=-1) # shape is (batch_size, n_particles)
             truth_particles_nonpadded = truth_particles[mask]
             
-            # out["EFlowObject"] has shape (all objects, 20 features)
+            # out["EFlowObject"] has shape (all objects, N_FEATURES)
             out = card(truth_particles_nonpadded)
 
             # first restore the (events, objects, features) shape by grouping with

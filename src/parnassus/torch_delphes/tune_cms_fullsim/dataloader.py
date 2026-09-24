@@ -7,7 +7,7 @@ its own max multiplicity in :func:`delphes_collate_fn`. This is numerically
 identical to padding every event to the GLOBAL max multiplicity (the padded
 slots are all-zero, so the fit loop's ``any(... != 0)`` truth mask and the loss's
 ``pid == 0`` drop behave the same) but uses an order of magnitude less memory --
-the dense global padding allocates ~100k x ~3000 x 21 x 8 B ~ 50 GB up front,
+the dense global padding allocates ~100k x ~3000 x N_FEATURES x 8 B ~ 50 GB up front,
 which the fit loop then immediately un-pads.
 """
 import torch

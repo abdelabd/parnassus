@@ -54,6 +54,17 @@ class ColumnMap(IntEnum):
     # loss can build the reco-bin <- pre-reco-region migration for the differentiable
     # charged-hadron count term. Default 0 everywhere else.
     EFF_REGION = 20
+    # Per-object LOG weight for the critic loss (critic_loss_plan.md). Convention:
+    # the stored value is log(w) with w the object's mass in the loss, so 0.0 means
+    # weight 1 and every row created from ``torch.zeros`` is a full-weight object by
+    # default (padding / killed ghosts are excluded by ``pt != 0`` as before). The
+    # FORWARD value is always exactly 0.0: only the autograd graph behind it carries
+    # the likelihood-ratio gradient of the tracking-efficiency coins the object depends
+    # on (alive ``log eff - sg(log eff)``, dead ``log(1-eff) - sg(log(1-eff))``, summed
+    # over the tracks of a tower for neutral-excess objects). Generation, plotting and
+    # every ROOT writer read named kinematic columns only and never see it. Never
+    # multiply this column into any kinematic column.
+    LOG_OBJ_WEIGHT = 21
 
 
 # Number of features per particle
