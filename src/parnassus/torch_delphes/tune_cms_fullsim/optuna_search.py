@@ -668,7 +668,10 @@ def main() -> None:
         help="Where the BEST trial's history.json is copied (the file plot_fit_results consumes).",
     )
     parser.add_argument("--n-events", type=int, default=-1)
-    parser.add_argument("--n-steps", type=int, default=200)
+    parser.add_argument(
+        "--n-steps", type=int, default=100,
+        help="Cap on the full-lr epochs; a 10-epoch cosine tail follows the monitor plateau or this cap. Default 100.",
+    )
     parser.add_argument(
         "--seed",
         type=int,
@@ -718,6 +721,16 @@ def main() -> None:
         "--comet-disabled",
         action="store_true",
         help="Disable Comet logging even when COMET_API_KEY is set.",
+    )
+    parser.add_argument(
+        "--truth-config",
+        type=str,
+        default=None,
+        help=(
+            "Param config the pseudodata was generated with (partial configs allowed: "
+            "unlisted scalars are the card defaults). When given, the fit prints every "
+            "fitted parameter next to its truth value at the end of each epoch."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -775,17 +788,6 @@ def main() -> None:
         type=int,
         default=10,
         help="Per-trial early stopping; epochs of no val improvement before stopping (<=0 disables). Default 10.",  # noqa: E501
-    )
-    parser.add_argument(
-        "--lr-scheduler-patience",
-        type=int,
-        default=0,
-        help=(
-            "Per-trial ReduceLROnPlateau patience; <=0 DISABLES lr decay, the default "
-            "here. The study searches the per-group lr, so decaying it mid-fit would "
-            "make the sampled value a mere starting point -- and the decay only goes "
-            "down, which silently rescues too-high lrs and biases the search."
-        ),
     )
     args = parser.parse_args()
 
@@ -866,8 +868,7 @@ def main() -> None:
         f"batch={global_batch_size} global ({batch_size}/rank) mode={args.mode} "
         f"truth_pt_cut={truth_pt_cut} reco_pt_cut={reco_pt_cut} "
         f"eta_cut={abs_eta_cut} chad_truncation={'ON' if truncate_chads else 'OFF'} "
-        f"photon_merge_radius={f'[{r_lo}, {r_hi}]' if search_radius else 'OFF (delphes)'} "
-        f"lr_decay={'ON' if args.lr_scheduler_patience > 0 else 'OFF'}"
+        f"photon_merge_radius={f'[{r_lo}, {r_hi}]' if search_radius else 'OFF (delphes)'}"
     )
     log(
         f"[optuna] search space: 3 group lrs + {'radius + ' if search_radius else ''}"
@@ -958,6 +959,15 @@ def main() -> None:
                 PhotonClusterMerger(merge_radius) if merge_radius is not None else None
             ),
         ).to(device)
+        # Truth values of the fitted scalars for the per-epoch print (partial
+        # generation config over the FRESH card defaults, so it must be read before
+        # the trial config is applied to the trainee).
+        truth_values = None
+        if args.truth_config is not None:
+            truth_cfg = pc.load_param_config_over_defaults(args.truth_config, trainee)
+            truth_values = {
+                k: float(truth_cfg[k]["value"]) for k, spec in cfg.items() if spec["trainable"]
+            }
         pc.apply_param_config(trainee, cfg)
         # cfg's lr_scale already holds each group's ABSOLUTE lr, so global_lr = 1.
         params_to_train, param_groups = pc.select_trainable(trainee, cfg, global_lr=1.0)
@@ -1021,9 +1031,7 @@ def main() -> None:
             early_stopping_patience=(
                 args.early_stopping_patience if args.early_stopping_patience > 0 else None
             ),
-            lr_scheduler_patience=(
-                args.lr_scheduler_patience if args.lr_scheduler_patience > 0 else None
-            ),
+            truth_values=truth_values,
             reco_pt_cut=reco_pt_cut,
             reco_abs_eta_cut=abs_eta_cut,
             truncate_chads=truncate_chads,
@@ -1134,7 +1142,6 @@ def main() -> None:
             "seed": args.seed,
             "world_size": world_size,
             "early_stopping_patience": max(0, args.early_stopping_patience),
-            "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
             # --mode + acceptance cuts + truncation (resolved values; None =
             # disabled). Losses are NOT comparable across different settings.
             "mode": args.mode,

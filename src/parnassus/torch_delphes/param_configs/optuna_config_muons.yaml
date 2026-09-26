@@ -5,7 +5,7 @@ search:
   lr:
     resolution: {low: 1.0e-4, high: 6.0e-3, log: true, init: 5.0e-3}
     scale:      {low: 3.0e-4, high: 6.0e-3, log: true, init: 2.0e-3}
-    efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 1.5e-2}
+    efficiency: {low: 1.0e-3, high: 2.0e-2, log: true, init: 5.0e-3}
   # Required by the loader; ignored (merger OFF) in --mode delphes.
   photon_merge_radius: {low: 0.0, high: 0.1, init: 0.045}
 

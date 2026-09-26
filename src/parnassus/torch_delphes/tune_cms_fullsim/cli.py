@@ -109,7 +109,10 @@ def main() -> None:
         ),
     )
     parser.add_argument("--n-events", type=int, default=-1)
-    parser.add_argument("--n-steps", type=int, default=200)
+    parser.add_argument(
+        "--n-steps", type=int, default=100,
+        help="Cap on the full-lr epochs; a 10-epoch cosine tail follows the monitor plateau or this cap. Default 100.",
+    )
     parser.add_argument(
         "--lr",
         type=float,
@@ -251,18 +254,6 @@ def main() -> None:
             "Stop after this many epochs with no val_loss improvement. Pass a "
             "value <= 0 to disable early stopping (always run the full "
             "--n-steps). Default 10."
-        ),
-    )
-    parser.add_argument(
-        "--lr-scheduler-patience",
-        type=int,
-        default=4,
-        help=(
-            "Patience for the ReduceLROnPlateau lr decay (epochs of no val_loss "
-            "improvement before the lr is halved). Pass a value <= 0 to disable "
-            "lr decay entirely and train at a constant lr -- recommended for "
-            "single-parameter closure fits, where the stochastic loss otherwise "
-            "collapses the lr before convergence. Default 4."
         ),
     )
     parser.add_argument(
@@ -459,12 +450,9 @@ def main() -> None:
         device=device,
         intermediate_plot_dir=args.intermediate_plot_dir,
         plot_every=args.plot_every,
-        # <= 0 on the CLI means "disable" (None) for both knobs.
+        # <= 0 on the CLI means "disable" (None).
         early_stopping_patience=(
             args.early_stopping_patience if args.early_stopping_patience > 0 else None
-        ),
-        lr_scheduler_patience=(
-            args.lr_scheduler_patience if args.lr_scheduler_patience > 0 else None
         ),
         reco_pt_cut=reco_pt_cut,
         reco_abs_eta_cut=abs_eta_cut,
@@ -496,7 +484,6 @@ def main() -> None:
             # Optimizer-schedule knobs (recorded so runs are reproducible and the
             # notebook cache key can detect changes). 0 = disabled.
             "early_stopping_patience": max(0, args.early_stopping_patience),
-            "lr_scheduler_patience": max(0, args.lr_scheduler_patience),
             # --mode + acceptance cuts + truncation (resolved values; None =
             # disabled). Losses are NOT comparable across different settings.
             "mode": args.mode,

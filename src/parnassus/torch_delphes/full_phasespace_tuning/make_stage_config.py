@@ -42,11 +42,13 @@ from parnassus.torch_delphes.defaults.CMSDefault import CMSEnergyFlowDefault
 from parnassus.torch_delphes.tune_cms_fullsim.optuna_search import LR_GROUPS, _group_of
 
 # Absolute per-group Adam learning rates (used with ``--lr 1``): the seed-trial values
-# of the optuna configs, i.e. what every M1-M3 / dijet reference fit ran with.
+# of the optuna configs. Efficiency 1.5e-2 -> 5e-3 with the Wasserstein critic (2026-09-25):
+# Adam moves a logit by ~lr per update, and 69 updates at 1.5e-2 crossed the truth in
+# three epochs and oscillated (critic_loss_plan.md, first muon-gun run).
 DEFAULT_GROUP_LR: dict[str, float] = {
     "resolution": 4.9e-3,
     "scale": 1.9e-3,
-    "efficiency": 1.5e-2,
+    "efficiency": 5.0e-3,
 }
 PICK_CHOICES: tuple[str, ...] = ("last", "best")
 

@@ -187,14 +187,10 @@ def build_history_payload(history: dict[str, list], metadata: dict) -> dict:
         for i in range(len(steps))
     }
 
-    # Best epoch = minimum validation loss; fall back to the last epoch when no
-    # val loss was recorded.
-    if val_losses:
-        best_i: int | None = min(range(len(val_losses)), key=lambda i: val_losses[i])
-    elif steps:
-        best_i = len(steps) - 1
-    else:
-        best_i = None
+    # Reported epoch = the LAST one: every fit ends with the annealed cosine tail
+    # (``training.LR_TAIL_EPOCHS``), so the last epoch is the converged one. The
+    # per-epoch monitor values stay in ``history`` for inspection.
+    best_i: int | None = len(steps) - 1 if steps else None
 
     if best_i is None:
         best_result: dict = {}

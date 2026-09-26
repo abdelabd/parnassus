@@ -10,16 +10,20 @@
 # remaining YAMLs and pointing FROM_HISTORY at the previous stage's history.json.
 #
 # Environment overrides:
-#   SAMPLE_DIR      dir of the pseudo-data files   (default /global/cfs/cdirs/m3246/diff_delphes/allsamples)
+#   SEQ_SAMPLE_DIR  dir of the param_config_all pseudo-data files (default $SAMPLE_DIR/allsamples,
+#                   with SAMPLE_DIR from setup.sh's .config; setup.sh re-assigns SAMPLE_DIR itself,
+#                   so a plain SAMPLE_DIR override would be clobbered)
 #   SAMPLE_PATTERN  printf pattern with %s = process (default pseudo_data_200k_param_config_all_%s.root)
 #   OUT_BASE        output base dir                (default doc/figure_sequential, relative to $REPO)
 #   N_STEPS         epochs per stage               (default 100; the CLI's global batch is 4096)
 #   N_EVENTS        events per stage               (default -1 = all; small values for a dry run)
-#   NPROC           GPUs; >1 launches torchrun     (default 4; per-rank batch = 4096/NPROC)
-#   EARLY_STOP      early-stopping patience in epochs, 0 = off (default 10: the val loss of every
-#                   stage sits on a floor from the frozen species, so late epochs only track noise)
-#   PICK            best|last epoch carried to the next stage (default best = the early-stopping
-#                   checkpoint, i.e. what params_reg.pdf marks; last = the final epoch)
+#   NPROC           GPUs; >1 launches torchrun     (default 1; per-rank batch = 4096/NPROC.
+#                   The Wasserstein critic is not synchronised across ranks yet, so >1 is
+#                   not equivalent to a single-GPU fit)
+#   EARLY_STOP      patience in epochs on the held-out W1 monitor after which the fit anneals
+#                   (10-epoch cosine lr tail, then stops); 0 = anneal at N_STEPS (default 10)
+#   PICK            best|last epoch carried to the next stage (both = the final, annealed epoch
+#                   now that history.json reports the last epoch as best_result)
 #   PLOT            1 = plot each stage (params_reg.pdf + plot_fit_results figures; default 1)
 #   PLOT_N_EVENTS   cap on events used by plot_fit_results (default: full validation split)
 #   TRUTH_CONFIG    truth reference for the plots  (default param_configs/param_config_all.yaml)
@@ -29,12 +33,11 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/../../../.." && pwd)}"
-SAMPLE_DIR="${SAMPLE_DIR:-/global/cfs/cdirs/m3246/diff_delphes/allsamples}"
 SAMPLE_PATTERN="${SAMPLE_PATTERN:-pseudo_data_200k_param_config_all_%s.root}"
 OUT_BASE="${OUT_BASE:-$REPO/doc/figure_sequential}"
 N_STEPS="${N_STEPS:-100}"
 N_EVENTS="${N_EVENTS:--1}"
-NPROC="${NPROC:-4}"
+NPROC="${NPROC:-1}"
 EARLY_STOP="${EARLY_STOP:-10}"
 PICK="${PICK:-best}"
 PLOT="${PLOT:-1}"
@@ -51,6 +54,7 @@ fi
 
 # shellcheck disable=SC1091
 source "$REPO/setup.sh"
+SAMPLE_DIR="${SEQ_SAMPLE_DIR:-${SAMPLE_DIR:-/global/cfs/cdirs/m3246/diff_delphes}/allsamples}"
 MK="python -m parnassus.torch_delphes.full_phasespace_tuning.make_stage_config"
 if (( NPROC > 1 )); then
     LAUNCH="torchrun --standalone --nproc-per-node=$NPROC -m"
@@ -85,7 +89,7 @@ for stage in "${STAGES[@]}"; do
         --param-config "$rdir/materialized_config.yaml" \
         --lr 1 \
         --mode delphes \
-        --early-stopping-patience "$EARLY_STOP" --lr-scheduler-patience 0 \
+        --early-stopping-patience "$EARLY_STOP" \
         --n-events "$N_EVENTS" --n-steps "$N_STEPS" \
         --history-path "$rdir/history.json" \
         --intermediate-plot-dir "$rdir/intermediate_plots" \
