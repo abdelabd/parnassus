@@ -583,7 +583,9 @@ def test_survival_decided_on_unsmeared_pt(low_bin_survives: bool) -> None:
     (chad bin 0, (0.1, 1]) are smeared to ~1.17 GeV (bin 1) by a 1.3 momentum scale
     at ~zero resolution; bin 0 / bin 1 efficiencies are ~1 / ~0 (or the reverse), so
     the outcome tells which pt the decision used. Killed tracks must stay fully
-    zeroed (no rest-mass resurrection) and the EFF_REGION tag names the truth bin.
+    zeroed (no rest-mass resurrection), the EFF_REGION tag names the truth bin, and
+    the exported per-track survival probability (TrackSurvivalExport, the BCE eps)
+    is that same truth-bin efficiency.
     """
     torch.manual_seed(0)
     n = 50
@@ -612,8 +614,12 @@ def test_survival_decided_on_unsmeared_pt(low_bin_survives: bool) -> None:
         card.ChargedHadronTrackingEfficiency.eff_logits.copy_(
             torch.tensor([30.0, -30.0, 30.0, -30.0], dtype=torch.float64) * sign
         )
-    tracks = card(arr)["Track"]
+    out = card(arr)
+    tracks = out["Track"]
     assert tracks.shape[0] == n  # the learnable mask keeps rows
+    eps = out["TrackSurvivalExport"]["eps:chad"]
+    assert eps.shape == (n,)
+    assert ((eps > 0.99) if low_bin_survives else (eps < 0.01)).all(), "eps must use the truth bin"
     if low_bin_survives:
         assert (tracks[:, ColumnMap.PT] > 1.0).all(), "smeared pt should sit in bin 1"
         assert (tracks[:, ColumnMap.EFF_REGION] == 1).all(), "tag must name the truth bin"

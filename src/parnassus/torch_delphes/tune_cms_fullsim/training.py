@@ -104,7 +104,7 @@ def _inject_track_bce(
     mask: torch.Tensor,
 ) -> None:
     """--eff-loss bce: pair the card's per-track survival probabilities (its
-    ``TrackSurvivalExport``: per species, ``eps`` on the smeared pre-mask
+    ``TrackSurvivalExport``: per species, ``eps`` on the unsmeared (propagated)
     kinematics + each track's input-row UID) with the Hungarian survival labels of
     the same truth rows (``batch["bce_x"]``, row-aligned with ``truth_particles``
     and flattened by the same padding ``mask`` as the card input). The pred dict

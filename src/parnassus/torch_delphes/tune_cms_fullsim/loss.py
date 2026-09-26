@@ -777,7 +777,8 @@ def _bce_eff_terms(
 
     Pred side: ``pred["bce_eps:{species}"]`` — the card's per-track survival
     probabilities, i.e. the efficiency evaluated inside the forward on the same
-    smeared pre-mask kinematics the Gumbel mask samples from (so pt-dependent
+    unsmeared (propagated) kinematics the Gumbel mask samples from -- a function
+    of the truth row alone, so no bin migration vs the labels (so pt-dependent
     bins such as the muon > 1 TeV roll-off are modeled exactly, and every
     parameter of the efficiency gets the exact Bernoulli gradient). Target side:
     ``target["bce_x:{species}"]`` — the position-aligned Hungarian truth<->reco

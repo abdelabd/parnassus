@@ -402,31 +402,32 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         ])
 
         # Per-track survival probability eps = the efficiency evaluated on the
-        # PRE-mask smeared kinematics -- NOT the unsmeared kinematics the Gumbel
-        # mask decides on (a known mismatch, see
-        # full_phasespace_tuning/eff_fix_plan.md) -- keyed by species with each
-        # track's input-row UID
-        # (TrackSurvivalExport). Loss-serving only: --eff-loss bce pairs it with the
-        # per-row Hungarian survival labels; --calo-bce conditions the towers on
-        # it (row-aligned with merged_tracks: the mask keeps rows and this concat
-        # order matches the TrackMerger's).
+        # unsmeared (propagated) kinematics -- the very function the Gumbel mask
+        # samples from, and computable from the truth row alone -- keyed by species
+        # with each track's input-row UID (TrackSurvivalExport). Loss-serving only:
+        # --eff-loss bce pairs it with the per-row Hungarian survival labels;
+        # --calo-bce conditions the towers on it together with the PRE-mask
+        # smeared energy (row-aligned with merged_tracks: the mask keeps rows and
+        # this concat order matches the TrackMerger's).
         track_survival = None
         track_cond = None
         if self.learnable:
             species = (
-                ("chad", charged_hadrons_smeared_pre, self.ChargedHadronTrackingEfficiency),
-                ("electron", electrons_smeared_pre, self.ElectronTrackingEfficiency),
-                ("muon", muons_smeared_pre, self.MuonTrackingEfficiency),
+                ("chad", charged_hadrons_propagated, charged_hadrons_smeared_pre,
+                 self.ChargedHadronTrackingEfficiency),
+                ("electron", electrons_propagated, electrons_smeared_pre,
+                 self.ElectronTrackingEfficiency),
+                ("muon", muons_propagated, muons_smeared_pre, self.MuonTrackingEfficiency),
             )
             track_survival = {}
-            for key, pre, mod in species:
+            for key, prop, _pre, mod in species:
                 track_survival[f"eps:{key}"] = mod.compute_efficiency(
-                    pre[:, ColumnMap.PT], pre[:, ColumnMap.ETA_OUTER]
+                    prop[:, ColumnMap.PT], prop[:, ColumnMap.ETA_OUTER]
                 )
-                track_survival[f"uid:{key}"] = pre[:, ColumnMap.UID]
+                track_survival[f"uid:{key}"] = prop[:, ColumnMap.UID]
         if self.learnable and self.tower_bce:
-            eps = torch.cat([track_survival[f"eps:{key}"] for key, _pre, _mod in species])
-            e_pre = torch.cat([pre[:, ColumnMap.E] for _key, pre, _mod in species])
+            eps = torch.cat([track_survival[f"eps:{key}"] for key, *_ in species])
+            e_pre = torch.cat([pre[:, ColumnMap.E] for _key, _prop, pre, _mod in species])
             if self.tower_bce_grads == "detach":
                 eps, e_pre = eps.detach(), e_pre.detach()
             track_cond = {
