@@ -549,11 +549,16 @@ class _LearnableEfficiencyBase(nn.Module):
         return y_hard.detach() + (y_soft - y_soft.detach())
 
     # ----- forward: apply mask to momentum columns -----
-    def forward(self, particles: torch.Tensor) -> torch.Tensor:
+    def forward(self, particles: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
+        """Mask ``particles`` by a Bernoulli(eff) draw. The efficiency is evaluated
+        on ``kin`` (row-aligned with ``particles``; default ``particles`` itself), so
+        the card can decide survival on the unsmeared kinematics, as C++ Delphes
+        does, while applying the mask to the smeared rows."""
         if particles.shape[0] == 0:
             return particles
-        pt = particles[:, ColumnMap.PT]
-        eta_outer = particles[:, ColumnMap.ETA_OUTER]
+        kin = particles if kin is None else kin
+        pt = kin[:, ColumnMap.PT]
+        eta_outer = kin[:, ColumnMap.ETA_OUTER]
         eff = self.compute_efficiency(pt, eta_outer)
         # Detach the mask: the forward stays a hard ~Bernoulli(eff) sample, but no
         # gradient reaches eff_logits through this momentum multiply. The old

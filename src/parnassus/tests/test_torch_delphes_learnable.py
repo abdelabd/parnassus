@@ -576,6 +576,52 @@ def test_count_term_gradient_flows_to_eff_logits() -> None:
     assert any_nonzero, "no eff_logit received a count-term gradient"
 
 
+@pytest.mark.parametrize("low_bin_survives", [True, False])
+def test_survival_decided_on_unsmeared_pt(low_bin_survives: bool) -> None:
+    """The learnable card decides track survival on the UNSMEARED kinematics (C++
+    Delphes order) while applying the mask after smearing. Pions at truth pt 0.9 GeV
+    (chad bin 0, (0.1, 1]) are smeared to ~1.17 GeV (bin 1) by a 1.3 momentum scale
+    at ~zero resolution; bin 0 / bin 1 efficiencies are ~1 / ~0 (or the reverse), so
+    the outcome tells which pt the decision used. Killed tracks must stay fully
+    zeroed (no rest-mass resurrection) and the EFF_REGION tag names the truth bin.
+    """
+    torch.manual_seed(0)
+    n = 50
+    arr = torch.zeros(n, N_FEATURES, dtype=torch.float64)
+    pt, eta, phi = 0.9, 0.3, torch.linspace(-3.0, 3.0, n, dtype=torch.float64)
+    arr[:, ColumnMap.PT] = pt
+    arr[:, ColumnMap.ETA] = eta
+    arr[:, ColumnMap.PHI] = phi
+    arr[:, ColumnMap.PX] = pt * torch.cos(phi)
+    arr[:, ColumnMap.PY] = pt * torch.sin(phi)
+    arr[:, ColumnMap.PZ] = pt * math.sinh(eta)
+    arr[:, ColumnMap.MASS] = 0.14
+    arr[:, ColumnMap.E] = math.sqrt((pt * math.cosh(eta)) ** 2 + 0.14**2)
+    arr[:, ColumnMap.PID] = 211
+    arr[:, ColumnMap.CHARGE] = 1.0
+    arr[:, ColumnMap.STATUS] = 1
+
+    card = CMSEnergyFlowDefault(debug=False, learnable=True)
+    sign = 1.0 if low_bin_survives else -1.0
+    with torch.no_grad():
+        res = card.ChargedHadronMomentumSmearing.resolution_module
+        res.a_raw.fill_(-30.0)  # softplus -> ~0: no smearing width
+        res.b_raw.fill_(-30.0)
+        res.scale_raw.fill_(30.0)  # 1 + 0.3 tanh -> 1.3
+        # cms4 chad bins: (lowpt-barrel, highpt-barrel, lowpt-endcap, highpt-endcap)
+        card.ChargedHadronTrackingEfficiency.eff_logits.copy_(
+            torch.tensor([30.0, -30.0, 30.0, -30.0], dtype=torch.float64) * sign
+        )
+    tracks = card(arr)["Track"]
+    assert tracks.shape[0] == n  # the learnable mask keeps rows
+    if low_bin_survives:
+        assert (tracks[:, ColumnMap.PT] > 1.0).all(), "smeared pt should sit in bin 1"
+        assert (tracks[:, ColumnMap.EFF_REGION] == 1).all(), "tag must name the truth bin"
+    else:
+        for c in (ColumnMap.PT, ColumnMap.PX, ColumnMap.PY, ColumnMap.PZ, ColumnMap.E):
+            assert float(tracks[:, c].abs().max()) == 0.0, f"killed track has column {c} != 0"
+
+
 # ---------------------------------------------------------------------------
 # 4. Adam optimizer step moves loss downward
 # ---------------------------------------------------------------------------

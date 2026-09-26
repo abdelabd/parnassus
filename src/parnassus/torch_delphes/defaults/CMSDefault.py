@@ -340,11 +340,13 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         # The Efficiency module drops rows; MomentumSmearing then operates on
         # the surviving subset and the bit-exact RNG sequence matches C++.
         #
-        # Learnable order: smear-then-mask. The LearnableEfficiency multiplies
-        # (PT, PX, PY, PZ, E) by a Gumbel-ST 0/1 mask but leaves the row in the
-        # tensor so gradients flow. This must run AFTER MomentumSmearing,
-        # because MomentumSmearing recomputes E from sqrt(p^2 + m^2) and would
-        # otherwise resurrect masked particles' energy as their rest mass.
+        # Learnable: survival is DECIDED on the unsmeared (propagated) kinematics,
+        # as in C++ Delphes, but the mask is APPLIED after smearing. The
+        # LearnableEfficiency multiplies (PT, PX, PY, PZ, E) by a Gumbel-ST 0/1
+        # mask but leaves the row in the tensor so gradients flow; applied before
+        # MomentumSmearing, the E = sqrt(p^2 + m^2) recomputation there would
+        # resurrect masked particles at their rest mass. Smearing keeps rows 1:1,
+        # so the propagated rows (kin=) align with the smeared ones.
         if self.learnable:
             charged_hadrons_smeared_pre = self.ChargedHadronMomentumSmearing(
                 charged_hadrons_propagated
@@ -352,9 +354,13 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             electrons_smeared_pre = self.ElectronMomentumSmearing(electrons_propagated)
             muons_smeared_pre = self.MuonMomentumSmearing(muons_propagated)
 
-            charged_hadrons_eff = self.ChargedHadronTrackingEfficiency(charged_hadrons_smeared_pre)
-            electrons_eff = self.ElectronTrackingEfficiency(electrons_smeared_pre)
-            muons_eff = self.MuonTrackingEfficiency(muons_smeared_pre)
+            charged_hadrons_eff = self.ChargedHadronTrackingEfficiency(
+                charged_hadrons_smeared_pre, kin=charged_hadrons_propagated
+            )
+            electrons_eff = self.ElectronTrackingEfficiency(
+                electrons_smeared_pre, kin=electrons_propagated
+            )
+            muons_eff = self.MuonTrackingEfficiency(muons_smeared_pre, kin=muons_propagated)
 
             # Tag each track with its pre-reco tracking-efficiency region in the
             # EFF_REGION column (per-species global 1-based label; 0 = outside all
@@ -364,16 +370,16 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
             # per-(species, reco-bin) <- pre-reco-region migration for the
             # differentiable count terms -- the only gradient source for eff_logits
             # (the Gumbel mask above is detached). The label is taken from the
-            # pre-mask smeared kinematics (same pt/eta the efficiency was evaluated
-            # at); killed rows keep their label but are dropped later by valid=pt>0.
+            # unsmeared kinematics (same pt/eta the efficiency was evaluated at);
+            # killed rows keep their label but are dropped later by valid=pt>0.
             charged_hadrons_eff = self._tag_eff_region(
-                charged_hadrons_eff, charged_hadrons_smeared_pre, self.ChargedHadronTrackingEfficiency
+                charged_hadrons_eff, charged_hadrons_propagated, self.ChargedHadronTrackingEfficiency
             )
             electrons_eff = self._tag_eff_region(
-                electrons_eff, electrons_smeared_pre, self.ElectronTrackingEfficiency
+                electrons_eff, electrons_propagated, self.ElectronTrackingEfficiency
             )
             muons_eff = self._tag_eff_region(
-                muons_eff, muons_smeared_pre, self.MuonTrackingEfficiency
+                muons_eff, muons_propagated, self.MuonTrackingEfficiency
             )
 
             charged_hadrons_smeared = charged_hadrons_eff
@@ -396,8 +402,10 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
         ])
 
         # Per-track survival probability eps = the efficiency evaluated on the
-        # PRE-mask smeared kinematics -- the very function the Gumbel mask samples
-        # from -- keyed by species with each track's input-row UID
+        # PRE-mask smeared kinematics -- NOT the unsmeared kinematics the Gumbel
+        # mask decides on (a known mismatch, see
+        # full_phasespace_tuning/eff_fix_plan.md) -- keyed by species with each
+        # track's input-row UID
         # (TrackSurvivalExport). Loss-serving only: --eff-loss bce pairs it with the
         # per-row Hungarian survival labels; --calo-bce conditions the towers on
         # it (row-aligned with merged_tracks: the mask keeps rows and this concat
@@ -545,17 +553,17 @@ class CMSEnergyFlowDefault(DelphesBaseCard):
 
     @staticmethod
     def _tag_eff_region(
-        masked: torch.Tensor, pre_mask: torch.Tensor, eff_module: nn.Module
+        masked: torch.Tensor, kin: torch.Tensor, eff_module: nn.Module
     ) -> torch.Tensor:
         """Write the per-species pre-reco region label into ``ColumnMap.EFF_REGION``.
 
-        The label is computed from the PRE-mask (post-smear) kinematics -- the same
-        ``(pt, eta_outer)`` the efficiency was evaluated at -- and written into the
-        post-mask tensor ``masked`` (a functional masked write via ``torch.where``,
-        so it does not assume ``EFF_REGION`` is the last column).
+        The label is computed from ``kin`` -- the row-aligned unsmeared kinematics,
+        the same ``(pt, eta_outer)`` the efficiency was evaluated at -- and written
+        into the post-mask tensor ``masked`` (a functional masked write via
+        ``torch.where``, so it does not assume ``EFF_REGION`` is the last column).
         """
         idx = eff_module.region_index_1based(
-            pre_mask[:, ColumnMap.PT], pre_mask[:, ColumnMap.ETA_OUTER]
+            kin[:, ColumnMap.PT], kin[:, ColumnMap.ETA_OUTER]
         )
         is_col = torch.zeros(masked.shape[1], dtype=torch.bool, device=masked.device)
         is_col[ColumnMap.EFF_REGION] = True
