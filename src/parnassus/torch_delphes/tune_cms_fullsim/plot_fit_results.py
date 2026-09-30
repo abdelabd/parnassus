@@ -1004,6 +1004,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--trainable-only",
+        action="store_true",
+        help=(
+            "Drop parameters the run held constant from the parameter-drift "
+            "plots (param_drift_all.pdf), keeping only the keys the history's "
+            "metadata lists as trainable. Per-scalar: a partially-trainable "
+            "tensor keeps its trainable elements and loses its frozen ones. "
+            "The before/after observable histograms still use the FULL "
+            "parameter snapshots."
+        ),
+    )
+    parser.add_argument(
         "--param-config",
         type=Path,
         default=None,
@@ -1117,8 +1129,22 @@ def main() -> None:
     print("  wrote loss_trajectory.pdf")
 
     # ----- 2. All parameter trajectories (one subplot per tensor) -----
+    # --trainable-only: filter a COPY of the snapshots for the drift plot only
+    # (the observable plots below need the full snapshots to set the trainee).
+    drift_history = history
+    if args.trainable_only:
+        trainable = set(history["metadata"]["trainable_params"])
+        drift_history = {
+            **history,
+            "parameters": [
+                {k: v for k, v in snap.items() if k in trainable}
+                for snap in history["parameters"]
+            ],
+        }
+        print(f"  --trainable-only: {len(trainable)} of "
+              f"{len(history['parameters'][0])} parameters kept in the drift plot")
     plot_all_param_drift(
-        history,
+        drift_history,
         truth,
         args.output_dir / "param_drift_all.pdf",
     )
