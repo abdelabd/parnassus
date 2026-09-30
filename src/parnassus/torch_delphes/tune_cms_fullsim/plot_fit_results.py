@@ -993,6 +993,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--no-target",
+        action="store_true",
+        help=(
+            "Suppress the dashed target/truth reference lines on the "
+            "parameter-drift plots (param_drift_all.pdf). Use for fits against "
+            "real data, where --truth-config's values are not a meaningful "
+            "target. The observable histograms are unaffected ('target' there "
+            "is the data being fit, not a parameter value)."
+        ),
+    )
+    parser.add_argument(
         "--param-config",
         type=Path,
         default=None,
@@ -1087,7 +1098,12 @@ def main() -> None:
             "Pass the generation config (e.g. param_configs/cms_target_default.yaml) "
             "to --truth-config instead."
         )
-    truth = {k: spec["value"] for k, spec in flat_truth_cfg.items()}
+    # --no-target: an empty truth dict suppresses every reference line (the
+    # drift plotters draw one only for keys present in it).
+    truth = (
+        {} if args.no_target
+        else {k: spec["value"] for k, spec in flat_truth_cfg.items()}
+    )
 
     # Honest "before fit" baseline: the perturbed starting config the fit began
     # from (NOT the card's constructor defaults). None => fall back to defaults.
